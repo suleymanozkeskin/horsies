@@ -391,9 +391,13 @@ mod tests {
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
             let prep = builder.task(TaskNode::<()>::raw("prepare", "null").node_id("prepare"));
             let child = builder.sub_workflow(
-                SubWorkflowNode::new("child_pipeline", "null")
-                    .waits_for(prep)
-                    .node_id("child"),
+                SubWorkflowNode::new(
+                    "child_pipeline",
+                    "null",
+                    crate::core::workflow::node::SubWorkflowParams::NotGiven,
+                )
+                .waits_for(prep)
+                .node_id("child"),
             );
             let finalize = builder.task(
                 TaskNode::<()>::raw("finalize", "null")

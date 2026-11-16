@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::core::error::{ErrorCode, HorsiesError};
-use crate::core::workflow::node::TaskDefaults;
+use crate::core::workflow::node::{SubWorkflowParams, TaskDefaults};
 use crate::core::workflow::spec::WorkflowSpec;
 
 /// Callback type for dynamically building a child WorkflowSpec at runtime.
@@ -598,8 +598,9 @@ impl WorkflowSpecRegistry {
     /// Performs:
     /// 1. Queue/priority resolution from task defaults
     /// 2. Queue validation (unresolved and invalid)
-    /// 3. Child params validation: a sub-workflow node that passes params to a
-    ///    child registered without a `spec_builder` is refused
+    /// 3. Child params validation: a sub-workflow node defined with
+    ///    `SubWorkflowParams::Given` is refused for a child registered without
+    ///    a `spec_builder`
     pub fn resolve_and_validate_spec(
         &self,
         spec: &mut crate::core::workflow::spec::WorkflowSpec,
@@ -616,21 +617,6 @@ impl WorkflowSpecRegistry {
                     .task_name
                     .strip_prefix("__sub_workflow:")
                     .unwrap_or(&node.task_name);
-                let passes_params = crate::core::workflow::node::passes_child_params(
-                    &node.input_json,
-                    !node.args_from.is_empty(),
-                )
-                .map_err(|e| {
-                    HorsiesError::new(format!(
-                        "workflow '{}' node '{}' params of child workflow '{}' are not valid JSON: {}",
-                        spec.name,
-                        node.node_id.as_deref().unwrap_or("?"),
-                        spec_name,
-                        e,
-                    ))
-                    .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                })?;
-
                 let Some(child_key) = node.sub_definition_key.as_deref() else {
                     return Err(HorsiesError::new(format!(
                         "workflow '{}' node '{}' has no definition_key of its child workflow '{}'",
@@ -659,7 +645,8 @@ impl WorkflowSpecRegistry {
                         ));
                     }
                     Some(ResolvedChildWorkflow::Static(registered))
-                        if passes_params && registered.spec_builder.is_none() =>
+                        if node.sub_workflow_params == SubWorkflowParams::Given
+                            && registered.spec_builder.is_none() =>
                     {
                         return Err(HorsiesError::new(format!(
                             "workflow '{}' node '{}' supplies params to child workflow '{}' \
@@ -812,9 +799,13 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new(name);
         let root = builder.task(TaskNode::<()>::raw("root_task", "null"));
         builder.sub_workflow(
-            SubWorkflowNode::new(child_spec_name, "null")
-                .waits_for(root)
-                .node_id(format!("sub_{}", child_spec_name)),
+            SubWorkflowNode::new(
+                child_spec_name,
+                "null",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .waits_for(root)
+            .node_id(format!("sub_{}", child_spec_name)),
         );
         builder.build().unwrap()
     }
@@ -901,14 +892,22 @@ mod tests {
             let mut builder = WorkflowSpecBuilder::new("wf_a");
             let root = builder.task(TaskNode::<()>::raw("root_task", "null"));
             builder.sub_workflow(
-                SubWorkflowNode::new("wf_b", "null")
-                    .waits_for(root)
-                    .node_id("sub_b"),
+                SubWorkflowNode::new(
+                    "wf_b",
+                    "null",
+                    crate::core::workflow::node::SubWorkflowParams::NotGiven,
+                )
+                .waits_for(root)
+                .node_id("sub_b"),
             );
             builder.sub_workflow(
-                SubWorkflowNode::new("wf_c", "null")
-                    .waits_for(root)
-                    .node_id("sub_c"),
+                SubWorkflowNode::new(
+                    "wf_c",
+                    "null",
+                    crate::core::workflow::node::SubWorkflowParams::NotGiven,
+                )
+                .waits_for(root)
+                .node_id("sub_c"),
             );
             let spec = builder.build().unwrap();
             let registered = RegisteredWorkflowSpec {
@@ -959,7 +958,14 @@ mod tests {
         registry.register(make_registered("child")).unwrap();
 
         let mut builder = WorkflowSpecBuilder::new("parent");
-        builder.sub_workflow(SubWorkflowNode::new("child", "null").node_id("child_node"));
+        builder.sub_workflow(
+            SubWorkflowNode::new(
+                "child",
+                "null",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .node_id("child_node"),
+        );
         let mut spec = builder.build().unwrap();
 
         let err = registry.resolve_and_validate_spec(&mut spec).unwrap_err();
@@ -975,13 +981,17 @@ mod tests {
 
         let mut builder = WorkflowSpecBuilder::new("parent");
         builder.sub_workflow(
-            SubWorkflowNode::<ChildParams, ()>::typed("child", "null")
-                .definition_key("tests.child.v1")
-                .set_input(ChildParams {
-                    region: "eu".to_owned(),
-                })
-                .unwrap()
-                .node_id("child_node"),
+            SubWorkflowNode::<ChildParams, ()>::typed(
+                "child",
+                "null",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .definition_key("tests.child.v1")
+            .set_input(ChildParams {
+                region: "eu".to_owned(),
+            })
+            .unwrap()
+            .node_id("child_node"),
         );
         let mut spec = builder.build().unwrap();
 
@@ -993,10 +1003,16 @@ mod tests {
     }
 
     #[test]
-    fn subworkflow_empty_params_need_no_spec_builder() {
-        // `null` (a Rust `()` params input) and `{}` (Python's empty keyword
-        // input) pass no params, so a child without a spec_builder takes them.
-        for empty_params in ["null", "{}"] {
+    fn the_params_choice_decides_whether_a_child_needs_a_spec_builder() {
+        // The registry reads the client's choice, never the input text: a
+        // `NotGiven` node is taken with any text, a `Given` node is refused
+        // even when its text is `null`.
+        for (input, params, accepted) in [
+            ("null", SubWorkflowParams::NotGiven, true),
+            ("{}", SubWorkflowParams::NotGiven, true),
+            ("null", SubWorkflowParams::Given, false),
+            ("{}", SubWorkflowParams::Given, false),
+        ] {
             let mut registry = WorkflowSpecRegistry::new();
             registry
                 .register(make_keyed_registered("child", "tests.child.v1"))
@@ -1004,13 +1020,14 @@ mod tests {
 
             let mut builder = WorkflowSpecBuilder::new("parent");
             builder.sub_workflow(
-                SubWorkflowNode::new("child", empty_params)
+                SubWorkflowNode::new("child", input, params)
                     .definition_key("tests.child.v1")
                     .node_id("child_node"),
             );
             let mut spec = builder.build().unwrap();
 
-            registry.resolve_and_validate_spec(&mut spec).unwrap();
+            let result = registry.resolve_and_validate_spec(&mut spec);
+            assert_eq!(result.is_ok(), accepted, "{input} {params:?}");
         }
     }
 
@@ -1160,10 +1177,14 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new(name);
         let root = builder.task(TaskNode::<()>::raw("root_task", "null"));
         builder.sub_workflow(
-            SubWorkflowNode::new(child_name, "null")
-                .definition_key(child_def_key)
-                .waits_for(root)
-                .node_id(format!("sub_{}", child_name)),
+            SubWorkflowNode::new(
+                child_name,
+                "null",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .definition_key(child_def_key)
+            .waits_for(root)
+            .node_id(format!("sub_{}", child_name)),
         );
         builder.build().unwrap()
     }

@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::core::error::{ErrorCode, HorsiesError, ValidationReport};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::{AnyNode, JoinType, NodeRef, TaskNode, TypedNodeRef};
+use crate::core::workflow::node::{
+    AnyNode, JoinType, NodeRef, SubWorkflowParams, TaskNode, TypedNodeRef,
+};
 use crate::core::workflow::policy::SuccessPolicy;
 use crate::core::workflow::status::OnError;
 use crate::core::workflow::sub_workflow::SubWorkflowNode;
@@ -488,6 +490,27 @@ impl WorkflowSpecBuilder {
                         .with_help("args_from sources must be listed in waits_for/dependencies"),
                     );
                 }
+            }
+
+            // A sub-workflow node that takes args_from members gives params, so
+            // the client defines it with `SubWorkflowParams::Given`.
+            match (
+                task.is_subworkflow,
+                task.sub_workflow_params,
+                task.args_from.is_empty(),
+            ) {
+                (true, SubWorkflowParams::NotGiven, false) => report.add(
+                    HorsiesError::new(format!(
+                        "sub-workflow node at index {} takes args_from members but is defined \
+                         with SubWorkflowParams::NotGiven",
+                        task.index,
+                    ))
+                    .with_code(ErrorCode::WorkflowInvalidArgsFrom)
+                    .with_help(
+                        "define the node with SubWorkflowParams::Given, or remove its args_from",
+                    ),
+                ),
+                _ => {}
             }
 
             // workflow_ctx_from node_ids must be in dependencies.
@@ -1356,12 +1379,32 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.sub_workflow(
-            SubWorkflowNode::new("child_wf", "null")
-                .waits_for(a)
-                .node_id("child"),
+            SubWorkflowNode::new(
+                "child_wf",
+                "null",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .waits_for(a)
+            .node_id("child"),
         );
         let spec = b.build().unwrap();
         assert!(spec.tasks[1].is_subworkflow);
+    }
+
+    #[test]
+    fn a_not_given_subworkflow_node_with_args_from_is_rejected() {
+        use crate::core::workflow::sub_workflow::SubWorkflowNode;
+
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let a = b.task(simple_node("a"));
+        b.sub_workflow(
+            SubWorkflowNode::new("child_wf", "{}", SubWorkflowParams::NotGiven)
+                .waits_for(a)
+                .node_id("child"),
+        );
+        b.tasks[1].args_from.insert("data".to_owned(), a.index);
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidArgsFrom));
     }
 
     #[derive(serde::Serialize, crate::WorkflowInput)]
@@ -1376,10 +1419,14 @@ mod tests {
 
         let mut b = WorkflowSpecBuilder::new("wf");
         b.sub_workflow(
-            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf", "{}")
-                .set(ChildWorkflowParams::field_limit(), 10)
-                .unwrap()
-                .node_id("child"),
+            SubWorkflowNode::<ChildWorkflowParams, ()>::typed(
+                "child_wf",
+                "{}",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .set(ChildWorkflowParams::field_limit(), 10)
+            .unwrap()
+            .node_id("child"),
         );
         let spec = b.build().unwrap();
         assert_eq!(
@@ -1395,11 +1442,15 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let producer = b.task(TaskNode::<String>::raw("producer", "null").node_id("producer"));
         b.sub_workflow(
-            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf", "{}")
-                .set(ChildWorkflowParams::field_limit(), 25)
-                .unwrap()
-                .arg_from(ChildWorkflowParams::field_source(), producer)
-                .node_id("child"),
+            SubWorkflowNode::<ChildWorkflowParams, ()>::typed(
+                "child_wf",
+                "{}",
+                crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            )
+            .set(ChildWorkflowParams::field_limit(), 25)
+            .unwrap()
+            .arg_from(ChildWorkflowParams::field_source(), producer)
+            .node_id("child"),
         );
 
         let spec = b.build().unwrap();

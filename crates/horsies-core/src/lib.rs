@@ -38,14 +38,15 @@ pub use crate::core::{
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
     RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
     RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError,
-    SubWorkflowNode, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
-    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions, TaskRegistry,
-    TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
-    TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
-    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
-    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions,
+    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult, TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule,
+    WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta,
+    WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
+    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
+    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
+    WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 

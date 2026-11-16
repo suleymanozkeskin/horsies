@@ -8,14 +8,13 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::passes_child_params;
 use crate::core::{
     JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowSummary, SuccessPolicy,
     TaskError, TaskResult, WorkflowSpecRegistry, WorkflowTaskStatus,
 };
 
 use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx, stored_row_params,
 };
 
 use crate::workflow_engine::error::WorkflowError;
@@ -899,8 +898,8 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .await;
     };
     let merged_input = merge_args_from(&node.input, &node.args_from, dep_results)?;
-    let has_inputs = passes_child_params(&node.input, node.args_from.is_some())?;
-    let child_spec = materialize_child_spec(registered, has_inputs, &merged_input, registry)?;
+    let params = stored_row_params(&node.args_from);
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
     let child_id = start_child_workflow_in_tx(
         transaction,
@@ -2036,10 +2035,10 @@ async fn enqueue_subworkflow_task(
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
     // otherwise use the static registered spec.
-    let has_child_inputs = passes_child_params(&task.input, task.args_from.is_some())?;
+    let params = stored_row_params(&task.args_from);
 
     let merged_input = merge_args_from(&task.input, &task.args_from, dep_results)?;
-    let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 

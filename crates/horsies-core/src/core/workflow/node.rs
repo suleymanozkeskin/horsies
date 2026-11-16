@@ -177,6 +177,25 @@ impl<I, F> Clone for InputField<I, F> {
 
 impl<I, F> Copy for InputField<I, F> {}
 
+/// Whether a sub-workflow node gives its child workflow params. The client
+/// sets it when it defines the node; the core branches on it and never reads
+/// the choice from the input text.
+///
+/// The node's input text (`AnyNode::input_json`) is required in both cases:
+/// the node row stores it, and a child with a `spec_builder` receives it. For
+/// `NotGiven` it is the client's encoding of an empty params input (`null`
+/// for a Rust `()`, `{}` from Python).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubWorkflowParams {
+    /// The node gives no params. A child registered without a `spec_builder`
+    /// takes such a node.
+    NotGiven,
+    /// The node gives params: a static input, `args_from` members, or both.
+    /// A child registered without a `spec_builder` refuses such a node.
+    Given,
+}
+
 /// Type-erased node stored in `WorkflowSpec.tasks`.
 ///
 /// Contains all fields needed for validation, DB insertion, and engine
@@ -251,31 +270,10 @@ pub struct AnyNode {
     /// Set when the sub-workflow's spec has a `definition_key`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_definition_key: Option<String>,
-}
 
-/// Whether a sub-workflow node passes params to its child workflow.
-///
-/// It does when it takes `args_from` members, or when its input holds a
-/// value. Two inputs hold no value: `null` (the encoding of a Rust `()`
-/// params input) and `{}` (Python's empty keyword input). Every other JSON
-/// value is params. A child registered without a `spec_builder` takes no
-/// params, so a node that passes params to it is refused.
-///
-/// Fails when `input_json` is not one JSON value. Does no I/O.
-pub(crate) fn passes_child_params(
-    input_json: &str,
-    has_args_from: bool,
-) -> Result<bool, serde_json::Error> {
-    let input: serde_json::Value = serde_json::from_str(input_json)?;
-    let input_holds_value = match input {
-        serde_json::Value::Null => false,
-        serde_json::Value::Object(map) => !map.is_empty(),
-        serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_)
-        | serde_json::Value::Array(_) => true,
-    };
-    Ok(has_args_from || input_holds_value)
+    /// Whether a sub-workflow node gives its child params, as the client set
+    /// it. A task node has no child, so it gives none: `NotGiven`.
+    pub sub_workflow_params: SubWorkflowParams,
 }
 
 /// Typed builder for a workflow task node.
@@ -552,6 +550,7 @@ impl<T, I> TaskNode<T, I> {
             task_options_json: self.task_options_json,
             is_subworkflow: false,
             sub_definition_key: None,
+            sub_workflow_params: SubWorkflowParams::NotGiven,
         }
     }
 }
@@ -744,18 +743,6 @@ mod tests {
     }
 
     #[test]
-    fn child_params_are_passed_by_a_value_or_by_args_from() {
-        for no_value in ["null", "{}"] {
-            assert!(!passes_child_params(no_value, false).unwrap(), "{no_value}");
-            assert!(passes_child_params(no_value, true).unwrap(), "{no_value}");
-        }
-        for value in [r#"{"region":"eu"}"#, r#""eu""#, "[]", "0", "false"] {
-            assert!(passes_child_params(value, false).unwrap(), "{value}");
-        }
-        assert!(passes_child_params("{", false).is_err());
-    }
-
-    #[test]
     fn serialize_explicit_input_rejects_non_finite_float() {
         #[derive(serde::Serialize)]
         struct Payload {
@@ -939,12 +926,14 @@ mod tests {
             task_options_json: None,
             is_subworkflow: false,
             sub_definition_key: None,
+            sub_workflow_params: SubWorkflowParams::NotGiven,
         };
 
         let json = serde_json::to_string(&any).unwrap();
         let back: AnyNode = serde_json::from_str(&json).unwrap();
         assert_eq!(back.task_name, "fetch");
         assert_eq!(back.input_json, r#"{"url": "https://example.com"}"#);
+        assert_eq!(back.sub_workflow_params, SubWorkflowParams::NotGiven);
         assert_eq!(back.node_id.as_deref(), Some("fetch:0"));
         assert_eq!(back.join, JoinType::All);
         assert!(!back.is_subworkflow);
@@ -980,6 +969,7 @@ mod tests {
             task_options_json: None,
             is_subworkflow,
             sub_definition_key: None,
+            sub_workflow_params: SubWorkflowParams::NotGiven,
         }
     }
 

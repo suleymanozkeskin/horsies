@@ -11,6 +11,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::task::retry_utils::parse_max_retries;
+use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{
     AnyNode, OnError, OperationalErrorCode, TaskError, WorkflowSpec, WorkflowSpecRegistry,
     WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
@@ -1010,10 +1011,6 @@ pub(crate) fn build_child_spec(
     parent_task: &AnyNode,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowSpec, WorkflowError> {
-    let has_child_inputs = crate::core::workflow::node::passes_child_params(
-        &parent_task.input_json,
-        !parent_task.args_from.is_empty(),
-    )?;
     let resolved = definition_key
         .and_then(|key| registry.resolve_child_registration(key))
         .ok_or_else(|| {
@@ -1025,18 +1022,33 @@ pub(crate) fn build_child_spec(
 
     materialize_child_spec(
         resolved,
-        has_child_inputs,
+        parent_task.sub_workflow_params,
         &parent_task.input_json,
         registry,
     )
 }
 
+/// The params choice that a stored sub-workflow node row shows.
+///
+/// The row keeps no column for the client's choice. It shows
+/// `SubWorkflowParams::Given` when the node takes `args_from` members, and
+/// `NotGiven` otherwise. A node defined `Given` with only a static input is
+/// refused at start for a child without a `spec_builder`
+/// (`WorkflowSpecRegistry::resolve_and_validate_spec`), so the row path
+/// checks the members only. Does no I/O.
+pub(crate) fn stored_row_params(args_from: &Option<serde_json::Value>) -> SubWorkflowParams {
+    match args_from {
+        Some(_) => SubWorkflowParams::Given,
+        None => SubWorkflowParams::NotGiven,
+    }
+}
+
 /// Build the child spec from the parent node's encoded input (`input_json`,
-/// as the client encoded it). `has_child_inputs` is true when the node passes
-/// params (`passes_child_params`).
+/// as the client encoded it). A child registered without a `spec_builder`
+/// refuses a node that gives params (`SubWorkflowParams::Given`).
 pub(crate) fn materialize_child_spec(
     resolved: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
-    has_child_inputs: bool,
+    params: SubWorkflowParams,
     input_json: &str,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowSpec, WorkflowError> {
@@ -1055,25 +1067,25 @@ pub(crate) fn materialize_child_spec(
             Ok(spec)
         }
         crate::core::registry::workflow::ResolvedChildWorkflow::Static(registered) => {
-            if let Some(ref builder) = registered.spec_builder {
-                let mut spec = builder(input_json).map_err(|e| {
-                    WorkflowError::Validation(format!(
-                        "spec_builder for '{}' failed: {}",
-                        registered.spec.name, e,
-                    ))
-                })?;
-                registry.resolve_spec_task_options(&mut spec);
-                registry
-                    .resolve_and_validate_spec(&mut spec)
-                    .map_err(|e| WorkflowError::Validation(e.to_string()))?;
-                Ok(spec)
-            } else if has_child_inputs {
-                Err(WorkflowError::Validation(format!(
+            match (&registered.spec_builder, params) {
+                (Some(builder), _) => {
+                    let mut spec = builder(input_json).map_err(|e| {
+                        WorkflowError::Validation(format!(
+                            "spec_builder for '{}' failed: {}",
+                            registered.spec.name, e,
+                        ))
+                    })?;
+                    registry.resolve_spec_task_options(&mut spec);
+                    registry
+                        .resolve_and_validate_spec(&mut spec)
+                        .map_err(|e| WorkflowError::Validation(e.to_string()))?;
+                    Ok(spec)
+                }
+                (None, SubWorkflowParams::Given) => Err(WorkflowError::Validation(format!(
                     "child workflow '{}' received params from its parent, but the registered child has no spec_builder",
                     registered.spec.name,
-                )))
-            } else {
-                Ok(registered.spec.clone())
+                ))),
+                (None, SubWorkflowParams::NotGiven) => Ok(registered.spec.clone()),
             }
         }
     }
@@ -1124,6 +1136,7 @@ mod tests {
             task_options_json: None,
             is_subworkflow,
             sub_definition_key: None,
+            sub_workflow_params: crate::core::workflow::node::SubWorkflowParams::NotGiven,
         }
     }
 
@@ -1376,10 +1389,14 @@ mod tests {
             }),
         };
 
-        let parent = SubWorkflowNode::<serde_json::Value, String>::typed("child_dynamic", "null")
-            .definition_key("tests.child_dynamic.v1")
-            .input_json(r#"{"region":"eu"}"#)
-            .into_any_node(0);
+        let parent = SubWorkflowNode::<serde_json::Value, String>::typed(
+            "child_dynamic",
+            "null",
+            crate::core::workflow::node::SubWorkflowParams::NotGiven,
+        )
+        .definition_key("tests.child_dynamic.v1")
+        .input_json(r#"{"region":"eu"}"#)
+        .into_any_node(0);
 
         let mut registry = WorkflowSpecRegistry::new();
         registry.register_definition(registered).unwrap();
@@ -1394,11 +1411,15 @@ mod tests {
     }
 
     #[test]
-    fn build_child_spec_takes_empty_params_without_builder() {
-        // `null` (a Rust `()` params input) and `{}` (Python's empty keyword
-        // input) pass no params; the static child spec is used as registered.
-        for empty_params in ["null", "{}"] {
-            let parent = SubWorkflowNode::<(), String>::typed("child_static", empty_params)
+    fn build_child_spec_follows_the_params_choice() {
+        // A child without a spec_builder takes a `NotGiven` node with any
+        // text and refuses a `Given` node, even when its text is `null`.
+        for (input, params, accepted) in [
+            ("null", SubWorkflowParams::NotGiven, true),
+            ("{}", SubWorkflowParams::NotGiven, true),
+            ("null", SubWorkflowParams::Given, false),
+        ] {
+            let parent = SubWorkflowNode::<(), String>::typed("child_static", input, params)
                 .definition_key("tests.child_static.v1")
                 .into_any_node(0);
 
@@ -1409,20 +1430,38 @@ mod tests {
                 parent.sub_definition_key.as_deref(),
                 &parent,
                 &registry,
-            )
-            .unwrap();
-            assert_eq!(child.name, "child_static");
+            );
+            match (child, accepted) {
+                (Ok(spec), true) => assert_eq!(spec.name, "child_static"),
+                (Err(WorkflowError::Validation(message)), false) => {
+                    assert!(message.contains("has no spec_builder"), "{message}")
+                }
+                (other, _) => panic!("{input} {params:?}: unexpected {other:?}"),
+            }
         }
+    }
+
+    #[test]
+    fn a_stored_row_gives_params_when_it_takes_members() {
+        assert_eq!(
+            stored_row_params(&Some(serde_json::json!({"data": 0}))),
+            SubWorkflowParams::Given
+        );
+        assert_eq!(stored_row_params(&None), SubWorkflowParams::NotGiven);
     }
 
     #[test]
     fn build_child_spec_rejects_explicit_input_without_builder() {
         let registered = child_registered_static();
-        let parent = SubWorkflowNode::<String, String>::typed("child_static", "null")
-            .definition_key("tests.child_static.v1")
-            .set_input("eu".to_owned())
-            .unwrap()
-            .into_any_node(0);
+        let parent = SubWorkflowNode::<String, String>::typed(
+            "child_static",
+            "null",
+            crate::core::workflow::node::SubWorkflowParams::NotGiven,
+        )
+        .definition_key("tests.child_static.v1")
+        .set_input("eu".to_owned())
+        .unwrap()
+        .into_any_node(0);
 
         let mut registry = WorkflowSpecRegistry::new();
         registry.register(registered).unwrap();

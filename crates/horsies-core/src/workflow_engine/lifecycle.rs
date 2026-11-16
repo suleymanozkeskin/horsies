@@ -5,7 +5,6 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::workflow::node::passes_child_params;
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -14,7 +13,7 @@ use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx, stored_row_params,
 };
 
 #[cfg(test)]
@@ -1145,7 +1144,7 @@ async fn enqueue_subworkflow_on_resume(
     };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
-    let has_child_inputs = passes_child_params(&task.input, task.args_from.is_some())?;
+    let params = stored_row_params(&task.args_from);
 
     let merged_input = merge_args_from_for_ready(
         pool,
@@ -1155,7 +1154,7 @@ async fn enqueue_subworkflow_on_resume(
         &task.dependencies,
     )
     .await?;
-    let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
