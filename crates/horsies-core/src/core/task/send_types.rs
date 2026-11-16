@@ -436,6 +436,29 @@ mod tests {
         assert_eq!(target.payload.sent_at, sent_at);
     }
 
+    /// A statement-pooled `database_url` is refused at the first checkout of
+    /// the core pool; the send reports it as `ENQUEUE_FAILED`, not retryable.
+    #[test]
+    fn a_statement_pooled_url_is_an_enqueue_failure_that_is_not_retryable() {
+        let error = send_error_from_enqueue(
+            Uuid::from_u128(1),
+            sample_payload(),
+            &BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "enqueue",
+                cause: crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::StatementPooledUrl {
+                        masked_url: crate::db::MaskedUrl::for_tests(
+                            "postgresql://horsies:***@pgbouncer:6432/app",
+                        ),
+                    },
+                ),
+            }),
+        );
+
+        assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
+        assert!(!error.retryable());
+    }
+
     #[test]
     fn a_vanished_conflict_row_is_an_enqueue_failure_that_is_not_retryable() {
         let error = send_error_from_enqueue(

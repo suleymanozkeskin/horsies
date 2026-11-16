@@ -840,13 +840,15 @@ impl Worker {
 
     // ----- listener setup with resilience -----
 
-    /// Check the session URL, then subscribe the claim wakes of every queue
-    /// and the ping channel on the broker's listener.
+    /// Check the pools and the session URL, then subscribe the claim wakes of
+    /// every queue and the ping channel on the broker's listener.
     ///
-    /// The session URL check runs at every worker boot, with or without
-    /// PgBouncer mode (Python `validate_worker_database_paths`). A URL that
-    /// does not keep session state is refused, not retryable; a database that
-    /// cannot be reached is retryable.
+    /// The checks run at every worker boot, with or without PgBouncer mode
+    /// (Python `validate_worker_database_paths`): the pool checks
+    /// ([`PostgresBroker::check_worker_session`]), then the session check
+    /// ([`PostgresBroker::check_session_delivery`]). A statement-pooled URL
+    /// or a URL that does not keep session state is refused, not retryable; a
+    /// database that cannot be reached is retryable.
     async fn try_connect_listener(&self) -> Result<WorkerSubscriptions, WorkerError> {
         let channels = self
             .worker_config
@@ -854,6 +856,10 @@ impl Worker {
             .iter()
             .map(|queue| queue_channel(queue))
             .collect::<Result<Vec<ChannelName>, WorkerError>>()?;
+        self.broker
+            .check_worker_session()
+            .await
+            .map_err(WorkerError::Broker)?;
         self.broker
             .check_session_delivery()
             .await
