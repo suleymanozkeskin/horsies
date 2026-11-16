@@ -351,7 +351,6 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
             capacity_notified: true,
             phase_two: PhaseTwoForm::NotKnown,
         },
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await;
