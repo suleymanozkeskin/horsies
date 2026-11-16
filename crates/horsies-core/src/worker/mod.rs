@@ -3,9 +3,11 @@
 pub mod backoff;
 pub mod cli;
 pub mod config;
+pub mod connection_fit;
 pub mod error;
 pub mod execution;
 pub mod executor;
+pub mod finalize_batch;
 pub mod heartbeat;
 pub mod recovery;
 pub mod retry;

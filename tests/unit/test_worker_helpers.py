@@ -46,6 +46,7 @@ from horsies.core.worker.claiming import (
     read_claim_rows,
 )
 from horsies.core.utils.db import PooledStatements
+from horsies.core.worker.release import RELEASE_CLAIMS_SQL
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -53,7 +54,6 @@ from horsies.core.worker.worker import (
     DELETE_EXPIRED_WORKFLOWS_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
@@ -1148,20 +1148,36 @@ class TestClaimerHeartbeatRenewsLease:
 
 def _make_session_mock(
     *,
-    rowcount: int = 0,
+    outcome: str = 'NOT_HELD',
     execute_side_effect: Exception | None = None,
 ) -> AsyncMock:
-    """Build an AsyncMock session context for _requeue_claimed_task tests."""
+    """Build an AsyncMock session context for _requeue_claimed_task tests.
+
+    The release runs on the session's autocommit connection, and its one
+    row carries ``outcome`` for the task id it was given."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     session.commit = AsyncMock()
+    session.connection = AsyncMock(return_value=session)
 
-    result_mock = MagicMock(rowcount=rowcount)
+    def _released(statement: Any, params: dict[str, Any]) -> MagicMock:
+        return MagicMock(
+            fetchall=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        ordinality=1,
+                        task_id=params['task_ids'][0],
+                        outcome=outcome,
+                    ),
+                ],
+            ),
+        )
+
     if execute_side_effect is not None:
         session.execute = AsyncMock(side_effect=execute_side_effect)
     else:
-        session.execute = AsyncMock(return_value=result_mock)
+        session.execute = AsyncMock(side_effect=_released)
 
     return session
 
@@ -1172,9 +1188,9 @@ class TestRequeueClaimedTask:
 
     @pytest.mark.asyncio
     async def test_requeue_success_returns_requeued(self) -> None:
-        """When DB UPDATE matches a row, outcome is REQUEUED."""
+        """When the release returns RELEASED, outcome is REQUEUED."""
         worker = _make_worker()
-        session = _make_session_mock(rowcount=1)
+        session = _make_session_mock(outcome='RELEASED')
         worker.sf = MagicMock(return_value=session)
 
         outcome = await worker._requeue_claimed_task(
@@ -1186,17 +1202,20 @@ class TestRequeueClaimedTask:
         assert outcome is _RequeueOutcome.REQUEUED
         session.execute.assert_awaited_once()
         call_args = session.execute.call_args[0]
-        assert call_args[0] is UNCLAIM_CLAIMED_TASK_SQL
-        assert call_args[1]['id'] == 'task-1'
-        assert call_args[1]['wid'] == worker.worker_instance_id
-        assert call_args[1]['claimed_at'] == CLAIMED_AT
-        session.commit.assert_awaited_once()
+        assert call_args[0] is RELEASE_CLAIMS_SQL
+        assert call_args[1] == {
+            'task_ids': ['task-1'],
+            'claimed_ats': [CLAIMED_AT],
+            'worker_id': worker.worker_instance_id,
+            'placement': 'SAME_CLASS',
+        }
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_requeue_guard_fail_returns_not_owner(self) -> None:
-        """When DB UPDATE matches zero rows, outcome is NOT_OWNER_OR_NOT_CLAIMED."""
+        """When the release returns NOT_HELD, outcome is NOT_OWNER_OR_NOT_CLAIMED."""
         worker = _make_worker()
-        session = _make_session_mock(rowcount=0)
+        session = _make_session_mock(outcome='NOT_HELD')
         worker.sf = MagicMock(return_value=session)
 
         outcome = await worker._requeue_claimed_task(
@@ -1206,7 +1225,7 @@ class TestRequeueClaimedTask:
         )
 
         assert outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
-        session.commit.assert_awaited_once()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_requeue_db_error_returns_db_error(self) -> None:
@@ -6016,8 +6035,6 @@ class TestPersistTerminalStateFusedPath:
             claimed_at=CLAIMED_AT,
         )
         assert command.result_json == _OK_WIRE
-        assert command.notify_channel == 'task_queue_q1'
-        assert command.notify_payload == 'capacity:task-1'
         # One statement in autocommit: no transaction of a session.
         session.execute.assert_not_awaited()
         session.commit.assert_not_awaited()

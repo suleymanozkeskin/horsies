@@ -8,8 +8,14 @@ use crate::core::task::result::TaskResult;
 use crate::core::workflow::node::NodeKey;
 use crate::core::workflow::summary::SubWorkflowSummary;
 
-/// Reserved kwarg key used to transport workflow context from the engine.
-pub const WORKFLOW_CTX_KWARG: &str = "__horsies_workflow_ctx__";
+/// Reserved kwarg key used to transport workflow context from the engine (Python `_ENGINE_KEY_WORKFLOW_CTX`,
+/// `core/workflows/engine.py:141`).
+pub const WORKFLOW_CTX_KWARG: &str = "__h_workflow_ctx__";
+
+/// Reserved kwarg key of the workflow metadata that Python's engine injects into every node
+/// (`_ENGINE_KEY_WORKFLOW_META`, `core/workflows/engine.py:142`). The worker removes it before the task
+/// input is decoded, as Python's child does (`core/worker/child_runner.py:1641-1642`).
+pub const WORKFLOW_META_KWARG: &str = "__h_workflow_meta__";
 
 /// Context passed to workflow tasks that need access to upstream results.
 ///
