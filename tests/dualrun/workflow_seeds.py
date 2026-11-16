@@ -272,6 +272,38 @@ def pause_workflow_row(connection: Connection, workflow_id: uuid.UUID) -> None:
     assert cursor.rowcount == 1, f'workflow {workflow_id} is not RUNNING'
 
 
+_PENDING_SQL: Final[LiteralString] = """
+    INSERT INTO horsies_workflow_phase2_pending (
+        task_id, workflow_id, workflow_node_row_id, terminalization_kind, recovery_source,
+        history_class, history_anchor, history_schema_version, result_digest,
+        quarantine_task_id, created_at, attempt_count, last_attempt_at, last_failure_class
+    )
+    SELECT n.task_id, n.workflow_id, n.id, 'COMPLETE_LOCKED', 'HISTORY',
+           'forever', now(), 1, sha256(convert_to('seed result', 'UTF8')),
+           NULL, now() - interval '1 minute', %(attempts)s,
+           CASE WHEN %(attempts)s = 0 THEN NULL ELSE now() END,
+           CASE WHEN %(attempts)s = 0 THEN NULL ELSE 'RAISED' END
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = %(wf)s AND n.task_index = %(idx)s AND n.task_id IS NOT NULL
+"""
+
+
+def insert_phase2_pending(
+    connection: Connection, workflow_id: uuid.UUID, index: int, attempts: int,
+) -> uuid.UUID:
+    """A phase-2 record of the task of node ``index``, with ``attempts`` raised passes.
+
+    The record points at a history row that the seed does not write; the
+    quarantine of the record then reports that the source is absent.
+    """
+    task_id = node_task_id(connection, workflow_id, index)
+    cursor = connection.execute(
+        _PENDING_SQL, {'wf': workflow_id, 'idx': index, 'attempts': attempts},
+    )
+    assert cursor.rowcount == 1, f'node {index} of {workflow_id} has no task'
+    return task_id
+
+
 def cover_history(database: DualRunDatabase) -> None:
     """The production coverage pass, which publishes the staged history readers.
 
