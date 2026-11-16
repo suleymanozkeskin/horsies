@@ -7,7 +7,9 @@ with the enum.
 
 Scope: `website/src/content/docs/` (`.md`, `.mdx`), `horsies/.agents/skills/`
 (`.md`) and `website/public/llms.txt`. The changelog and the migration
-guides describe past versions, so the scan skips them. The enums are the
+guides describe past versions, so the scan skips them. The pages under
+`website/src/content/docs/rust/` document the Rust crates, whose enums are
+not these, so the scan skips them too. The enums are the
 `Enum` classes in `__all__` of `horsies`, `horsies.monitoring` and
 `horsies.web`.
 
@@ -60,6 +62,7 @@ pytestmark = [pytest.mark.unit]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DOCS_DIR = _REPO_ROOT / 'website' / 'src' / 'content' / 'docs'
+_RUST_DOCS_DIR = _DOCS_DIR / 'rust'
 _SKILLS_DIR = _REPO_ROOT / 'horsies' / '.agents' / 'skills'
 _LLMS_FILE = _REPO_ROOT / 'website' / 'public' / 'llms.txt'
 _HISTORY_PAGES: Final = ('changelog.md',)
@@ -685,13 +688,14 @@ def public_enums() -> dict[str, type[enum.Enum]]:
 
 
 def docs_files() -> list[Path]:
-    """The docs, skills and llms files in scope, without the history pages."""
+    """The docs, skills and llms files in scope, without the history and Rust pages."""
     site = [
         path
         for pattern in ('*.md', '*.mdx')
         for path in _DOCS_DIR.rglob(pattern)
         if path.name not in _HISTORY_PAGES
         and not any(part in _HISTORY_DIRS for part in path.relative_to(_DOCS_DIR).parts)
+        and not path.is_relative_to(_RUST_DOCS_DIR)
     ]
     return sorted([*site, *_SKILLS_DIR.rglob('*.md'), _LLMS_FILE])
 
@@ -741,6 +745,15 @@ def test_each_docs_root_has_checked_lists() -> None:
     assert checked.get('website/src/content/docs', 0) > 0
     assert checked.get('horsies/.agents/skills', 0) > 0
     assert checked.get('website/public/llms.txt', 0) > 0
+
+
+def test_docs_files_skip_the_rust_pages() -> None:
+    rust_pages = [*_RUST_DOCS_DIR.rglob('*.md'), *_RUST_DOCS_DIR.rglob('*.mdx')]
+    in_scope = docs_files()
+
+    assert rust_pages
+    assert not [path for path in in_scope if path.is_relative_to(_RUST_DOCS_DIR)]
+    assert [path for path in in_scope if path.is_relative_to(_DOCS_DIR)]
 
 
 def test_each_docs_member_list_matches_its_enum() -> None:
