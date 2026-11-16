@@ -95,6 +95,8 @@ pub enum NotRunCause {
     QueueFull,
     /// The task's route names a child kind this worker does not run.
     NoChildOfItsKind,
+    /// The runner heartbeats failed closed: no beat would cover the task.
+    RunnerBeatsFailedClosed,
 }
 
 impl fmt::Display for NotRunCause {
@@ -104,6 +106,7 @@ impl fmt::Display for NotRunCause {
             Self::PoolFailed => "no child could start",
             Self::QueueFull => "too many tasks wait for a slot",
             Self::NoChildOfItsKind => "this worker runs no child of the task's kind",
+            Self::RunnerBeatsFailedClosed => "the runner heartbeats of the worker failed closed",
         };
         f.write_str(text)
     }

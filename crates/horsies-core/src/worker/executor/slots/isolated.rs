@@ -14,7 +14,9 @@
 //! - A child whose exit is not seen 30 s after the kill: the end is not
 //!   known (stale recovery on), or the slot waits for the exit (off).
 //! - The runner beats of the task stop when its end is read or a kill is
-//!   sent.
+//!   sent. A closed runner beat registry (the worker failed closed) refuses
+//!   the task before it is sent: it ends `NotDispatched`, and the child is
+//!   killed.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -23,7 +25,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::time::Instant;
 
-use super::dispatch::AttemptEnd;
+use super::dispatch::{AttemptEnd, NotRunCause};
 use super::pool::{
     Answer, DownState, ExitNotSeen, IsolatedSlotState, MemoryLimit, PoolFailure, PoolShared,
     QueuedRun, TaskLimit,
@@ -38,6 +40,7 @@ use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, MailboxBound, SpawnError,
     CHILD_KILL_WAIT, CHILD_READY_TIMEOUT,
 };
+use crate::worker::runner_beats::{DispatchRunner, HeldChild, RegistryClosed};
 
 /// After a body returned with work left on its loop, the child reports how
 /// that work ended within this time, or it is killed: 1 s of grace, 0.3 s
@@ -409,7 +412,28 @@ async fn run_one(shared: &PoolShared, channel: &mut ChildChannel, run: QueuedRun
         mut answer,
     } = run;
     let task_id = frame.task_id;
-    let held = shared.live.hold(task_id, frame.claimed_at);
+    let runner = DispatchRunner::Child(HeldChild {
+        id: channel.id(),
+        pid: channel.pid(),
+        spawner: shared.spawner.clone(),
+        kill_mark: channel.kill_mark(),
+    });
+    let held = match shared.live.hold(task_id, frame.claimed_at, runner) {
+        Ok(held) => held,
+        Err(RegistryClosed) => {
+            // No beat would cover the task: it is not sent, and the child
+            // is killed with the slot's lost-child path.
+            tracing::error!(
+                task_id = %task_id,
+                pid = channel.pid().get(),
+                "the runner heartbeats failed closed; the task is not sent",
+            );
+            answer.send(AttemptEnd::NotDispatched(
+                NotRunCause::RunnerBeatsFailedClosed,
+            ));
+            return AfterRun::ChildGone;
+        }
+    };
     answer.child_took_it(channel.pid());
     let parent_frame = ParentFrame::Run(frame);
     let sent = channel.send(&parent_frame).await;
