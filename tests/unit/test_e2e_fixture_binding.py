@@ -9,9 +9,7 @@ import pytest
 from horsies.core.brokers.resources import ListenerEnabled
 from horsies.core.types.result import Ok
 from tests.broker_resources_support import fake_resources
-from tests.e2e.conftest import (
-    _initialize_session_broker,  # pyright: ignore[reportPrivateUsage]
-)
+from tests.e2e.helpers.session_broker import initialize_session_broker
 
 
 @pytest.mark.unit
@@ -28,7 +26,7 @@ async def test_pgbouncer_lane_does_not_initialize_default_brokers(
         fake_resources(listener=ListenerEnabled(listener=listener)),
     )
 
-    await _initialize_session_broker(broker, seed_history=True)
+    await initialize_session_broker(broker, seed_history=True)
 
     broker.ensure_schema_initialized.assert_not_awaited()
     listener.start.assert_not_awaited()

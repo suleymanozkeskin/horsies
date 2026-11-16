@@ -8,7 +8,10 @@ use uuid::Uuid;
 use crate::core::TaskStatus;
 
 /// Categorized broker operation failure codes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "broker", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum BrokerErrorCode {
     SchemaInitFailed,

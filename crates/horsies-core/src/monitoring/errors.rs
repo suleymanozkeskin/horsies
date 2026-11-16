@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::broker::is_retryable_sqlx_error;
 use crate::core::history::errors::HistoryError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "monitoring", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MonitoringQueryErrorCode {
     /// The read failed with a database or driver error. `retryable` is the

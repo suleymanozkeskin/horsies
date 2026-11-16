@@ -226,6 +226,11 @@ impl From<ReservationWindowSeconds> for u32 {
 impl DatabaseManifest {
     /// The broker config of these settings. `retain_rerun_input_default`
     /// comes from the send section of the same manifest.
+    ///
+    /// The manifest holds the resolved settings of one process, so
+    /// `pool_pre_ping` is already the value of that process. Both pre-ping
+    /// fields of the config take it: the pool reads `pool_pre_ping`, and
+    /// [`PostgresConfig::worker_process_config`] reads `worker_pool_pre_ping`.
     pub fn to_postgres_config(&self, retain_rerun_input_default: bool) -> PostgresConfig {
         let session_database_url = match &self.session_database {
             SessionDatabase::SameAsDatabaseUrl => None,
@@ -236,6 +241,7 @@ impl DatabaseManifest {
             session_database_url,
             pgbouncer_transaction_mode: self.pgbouncer_transaction_mode,
             pool_pre_ping: self.pool_pre_ping,
+            worker_pool_pre_ping: self.pool_pre_ping,
             pool_size: self.pool_size.get(),
             max_overflow: self.max_overflow.get(),
             retain_rerun_input_default,
@@ -393,6 +399,23 @@ mod tests {
             Some("postgresql://user:secret@direct:5432/db")
         );
         assert!(config.retain_rerun_input_default);
+    }
+
+    /// The manifest's `pool_pre_ping` is the resolved value of its process;
+    /// both pre-ping fields of the broker config take it.
+    #[test]
+    fn both_pre_ping_fields_take_the_resolved_pre_ping() {
+        for (text_value, resolved) in [("true", true), ("false", false)] {
+            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+                "\"pool_pre_ping\": true",
+                &format!("\"pool_pre_ping\": {text_value}"),
+                1,
+            );
+            let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
+            let config = manifest.database.to_postgres_config(false);
+            assert_eq!(config.pool_pre_ping, resolved);
+            assert_eq!(config.worker_pool_pre_ping, resolved);
+        }
     }
 
     #[test]

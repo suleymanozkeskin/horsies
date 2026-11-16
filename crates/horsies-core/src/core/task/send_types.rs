@@ -9,7 +9,8 @@ use uuid::Uuid;
 use crate::broker::BrokerError;
 
 /// Categorized task send failure codes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
@@ -253,14 +254,19 @@ pub fn send_error_from_enqueue(
         | BrokerError::IncompleteTaskHistoryCutover
         | BrokerError::SchemaVersionMismatch { .. }
         | BrokerError::InvalidStatus(_)
+        | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
         | BrokerError::EnqueueConflictUnverifiable { .. }
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
+        | BrokerError::ClientFamilyMismatch { .. }
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
+        | BrokerError::InvalidClaimArgument(_)
+        | BrokerError::Statement(_)
+        | BrokerError::PoolSettings(_)
+        | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,

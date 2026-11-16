@@ -8,14 +8,15 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::NO_NODE_INPUT;
 use crate::core::{
-    JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowSummary, SuccessPolicy,
-    TaskError, TaskResult, WorkflowSpecRegistry, WorkflowTaskStatus,
+    JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowFailure,
+    SubWorkflowSummary, SuccessPolicy, TaskError, TaskErrorKind, TaskResult, WorkflowSpecRegistry,
+    WorkflowTaskStatus,
 };
 
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 use crate::workflow_engine::error::WorkflowError;
@@ -95,9 +96,14 @@ FROM found";
 
 /// The node error lives in `result` only; the node `error` column has no writer (Python
 /// `MARK_WORKFLOW_TASK_FAILED_SQL`, `core/workflows/sql.py:253-259`).
+///
+/// Every caller fails a node at its enqueue step, so a node with no `started_at` takes its enqueue time:
+/// Python marks the node ENQUEUED (with `started_at`) before it fails it (`core/workflows/sql.py:114-116,
+/// 238-240, 449-470`; `core/workflows/engine.py:1030-1035`).
 const UPDATE_WORKFLOW_TASK_FAILED_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET status = 'FAILED', result = $1, completed_at = NOW()
+SET status = 'FAILED', result = $1, completed_at = NOW(),
+    started_at = COALESCE(started_at, NOW())
 WHERE workflow_id = $2 AND task_index = $3
   AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
 RETURNING id";
@@ -114,6 +120,7 @@ SELECT d.task_index, d.dependencies, d.args_from, d.workflow_ctx_from,
        d.input, d.queue_name, d.priority,
        d.node_id, d.task_options, d.status,
        d.is_subworkflow, d.sub_workflow_name, d.sub_definition_key,
+       d.sub_workflow_params,
        COALESCE((
            SELECT jsonb_object_agg(s.status, s.cnt)
            FROM (SELECT src.status, COUNT(*) AS cnt
@@ -135,7 +142,7 @@ SELECT task_index, dependencies, args_from, workflow_ctx_from,
        allow_failed_deps, join_type, min_success, task_name,
        input, queue_name, priority, node_id,
        task_options, status, is_subworkflow, sub_workflow_name,
-       sub_definition_key
+       sub_definition_key, sub_workflow_params
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = $2 AND status = 'PENDING'";
 
@@ -157,9 +164,11 @@ RETURNING task_index";
 /// Batched READY -> ENQUEUED CAS, guarded on the workflow still RUNNING (the same
 /// re-check the single-node LINK does). RETURNING the won set drives the bulk
 /// INSERT + LINK; a paused workflow returns zero rows so no task row is inserted.
+/// A node's `started_at` is its enqueue time (Python `PROMOTE_DEPENDENTS_BATCH_SQL`,
+/// `core/workflows/sql.py:449-470`).
 const ENQUEUE_WORKFLOW_TASKS_BATCH_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET status = 'ENQUEUED'
+SET status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $1::uuid AND wt.task_index = ANY($2)
   AND wt.status = 'READY'
@@ -195,6 +204,7 @@ WHERE workflow_id = $1 AND task_index = $2 AND status IN ('PENDING', 'READY')";
 
 // An engine-minted task row carries no command fingerprint, no idempotency
 // key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+// `sent_at` is the start call time of the node's workflow ($11).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -204,12 +214,15 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
+/// A node's `started_at` is its enqueue time (Python `ENQUEUE_WORKFLOW_TASK_SQL`,
+/// `core/workflows/sql.py:114-116`).
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -412,7 +425,7 @@ struct DependentRow {
     join_type: String,
     min_success: Option<i32>,
     task_name: String,
-    /// The node's stored input (one JSON value; `null` for no static input).
+    /// The node's stored input: one JSON value, as the client encoded it.
     input: String,
     queue_name: String,
     priority: i32,
@@ -422,6 +435,9 @@ struct DependentRow {
     is_subworkflow: bool,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
+    /// `GIVEN`); `NULL` on a task node.
+    sub_workflow_params: Option<String>,
 }
 
 /// One batched-eval row: a PENDING dependent's full node config plus its
@@ -801,6 +817,7 @@ async fn enqueue_phase2_dependent_in_tx(
         .bind(&facts.retention_class_key)
         .bind(parse_max_retries(node.task_options.as_deref()))
         .bind(good_until)
+        .bind(workflow_id)
         .execute(transaction.as_mut())
         .await?;
     let linked = sqlx::query(LINK_ENQUEUED_TASK_SQL)
@@ -899,8 +916,8 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .await;
     };
     let merged_input = merge_args_from(&node.input, &node.args_from, dep_results)?;
-    let has_inputs = node.input != NO_NODE_INPUT || node.args_from.is_some();
-    let child_spec = materialize_child_spec(registered, has_inputs, &merged_input, registry)?;
+    let params = stored_sub_workflow_params(node.sub_workflow_params.as_deref())?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
     let child_id = start_child_workflow_in_tx(
         transaction,
@@ -1402,7 +1419,10 @@ async fn promote_dependents_level(
                         .push_bind(p.task_options.clone())
                         .push_bind(p.facts.execution.as_str())
                         .push_bind(p.facts.retention_class_key.clone())
-                        .push("NOW()")
+                        // sent_at: the start call time of the workflow.
+                        .push("(SELECT w.sent_at FROM horsies_workflows w WHERE w.id = ")
+                        .push_bind_unseparated(workflow_id)
+                        .push_unseparated(")")
                         .push("NOW()")
                         .push("NULL")
                         .push("NULL")
@@ -1846,6 +1866,7 @@ async fn enqueue_workflow_task(
         .bind(&params.facts.retention_class_key)
         .bind(params.max_retries)
         .bind(params.good_until)
+        .bind(workflow_id)
         .execute(&mut *tx)
         .await?;
 
@@ -1908,7 +1929,7 @@ pub(crate) async fn fail_subworkflow_node(
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
-    let error_code = error.error_code.as_ref().map(ToString::to_string);
+    let error_code = Some(error.error_code.to_string());
     let error_json = serde_json::to_string(&error)?;
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
 
@@ -2036,10 +2057,10 @@ async fn enqueue_subworkflow_task(
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
     // otherwise use the static registered spec.
-    let has_child_inputs = task.input != NO_NODE_INPUT || task.args_from.is_some();
+    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
 
     let merged_input = merge_args_from(&task.input, &task.args_from, dep_results)?;
-    let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
@@ -2252,12 +2273,13 @@ fn completed_child_node(
         }),
         ChildOutput::Unreadable { cause } => {
             let error = TaskError {
-                error_code: Some(OperationalErrorCode::ResultDeserializationError.into()),
+                error_code: OperationalErrorCode::ResultDeserializationError.into(),
                 message: Some(format!(
                     "Child workflow {child_workflow_id} is COMPLETED and its stored result does not parse: {cause}"
                 )),
-                cause: None,
+                exception: None,
                 data: Some(serde_json::json!({ "workflow_id": child_workflow_id.to_string() })),
+                kind: crate::core::TaskErrorKind::Plain,
             };
             Ok(ParentNodeOutcome::Failed {
                 result_json: serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
@@ -2291,23 +2313,23 @@ fn failed_child_node(
     })
 }
 
-/// The `SUBWORKFLOW_FAILED` error of a parent node.
-///
-/// The child id and summary ride in `data`, where `TaskError::sub_workflow_details` reads them back at any
-/// error surface.
+/// The `SUBWORKFLOW_FAILED` error of a parent node: Python's `SubWorkflowError`
+/// (`core/workflows/engine.py:3238-3281`), with `sub_workflow_id` and `sub_workflow_summary` stored at the top
+/// level of the error object and `data` null.
 fn subworkflow_failed_error(
     child_workflow_id: Uuid,
     message: String,
     summary: &SubWorkflowSummary,
 ) -> TaskError {
     TaskError {
-        error_code: Some(OutcomeCode::SubworkflowFailed.into()),
+        exception: None,
+        error_code: OutcomeCode::SubworkflowFailed.into(),
+        data: None,
         message: Some(message),
-        cause: None,
-        data: Some(serde_json::json!({
-            "sub_workflow_id": child_workflow_id,
-            "sub_workflow_summary": summary,
-        })),
+        kind: TaskErrorKind::SubWorkflow(SubWorkflowFailure {
+            sub_workflow_id: child_workflow_id,
+            sub_workflow_summary: summary.clone(),
+        }),
     }
 }
 
@@ -2977,15 +2999,16 @@ fn output_error(
     row: &NodeResult,
 ) -> TaskError {
     TaskError {
-        error_code: Some(error_code),
+        error_code,
         message: Some(message),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "output_node_id": row.node_id,
             "output_task_index": row.task_index,
             "output_task_name": row.task_name,
         })),
+        kind: crate::core::TaskErrorKind::Plain,
     }
 }
 
@@ -3130,10 +3153,11 @@ async fn recovered_phase2_failure_error(
         ),
     };
     Ok(serde_json::to_string(&TaskError {
-        error_code: Some(error_code),
+        error_code,
         message: Some(message),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({"task_status": status})),
+        kind: crate::core::TaskErrorKind::Plain,
     })?)
 }
 
@@ -3366,7 +3390,7 @@ mod p7_exact_error_tests {
     }
 
     async fn seed_prior_failure(pool: &PgPool, workflow_id: Uuid) {
-        let prior = TaskError::new("PRIOR_FAILURE", "prior node failed");
+        let prior = TaskError::new("PRIOR_FAILURE", "prior node failed").unwrap();
         let result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(prior)).unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
@@ -3405,6 +3429,7 @@ mod p7_exact_error_tests {
             is_subworkflow: true,
             sub_workflow_name: Some("p7_missing_child".to_owned()),
             sub_definition_key: Some("missing.definition".to_owned()),
+            sub_workflow_params: Some("NOT_GIVEN".to_owned()),
         }
     }
 
@@ -3418,11 +3443,11 @@ mod p7_exact_error_tests {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params,
                 sub_workflow_name, sub_definition_key, created_at
             ) VALUES (
                 $1, $2, 1, 'missing_child', '__sub_workflow:p7_missing_child', 'null',
-                'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'p7_missing_child',
+                'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'NOT_GIVEN', 'p7_missing_child',
                 'missing.definition', NOW()
             )",
         )
@@ -3456,10 +3481,20 @@ mod p7_exact_error_tests {
         assert_eq!(status, "PAUSED");
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::SubworkflowLoadFailed,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::SubworkflowLoadFailed,),
         );
+        // A node that fails at its enqueue step holds its enqueue time, as Python's node does after its
+        // ENQUEUED write.
+        let (node_status, has_enqueue_time): (String, bool) = sqlx::query_as(
+            "SELECT status, started_at IS NOT NULL FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(node_status, "FAILED");
+        assert!(has_enqueue_time);
     }
 
     #[tokio::test]
@@ -3487,9 +3522,9 @@ mod p7_exact_error_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_name, sub_definition_key, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
              ) VALUES ($1, $2, 1, 'missing_child', 'p7_missing_child', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'READY', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'NOT_GIVEN',
                        'p7_missing_child', 'missing.definition', NOW())",
         )
         .bind(Uuid::new_v4())
@@ -3528,9 +3563,7 @@ mod p7_exact_error_tests {
         // The depth check runs before the definition load, as in Python.
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::SubworkflowDepthLimitReached,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::SubworkflowDepthLimitReached,),
         );
         let child_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1",
@@ -3553,10 +3586,10 @@ mod p7_exact_error_tests {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params, created_at
             ) VALUES (
                 $1, $2, 1, 'child', '__sub_workflow:p7_child', 'null', 'default', 100, '{}',
-                FALSE, 'all', 'RUNNING', TRUE, NOW()
+                FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN', NOW()
             )",
         )
         .bind(Uuid::new_v4())
@@ -3600,14 +3633,13 @@ mod p7_exact_error_tests {
         assert_eq!(status, "PAUSED");
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::SubworkflowFailed)),
+            TaskErrorCode::from(OutcomeCode::SubworkflowFailed),
         );
         assert_eq!(
             error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("sub_workflow_id")),
-            Some(&serde_json::json!(child_id)),
+                .sub_workflow_details()
+                .map(|failure| failure.sub_workflow_id),
+            Some(child_id),
         );
     }
 
@@ -3685,11 +3717,11 @@ mod guard_tests {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params,
                 sub_workflow_id, created_at
             ) VALUES (
                 $1, $2, 0, 'node_0', 'subwf_node', 'null', 'default', 100, '{}', FALSE, 'all',
-                'RUNNING', TRUE, $3, NOW()
+                'RUNNING', TRUE, 'NOT_GIVEN', $3, NOW()
             )",
         )
         .bind(Uuid::new_v4())
@@ -4037,10 +4069,10 @@ WHERE wt.workflow_id = $1
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params, created_at
             ) VALUES (
                 $1, $2, 0, 'node_0', 'sub', 'null', 'default', 100, '{}', FALSE, 'all',
-                'READY', TRUE, NOW()
+                'READY', TRUE, 'NOT_GIVEN', NOW()
             )",
         )
         .bind(Uuid::new_v4())
@@ -4212,10 +4244,10 @@ WHERE wt.workflow_id = $1
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, sub_workflow_name, sub_definition_key, created_at
+                status, is_subworkflow, sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
             ) VALUES ($1, $2, 0, 'node_0', 'child', '{}',
                       'default', 100, '{}', FALSE, 'all',
-                      'RUNNING', TRUE, 'child', 'tests.child.v1', NOW())",
+                      'RUNNING', TRUE, 'NOT_GIVEN', 'child', 'tests.child.v1', NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(wf_id)
@@ -4912,6 +4944,84 @@ mod promotion_batch_tests {
         cleanup(&pool, &wf_id).await;
     }
 
+    /// Every promoted task row stores the start call time of its workflow (`horsies_workflows.sent_at`) as
+    /// its `sent_at`: the batched level (node 1 of the first workflow), the per-node path (node 2, which
+    /// reads the workflow context) and the phase-2 path (node 1 of the second workflow).
+    #[tokio::test]
+    #[serial]
+    async fn a_promoted_task_row_stores_the_start_call_time_of_its_workflow() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let registry = WorkflowSpecRegistry::new();
+        let started = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed start call time")
+            .with_timezone(&chrono::Utc);
+        let level_wf = Uuid::new_v4().to_string();
+        let phase2_wf = Uuid::new_v4().to_string();
+        for wf_id in [&level_wf, &phase2_wf] {
+            insert_workflow(&pool, wf_id).await;
+            sqlx::query("UPDATE horsies_workflows SET sent_at = $2 WHERE id = $1::uuid")
+                .bind(test_uuid(wf_id))
+                .bind(started)
+                .execute(&pool)
+                .await
+                .expect("set the start call time");
+            insert_node(&pool, wf_id, 0, vec![], "COMPLETED", "all", false).await;
+            insert_node(&pool, wf_id, 1, vec![0], "PENDING", "all", false).await;
+        }
+        insert_node(&pool, &level_wf, 2, vec![0], "PENDING", "all", false).await;
+        // A context member merges into an object input.
+        sqlx::query(
+            "UPDATE horsies_workflow_tasks SET workflow_ctx_from = ARRAY['node_0'], input = '{}'
+             WHERE workflow_id = $1::uuid AND task_index = 2",
+        )
+        .bind(test_uuid(&level_wf))
+        .execute(&pool)
+        .await
+        .expect("node 2 reads the workflow context");
+
+        process_dependents(
+            &pool,
+            test_uuid(&level_wf),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+        let mut transaction = pool.begin().await.expect("phase-2 transaction");
+        promote_phase2_dependents_in_tx(
+            &mut transaction,
+            test_uuid(&phase2_wf),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("phase-2 promotion");
+        transaction.commit().await.expect("commit phase 2");
+
+        let stored: Vec<(String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT wt.workflow_id::text, wt.task_index, t.sent_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = ANY($1::uuid[])
+             ORDER BY 1, 2",
+        )
+        .bind(vec![test_uuid(&level_wf), test_uuid(&phase2_wf)])
+        .fetch_all(&pool)
+        .await
+        .expect("read the promoted task rows");
+        assert_eq!(stored.len(), 3, "three promoted task rows: {stored:?}");
+        for (workflow_id, task_index, sent_at) in stored {
+            assert_eq!(sent_at, started, "{workflow_id}:{task_index}");
+        }
+
+        cleanup(&pool, &level_wf).await;
+        cleanup(&pool, &phase2_wf).await;
+    }
+
     /// Multi-level skip cascade: a failed root skips a chain of join='all'
     /// dependents across levels (1 -> 2 -> 3), driven by the level loop.
     #[tokio::test]
@@ -4949,6 +5059,78 @@ mod promotion_batch_tests {
         }
 
         cleanup(&pool, &wf_id).await;
+    }
+
+    /// A promoted node holds its enqueue time as `started_at` on the batched level (node 1 of the first
+    /// workflow), the per-node path (node 2, which reads the workflow context) and the phase-2 path (node 1
+    /// of the second workflow). The node write and the task insert share a transaction, so the time equals
+    /// `enqueued_at` of the task row.
+    #[tokio::test]
+    #[serial]
+    async fn a_promoted_node_holds_its_enqueue_time() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let registry = WorkflowSpecRegistry::new();
+        let level_wf = Uuid::new_v4().to_string();
+        let phase2_wf = Uuid::new_v4().to_string();
+        for wf_id in [&level_wf, &phase2_wf] {
+            insert_workflow(&pool, wf_id).await;
+            insert_node(&pool, wf_id, 0, vec![], "COMPLETED", "all", false).await;
+            insert_node(&pool, wf_id, 1, vec![0], "PENDING", "all", false).await;
+        }
+        insert_node(&pool, &level_wf, 2, vec![0], "PENDING", "all", false).await;
+        // A context member merges into an object input.
+        sqlx::query(
+            "UPDATE horsies_workflow_tasks SET workflow_ctx_from = ARRAY['node_0'], input = '{}'
+             WHERE workflow_id = $1::uuid AND task_index = 2",
+        )
+        .bind(test_uuid(&level_wf))
+        .execute(&pool)
+        .await
+        .expect("node 2 reads the workflow context");
+
+        process_dependents(
+            &pool,
+            test_uuid(&level_wf),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+        let mut transaction = pool.begin().await.expect("phase-2 transaction");
+        promote_phase2_dependents_in_tx(
+            &mut transaction,
+            test_uuid(&phase2_wf),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("phase-2 promotion");
+        transaction.commit().await.expect("commit phase 2");
+
+        let nodes: Vec<(String, i32, String, bool)> = sqlx::query_as(
+            "SELECT wt.workflow_id::text, wt.task_index, wt.status,
+                    wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = ANY($1::uuid[])
+             ORDER BY 1, 2",
+        )
+        .bind(vec![test_uuid(&level_wf), test_uuid(&phase2_wf)])
+        .fetch_all(&pool)
+        .await
+        .expect("read the promoted nodes");
+        assert_eq!(nodes.len(), 3, "three promoted nodes: {nodes:?}");
+        for (workflow_id, task_index, status, holds_enqueue_time) in nodes {
+            assert_eq!(status, "ENQUEUED", "{workflow_id}:{task_index}");
+            assert!(holds_enqueue_time, "{workflow_id}:{task_index}");
+        }
+
+        cleanup(&pool, &level_wf).await;
+        cleanup(&pool, &phase2_wf).await;
     }
 
     /// allow_failed_deps: a failed dep still promotes the dependent (not skipped).
@@ -5221,7 +5403,7 @@ mod child_outcome_tests {
     }
 
     fn code(error: &TaskError) -> Option<String> {
-        error.error_code.as_ref().map(ToString::to_string)
+        Some(error.error_code.to_string())
     }
 
     #[test]
@@ -5253,10 +5435,9 @@ mod child_outcome_tests {
     #[test]
     fn a_completed_child_with_an_err_output_fails_the_node_with_that_error() {
         let child = Uuid::new_v4();
-        let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::new(
-            "OUTPUT_FAILED",
-            "output node failed",
-        )))
+        let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
+            TaskError::new("OUTPUT_FAILED", "output node failed").unwrap(),
+        ))
         .unwrap();
         let (summary, outcome) = terminal_child_outcome(
             child,
@@ -5324,7 +5505,7 @@ mod child_outcome_tests {
     fn a_failed_child_fails_the_node_with_subworkflow_failed() {
         let child = Uuid::new_v4();
         let child_error =
-            serde_json::to_string(&TaskError::new("BOOM", "task b exploded")).unwrap();
+            serde_json::to_string(&TaskError::new("BOOM", "task b exploded").unwrap()).unwrap();
         for status in ["FAILED", "CANCELLED", "EXPIRED"] {
             let (summary, outcome) = terminal_child_outcome(
                 child,
@@ -5358,6 +5539,18 @@ mod child_outcome_tests {
             let details = node_error.sub_workflow_details().unwrap();
             assert_eq!(details.sub_workflow_id, child);
             assert_eq!(details.sub_workflow_summary, summary);
+            // Row 35: both fields at the top level of the stored error, `data` null (Python
+            // `SubWorkflowError`, `core/workflows/engine.py:3238-3281`).
+            let stored_value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+            assert_eq!(
+                stored_value["err"]["sub_workflow_id"],
+                serde_json::json!(child.to_string())
+            );
+            assert_eq!(
+                stored_value["err"]["sub_workflow_summary"]["status"],
+                serde_json::json!(status)
+            );
+            assert_eq!(stored_value["err"]["data"], serde_json::Value::Null);
         }
     }
 
@@ -5441,14 +5634,7 @@ mod completion_rule_tests {
         let text =
             explicit_output_result(workflow_id, 2, Some(output_row("SKIPPED", None))).unwrap();
         let error = stored_error(&text);
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_OUTPUT_SKIPPED")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_OUTPUT_SKIPPED");
         assert_eq!(
             error.data,
             Some(serde_json::json!({
@@ -5468,12 +5654,8 @@ mod completion_rule_tests {
                     explicit_output_result(Uuid::new_v4(), 2, Some(output_row(status, result)))
                         .unwrap();
                 assert_eq!(
-                    stored_error(&text)
-                        .error_code
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .as_deref(),
-                    Some("RESULT_DESERIALIZATION_ERROR")
+                    stored_error(&text).error_code.to_string(),
+                    "RESULT_DESERIALIZATION_ERROR"
                 );
             }
         }
@@ -5504,7 +5686,8 @@ mod completion_rule_tests {
     async fn completion_with_a_stored_error_and_no_failed_node_keeps_that_error() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        let first_error = serde_json::to_string(&TaskError::new("FIRST", "first failure")).unwrap();
+        let first_error =
+            serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, error, definition_key, depth,
