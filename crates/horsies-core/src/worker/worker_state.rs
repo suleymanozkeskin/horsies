@@ -163,11 +163,23 @@ pub fn spawn_worker_state_loop(
         while !cancel.is_cancelled() {
             let tasks_running = (total_permits - semaphore.available_permits()) as i32;
 
+            // Python counts and inserts under one `try`, so a failed count
+            // writes no snapshot (`core/worker/health.py`,
+            // `_update_worker_state`). Storing 0 would record "no claimed
+            // row" for a count that was not taken.
             let tasks_claimed = match query_tasks_claimed(&pool, &worker_id).await {
                 Ok(count) => count,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to query tasks_claimed");
-                    0
+                Err(error) => {
+                    tracing::error!(
+                        worker_id = %worker_id,
+                        %error,
+                        "failed to count claimed tasks; no worker snapshot this interval",
+                    );
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(snapshot_interval) => {}
+                    }
+                    continue;
                 }
             };
 
@@ -418,6 +430,85 @@ mod tests {
         assert_eq!(queue_max_concurrency, serde_json::json!({}));
         assert_eq!(slots_down, serde_json::json!([]));
         assert_eq!(class_capacity, in_process_class_capacity(2));
+    }
+
+    /// Run the snapshot loop on `pool` for `window` with a 10 ms interval,
+    /// then stop it and return the number of snapshot rows of `worker_id`.
+    async fn snapshots_written_in(
+        pool: &PgPool,
+        worker_id: &str,
+        window: std::time::Duration,
+    ) -> i64 {
+        use crate::worker::recovery::new_reaper_health;
+
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        app_config.recovery.worker_state_snapshot_interval_ms = 10;
+        let cancel = CancellationToken::new();
+        let task = spawn_worker_state_loop(
+            pool.clone(),
+            worker_id.to_owned(),
+            "claimed-count-test".to_owned(),
+            std::process::id() as i32,
+            WorkerConfig {
+                concurrency: 1,
+                ..Default::default()
+            },
+            app_config,
+            new_reaper_health(),
+            Arc::new(Semaphore::new(1)),
+            Utc::now(),
+            cancel.clone(),
+        );
+        tokio::time::sleep(window).await;
+        cancel.cancel();
+        task.await.expect("the snapshot loop joins");
+        sqlx::query_scalar("SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(worker_id)
+            .fetch_one(pool)
+            .await
+            .expect("count the snapshots")
+    }
+
+    /// A failed count of claimed rows writes no snapshot (Python counts and
+    /// inserts under one `try`, `core/worker/health.py:201-291`). The old
+    /// loop wrote the snapshot with `tasks_claimed = 0`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_claimed_count_writes_no_snapshot() {
+        /// About 100 intervals of the loop.
+        const LOOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+        let migrated = crate::broker::terminalization_matrix::migrated_pool().await;
+        // On this pool a temporary `horsies_tasks` without the counted
+        // columns hides the table of that name, so the count fails; the
+        // snapshot table is untouched, so the insert alone would succeed.
+        let shadowed = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("CREATE TEMP TABLE horsies_tasks (id integer)")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*migrated.connect_options()).clone())
+            .await
+            .expect("connect the shadowed pool");
+        let control_worker = uuid::Uuid::new_v4().to_string();
+        let failing_worker = uuid::Uuid::new_v4().to_string();
+
+        let control = snapshots_written_in(&migrated, &control_worker, LOOP_WINDOW).await;
+        let written = snapshots_written_in(&shadowed, &failing_worker, LOOP_WINDOW).await;
+
+        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
+            .bind(vec![control_worker, failing_worker])
+            .execute(&migrated)
+            .await
+            .expect("delete the snapshots");
+        shadowed.close().await;
+        assert!(control > 0, "the loop writes when the count works");
+        assert_eq!(written, 0, "a failed count must write no snapshot");
     }
 
     #[test]
