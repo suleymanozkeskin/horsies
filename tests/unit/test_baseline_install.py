@@ -8,6 +8,7 @@ from horsies.core.baseline.install import (
     AppliedMigration,
     BaselineCurrent,
     ClientFamily,
+    CompleteInstall,
     DatabaseState,
     EmptyDatabase,
     FamilyNotRecorded,
@@ -16,7 +17,9 @@ from horsies.core.baseline.install import (
     InstallBaseline,
     MigrationEdited,
     MigrationIncomplete,
-    RecordFamily,
+    ReaderPresence,
+    ReadersMissing,
+    ReadersPublished,
     RefuseInstall,
     SchemaNewer,
     SchemaReady,
@@ -38,6 +41,7 @@ def _classify(
     tables: tuple[str, ...] = ('horsies_migrations', 'horsies_tasks'),
     applied: tuple[AppliedMigration, ...] = (AppliedMigration(1000, True, OWN),),
     family: FamilyRecorded | FamilyNotRecorded = FamilyRecorded(ClientFamily.PYTHON),
+    readers: ReaderPresence = ReadersPublished(),
 ) -> DatabaseState:
     return classify_database(
         migrations_table=migrations_table,
@@ -45,8 +49,13 @@ def _classify(
         tables=tables,
         applied=applied,
         family=family,
+        readers=readers,
         own_checksum=OWN,
     )
+
+
+PYTHON = FamilyRecorded(ClientFamily.PYTHON)
+RUST = FamilyRecorded(ClientFamily.RUST)
 
 
 class TestClassifyDatabase:
@@ -90,24 +99,43 @@ class TestClassifyDatabase:
             version=1000, stored_checksum=OTHER, own_checksum=OWN
         )
 
-    def test_matching_baseline_is_current_with_its_family(self) -> None:
-        assert _classify(family=FamilyNotRecorded()) == BaselineCurrent(family=FamilyNotRecorded())
-        assert _classify() == BaselineCurrent(family=FamilyRecorded(ClientFamily.PYTHON))
+    def test_matching_baseline_is_current_with_its_family_and_readers(self) -> None:
+        assert _classify(family=FamilyNotRecorded()) == BaselineCurrent(
+            family=FamilyNotRecorded(), readers=ReadersPublished()
+        )
+        assert _classify() == BaselineCurrent(family=PYTHON, readers=ReadersPublished())
+        assert _classify(readers=ReadersMissing()) == BaselineCurrent(
+            family=PYTHON, readers=ReadersMissing()
+        )
 
 
 class TestDecideInstall:
     def test_empty_database_is_installed(self) -> None:
         assert decide_install(EmptyDatabase()) == InstallBaseline()
 
-    def test_own_family_is_ready(self) -> None:
-        state = BaselineCurrent(family=FamilyRecorded(ClientFamily.PYTHON))
+    def test_own_family_with_its_readers_is_ready(self) -> None:
+        state = BaselineCurrent(family=PYTHON, readers=ReadersPublished())
         assert decide_install(state) == SchemaReady()
 
-    def test_missing_family_is_recorded(self) -> None:
-        assert decide_install(BaselineCurrent(family=FamilyNotRecorded())) == RecordFamily()
+    @pytest.mark.parametrize(
+        ('family', 'readers'),
+        [
+            (FamilyNotRecorded(), ReadersPublished()),
+            (FamilyNotRecorded(), ReadersMissing()),
+            (PYTHON, ReadersMissing()),
+        ],
+    )
+    def test_missing_family_or_readers_complete_the_install(
+        self,
+        family: FamilyRecorded | FamilyNotRecorded,
+        readers: ReaderPresence,
+    ) -> None:
+        state = BaselineCurrent(family=family, readers=readers)
+        assert decide_install(state) == CompleteInstall()
 
-    def test_other_family_is_refused(self) -> None:
-        state = BaselineCurrent(family=FamilyRecorded(ClientFamily.RUST))
+    @pytest.mark.parametrize('readers', [ReadersPublished(), ReadersMissing()])
+    def test_other_family_is_refused(self, readers: ReaderPresence) -> None:
+        state = BaselineCurrent(family=RUST, readers=readers)
         match decide_install(state):
             case RefuseInstall(state=refused, cause=cause):
                 assert refused == state
