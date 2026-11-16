@@ -1,60 +1,49 @@
-use std::collections::{HashMap, HashSet};
+//! Data-lifecycle configuration: how long records live and how they age.
+//!
+//! A finite retention class is identified by its period in whole days
+//! (`standard_<days>d`). A queue maps to a period, or to `None` for forever;
+//! `retention_periods` lists the other periods a send may choose. The
+//! maintenance owner registers the class of every period this config can
+//! stamp.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::Duration;
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-use crate::core::history::commands::is_safe_identifier;
-use crate::core::history::ddl::classes::{DEFAULT_RETENTION_CLASS_KEY, FOREVER_CLASS_KEY};
-use crate::core::history::names::{HEARTBEAT_CLASS_KEY, MAX_RETENTION_CLASS_KEY_LENGTH};
+use crate::core::history::ddl::classes::{DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DAYS};
+use crate::core::history::periods::{PeriodRefused, RetentionDays};
 
-pub const QUEUE_DERIVED_CLASS_PREFIX: &str = "q_";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetentionClassConfig {
-    pub key: String,
-    pub duration: Duration,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The send-time retention choice that overrides the queue mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionChoice {
-    Class(String),
+    /// A finite period; it must be one of `RetentionConfig::sendable_periods`.
+    Period(RetentionDays),
     Forever,
 }
 
 impl RetentionChoice {
-    pub fn class(key: impl Into<String>) -> Self {
-        Self::Class(key.into())
-    }
-
-    pub fn as_class_key(&self) -> Option<&str> {
-        match self {
-            Self::Class(key) => Some(key),
-            Self::Forever => None,
-        }
+    /// The choice of a finite period, or why the duration is not a period.
+    pub fn period(period: Duration) -> Result<Self, PeriodRefused> {
+        RetentionDays::parse_period(period).map(Self::Period)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RetentionConfig {
-    #[serde(default = "default_worker_state_retention_hours")]
     pub worker_state_retention_hours: Option<u32>,
-    #[serde(default = "default_terminal_record_retention_hours")]
     pub terminal_record_retention_hours: Option<u32>,
-    #[serde(default)]
     pub paused_workflow_auto_cancel_after: Option<Duration>,
-    #[serde(default = "default_history_leaf_horizon_days")]
     pub history_leaf_horizon_days: u32,
-    #[serde(default = "default_heartbeat_leaf_horizon_hours")]
     pub heartbeat_leaf_horizon_hours: u32,
-    #[serde(default)]
-    pub retention_classes: Vec<RetentionClassConfig>,
-    #[serde(default)]
+    /// Finite periods a send may choose besides the 30-day default and the
+    /// mapped periods. Whole days, 1 to 1825.
+    pub retention_periods: Vec<Duration>,
+    /// Per-queue retention: a period in whole days, 1 to 1825, or `None` to
+    /// keep the history record forever. An unmapped queue uses the default.
     pub queue_retention: HashMap<String, Option<Duration>>,
-    #[serde(default = "default_partition_maintenance_interval_s")]
     pub partition_maintenance_interval_s: u64,
-    #[serde(default = "default_retention_sweep_interval_s")]
     pub retention_sweep_interval_s: u64,
-    #[serde(default = "default_retention_delete_batch_size")]
     pub retention_delete_batch_size: u32,
 }
 
@@ -94,12 +83,70 @@ impl Default for RetentionConfig {
             paused_workflow_auto_cancel_after: None,
             history_leaf_horizon_days: default_history_leaf_horizon_days(),
             heartbeat_leaf_horizon_hours: default_heartbeat_leaf_horizon_hours(),
-            retention_classes: Vec::new(),
+            retention_periods: Vec::new(),
             queue_retention: HashMap::new(),
             partition_maintenance_interval_s: default_partition_maintenance_interval_s(),
             retention_sweep_interval_s: default_retention_sweep_interval_s(),
             retention_delete_batch_size: default_retention_delete_batch_size(),
         }
+    }
+}
+
+/// The refusal of the named classes that periods replaced.
+const RETENTION_CLASSES_REMOVED: &str = "retention_classes was removed: a retention class is identified by its period in whole days. Map a queue to the period in queue_retention, or list a period that sends choose explicitly in retention_periods";
+
+/// Every field of `RetentionConfig`.
+#[derive(Deserialize)]
+struct RetentionConfigWire {
+    #[serde(default = "default_worker_state_retention_hours")]
+    worker_state_retention_hours: Option<u32>,
+    #[serde(default = "default_terminal_record_retention_hours")]
+    terminal_record_retention_hours: Option<u32>,
+    #[serde(default)]
+    paused_workflow_auto_cancel_after: Option<Duration>,
+    #[serde(default = "default_history_leaf_horizon_days")]
+    history_leaf_horizon_days: u32,
+    #[serde(default = "default_heartbeat_leaf_horizon_hours")]
+    heartbeat_leaf_horizon_hours: u32,
+    #[serde(default)]
+    retention_periods: Vec<Duration>,
+    #[serde(default)]
+    queue_retention: HashMap<String, Option<Duration>>,
+    #[serde(default = "default_partition_maintenance_interval_s")]
+    partition_maintenance_interval_s: u64,
+    #[serde(default = "default_retention_sweep_interval_s")]
+    retention_sweep_interval_s: u64,
+    #[serde(default = "default_retention_delete_batch_size")]
+    retention_delete_batch_size: u32,
+}
+
+impl<'de> Deserialize<'de> for RetentionConfig {
+    /// Refuses `retention_classes`: a configuration that still declares named
+    /// classes is corrected, never silently ignored.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value
+            .as_object()
+            .is_some_and(|fields| fields.contains_key("retention_classes"))
+        {
+            return Err(D::Error::custom(RETENTION_CLASSES_REMOVED));
+        }
+        let wire: RetentionConfigWire = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            worker_state_retention_hours: wire.worker_state_retention_hours,
+            terminal_record_retention_hours: wire.terminal_record_retention_hours,
+            paused_workflow_auto_cancel_after: wire.paused_workflow_auto_cancel_after,
+            history_leaf_horizon_days: wire.history_leaf_horizon_days,
+            heartbeat_leaf_horizon_hours: wire.heartbeat_leaf_horizon_hours,
+            retention_periods: wire.retention_periods,
+            queue_retention: wire.queue_retention,
+            partition_maintenance_interval_s: wire.partition_maintenance_interval_s,
+            retention_sweep_interval_s: wire.retention_sweep_interval_s,
+            retention_delete_batch_size: wire.retention_delete_batch_size,
+        })
     }
 }
 
@@ -114,30 +161,25 @@ pub enum RetentionConfigError {
     },
     #[error("paused_workflow_auto_cancel_after must be positive; use None to disable the sweep")]
     NonPositivePausedExpiry,
-    #[error("retention class {key:?} is reserved")]
-    ReservedClass { key: String },
-    #[error("retention class {key:?} uses the reserved {QUEUE_DERIVED_CLASS_PREFIX:?} prefix")]
-    QueueDerivedPrefix { key: String },
-    #[error("retention class {key:?} is not a usable identifier")]
-    InvalidClassIdentifier { key: String },
     #[error(
-        "retention class key {key:?} is {length} characters; the limit is {MAX_RETENTION_CLASS_KEY_LENGTH}"
+        "queue {queue:?} maps to a period that is not one: {refused}; use whole days from 1 to 1825, or None to keep records forever"
     )]
-    ClassKeyTooLong { key: String, length: usize },
-    #[error("retention class {key:?} declared twice")]
-    DuplicateClass { key: String },
-    #[error("retention class {key:?} has a non-positive duration")]
-    NonPositiveClassDuration { key: String },
-    #[error("queue {queue:?} cannot be mapped: the name is not a usable identifier")]
-    InvalidQueueIdentifier { queue: String },
-    #[error("queue {queue:?} maps to a non-positive retention")]
-    NonPositiveQueueDuration { queue: String },
-    #[error("queue {queue:?} retention is not a whole number of seconds")]
-    QueueDurationNotWholeSeconds { queue: String },
+    QueuePeriodRefused {
+        queue: String,
+        refused: PeriodRefused,
+    },
+    #[error(
+        "retention period refused: {refused}; use whole days from 1 to 1825, or None to keep records forever"
+    )]
+    PeriodRefused { refused: PeriodRefused },
+    #[error("retention period of {days} days listed twice: a period has exactly one class")]
+    DuplicatePeriod { days: u16 },
     #[error("queue_retention references unknown queue {queue:?}")]
     UnknownQueue { queue: String },
-    #[error("unknown retention class {key:?}")]
-    UnknownClass { key: String },
+    #[error(
+        "retention of {days} days is not a period this deployment registers; omit it for the queue mapping or the 30-day default, choose forever, or choose one of {allowed:?} days. Add the period to retention_periods to send with it"
+    )]
+    UnregisteredPeriod { days: u16, allowed: Vec<u16> },
 }
 
 impl RetentionConfig {
@@ -199,65 +241,30 @@ impl RetentionConfig {
             errors.push(RetentionConfigError::NonPositivePausedExpiry);
         }
 
-        let reserved = [
-            DEFAULT_RETENTION_CLASS_KEY,
-            FOREVER_CLASS_KEY,
-            HEARTBEAT_CLASS_KEY,
-        ];
-        let mut seen = HashSet::new();
-        for declared in &self.retention_classes {
-            let key = &declared.key;
-            if reserved.contains(&key.as_str()) {
-                errors.push(RetentionConfigError::ReservedClass { key: key.clone() });
-            } else if key.starts_with(QUEUE_DERIVED_CLASS_PREFIX) {
-                errors.push(RetentionConfigError::QueueDerivedPrefix { key: key.clone() });
-            } else if !is_safe_identifier(key) {
-                errors.push(RetentionConfigError::InvalidClassIdentifier { key: key.clone() });
-            } else if key.len() > MAX_RETENTION_CLASS_KEY_LENGTH {
-                errors.push(RetentionConfigError::ClassKeyTooLong {
-                    key: key.clone(),
-                    length: key.len(),
+        // A queue name is only a lookup key: the class key holds the period
+        // alone, so any configured queue name can be mapped.
+        let mut mappings: Vec<_> = self.queue_retention.iter().collect();
+        mappings.sort_by_key(|(queue, _)| queue.as_str());
+        for (queue, period) in mappings {
+            let Some(period) = period else {
+                continue;
+            };
+            if let Err(refused) = RetentionDays::parse_period(*period) {
+                errors.push(RetentionConfigError::QueuePeriodRefused {
+                    queue: queue.clone(),
+                    refused,
                 });
-            }
-            if !seen.insert(key.as_str()) {
-                errors.push(RetentionConfigError::DuplicateClass { key: key.clone() });
-            }
-            if declared.duration <= Duration::zero() {
-                errors.push(RetentionConfigError::NonPositiveClassDuration { key: key.clone() });
             }
         }
 
-        let mut mappings: Vec<_> = self.queue_retention.iter().collect();
-        mappings.sort_by_key(|(queue, _)| queue.as_str());
-        for (queue, duration) in mappings {
-            if !is_safe_identifier(queue) {
-                errors.push(RetentionConfigError::InvalidQueueIdentifier {
-                    queue: queue.clone(),
-                });
-                continue;
-            }
-            let Some(duration) = duration else {
-                continue;
-            };
-            if *duration <= Duration::zero() {
-                errors.push(RetentionConfigError::NonPositiveQueueDuration {
-                    queue: queue.clone(),
-                });
-                continue;
-            }
-            match derived_queue_class_key(queue, *duration) {
-                Ok(key) if key.len() > MAX_RETENTION_CLASS_KEY_LENGTH => {
-                    errors.push(RetentionConfigError::ClassKeyTooLong {
-                        length: key.len(),
-                        key,
-                    });
+        let mut listed = HashSet::new();
+        for period in &self.retention_periods {
+            match RetentionDays::parse_period(*period) {
+                Err(refused) => errors.push(RetentionConfigError::PeriodRefused { refused }),
+                Ok(days) if !listed.insert(days) => {
+                    errors.push(RetentionConfigError::DuplicatePeriod { days: days.get() });
                 }
                 Ok(_) => {}
-                Err(DurationRenderError::NotWholeSeconds) => {
-                    errors.push(RetentionConfigError::QueueDurationNotWholeSeconds {
-                        queue: queue.clone(),
-                    });
-                }
             }
         }
         errors
@@ -281,39 +288,22 @@ impl RetentionConfig {
             .collect()
     }
 
-    pub fn declared_class_keys(&self) -> HashSet<&str> {
-        self.retention_classes
-            .iter()
-            .map(|class| class.key.as_str())
-            .collect()
-    }
-
-    pub fn known_finite_class_keys(&self) -> HashSet<String> {
-        let mut keys: HashSet<String> = self
-            .retention_classes
-            .iter()
-            .map(|class| class.key.clone())
-            .collect();
-        keys.extend(self.queue_retention.iter().filter_map(|(queue, duration)| {
-            duration.map(|duration| {
-                derived_queue_class_key(queue, duration)
-                    .expect("validated retention mappings have whole-second durations")
-            })
-        }));
-        keys
-    }
-
+    /// The class a send on this queue stamps when it chooses none: the mapped
+    /// period's class, `None` for a queue mapped to forever, or the default
+    /// class for an unmapped queue.
+    ///
+    /// The periods come from a config that `validate` accepted; a period that
+    /// fails to parse here was changed after validation, which is a defect.
     pub fn resolve_queue_class(&self, queue_name: &str) -> Option<String> {
         match self.queue_retention.get(queue_name) {
             None => Some(DEFAULT_RETENTION_CLASS_KEY.to_owned()),
             Some(None) => None,
-            Some(Some(duration)) => Some(
-                derived_queue_class_key(queue_name, *duration)
-                    .expect("validated retention mappings have whole-second durations"),
-            ),
+            Some(Some(period)) => Some(validated_days(*period).class_key()),
         }
     }
 
+    /// The class one send stamps: the queue mapping when the send chooses
+    /// none, `None` for forever, or the class of a sendable period.
     pub fn resolve_choice(
         &self,
         queue_name: &str,
@@ -322,30 +312,53 @@ impl RetentionConfig {
         match choice {
             None => Ok(self.resolve_queue_class(queue_name)),
             Some(RetentionChoice::Forever) => Ok(None),
-            Some(RetentionChoice::Class(key)) if key == DEFAULT_RETENTION_CLASS_KEY => {
-                Ok(Some(key.clone()))
-            }
-            Some(RetentionChoice::Class(key)) if self.known_finite_class_keys().contains(key) => {
-                Ok(Some(key.clone()))
-            }
-            Some(RetentionChoice::Class(key)) => {
-                Err(RetentionConfigError::UnknownClass { key: key.clone() })
+            Some(RetentionChoice::Period(days)) => {
+                let allowed = self.sendable_periods();
+                match allowed.contains(days) {
+                    true => Ok(Some(days.class_key())),
+                    false => Err(RetentionConfigError::UnregisteredPeriod {
+                        days: days.get(),
+                        allowed: allowed.iter().map(|days| days.get()).collect(),
+                    }),
+                }
             }
         }
     }
 
-    pub fn registrable_classes(&self) -> Vec<RetentionClassConfig> {
-        let mut classes = self.retention_classes.clone();
-        let mut mappings: Vec<_> = self.queue_retention.iter().collect();
-        mappings.sort_by_key(|(queue, _)| queue.as_str());
-        classes.extend(mappings.into_iter().filter_map(|(queue, duration)| {
-            duration.map(|duration| RetentionClassConfig {
-                key: derived_queue_class_key(queue, duration)
-                    .expect("validated retention mappings have whole-second durations"),
-                duration,
-            })
-        }));
-        classes
+    /// The finite periods a send may choose explicitly: the default, every
+    /// mapped period, and `retention_periods`. These are the periods whose
+    /// classes this process's maintenance owner registers.
+    pub fn sendable_periods(&self) -> BTreeSet<RetentionDays> {
+        let mut periods = self.mapped_and_listed_periods();
+        periods.insert(DEFAULT_RETENTION_DAYS);
+        periods
+    }
+
+    /// Every finite period the maintenance owner must register besides the
+    /// default, which the library registers: the distinct mapped and listed
+    /// periods, in day order. Queues with the same period share one class.
+    pub fn registrable_periods(&self) -> Vec<RetentionDays> {
+        self.mapped_and_listed_periods()
+            .into_iter()
+            .filter(|days| *days != DEFAULT_RETENTION_DAYS)
+            .collect()
+    }
+
+    fn mapped_and_listed_periods(&self) -> BTreeSet<RetentionDays> {
+        self.queue_retention
+            .values()
+            .flatten()
+            .chain(self.retention_periods.iter())
+            .map(|period| validated_days(*period))
+            .collect()
+    }
+}
+
+/// The days of a period that `RetentionConfig::validate` accepted.
+fn validated_days(period: Duration) -> RetentionDays {
+    match RetentionDays::parse_period(period) {
+        Ok(days) => days,
+        Err(refused) => panic!("retention period changed after validation: {refused}"),
     }
 }
 
@@ -378,57 +391,9 @@ fn validate_range(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum DurationRenderError {
-    #[error("duration is not a whole number of seconds")]
-    NotWholeSeconds,
-}
-
-pub fn render_duration(duration: Duration) -> Result<String, DurationRenderError> {
-    if duration.num_nanoseconds().is_none()
-        || duration.num_nanoseconds().expect("checked above") % 1_000_000_000 != 0
-    {
-        return Err(DurationRenderError::NotWholeSeconds);
-    }
-    let total = duration.num_seconds();
-    for (unit, seconds) in [('d', 86_400), ('h', 3_600), ('m', 60)] {
-        if total % seconds == 0 {
-            return Ok(format!("{}{unit}", total / seconds));
-        }
-    }
-    Ok(format!("{total}s"))
-}
-
-pub fn derived_queue_class_key(
-    queue_name: &str,
-    duration: Duration,
-) -> Result<String, DurationRenderError> {
-    Ok(format!(
-        "{QUEUE_DERIVED_CLASS_PREFIX}{queue_name}_{}",
-        render_duration(duration)?
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn duration_rendering_and_queue_derivation_are_exact() {
-        for (duration, expected) in [
-            (Duration::days(7), "7d"),
-            (Duration::hours(36), "36h"),
-            (Duration::minutes(90), "90m"),
-            (Duration::seconds(45), "45s"),
-        ] {
-            assert_eq!(render_duration(duration).unwrap(), expected);
-        }
-        assert_eq!(
-            derived_queue_class_key("bulk", Duration::hours(36)).unwrap(),
-            "q_bulk_36h"
-        );
-        assert!(render_duration(Duration::nanoseconds(1)).is_err());
-    }
 
     #[test]
     fn defaults_and_all_bounds_match_the_retention_contract() {
@@ -510,146 +475,68 @@ mod tests {
         }
     }
 
+    fn days(count: i64) -> RetentionDays {
+        RetentionDays::parse_period(Duration::days(count)).unwrap()
+    }
+
     #[test]
-    fn declarations_and_queue_mappings_fail_closed() {
+    fn periods_and_queue_mappings_fail_closed() {
         let config = RetentionConfig {
-            retention_classes: vec![
-                RetentionClassConfig {
-                    key: "forever".to_owned(),
-                    duration: Duration::days(1),
-                },
-                RetentionClassConfig {
-                    key: "q_owned".to_owned(),
-                    duration: Duration::days(1),
-                },
-                RetentionClassConfig {
-                    key: "nineteen_chars_keyx".to_owned(),
-                    duration: Duration::zero(),
-                },
-            ],
+            retention_periods: vec![Duration::days(7), Duration::days(7), Duration::days(1826)],
             queue_retention: HashMap::from([
-                ("bad-name".to_owned(), Some(Duration::days(1))),
-                ("bulk".to_owned(), Some(Duration::nanoseconds(1))),
+                ("bulk".to_owned(), Some(Duration::hours(36))),
+                ("empty".to_owned(), Some(Duration::zero())),
                 ("forever_queue".to_owned(), None),
+                ("week".to_owned(), Some(Duration::days(7))),
             ]),
             ..Default::default()
         };
         let errors = config.validate();
-        assert!(errors.iter().any(|error| matches!(
-            error,
-            RetentionConfigError::ReservedClass { key } if key == "forever"
-        )));
-        assert!(errors.iter().any(|error| matches!(
-            error,
-            RetentionConfigError::QueueDerivedPrefix { key } if key == "q_owned"
-        )));
-        assert!(errors
-            .iter()
-            .any(|error| matches!(error, RetentionConfigError::ClassKeyTooLong { .. })));
-        assert!(errors
-            .iter()
-            .any(|error| matches!(error, RetentionConfigError::NonPositiveClassDuration { .. })));
-        assert!(errors
-            .iter()
-            .any(|error| matches!(error, RetentionConfigError::InvalidQueueIdentifier { .. })));
-        assert!(errors.iter().any(|error| matches!(
-            error,
-            RetentionConfigError::QueueDurationNotWholeSeconds { .. }
-        )));
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert!(errors.contains(&RetentionConfigError::QueuePeriodRefused {
+            queue: "bulk".to_owned(),
+            refused: PeriodRefused::NotWholeDays {
+                period: Duration::hours(36)
+            },
+        }));
+        assert!(errors.contains(&RetentionConfigError::QueuePeriodRefused {
+            queue: "empty".to_owned(),
+            refused: PeriodRefused::TooShort {
+                period: Duration::zero()
+            },
+        }));
+        assert!(errors.contains(&RetentionConfigError::DuplicatePeriod { days: 7 }));
+        assert!(errors.contains(&RetentionConfigError::PeriodRefused {
+            refused: PeriodRefused::TooLong {
+                period: Duration::days(1826)
+            },
+        }));
     }
 
     #[test]
-    fn class_key_budget_identifier_rules_duplicates_and_collision_band_are_exact() {
-        let at_budget = "k".repeat(MAX_RETENTION_CLASS_KEY_LENGTH);
-        let valid = RetentionConfig {
-            retention_classes: vec![RetentionClassConfig {
-                key: at_budget.clone(),
-                duration: Duration::hours(1),
-            }],
-            ..Default::default()
-        };
-        assert!(valid.validate().is_empty());
-        assert_eq!(valid.retention_classes[0].key, at_budget);
-
-        for key_length in [MAX_RETENTION_CLASS_KEY_LENGTH + 1, 30, 31] {
-            let key = "k".repeat(key_length);
-            let errors = RetentionConfig {
-                retention_classes: vec![RetentionClassConfig {
-                    key: key.clone(),
-                    duration: Duration::days(5),
-                }],
-                ..Default::default()
-            }
-            .validate();
-            assert!(errors.iter().any(|error| matches!(
-                error,
-                RetentionConfigError::ClassKeyTooLong { key: found, length }
-                    if found == &key && *length == key_length
-            )));
-        }
-
-        for unsafe_key in ["", "Upper", "has-dash", "has space", "_leading"] {
-            let errors = RetentionConfig {
-                retention_classes: vec![RetentionClassConfig {
-                    key: unsafe_key.to_owned(),
-                    duration: Duration::days(1),
-                }],
-                ..Default::default()
-            }
-            .validate();
-            assert!(errors.iter().any(|error| matches!(
-                error,
-                RetentionConfigError::InvalidClassIdentifier { key } if key == unsafe_key
-            )));
-        }
-
-        let duplicate = RetentionConfig {
-            retention_classes: vec![
-                RetentionClassConfig {
-                    key: "audit".to_owned(),
-                    duration: Duration::days(1),
-                },
-                RetentionClassConfig {
-                    key: "audit".to_owned(),
-                    duration: Duration::days(2),
-                },
-            ],
-            ..Default::default()
-        };
-        assert!(duplicate.validate().iter().any(|error| matches!(
-            error,
-            RetentionConfigError::DuplicateClass { key } if key == "audit"
-        )));
-    }
-
-    #[test]
-    fn precedence_and_registrable_classes_are_exact() {
+    fn precedence_sendable_and_registrable_periods_are_exact() {
         let config = RetentionConfig {
-            retention_classes: vec![RetentionClassConfig {
-                key: "audit_7d".to_owned(),
-                duration: Duration::days(7),
-            }],
+            retention_periods: vec![Duration::days(7)],
             queue_retention: HashMap::from([
-                ("bulk".to_owned(), Some(Duration::hours(36))),
+                ("bulk".to_owned(), Some(Duration::days(2))),
+                ("shared".to_owned(), Some(Duration::days(2))),
                 ("audit".to_owned(), None),
             ]),
             ..Default::default()
         };
+        assert!(config.validate().is_empty());
         assert_eq!(
             config.resolve_choice("default", None).unwrap().as_deref(),
             Some(DEFAULT_RETENTION_CLASS_KEY)
         );
         assert_eq!(
             config.resolve_choice("bulk", None).unwrap().as_deref(),
-            Some("q_bulk_36h")
+            Some("standard_2d")
         );
         assert_eq!(config.resolve_choice("audit", None).unwrap(), None);
         assert_eq!(
             config
-                .resolve_choice(
-                    "bulk",
-                    Some(&RetentionChoice::class(DEFAULT_RETENTION_CLASS_KEY)),
-                )
+                .resolve_choice("bulk", Some(&RetentionChoice::Period(days(30))))
                 .unwrap()
                 .as_deref(),
             Some(DEFAULT_RETENTION_CLASS_KEY)
@@ -660,26 +547,52 @@ mod tests {
                 .unwrap(),
             None
         );
-        for key in ["audit_7d", "q_bulk_36h"] {
+        for (period, key) in [(7, "standard_7d"), (2, "standard_2d")] {
             assert_eq!(
                 config
-                    .resolve_choice("default", Some(&RetentionChoice::class(key)))
+                    .resolve_choice("default", Some(&RetentionChoice::Period(days(period))))
                     .unwrap()
                     .as_deref(),
                 Some(key),
             );
         }
-        assert!(matches!(
-            config.resolve_choice("default", Some(&RetentionChoice::class("q_other_9d")),),
-            Err(RetentionConfigError::UnknownClass { .. })
-        ));
+        assert_eq!(
+            config.resolve_choice("default", Some(&RetentionChoice::Period(days(9)))),
+            Err(RetentionConfigError::UnregisteredPeriod {
+                days: 9,
+                allowed: vec![2, 7, 30],
+            })
+        );
+        assert_eq!(
+            RetentionChoice::period(Duration::hours(12)),
+            Err(PeriodRefused::NotWholeDays {
+                period: Duration::hours(12)
+            })
+        );
         assert_eq!(
             config
-                .registrable_classes()
+                .sendable_periods()
                 .into_iter()
-                .map(|class| class.key)
+                .map(RetentionDays::get)
                 .collect::<Vec<_>>(),
-            vec!["audit_7d", "q_bulk_36h"]
+            vec![2, 7, 30]
         );
+        assert_eq!(config.registrable_periods(), vec![days(2), days(7)]);
+    }
+
+    #[test]
+    fn named_classes_are_refused_when_the_config_is_read() {
+        let refused = serde_json::from_value::<RetentionConfig>(serde_json::json!({
+            "retention_classes": [],
+        }))
+        .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("retention_classes was removed"),
+            "{refused}"
+        );
+        let read: RetentionConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(read, RetentionConfig::default());
     }
 }

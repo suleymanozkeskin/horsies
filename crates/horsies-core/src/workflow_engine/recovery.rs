@@ -3055,7 +3055,7 @@ mod cap_tests {
         .fetch_one(&pool)
         .await
         .expect("read recovery enqueue facts");
-        assert_eq!(facts.0, "q_bulk_7d");
+        assert_eq!(facts.0, "standard_7d");
         assert_eq!(facts.1, "NEVER_ELIGIBLE");
         assert_eq!(facts.2, 32);
         assert_eq!(facts.3, 32);
