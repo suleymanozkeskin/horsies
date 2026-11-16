@@ -215,7 +215,7 @@ ScheduleConfig(
 When schedule configuration changes:
 
 1. Scheduler detects via `config_hash`
-2. Recalculates `next_run_at` from current time
+2. Recalculates `next_run_at` from the database time; `run_count`, `last_run_at` and `last_task_id` stay
 3. Logs warning about configuration change
 
 This prevents issues when:

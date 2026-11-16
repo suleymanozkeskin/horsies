@@ -93,6 +93,7 @@ from horsies.core.worker.workflow_success import (
     success_statement,
 )
 from horsies.monitoring.task_actions import CANCEL_TASK_SQL
+from tests.dispatch_claim_support import claim_at
 from tests.broker_resources_support import listener_of
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
@@ -275,7 +276,7 @@ async def _fail_by_worker(
         task_name=TASK_NAME,
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 
@@ -294,7 +295,7 @@ async def _complete_workflow_task(
         task_name=TASK_NAME,
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 

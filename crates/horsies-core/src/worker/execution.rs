@@ -26,7 +26,7 @@ use crate::broker::attempt_writes::{
 use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
-use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::broker::{ClaimedTaskRow, PostgresBroker, PrestartExpiry, SetRunningRow};
 use crate::core::codec::user_value::check_task_input;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::recovery::RecoveryConfig;
@@ -39,13 +39,10 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
-use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 use crate::db::CheckoutClass;
 use crate::workflow_engine::args_merge::unwrap_args_from_entries;
-use crate::workflow_engine::phase2_recovery::{
-    send_phase2_wake, terminal_status_of_pending_kind, Phase2Wake,
-};
+use crate::workflow_engine::phase2_recovery::{send_phase2_wake, Phase2Wake};
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
     NodeFinishDisposition, OwedParentAdvances,
@@ -94,8 +91,9 @@ pub(crate) enum PhaseTwoForm {
 /// Outcome of Phase 1 finalize: persisting the terminal task state.
 pub(crate) enum FinalizeOutcome {
     /// Task completed or failed terminally. Needs Phase 2 (workflow callback).
+    /// The node status comes from the kind of the phase-2 record, which the
+    /// node finish reads; phase 2 does not take the task's status.
     Terminal {
-        is_success: bool,
         /// Phase 1 already fired the capacity wake (the fused success path
         /// notifies in-statement); Phase 2 must not wake capacity twice.
         capacity_notified: bool,
@@ -121,7 +119,6 @@ pub(crate) enum FinalizeOutcome {
 /// before running potentially slow workflow callbacks + retries.
 pub(crate) struct Phase2Work {
     pub task_id: Uuid,
-    pub is_success: bool,
     pub queue_name: String,
     pub is_workflow_task: bool,
     /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
@@ -201,18 +198,20 @@ pub(crate) async fn confirm_ownership_and_set_running(
     // while the row is still CLAIMED. The match set is idempotent across
     // crash-replays (a node already RUNNING matches again). The first handoff
     // stamps `started_at`; a RUNNING replay preserves the original timestamp.
-    // Zero matched rows
-    // is the free orphan signal: no workflow_task linkage in a runnable state
-    // means this row can never legitimately progress — with self-heal on, the
-    // still-CLAIMED row is cancelled through `horsies_cancel_owned_orphan`,
-    // which re-verifies the linkage under its own lock and refuses (leaving
-    // the task to run) when a runnable link exists after all. A transient
-    // handoff failure stays non-fatal: the update is informational
-    // (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED workflow_task), so the
-    // task proceeds. Gated on `is_workflow_task`: a plain task pays no round
-    // trip here (P1).
+    // Gated on `is_workflow_task`: a plain task pays no round trip here (P1).
+    //
+    // User code of a workflow task runs only when its node is linked in a
+    // runnable state, as in Python (`core/worker/child_runner.py`, the
+    // workflow start; `core/lifecycle/classify.py`, WORKFLOW_CHECK_FAILED):
+    // - linked: the start goes on;
+    // - not linked, self-heal on: the claim is cancelled through
+    //   `horsies_cancel_owned_orphan`; whatever it answers, nothing runs;
+    // - not linked, self-heal off: nothing is written and the row stays
+    //   CLAIMED, which the reaper also declines to requeue;
+    // - a database error: nothing runs, and the claim is released at once
+    //   with the fenced release.
     if is_workflow_task {
-        match sqlx::query_scalar::<_, bool>(
+        let node_linked = sqlx::query_scalar::<_, bool>(
             "WITH linked AS MATERIALIZED (
                 SELECT id, status FROM horsies_workflow_tasks
                 WHERE task_id = $1 AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
@@ -224,57 +223,30 @@ pub(crate) async fn confirm_ownership_and_set_running(
         )
         .bind(task_id)
         .fetch_one(broker.pool())
-        .await
-        {
-            Ok(false) if orphan_self_heal => {
-                match terminalize(
-                    broker.pool(),
-                    &TerminalizationCommand::CancelOwnedOrphan {
-                        task_id,
-                        fence: OwnedClaim {
-                            worker_id: worker_id.to_owned(),
-                            claimed_at,
-                        },
-                    },
-                )
-                .await
-                {
-                    Ok(outcomes)
-                        if matches!(
-                            outcomes.first(),
-                            Some(TerminalizationOutcome::Applied { .. })
-                        ) =>
-                    {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            "workflow task orphaned (no runnable workflow_task \
-                             linkage); cancelled before start",
-                        );
-                        return OwnershipOutcome::Aborted;
-                    }
-                    Ok(_) => {
-                        // Refused: a runnable link exists after all (e.g. a
-                        // crash-replay whose node moved between statements),
-                        // or ownership moved — set_running below re-judges.
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            error = %e,
-                            "orphan check failed; proceeding to set_running",
-                        );
-                    }
-                }
+        .await;
+        match (node_linked, orphan_self_heal) {
+            (Ok(true), _) => {}
+            (Ok(false), true) => {
+                cancel_orphan_before_start(broker, task_id, worker_id, claimed_at).await;
+                return OwnershipOutcome::Aborted;
             }
-            Ok(_) => {}
-            Err(e) => {
+            (Ok(false), false) => {
                 tracing::warn!(
                     task_id = %task_id,
-                    error = %e,
-                    "failed to update workflow task to RUNNING; proceeding with \
-                     execution (workflow_task left as-is, which completion \
-                     tolerates)",
+                    "workflow task has no runnable workflow_task linkage and orphan \
+                     self-heal is off; the task does not run and stays CLAIMED",
                 );
+                return OwnershipOutcome::Aborted;
+            }
+            (Err(e), _) => {
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %e,
+                    "workflow node check failed; the task does not run and its claim \
+                     is released",
+                );
+                release_after_start_error(broker, task_id, worker_id, claimed_at).await;
+                return OwnershipOutcome::Aborted;
             }
         }
     }
@@ -289,15 +261,14 @@ pub(crate) async fn confirm_ownership_and_set_running(
                 .expire_claimed_task_before_start(task_id, worker_id)
                 .await
             {
-                Ok(Some(result_json)) => {
+                Ok(PrestartExpiry::Expired) => {
                     tracing::info!(
                         task_id = %task_id,
                         "task expired before execution started",
                     );
-                    let _ = result_json;
                     return OwnershipOutcome::ExpiredBeforeStart;
                 }
-                Ok(None) => {}
+                Ok(PrestartExpiry::NotExpired) => {}
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task_id,
@@ -335,19 +306,95 @@ pub(crate) async fn confirm_ownership_and_set_running(
         }
         Err(e) => {
             tracing::error!(task_id = %task_id, error = %e, "failed to set RUNNING, requeueing");
-            if let Err(ue) = unclaim_task_with_retry(
-                broker,
-                task_id,
-                worker_id,
-                claimed_at,
-                "set RUNNING failed",
-            )
-            .await
-            {
-                tracing::error!(task_id = %task_id, error = %ue, "failed to unclaim task after RUNNING transition error");
-            }
+            release_after_start_error(broker, task_id, worker_id, claimed_at).await;
             OwnershipOutcome::Aborted
         }
+    }
+}
+
+/// Cancel a claimed workflow task whose node is not linked (self-heal on).
+/// The function re-checks the link under its own lock; a refusal or an error
+/// is logged, and the task does not run either way.
+async fn cancel_orphan_before_start(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: chrono::DateTime<Utc>,
+) {
+    let cancelled = terminalize(
+        broker.pool(),
+        &TerminalizationCommand::CancelOwnedOrphan {
+            task_id,
+            fence: OwnedClaim {
+                worker_id: worker_id.to_owned(),
+                claimed_at,
+            },
+        },
+    )
+    .await;
+    match cancelled {
+        Ok(outcomes) => match outcomes.first() {
+            Some(TerminalizationOutcome::Applied { .. }) => tracing::warn!(
+                task_id = %task_id,
+                "workflow task orphaned (no runnable workflow_task linkage); cancelled before start",
+            ),
+            Some(
+                TerminalizationOutcome::AlreadyApplied { .. }
+                | TerminalizationOutcome::LostClaim { .. }
+                | TerminalizationOutcome::SourceStateConflict { .. }
+                | TerminalizationOutcome::TaskAbsent { .. },
+            )
+            | None => tracing::warn!(
+                task_id = %task_id,
+                "orphan cancel wrote nothing; the task does not run in this dispatch",
+            ),
+        },
+        Err(e) => tracing::error!(
+            task_id = %task_id,
+            error = %e,
+            "orphan cancel failed; the task does not run in this dispatch",
+        ),
+    }
+}
+
+/// Release the claim after a database error at the start: the fenced release
+/// returns a still-CLAIMED row of this generation to PENDING at once, and
+/// cannot touch a start that committed. If the release fails too, the lease
+/// returns the row.
+async fn release_after_start_error(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: chrono::DateTime<Utc>,
+) {
+    if let Err(e) =
+        unclaim_task_with_retry(broker, task_id, worker_id, claimed_at, "start failed").await
+    {
+        tracing::error!(
+            task_id = %task_id,
+            error = %e,
+            "failed to release the claim after a start error; the lease returns the row",
+        );
+    }
+}
+
+/// What an expiry before start owes (Python `_classify_abort`, TASK_EXPIRED,
+/// `core/lifecycle/classify.py`): a plain task is done and sends no wake; a
+/// workflow task owes its phase 2.
+fn phase2_after_prestart_expiry(
+    task_id: Uuid,
+    queue_name: String,
+    is_workflow_task: bool,
+) -> Option<Phase2Work> {
+    match is_workflow_task {
+        true => Some(Phase2Work {
+            task_id,
+            queue_name,
+            is_workflow_task,
+            capacity_notified: false,
+            phase_two: PhaseTwoForm::NotKnown,
+        }),
+        false => None,
     }
 }
 
@@ -675,15 +722,7 @@ pub(crate) async fn persist_terminal_state(
                 PayloadKind::Result,
                 result_bytes.len(),
             );
-            persist_ok_result(
-                broker,
-                task_id,
-                result_bytes,
-                fence,
-                row.is_workflow_task,
-                &row.queue_name,
-            )
-            .await
+            persist_ok_result(broker, task_id, result_bytes, fence, row.is_workflow_task).await
         }
         TaskResult::Err(ref task_error) => {
             // The stored error keeps its code when its `data` cannot be stored:
@@ -760,7 +799,6 @@ pub(crate) async fn persist_ok_result(
     result_bytes: &[u8],
     fence: OwnedClaim,
     is_workflow_task: bool,
-    queue_name: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     // Wrap the task's result bytes via `&RawValue`: parsing validates the JSON,
     // and the adjacently-tagged wrapper embeds the original bytes verbatim
@@ -782,25 +820,23 @@ pub(crate) async fn persist_ok_result(
         .map_err(|error| envelope_error(task_id, error))?;
     match is_workflow_task {
         true => persist_workflow_success(broker, task_id, fence, result_json).await,
-        false => persist_plain_success(broker, task_id, fence, result_json, queue_name).await,
+        false => persist_plain_success(broker, task_id, fence, result_json).await,
     }
 }
 
 /// The success of a plain task: one statement locks the RUNNING row under the
-/// full fence, writes the attempt, moves the row and sends the capacity wake.
+/// full fence, writes the attempt, moves the row and sends the capacity wake
+/// of the row's queue.
 async fn persist_plain_success(
     broker: &PostgresBroker,
     task_id: Uuid,
     fence: OwnedClaim,
     result_json: String,
-    queue_name: &str,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let command = TerminalizationCommand::CompleteTaskFused {
         task_id,
         fence,
         result_json,
-        notify_channel: format!("task_queue_{queue_name}"),
-        notify_payload: format!("capacity:{task_id}"),
     };
     let outcomes = terminalize(broker.pool(), &command)
         .await
@@ -845,7 +881,6 @@ async fn persist_workflow_success(
         .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
-            is_success: true,
             capacity_notified: false,
             phase_two: PhaseTwoForm::Step(phase_two.step),
         }),
@@ -918,7 +953,6 @@ pub(crate) async fn persist_failed_attempt(
             after: AfterFailure::PhaseTwoOwed(owed),
             ..
         } => Ok(FinalizeOutcome::Terminal {
-            is_success: false,
             capacity_notified: false,
             phase_two: PhaseTwoForm::Step(owed.step),
         }),
@@ -975,8 +1009,8 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 }
 
 /// A replay of a committed write (`AlreadyApplied`). A workflow task owes
-/// phase 2 while its durable phase-2 record exists, with the outcome of the
-/// status that the record's kind stands for; a plain task owes nothing.
+/// phase 2 while its durable phase-2 record exists; a plain task owes
+/// nothing.
 async fn replay_of_committed_write(
     pool: &sqlx::PgPool,
     task_id: Uuid,
@@ -984,8 +1018,7 @@ async fn replay_of_committed_write(
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
         true => match load_pending_phase_two(pool, task_id).await? {
-            PendingPhaseTwo::Owed(status) => Ok(FinalizeOutcome::Terminal {
-                is_success: status == TaskStatus::Completed,
+            PendingPhaseTwo::Owed => Ok(FinalizeOutcome::Terminal {
                 capacity_notified: false,
                 phase_two: PhaseTwoForm::NotKnown,
             }),
@@ -1202,37 +1235,34 @@ fn node_finish_outcome(
     }
 }
 
-/// The kind of a task's phase-2 record. The record has no status column: the
-/// status follows from the kind (`terminal_status_of_pending_kind`).
-const LOAD_PENDING_KIND_SQL: &str =
-    "SELECT terminalization_kind FROM horsies_workflow_phase2_pending WHERE task_id = $1";
+/// Whether a task has a phase-2 record. Its status is not read: the node
+/// finish takes the node status from the record's kind.
+const PENDING_PHASE_TWO_EXISTS_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)";
 
 /// What the phase-2 record of a committed workflow write owes, as a replay
 /// reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingPhaseTwo {
-    /// The record exists: phase 2 is owed for a task that ended with this
-    /// status (COMPLETED, FAILED or EXPIRED).
-    Owed(TaskStatus),
+    /// The record exists: phase 2 is owed.
+    Owed,
     /// No record: phase 2 consumed it, so the replay owes nothing.
     Consumed,
 }
 
-/// Read the phase-2 record of a workflow task after a phase-1 replay.
+/// Read whether a workflow task's phase-2 record exists after a phase-1
+/// replay. One statement; writes nothing. The moved history row is not read:
+/// the record is the evidence that phase 2 is still owed.
 ///
-/// One statement; writes nothing. The moved history row is not read: the
-/// record is the evidence that phase 2 is still owed.
-///
-/// Errors:
-/// - the read fails: retryable;
-/// - the record names a kind that writes no phase-2 record: not retryable.
+/// Errors: the read fails: [`FinalizeError`] at
+/// [`FinalizeStage::Phase2Workflow`], retryable.
 async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
 ) -> Result<PendingPhaseTwo, FinalizeError> {
-    let kind: Option<String> = sqlx::query_scalar(LOAD_PENDING_KIND_SQL)
+    let owed: bool = sqlx::query_scalar(PENDING_PHASE_TWO_EXISTS_SQL)
         .bind(task_id)
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| FinalizeError {
             stage: FinalizeStage::Phase2Workflow,
@@ -1240,17 +1270,10 @@ async fn load_pending_phase_two(
             message: format!("failed to load the phase-2 record: {error}"),
             retryable: true,
         })?;
-    match kind {
-        None => Ok(PendingPhaseTwo::Consumed),
-        Some(kind) => terminal_status_of_pending_kind(&kind)
-            .map(PendingPhaseTwo::Owed)
-            .map_err(|refusal| FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
-                task_id,
-                message: refusal.to_string(),
-                retryable: false,
-            }),
-    }
+    Ok(match owed {
+        true => PendingPhaseTwo::Owed,
+        false => PendingPhaseTwo::Consumed,
+    })
 }
 
 #[cfg(test)]
@@ -1284,14 +1307,7 @@ pub(crate) async fn finalize_pre_execution_failure(
     {
         OwnershipOutcome::Running(running) => running,
         OwnershipOutcome::ExpiredBeforeStart => {
-            return Some(Phase2Work {
-                task_id,
-                is_success: false,
-                queue_name,
-                is_workflow_task,
-                capacity_notified: false,
-                phase_two: PhaseTwoForm::NotKnown,
-            });
+            return phase2_after_prestart_expiry(task_id, queue_name, is_workflow_task);
         }
         OwnershipOutcome::Aborted => return None,
     };
@@ -1310,12 +1326,10 @@ pub(crate) async fn finalize_pre_execution_failure(
     .await
     {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
@@ -1436,14 +1450,7 @@ pub(crate) async fn execute_and_finalize(
     {
         OwnershipOutcome::Running(running) => running,
         OwnershipOutcome::ExpiredBeforeStart => {
-            return Some(Phase2Work {
-                task_id,
-                is_success: false,
-                queue_name,
-                is_workflow_task,
-                capacity_notified: false,
-                phase_two: PhaseTwoForm::NotKnown,
-            });
+            return phase2_after_prestart_expiry(task_id, queue_name, is_workflow_task);
         }
         OwnershipOutcome::Aborted => return None,
     };
@@ -1503,12 +1510,10 @@ pub(crate) async fn execute_and_finalize(
 
     match phase1_outcome {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
@@ -2500,6 +2505,26 @@ mod set_running_gate_tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prestart_expiry_tests {
+    //! Python `core/lifecycle/classify.py` (`_classify_abort`, TASK_EXPIRED)
+    //! and `test_lifecycle_classification.py::TestExpiryRoutesByTaskKind`.
+    use super::phase2_after_prestart_expiry;
+    use uuid::Uuid;
+
+    #[test]
+    fn a_plain_task_expired_before_start_owes_nothing() {
+        assert!(phase2_after_prestart_expiry(Uuid::nil(), "q".to_owned(), false).is_none());
+    }
+
+    #[test]
+    fn a_workflow_task_expired_before_start_owes_its_phase_two() {
+        let work = phase2_after_prestart_expiry(Uuid::nil(), "q".to_owned(), true)
+            .expect("phase 2 is owed");
+        assert!(work.is_workflow_task);
     }
 }
 

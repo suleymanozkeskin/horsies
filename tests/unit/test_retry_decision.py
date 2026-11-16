@@ -1,6 +1,6 @@
 """The retry policy of a failed attempt: ``retry_request_for``.
 
-The policy reads the facts of the unlocked read (``RunningAttempt``) and the
+The policy reads the retry facts of the claim (``DispatchClaim``) and the
 error code, and asks for a retry with its delay, or for none. The deadline is
 judged by ``horsies_finish_failed_attempt`` under the lock (integration
 tests). Also the full chain: resolve_exception_error_code() -> the code ->
@@ -10,6 +10,7 @@ retry_request_for().
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -17,11 +18,11 @@ import pytest
 from horsies.core.exception_mapper import ExceptionMapper, resolve_exception_error_code
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.utils.retry import calculate_retry_delay
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryAfter,
     RetryRequest,
-    RunningAttempt,
     retry_request_for,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
@@ -60,7 +61,8 @@ def _decide(
     placement: RetryPlacement = RetryPlacement.SAME_CLASS,
 ) -> RetryRequest:
     return retry_request_for(
-        RunningAttempt(
+        DispatchClaim(
+            claimed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             retry_count=retry_count,
             max_retries=max_retries,
             task_options=task_options,

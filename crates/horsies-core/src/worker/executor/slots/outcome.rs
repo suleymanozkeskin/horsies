@@ -493,14 +493,12 @@ impl OutcomeWriter {
         match (outcome, claimed_row) {
             (
                 FinalizeOutcome::Terminal {
-                    is_success,
                     capacity_notified,
                     phase_two,
                 },
                 _,
             ) => {
-                self.phase_two(task, is_success, capacity_notified, phase_two)
-                    .await;
+                self.phase_two(task, capacity_notified, phase_two).await;
                 Settlement::Written
             }
             (FinalizeOutcome::Retried | FinalizeOutcome::Finalized, _) => Settlement::Written,
@@ -515,7 +513,6 @@ impl OutcomeWriter {
     async fn phase_two(
         &self,
         task: &ClaimedTask,
-        is_success: bool,
         capacity_notified: bool,
         phase_two: PhaseTwoForm,
     ) {
@@ -524,7 +521,6 @@ impl OutcomeWriter {
             &self.workflows,
             Phase2Work {
                 task_id: task.task_id,
-                is_success,
                 queue_name: task.queue_name.clone(),
                 is_workflow_task: task.kind.is_workflow_task(),
                 capacity_notified,
