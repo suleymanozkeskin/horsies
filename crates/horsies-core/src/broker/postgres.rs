@@ -46,7 +46,10 @@ use crate::broker::row::task::{
     TaskResultRow, TaskRunningContextRow,
 };
 
-use crate::broker::client_family::ClientFamily;
+use crate::broker::client_family::{
+    admit_family, recorded_family_from, ClientFamily, FamilyCheckError, FamilyCheckFailure,
+    RecordedFamily,
+};
 use crate::broker::process_listener::{
     default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
     SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
@@ -1304,23 +1307,60 @@ impl PostgresBroker {
     /// records this handle's client family. Reads never call it. A handle
     /// whose install ran in this process has passed it already. A database of
     /// the other family, or with no family row, is
-    /// `BrokerError::ClientFamilyMismatch`, not retryable; a database failure
-    /// is not kept, so the next write checks again. One statement, once.
+    /// `BrokerError::ClientFamilyMismatch`, not retryable; a failed read
+    /// ([`FamilyCheckFailure`]) is `BrokerError::Statement`,
+    /// `BrokerError::PoolSettings` or `BrokerError::RowDecode`, and is not
+    /// kept, so the next write checks again. One statement, once.
     pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
+        match self.check_client_family_for_write().await {
+            Ok(()) => Ok(()),
+            Err(FamilyCheckError::Mismatch(mismatch)) => Err(mismatch.into()),
+            Err(FamilyCheckError::ReadFailed(failure)) => Err(failure.into()),
+        }
+    }
+
+    /// The check of [`PostgresBroker::ensure_client_family_for_write`], with
+    /// its closed error. A pass is kept for the life of the handle; a
+    /// mismatch or a failed read is not.
+    async fn check_client_family_for_write(&self) -> Result<(), FamilyCheckError> {
         self.client_family_admitted
             .get_or_try_init(|| async {
-                let rows = self.query_main(&READ_CLIENT_FAMILY.bind().finish()).await?;
-                let stored: Option<String> = match rows.first() {
-                    Some(row) => Some(column(row, &READ_CLIENT_FAMILY, "family")?),
-                    None => None,
-                };
-                crate::broker::client_family::admit_family(
-                    crate::broker::client_family::recorded_family_from(stored),
-                    self.client_family,
-                )
+                let recorded = self
+                    .read_client_family()
+                    .await
+                    .map_err(FamilyCheckError::ReadFailed)?;
+                admit_family(recorded, self.client_family).map_err(FamilyCheckError::Mismatch)
             })
             .await?;
         Ok(())
+    }
+
+    /// Reads the family row on the main core pool. Checkout and bound as
+    /// [`PostgresBroker::query_main`]. Writes nothing.
+    async fn read_client_family(&self) -> Result<RecordedFamily, FamilyCheckFailure> {
+        let open = self
+            .core
+            .pools()
+            .map_err(FamilyCheckFailure::PoolsNotReopened)?;
+        let statement = READ_CLIENT_FAMILY.bind().finish();
+        self.log_statement(statement.statement());
+        let rows = open
+            .main()
+            .query(
+                CheckoutClass::Batch,
+                &statement,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .map_err(FamilyCheckFailure::Statement)?;
+        let stored: Option<String> = match rows.first() {
+            Some(row) => Some(
+                column(row, &READ_CLIENT_FAMILY, "family")
+                    .map_err(FamilyCheckFailure::FamilyColumnUndecodable)?,
+            ),
+            None => None,
+        };
+        Ok(recorded_family_from(stored))
     }
 
     /// Ensure the embedded schema is initialized exactly once for this broker.
@@ -1482,16 +1522,15 @@ impl PostgresBroker {
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
-    /// `RerunError::ClientFamilyMismatch`, and nothing is written. A family
-    /// read that fails on the core statement layer is
-    /// `RerunError::FamilyCheckStatement`, `FamilyCheckPoolSettings` or
-    /// `FamilyCheckRowDecode`, and nothing is written.
+    /// `RerunError::ClientFamilyMismatch`; a family row that could not be
+    /// read is `RerunError::FamilyCheckFailed`. In both cases nothing is
+    /// written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
-        self.ensure_client_family_for_write()
+        self.check_client_family_for_write()
             .await
             .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
@@ -3348,25 +3387,58 @@ fn idempotency_reservation_window_seconds(
     Ok(window.num_seconds())
 }
 
-/// The rerun error of a failed client-family check.
-///
-/// # Panics
-///
-/// `ensure_client_family_for_write` fails only with a family mismatch, a
-/// statement failure, a pool settings refusal or an unreadable family row;
-/// any other error is a defect of that function.
-fn rerun_family_error(error: BrokerError) -> RerunError {
+/// The rerun error of a client-family check that did not pass.
+fn rerun_family_error(error: FamilyCheckError) -> RerunError {
     match error {
-        BrokerError::ClientFamilyMismatch { stored, own } => {
-            RerunError::ClientFamilyMismatch { stored, own }
+        FamilyCheckError::Mismatch(mismatch) => RerunError::ClientFamilyMismatch {
+            stored: mismatch.stored,
+            own: mismatch.own,
+        },
+        FamilyCheckError::ReadFailed(failure) => RerunError::FamilyCheckFailed(failure),
+    }
+}
+
+#[cfg(test)]
+mod rerun_family_error_tests {
+    use super::rerun_family_error;
+    use crate::broker::client_family::{
+        ClientFamily, FamilyCheckError, FamilyCheckFailure, FamilyMismatch, RecordedFamily,
+    };
+    use crate::core::history::rerun::RerunError;
+    use crate::db::{NotSentCause, StatementFailure, Transience};
+
+    #[test]
+    fn a_family_mismatch_is_the_rerun_mismatch() {
+        let error = rerun_family_error(FamilyCheckError::Mismatch(FamilyMismatch {
+            stored: RecordedFamily::NotRecorded,
+            own: ClientFamily::Rust,
+        }));
+        assert!(matches!(
+            error,
+            RerunError::ClientFamilyMismatch {
+                stored: RecordedFamily::NotRecorded,
+                own: ClientFamily::Rust,
+            }
+        ));
+    }
+
+    /// A failed family read is a rerun error, never a panic, and keeps the
+    /// retry class of its statement.
+    #[test]
+    fn a_failed_family_read_is_a_rerun_error_with_its_retry_class() {
+        let error = rerun_family_error(FamilyCheckError::ReadFailed(
+            FamilyCheckFailure::Statement(StatementFailure::NotSent {
+                statement: "read_client_family",
+                cause: NotSentCause::ConnectionClosed,
+            }),
+        ));
+        match error {
+            RerunError::FamilyCheckFailed(failure) => {
+                assert!(matches!(failure, FamilyCheckFailure::Statement(_)));
+                assert_eq!(failure.transience(), Transience::Transient);
+            }
+            other => panic!("expected FamilyCheckFailed, got {other:?}"),
         }
-        BrokerError::Statement(failure) => RerunError::FamilyCheckStatement(failure),
-        BrokerError::PoolSettings(refused) => RerunError::FamilyCheckPoolSettings(refused),
-        BrokerError::RowDecode(unreadable) => RerunError::FamilyCheckRowDecode(unreadable),
-        other => panic!(
-            "ensure_client_family_for_write failed with {other:?}, which is none of a family \
-             mismatch, a statement failure, a pool settings refusal or an unreadable family row"
-        ),
     }
 }
 

@@ -10,7 +10,8 @@ use crate::core::config::QueueMode;
 use crate::core::error::{ErrorCode, HorsiesError};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::{
-    BuilderHookName, RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
+    BuilderHookName, RegisteredWorkflowDefinition, RegisteredWorkflowSpec, SpecBuildError,
+    WorkflowSpecRegistry,
 };
 use crate::core::workflow::spec::{WorkflowSpec, WorkflowSpecBuilder};
 
@@ -342,7 +343,7 @@ impl Horsies {
         let name_owned = name.to_owned();
         let wrapped = Arc::new(move |input_json: &str| {
             let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
-            builder(params)
+            builder(params).map_err(SpecBuildError::Failed)
         });
 
         self.workflow_registry
@@ -377,7 +378,7 @@ impl Horsies {
         let name_owned = name.to_owned();
         let wrapped = Arc::new(move |input_json: &str| {
             let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
-            builder(params)
+            builder(params).map_err(SpecBuildError::Failed)
         });
 
         self.workflow_registry
@@ -1462,29 +1463,70 @@ where
 
 /// Decode a child workflow's params from the parent node's encoded input, as
 /// the client encoded it. The text must pass the core's strict JSON read rule;
-/// it is then decoded as stored, with no conversion.
+/// it is then decoded as stored, with no conversion, in the member order of
+/// the text.
+///
+/// Errors:
+/// - [`SpecBuildError::MemberRefused`]: the value of one top-level member
+///   does not decode to its field of `P` (the first such member in the text).
+/// - [`SpecBuildError::Failed`]: the text fails the strict read rule, or the
+///   decode refuses the input as a whole (a missing member, an input that is
+///   not an object, text after the value).
 fn decode_parameterized_workflow_input<P>(
     workflow_name: &str,
     input_json: &str,
-) -> Result<P, HorsiesError>
+) -> Result<P, SpecBuildError>
 where
     P: DeserializeOwned,
 {
-    // The core's strict reader: 300 levels of room, so a user value of 200
-    // levels inside the params reads (serde_json alone stops at 128).
-    let value: serde_json::Value = crate::core::codec::from_json_str(input_json).map_err(|e| {
-        HorsiesError::new(format!(
+    crate::core::codec::check_json_text(input_json).map_err(|e| {
+        SpecBuildError::Failed(HorsiesError::new(format!(
             "params of workflow '{}' are refused: {}",
             workflow_name, e,
-        ))
+        )))
     })?;
-    serde_json::from_value::<P>(value).map_err(|e| {
+    let mut deserializer = serde_json::Deserializer::from_str(input_json);
+    // The strict read rule bounds the depth, so serde_json's own limit of
+    // 128 levels is turned off, as `core::codec::from_json_str` does.
+    deserializer.disable_recursion_limit();
+    let decoded: Result<P, _> = serde_path_to_error::deserialize(&mut deserializer);
+    let params = decoded.map_err(|error| params_decode_error(workflow_name, &error))?;
+    deserializer
+        .end()
+        .map_err(|e| whole_input_refused(workflow_name, &e))?;
+    Ok(params)
+}
+
+/// The error of a params decode that failed at `error.path()`: the first
+/// segment names a top-level member ([`SpecBuildError::MemberRefused`]), or
+/// the input as a whole failed ([`SpecBuildError::Failed`]). Pure.
+fn params_decode_error(
+    workflow_name: &str,
+    error: &serde_path_to_error::Error<serde_json::Error>,
+) -> SpecBuildError {
+    match error.path().iter().next() {
+        Some(serde_path_to_error::Segment::Map { key }) => SpecBuildError::MemberRefused {
+            key: key.clone(),
+            cause: error.to_string(),
+        },
+        Some(
+            serde_path_to_error::Segment::Seq { .. }
+            | serde_path_to_error::Segment::Enum { .. }
+            | serde_path_to_error::Segment::Unknown,
+        )
+        | None => whole_input_refused(workflow_name, error.inner()),
+    }
+}
+
+/// The input of `workflow_name` does not decode to its params as a whole.
+fn whole_input_refused(workflow_name: &str, error: &serde_json::Error) -> SpecBuildError {
+    SpecBuildError::Failed(
         HorsiesError::new(format!(
             "failed to decode params for workflow '{}': {}",
-            workflow_name, e,
+            workflow_name, error,
         ))
-        .with_help("ensure the child workflow params type matches the parent-provided input shape")
-    })
+        .with_help("ensure the child workflow params type matches the parent-provided input shape"),
+    )
 }
 
 /// Builder for registering typed workflow builders on the app.
@@ -1650,6 +1692,74 @@ mod tests {
     use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::options::{RetryPolicy, TaskOptions};
     use crate::core::workflow::node::TaskNode;
+
+    /// The params of a child workflow in the decode tests.
+    #[derive(Debug, serde::Deserialize)]
+    struct ChildParams {
+        count: i64,
+        label: String,
+    }
+
+    /// A member whose value does not fit its field is refused by its key,
+    /// with the path in the cause; the builder would not run.
+    #[test]
+    fn a_params_member_that_does_not_decode_is_refused_by_its_key() {
+        let refused = decode_parameterized_workflow_input::<ChildParams>(
+            "child",
+            r#"{"count":"seven","label":"a"}"#,
+        );
+        match refused {
+            Err(SpecBuildError::MemberRefused { key, cause }) => {
+                assert_eq!(key, "count");
+                assert!(cause.starts_with("count: invalid type: string"), "{cause}");
+            }
+            other => panic!("expected a member refusal, got {other:?}"),
+        }
+    }
+
+    /// The decode reads the members in the order of the text: of two
+    /// refused members, the first in the text is named, not the first in key
+    /// order.
+    #[test]
+    fn the_first_refused_member_in_the_text_is_named() {
+        let refused = decode_parameterized_workflow_input::<ChildParams>(
+            "child",
+            r#"{"label":5,"count":"seven"}"#,
+        );
+        match refused {
+            Err(SpecBuildError::MemberRefused { key, .. }) => assert_eq!(key, "label"),
+            other => panic!("expected a member refusal, got {other:?}"),
+        }
+    }
+
+    /// A missing member is not at one member: the input as a whole is
+    /// refused, as a failed build.
+    #[test]
+    fn a_missing_params_member_fails_the_build() {
+        let refused = decode_parameterized_workflow_input::<ChildParams>("child", r#"{"count":1}"#);
+        match refused {
+            Err(SpecBuildError::Failed(error)) => {
+                let text = error.to_string();
+                assert!(
+                    text.starts_with(
+                        "error: failed to decode params for workflow 'child': missing field `label`"
+                    ),
+                    "{text}"
+                );
+            }
+            other => panic!("expected a failed build, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn params_that_fit_decode() {
+        let params = decode_parameterized_workflow_input::<ChildParams>(
+            "child",
+            r#"{"count":7,"label":"a"}"#,
+        )
+        .expect("params that fit");
+        assert_eq!((params.count, params.label.as_str()), (7, "a"));
+    }
 
     fn valid_config() -> AppConfig {
         AppConfig {

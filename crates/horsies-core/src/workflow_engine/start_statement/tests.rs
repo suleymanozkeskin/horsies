@@ -219,8 +219,10 @@ fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
     );
     builder.output(node);
     let failing_builder: crate::core::SpecBuilderFn = Arc::new(
-        |_input: &str| -> Result<WorkflowSpec, crate::core::HorsiesError> {
-            Err(crate::core::HorsiesError::new("the builder refuses"))
+        |_input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
+            Err(crate::core::SpecBuildError::Failed(
+                crate::core::HorsiesError::new("the builder refuses"),
+            ))
         },
     );
     registry

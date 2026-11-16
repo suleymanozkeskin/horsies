@@ -1724,7 +1724,10 @@ async fn start_stuck_subworkflow(
     .await;
     let built = engine::preparation(engine::prepare_child_spec(
         registered,
+        row.workflow_id,
+        row.task_index,
         merge,
+        row.args_from.as_ref(),
         row.sub_workflow_params.as_deref(),
         registry,
     ))?;
