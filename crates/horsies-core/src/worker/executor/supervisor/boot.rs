@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use super::channel::{ChildLost, LossCause};
 use super::exit::{ChildExit, ReapedExit};
+use crate::core::boot_failure::MAX_BOOT_FAILURE_DETAIL_CHARS;
 use crate::worker::executor::protocol::{
     BootFailedFrame, BoundedText, ChildExitCode, ReceivedProtocol, ReportedBootCause,
     ShortageErrno, PROTOCOL_VERSION,
@@ -30,10 +31,8 @@ pub const SLOT_DOWN_FIRST_DELAY: Duration = Duration::from_secs(1);
 pub const SLOT_DOWN_MAX_DELAY: Duration = Duration::from_secs(60);
 /// The doubling stops here: 1 s * 2^6 = 64 s is past the cap.
 const SLOT_DOWN_DELAY_DOUBLINGS: u32 = 6;
-/// The detail of a boot failure has at most this many characters.
-pub const MAX_BOOT_FAILURE_DETAIL_CHARS: usize = 2400;
-
-/// The detail of a boot failure.
+/// The detail of a boot failure, at most
+/// [`MAX_BOOT_FAILURE_DETAIL_CHARS`] characters.
 pub type BootFailureDetail = BoundedText<MAX_BOOT_FAILURE_DETAIL_CHARS>;
 
 /// How the parent saw that the child speaks another protocol version.
