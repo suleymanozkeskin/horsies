@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
 )]
-#[code_catalog(module = "status", base = "enum")]
+#[code_catalog(
+    module = "status",
+    base = "enum",
+    terminal_states = "TASK_TERMINAL_STATES"
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskStatus {
     /// Awaiting execution. Default status when the task is sent.
@@ -22,12 +26,16 @@ pub enum TaskStatus {
     /// Being executed by a worker.
     Running,
     /// Executed successfully.
+    #[code_catalog(terminal)]
     Completed,
     /// Failed to execute.
+    #[code_catalog(terminal)]
     Failed,
     /// Cancelled by the user or system.
+    #[code_catalog(terminal)]
     Cancelled,
     /// good_until passed before execution started. Terminal.
+    #[code_catalog(terminal)]
     Expired,
 }
 
