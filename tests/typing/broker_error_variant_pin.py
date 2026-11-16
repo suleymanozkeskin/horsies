@@ -208,14 +208,18 @@ async def enqueue_helpers_return_their_subsets(
     bound: Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch] = await bind_key(
         session,
         task_id='task-1',
-        enqueue_sha='sha',
         task_name='report',
         key_digest=b'key',
         command_fingerprint=b'fingerprint',
+        sent_at=good_until,
     )
     verify = broker._verify_enqueue_conflict  # pyright: ignore[reportPrivateUsage]
     verified: Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch] = await verify(
-        resources, 'task-1', 'sha', 'report',
+        resources,
+        task_id='task-1',
+        task_name='report',
+        command_fingerprint=b'fingerprint',
+        sent_at=good_until,
     )
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',

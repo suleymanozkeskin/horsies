@@ -12,7 +12,7 @@ pub use error::{
     BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
     SubWorkflowError, TaskError, TaskErrorCode,
 };
-pub use execution::{Execution, InvalidExecution};
+pub use execution::{Execution, ExecutionClass, InvalidExecution};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};
 pub use options::{BackoffStrategy, RetryPolicy, RetryPolicyError, TaskOptions};
