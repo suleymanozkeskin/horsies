@@ -54,6 +54,26 @@ async def _statuses(session: AsyncSession, wf_id: str) -> dict[int, str]:
     return {r.task_index: r.status for r in rows}
 
 
+async def _corrupt_stored_options(
+    session: AsyncSession, wf_id: str, task_index: int,
+) -> None:
+    """Make the stored task_options of one node text that does not parse.
+
+    The promotion reads the options from the node row, so it fails that
+    node alone. The workflow start parses the options of every task node
+    to write its facts, so a task function with such options is refused at
+    the start instead.
+    """
+    await session.execute(
+        text("""
+            UPDATE horsies_workflow_tasks SET task_options = '{not-json'
+            WHERE workflow_id = :wf AND task_index = :idx
+        """),
+        {'wf': wf_id, 'idx': task_index},
+    )
+    await session.commit()
+
+
 async def _start(app: Horsies, broker: PostgresBroker, nodes: list[Any], name: str) -> str:
     spec = app.workflow(
         f'{name}_{uuid.uuid4().hex[:6]}', nodes,
@@ -302,20 +322,19 @@ class TestBatchedPromotionSemantics:
         session: AsyncSession,
     ) -> None:
         """Per-node failure isolation under the bulk INSERT: a dependent
-        with corrupt decorator-attached task_options fails alone; its
-        sibling still enqueues."""
+        whose stored task_options do not parse fails alone; its sibling
+        still enqueues."""
         fn = _make_task(app, 'isolation')
 
         @app.task(task_name=f'isolation_corrupt_{uuid.uuid4().hex[:8]}')
         def corrupt_fn(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
-        corrupt_fn.task_options_json = '{not-json'  # type: ignore[attr-defined]
-
         root = TaskNode(fn=fn, kwargs={'value': 0})
         good = TaskNode(fn=fn, kwargs={'value': 1}, waits_for=[root])
         bad = TaskNode(fn=corrupt_fn, kwargs={'value': 2}, waits_for=[root])
         wf_id = await _start(app, broker, [root, good, bad], 'batched_isolation')
+        await _corrupt_stored_options(session, wf_id, 2)
 
         await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()
@@ -356,8 +375,6 @@ class TestBatchedPromotionSemantics:
         def corrupt_fn(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
-        corrupt_fn.task_options_json = '{not-json'  # type: ignore[attr-defined]
-
         root = TaskNode(fn=fn, kwargs={'value': 0})
         good = TaskNode(fn=fn, kwargs={'value': 1}, waits_for=[root])
         bad = TaskNode(fn=corrupt_fn, kwargs={'value': 2}, waits_for=[root])
@@ -369,6 +386,7 @@ class TestBatchedPromotionSemantics:
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
         wf_id = start_r.ok_value.workflow_id
+        await _corrupt_stored_options(session, wf_id, 2)
 
         await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()

@@ -220,6 +220,39 @@ class TestTransactionSerializationError:
         session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_corrupt_task_options_of_a_dependent_propagate_and_nothing_commits(
+        self,
+    ) -> None:
+        """The start writes the task facts of every task node, so it parses
+        the options of a node with dependencies too, not only of a root."""
+        app = _default_app()
+        echo = _register_echo(app)
+
+        @app.task('start_catches.corrupt_dependent')
+        def corrupt_dependent(*, value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        # Only a defect or a write to the private attribute makes this.
+        setattr(corrupt_dependent, 'task_options_json', '{not-json')
+        root = echo.node()(value=1)
+        spec = app.workflow(
+            name='corrupt-dependent-options-wf',
+            tasks=[root, corrupt_dependent.node(waits_for=[root])(value=2)],
+            definition_key=_definition_key('corrupt_dependent_options'),
+        )
+        session = _accepting_session(app)
+
+        with pytest.raises(SerializationError) as exc_info:
+            await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
+
+        assert 'start_catches.corrupt_dependent' in str(exc_info.value)
+        assert not any(
+            call.args[0] is INSERT_WORKFLOW_TASKS_BULK_SQL
+            for call in session.execute.await_args_list
+        )
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_a_serialization_error_in_the_transaction_propagates_and_nothing_commits(
         self,
     ) -> None:
