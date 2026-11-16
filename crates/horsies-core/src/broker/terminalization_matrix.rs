@@ -494,7 +494,7 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'matrix_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            $1, 'matrix_task', 'default', 100, 'null', NULL, 'ISOLATED',
             'forever', NOW(), NOW(),
             CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END, $9,
             $2, NOW(), $5, $4, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -1947,7 +1947,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
              updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          )
-         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, '{}', NULL,
+         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, 'null', NULL,
                 'ISOLATED', 'forever', NOW(), NOW(),
                 NULL, NULL, NULL,
                 'PENDING', NOW(), NULL, NULL, NULL,
