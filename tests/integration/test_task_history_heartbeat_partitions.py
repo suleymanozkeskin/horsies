@@ -40,6 +40,7 @@ from horsies.core.history.outcomes import (
     LeafInspection,
     LeafMaintenanceBusy,
     LeafSweep,
+    PruneReach,
 )
 from horsies.core.history.partitions.publication import LoaderPublication
 from horsies.core.history.partitions.catalog import database_now
@@ -390,7 +391,9 @@ class TestSweep:
             ),
             UnpublishedLoader(),
         )
-        assert sweep == LeafSweep(swept=(), errors=())
+        assert sweep == LeafSweep(
+            swept=(), errors=(), acted=0, reach=PruneReach.WITHIN_BOUNDS
+        )
 
     @pytest.mark.asyncio
     async def test_one_leaf_error_does_not_stop_the_sweep(

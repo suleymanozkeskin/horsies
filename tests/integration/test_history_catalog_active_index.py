@@ -14,8 +14,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.commands import PRUNE_BOUNDS
 from horsies.core.history.maintenance.pruning import EXPIRED_HISTORY_LEAVES_SQL
-from horsies.core.history.names import HEARTBEAT_CLASS_KEY, LEAF_CATALOG
+from horsies.core.history.names import LEAF_CATALOG
 from tests.integration.task_history_harness import register_class
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -102,7 +103,7 @@ async def test_expired_leaf_scan_examines_only_active_records(
             )).scalar_one())
             plan = cast(PlanNode, (await connection.execute(
                 text('EXPLAIN (ANALYZE, FORMAT JSON) ' + EXPIRED_HISTORY_LEAVES_SQL),
-                {'heartbeat_class_key': HEARTBEAT_CLASS_KEY},
+                {'limit': PRUNE_BOUNDS.candidates + 1},
             )).scalar_one()[0]['Plan'])
         finally:
             await transaction.rollback()

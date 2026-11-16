@@ -30,11 +30,21 @@ from horsies.core.history.commands import (
     LeafBounds,
     LeafLifecycle,
     LeafRef,
+    PRUNE_BOUNDS,
     PartitionMaintenanceCommand,
+    PruneBounds,
     is_safe_identifier,
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.heartbeats.partitioning import hourly_leaf_name
+from horsies.core.history.outcomes import (
+    DropRefusedLoaderReferences,
+    LeafDetached,
+    LeafDropped,
+    LeafMaintenanceBusy,
+    LeafNotExpired,
+    counts_toward_prune_bound,
+)
 from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
     decode_leaf_bounds,
@@ -331,6 +341,45 @@ class TestCollectPartitionHealth:
     def test_rejects_empty_class_key(self) -> None:
         with pytest.raises(ValueError, match='non-empty'):
             CollectPartitionHealth(class_key='', application_managed=True)
+
+
+class TestPruneBounds:
+    def test_the_production_bounds_are_the_core_values(self) -> None:
+        assert PRUNE_BOUNDS == PruneBounds(candidates=512, acted_leaves=64)
+
+    def test_a_pass_without_candidates_is_refused(self) -> None:
+        with pytest.raises(ValueError, match='at least one candidate'):
+            PruneBounds(candidates=0, acted_leaves=64)
+
+    def test_a_negative_leaf_bound_is_refused(self) -> None:
+        with pytest.raises(ValueError, match='zero or more leaves'):
+            PruneBounds(candidates=512, acted_leaves=-1)
+
+    def test_a_zero_leaf_bound_is_a_budget_that_acts_on_nothing(self) -> None:
+        assert PruneBounds(candidates=1, acted_leaves=0).acted_leaves == 0
+
+
+class TestCountsTowardPruneBound:
+    NAME = 'horsies_task_history_standard_30d_2026_08_06'
+
+    def test_a_detached_leaf_counts(self) -> None:
+        detached = LeafDetached(leaf_name=self.NAME, expires_at=UPPER)
+        assert counts_toward_prune_bound(
+            detached, DropRefusedLoaderReferences(leaf_name=self.NAME)
+        )
+
+    def test_a_dropped_leaf_counts(self) -> None:
+        assert counts_toward_prune_bound(
+            LeafMaintenanceBusy(leaf_name=self.NAME), LeafDropped(leaf_name=self.NAME)
+        )
+
+    def test_a_busy_leaf_does_not_count(self) -> None:
+        assert not counts_toward_prune_bound(LeafMaintenanceBusy(leaf_name=self.NAME), None)
+
+    def test_an_unexpired_leaf_does_not_count(self) -> None:
+        assert not counts_toward_prune_bound(
+            LeafNotExpired(leaf_name=self.NAME, expires_at=UPPER), None
+        )
 
 
 class TestCommandUnion:

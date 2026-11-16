@@ -254,6 +254,18 @@ type LeafDrop = (
 """Outcome of one drop attempt; non-detached inspections pass through."""
 
 
+class PruneReach(Enum):
+    """Whether a per-pass bound stopped a pruning pass."""
+
+    WITHIN_BOUNDS = 'WITHIN_BOUNDS'
+    """No bound stopped the pass: it read every expired leaf and acted on
+    every candidate."""
+
+    TRUNCATED = 'TRUNCATED'
+    """A bound stopped the pass; the expired leaves left over are the next
+    pass's candidates."""
+
+
 @dataclass(frozen=True, slots=True)
 class LeafSweep[E]:
     """One sweep over the expired leaves of one kind.
@@ -261,11 +273,31 @@ class LeafSweep[E]:
     `swept` holds one entry per leaf whose sweep ended in an outcome;
     `errors` holds one `leaf: cause` entry per leaf whose sweep raised a
     database error. A failed leaf's effects are unknown; it stays a
-    candidate of the next pass.
+    candidate of the next pass. `acted` counts the leaves this sweep
+    detached or dropped, and the failed leaves. `reach` is `TRUNCATED`
+    when expired leaves were left for the next pass.
     """
 
     swept: tuple[E, ...]
     errors: tuple[str, ...]
+    acted: int
+    reach: PruneReach
+
+
+def counts_toward_prune_bound(
+    detach: LeafInspection | LeafMaintenanceBusy,
+    drop: LeafDrop | None,
+) -> bool:
+    """Whether one swept leaf counts toward the acted-leaf bound of a pass.
+
+    It counts when the detach ended `LeafDetached` or the drop ended
+    `LeafDropped`. A busy, blocked or unexpired leaf does not count, so
+    leaves that stay refused at the old end of the catalog cannot hold
+    back the newer expired leaves. A leaf that an earlier pass detached
+    and whose drop is refused now counts: the detach outcome does not
+    tell the two apart.
+    """
+    return isinstance(detach, LeafDetached) or isinstance(drop, LeafDropped)
 
 
 # ---------------------------------------------------------------------------

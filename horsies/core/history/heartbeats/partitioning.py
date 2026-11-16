@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..maintenance.database import PartitionMaintenanceDatabase
 from ..commands import (
+    PRUNE_BOUNDS,
     AnchoredLowerBound,
     DETACH_STATEMENT_TIMEOUT_MS,
     DetachExpiredHistoryLeaf,
@@ -45,6 +46,7 @@ from ..commands import (
     LeafBounds,
     LeafLifecycle,
     LeafRef,
+    PruneBounds,
     is_safe_identifier,
 )
 from ..errors import HistoryContractError, HistoryParentAbsent
@@ -66,7 +68,9 @@ from ..outcomes import (
     LeafInspection,
     LeafMaintenanceBusy,
     LeafSweep,
+    PruneReach,
     RetentionClassAbsent,
+    counts_toward_prune_bound,
 )
 from ..partitions.catalog import (
     INDEX_SCHEMA_VERSION,
@@ -585,57 +589,73 @@ class HeartbeatLeafSwept:
     drop: LeafDrop | None
 
 
+_EXPIRED_HEARTBEAT_LEAVES_SQL = f"""
+SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
+FROM {LEAF_CATALOG} AS c
+JOIN {RETENTION_CLASSES} AS r
+  ON r.class_key = c.class_key
+WHERE c.class_key = :class_key
+  AND c.lower_bound_kind = 'AT'
+  AND c.dropped_at IS NULL
+  AND c.upper_anchor
+      + r.heartbeat_horizon_hours * interval '1 hour'
+      <= statement_timestamp()
+ORDER BY c.lower_anchor
+LIMIT :limit
+"""
+
+
 async def sweep_expired_heartbeat_leaves(
     database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
+    bounds: PruneBounds = PRUNE_BOUNDS,
 ) -> LeafSweep[HeartbeatLeafSwept]:
-    """Detach and drop every heartbeat leaf past its horizon.
+    """Detach and drop the oldest heartbeat leaves past their horizon.
 
     Discovery reads the catalog for reserved-class leaves whose upper
-    bound plus the stored horizon has elapsed. Each leaf goes through the
-    shared manager machinery — the same detach and drop history leaves
-    use; a heartbeat leaf can never be pending-blocked because no pending
-    locator carries the reserved class.
-    One leaf per transaction (the inherited bounded-relations invariant).
-    A database error of one leaf is reported as `leaf: cause` and the
-    sweep goes on with the next leaf; a database error of the discovery
-    raises.
+    bound plus the stored horizon has elapsed, at most
+    `bounds.candidates`, oldest first. Each leaf goes through the shared
+    manager machinery — the same detach and drop history leaves use; a
+    heartbeat leaf can never be pending-blocked because no pending
+    locator carries the reserved class. The sweep stops when
+    `bounds.acted_leaves` leaves count toward the bound
+    (`counts_toward_prune_bound`). One leaf per transaction (the
+    inherited bounded-relations invariant).
+    A database error of one leaf is reported as `leaf: cause`, counts
+    toward the bound, and the sweep goes on with the next leaf; a
+    database error of the discovery raises.
     """
     async with database.connect() as connection:
         rows = (
             await connection.execute(
-                text(
-                    f"""
-                    SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
-                    FROM {LEAF_CATALOG} AS c
-                    JOIN {RETENTION_CLASSES} AS r
-                      ON r.class_key = c.class_key
-                    WHERE c.class_key = :class_key
-                      AND c.lower_bound_kind = 'AT'
-                      AND c.dropped_at IS NULL
-                      AND c.upper_anchor
-                          + r.heartbeat_horizon_hours * interval '1 hour'
-                          <= statement_timestamp()
-                    ORDER BY c.lower_anchor
-                    """
-                ),
-                {'class_key': HEARTBEAT_CLASS_KEY},
+                text(_EXPIRED_HEARTBEAT_LEAVES_SQL),
+                {'class_key': HEARTBEAT_CLASS_KEY, 'limit': bounds.candidates + 1},
             )
         ).all()
-
+    reach = (
+        PruneReach.TRUNCATED if len(rows) > bounds.candidates else PruneReach.WITHIN_BOUNDS
+    )
     swept: list[HeartbeatLeafSwept] = []
     errors: list[str] = []
-    for row in rows:
+    acted = 0
+    for row in rows[: bounds.candidates]:
+        if acted >= bounds.acted_leaves:
+            reach = PruneReach.TRUNCATED
+            break
         ref = LeafRef(
             leaf_name=row.leaf_name,
             class_key=HEARTBEAT_CLASS_KEY,
             bounds=decode_leaf_bounds(row.lower_anchor, row.upper_anchor),
         )
         try:
-            swept.append(await _sweep_heartbeat_leaf(database, publisher, ref))
+            entry = await _sweep_heartbeat_leaf(database, publisher, ref)
         except SQLAlchemyError as error:
+            acted += 1
             errors.append(f'{ref.leaf_name}: {error}')
-    return LeafSweep(swept=tuple(swept), errors=tuple(errors))
+            continue
+        acted += int(counts_toward_prune_bound(entry.detach, entry.drop))
+        swept.append(entry)
+    return LeafSweep(swept=tuple(swept), errors=tuple(errors), acted=acted, reach=reach)
 
 
 async def _sweep_heartbeat_leaf(
