@@ -2596,21 +2596,45 @@ class TestWorkflowStartErrors:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Mid-insert failure leaves no workflow rows persisted."""
-        from unittest.mock import AsyncMock, MagicMock
+        """A start that owes a child start runs in one transaction: a failure
+        of the child start after the start statement leaves no row."""
+        import uuid
+        from unittest.mock import MagicMock
 
         from sqlalchemy.exc import OperationalError
 
         session, broker, app = setup
         task_a = make_simple_task(app, 'rollback_test')
+        suffix = uuid.uuid4().hex[:8]
 
-        spec = make_workflow_spec(
-            'rollback_wf',
-            [TaskNode(fn=task_a, kwargs={'value': 1})],
-            broker,
+        class RollbackBroken(WorkflowDefinition[int]):
+            name = f'rollback_broken_{suffix}'
+            definition_key = f'rollback-broken-{suffix}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = (app, args, params)
+                raise RuntimeError('the child cannot be built')
+
+        class RollbackChild(WorkflowDefinition[int]):
+            name = f'rollback_child_{suffix}'
+            definition_key = f'rollback-child-{suffix}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = (args, params)
+                node = TaskNode(fn=task_a, kwargs={'value': 1})
+                return app.workflow(cls.name, [node], output=node)
+
+        broken = SubWorkflowNode(workflow_def=RollbackBroken)
+        started_after = SubWorkflowNode(
+            workflow_def=RollbackChild, waits_for=[broken], allow_failed_deps=True,
+        )
+        spec = app.workflow(
+            'rollback_wf', [broken, started_after], definition_key=f'rollback-wf-{suffix}',
         )
 
-        # Induce failure after workflow INSERT but before commit
+        # The start statement runs; the child start that it owes fails.
         original_factory = current_resources(broker).session_factory
 
         def _failing_session_factory() -> Any:
@@ -2625,11 +2649,10 @@ class TestWorkflowStartErrors:
                     async def patched_execute(*a: Any, **kw: Any) -> Any:
                         nonlocal call_count
                         call_count += 1
-                        # Let first execute (workflow INSERT) succeed,
-                        # fail on second (workflow_task INSERT)
                         if call_count >= 2:
                             raise OperationalError(
-                                'INSERT', params=None, orig=Exception('Induced mid-insert failure'),
+                                'child start', params=None,
+                                orig=Exception('Induced child start failure'),
                             )
                         return await original_execute(*a, **kw)
 
