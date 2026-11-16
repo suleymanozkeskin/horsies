@@ -326,11 +326,16 @@ impl Worker {
         self.run().await
     }
 
-    /// Authorize the schema and ensure the partition coverage of the
-    /// current period: the database steps of the worker start. It does not
-    /// retry.
+    /// Authorize the schema, check the client family, and ensure the
+    /// partition coverage of the current period: the database steps of the
+    /// worker start. It does not retry.
     async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
+        // The startup coverage and the reaper's partition maintenance are the
+        // worker's maintenance writes. The handle checks its client family
+        // once, before the first of them; a database of the other family or
+        // with no family row refuses the start, not retryable.
+        self.broker.ensure_client_family_for_write().await?;
         let declared_periods = self.app_config.retention.registrable_periods();
         let startup_coverage = ensure_startup_coverage_in_pool(
             self.broker.session_pool(),
@@ -1637,6 +1642,9 @@ mod tests {
         let schema = database
             .find("ensure_schema_initialized().await")
             .expect("schema authorization");
+        let family = database
+            .find("self.broker.ensure_client_family_for_write().await?")
+            .expect("client family check");
         let coverage = database
             .find("ensure_startup_coverage_in_pool(")
             .expect("startup partition coverage");
@@ -1656,7 +1664,8 @@ mod tests {
         let reaper_call = &run[reaper..reaper + 500];
         assert!(reaper_call.contains("self.broker.pool().clone()"));
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
-        assert!(schema < coverage);
+        assert!(schema < family);
+        assert!(family < coverage);
         assert!(coverage < session_pool);
         assert!(start < banner);
         assert!(start < listener);
