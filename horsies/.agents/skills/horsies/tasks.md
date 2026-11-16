@@ -425,7 +425,7 @@ worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | 
 error_code: str | None                      # always returned (final TaskError.error_code, NULL if not failed)
 result: TaskResult[Any, TaskError] | None    # opt-in: include_result=True
 failed_reason: str | None                    # opt-in: include_failed_reason=True
-attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty)
+attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty); newest first
 ```
 
 ### `TaskAttemptInfo` fields

@@ -46,6 +46,7 @@ from horsies.core.models.task_send_types import (
 )
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.history.archive.versions import archive_digest
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
@@ -3821,6 +3822,63 @@ class TestHistoryTaskInfoResultDecode:
                 assert 'invalid_json' in message
             case other:
                 raise AssertionError(f'expected INVALID_JSON_PAYLOAD, got {other!r}')
+
+
+def _attempt_record(attempt: int) -> AttemptRecord:
+    started_at = datetime(2026, 8, 7, attempt, tzinfo=timezone.utc)
+    return AttemptRecord(
+        attempt=attempt,
+        outcome='FAILED',
+        will_retry=attempt < 3,
+        started_at=started_at,
+        finished_at=started_at + timedelta(minutes=1),
+        error_code='BOOM',
+        error_message=None,
+        failed_reason=None,
+        worker_id='w-1',
+        worker_hostname='host-1',
+        worker_pid=100 + attempt,
+        worker_process_name=None,
+    )
+
+
+@pytest.mark.unit
+class TestHistoryTaskInfoAttemptOrder:
+    """A history read lists the attempts newest first, as the live read does."""
+
+    @pytest.mark.asyncio
+    async def test_attempts_are_listed_newest_first(self) -> None:
+        detail = MagicMock(spec=HistoryTaskDetail)
+        detail.task_id = '0192b3a4-0000-7000-8000-000000000002'
+        detail.status = TaskStatus.FAILED
+        detail.terminal_at = datetime(2026, 8, 7, 4, tzinfo=timezone.utc)
+        # The snapshot decodes oldest first.
+        detail.attempts = tuple(_attempt_record(n) for n in (1, 2, 3))
+
+        with (
+            patch(
+                'horsies.core.history.reads.detail.staged_detail_published',
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                'horsies.core.history.reads.detail.read_task_detail',
+                AsyncMock(return_value=detail),
+            ),
+        ):
+            result = await _make_broker()._history_task_info(
+                AsyncMock(),
+                '0192b3a4-0000-7000-8000-000000000002',
+                include_result=False,
+                include_failed_reason=False,
+                include_attempts=True,
+            )
+
+        assert is_ok(result)
+        info = result.ok_value
+        assert info is not None
+        assert info.attempts is not None
+        assert [a.attempt for a in info.attempts] == [3, 2, 1]
+        assert [a.worker_pid for a in info.attempts] == [103, 102, 101]
 
 
 class _DatabaseMustNotRun:
