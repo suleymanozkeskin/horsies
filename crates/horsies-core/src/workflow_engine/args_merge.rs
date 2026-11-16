@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, RetrievalCode, TaskError};
+use crate::core::{OperationalErrorCode, OutcomeCode, TaskError};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -137,52 +137,64 @@ pub async fn merge_args_from_async(
     Ok(serde_json::to_string(&object)?)
 }
 
-/// Wrap a single dependency result into a serialized `TaskResult` value.
+/// Wrap a single dependency result into a serialized `TaskResult` value. Python:
+/// `get_dependency_results` (`core/workflows/engine.py:2816-2850`).
+///
+/// - SKIPPED: `UPSTREAM_SKIPPED` with `data.dependency_index`, also when a result is stored.
+/// - A stored result: that result; one that does not parse gives `RESULT_DESERIALIZATION_ERROR`.
+/// - COMPLETED or FAILED with no stored result: `RESULT_DESERIALIZATION_ERROR` naming the dependency
+///   (decided: no writer stores such a node, so it is stored data that does not parse).
+/// - A dependency that is not terminal, or has no row: `UPSTREAM_SKIPPED`. Python leaves the key out for
+///   such a dependency; that rule belongs to the `args_from` injection of the node input.
 fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
     match dep {
-        Some(d) => {
-            if let Some(json) = &d.result {
-                // Result already stored as TaskResult JSON; pass through as Value.
-                serde_json::from_str(json).unwrap_or_else(|e| {
-                    tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
-                    dep_parse_error_value(dep_idx, e)
-                })
-            } else if d.status == "COMPLETED" || d.status == "FAILED" {
-                let err = TaskError::builtin(
-                    RetrievalCode::ResultNotAvailable,
-                    format!("upstream task at index {} has no stored result", dep_idx),
-                );
-                let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-                task_result_to_value(
-                    dep_idx,
-                    wrapped,
-                    "failed to serialize wrapped missing-result error",
-                )
-            } else {
-                let err = TaskError::builtin(
-                    OutcomeCode::UpstreamSkipped,
-                    format!("upstream task at index {} did not complete", dep_idx),
-                );
-                let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-                task_result_to_value(
-                    dep_idx,
-                    wrapped,
-                    "failed to serialize wrapped upstream-skipped error",
-                )
-            }
-        }
-        None => {
-            let err = TaskError::builtin(
-                OutcomeCode::UpstreamSkipped,
-                format!("upstream task at index {} did not complete", dep_idx),
-            );
-            let wrapped: TaskResult<serde_json::Value> = TaskResult::Err(err);
-            task_result_to_value(
-                dep_idx,
-                wrapped,
-                "failed to serialize wrapped missing-dependency error",
-            )
-        }
+        Some(DepResult { status, .. }) if status == "SKIPPED" => task_result_to_value(
+            dep_idx,
+            TaskResult::Err(upstream_skipped_error(dep_idx)),
+            "failed to serialize wrapped upstream-skipped error",
+        ),
+        Some(DepResult {
+            result: Some(json), ..
+        }) => serde_json::from_str(json).unwrap_or_else(|e| {
+            tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
+            dep_parse_error_value(dep_idx, e)
+        }),
+        Some(DepResult {
+            status,
+            result: None,
+        }) if status == "COMPLETED" || status == "FAILED" => task_result_to_value(
+            dep_idx,
+            TaskResult::Err(missing_result_error(dep_idx, status)),
+            "failed to serialize wrapped missing-result error",
+        ),
+        Some(_) | None => task_result_to_value(
+            dep_idx,
+            TaskResult::Err(upstream_skipped_error(dep_idx)),
+            "failed to serialize wrapped missing-dependency error",
+        ),
+    }
+}
+
+/// The entry of a SKIPPED dependency (Python `core/workflows/engine.py:2830-2835`).
+pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
+    TaskError {
+        error_code: Some(OutcomeCode::UpstreamSkipped.into()),
+        message: Some("Upstream dependency was SKIPPED".to_owned()),
+        cause: None,
+        data: Some(serde_json::json!({ "dependency_index": dep_idx })),
+    }
+}
+
+/// The entry of a terminal dependency with no stored result: `RESULT_DESERIALIZATION_ERROR` naming the
+/// dependency.
+pub(crate) fn missing_result_error(dep_idx: i32, status: &str) -> TaskError {
+    TaskError {
+        error_code: Some(OperationalErrorCode::ResultDeserializationError.into()),
+        message: Some(format!(
+            "Upstream dependency at index {dep_idx} is {status} with no stored result"
+        )),
+        cause: None,
+        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
     }
 }
 
@@ -308,6 +320,71 @@ mod tests {
         assert_eq!(parsed["existing"], true);
         assert_eq!(parsed["dep_val"]["__type"], "ok");
         assert_eq!(parsed["dep_val"]["value"], "hello");
+    }
+
+    #[test]
+    fn a_skipped_dependency_gives_upstream_skipped_with_its_index() {
+        let mut deps = HashMap::new();
+        deps.insert(
+            3,
+            DepResult {
+                status: "SKIPPED".to_owned(),
+                result: Some(serde_json::to_string(&TaskResult::Ok(json!(1))).unwrap()),
+            },
+        );
+        let result = merge_args_from_sync("{}", &Some(json!({"answer": 3})), &deps).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let answer: TaskResult<serde_json::Value> =
+            serde_json::from_value(parsed["answer"].clone()).unwrap();
+        let TaskResult::Err(error) = answer else {
+            panic!("a skipped dependency must give an error entry");
+        };
+        assert_eq!(
+            error
+                .error_code
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("UPSTREAM_SKIPPED")
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some("Upstream dependency was SKIPPED")
+        );
+        assert_eq!(error.data, Some(json!({"dependency_index": 3})));
+    }
+
+    #[test]
+    fn a_terminal_dependency_with_no_result_gives_result_deserialization_error() {
+        for status in ["COMPLETED", "FAILED"] {
+            let mut deps = HashMap::new();
+            deps.insert(
+                2,
+                DepResult {
+                    status: status.to_owned(),
+                    result: None,
+                },
+            );
+            let result = merge_args_from_sync("{}", &Some(json!({"answer": 2})), &deps).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            let answer: TaskResult<serde_json::Value> =
+                serde_json::from_value(parsed["answer"].clone()).unwrap();
+            let TaskResult::Err(error) = answer else {
+                panic!("a dependency with no result must give an error entry");
+            };
+            assert_eq!(
+                error
+                    .error_code
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                Some("RESULT_DESERIALIZATION_ERROR")
+            );
+            assert_eq!(
+                error.data,
+                Some(json!({"dependency_index": 2, "status": status}))
+            );
+        }
     }
 
     #[test]

@@ -6,9 +6,9 @@ key where possible.
 
 Clock columns use one of three rules:
 
-- ``RUN_CLOCK``: a value the run takes from the clock. Inside the run window
-  it is a token; outside it (a fixed test time, a seed row) it compares
-  exactly.
+- ``RUN_CLOCK``: a value the run takes from the clock, or moves from it by
+  minutes or hours. Within ``RUN_CLOCK_MARGIN`` of the run window it is a
+  token; further out (a fixed test time) it compares exactly.
 - ``ORDER``: a value whose order between rows is behaviour (send order,
   claim order), or a value derived from a time the row does not carry
   (expiry from a terminal time, a deadline a test computes from its own
@@ -16,6 +16,12 @@ Clock columns use one of three rules:
 - ``anchored(column)``: a value computed from another clock column of the
   row plus a duration (lease end, retry time). The offset compares within
   ``ANCHOR_TOLERANCE``.
+
+Stored JSON (inputs, options, results, errors, the attempt archive, the
+rerun envelope) is parsed and compared as JSON; the ids and clock values
+inside it have path rules. A digest column is checked against its source
+column. Partition leaf names compare with their date or hour as an offset
+from the run start.
 """
 
 from __future__ import annotations
@@ -27,19 +33,36 @@ from tests.dualrun.rules import (
     AnchorReference,
     ColumnRule,
     ColumnSpec,
+    DigestOf,
+    EachItem,
     Exact,
+    FormatVersion,
+    GeneratedName,
     IdFamily,
     Ignored,
+    Index,
+    JsonPath,
+    JsonStorage,
+    JsonTime,
+    Key,
     NormalisedId,
     RunWindowReference,
     SnapshotCatalog,
+    StoredJson,
     TableRules,
+    TimeEncoding,
     TimeOrderOnly,
     TimeWithin,
+    Unversioned,
 )
 
-RUN_CLOCK_MARGIN: Final = timedelta(seconds=1)
-"""Widening of the run window on each side, for values read from a clock other than the database clock."""
+RUN_CLOCK_MARGIN: Final = timedelta(days=1)
+"""Widening of the run window on each side.
+
+Test code moves clock values by minutes or hours from the run (a stale
+claim, a task created an hour ago); such a value is a run value. A fixed
+test time more than a day from the run compares exactly.
+"""
 
 ANCHOR_TOLERANCE: Final = timedelta(seconds=1)
 """Largest difference between two offsets from an anchor that still compares equal."""
@@ -53,7 +76,7 @@ WORKFLOW_NODE_ID: Final = NormalisedId(family=IdFamily.WORKFLOW_NODE)
 WORKER_ID: Final = NormalisedId(family=IdFamily.WORKER)
 COMMAND_FINGERPRINT: Final = NormalisedId(family=IdFamily.COMMAND_FINGERPRINT)
 """Version 1 covers good_until and the rerun lineage ids, so its bytes differ between runs."""
-PARTITION_LEAF: Final = NormalisedId(family=IdFamily.PARTITION_LEAF)
+LEAF_NAME: Final = GeneratedName()
 """Leaf names carry the day or hour of their range."""
 SCAN_POSITION: Final = NormalisedId(family=IdFamily.SCAN_POSITION)
 """A cursor position: a workflow id or a task id, by scan."""
@@ -64,16 +87,71 @@ _PROCESS_SAMPLE: Final = Ignored(
         'on every read and stores no decision of the code under test'
     ),
 )
-_ATTEMPT_ARCHIVE: Final = Ignored(
-    reason=(
-        'archive bytes that embed run times as epoch microseconds and worker ids; the '
-        'bytes differ on every run, and comparing the attempts inside needs a rule '
-        'that decodes the archive'
+JSON: Final = StoredJson(storage=JsonStorage.TEXT, format=Unversioned(), paths=())
+"""A JSON text with no ids or clock values inside."""
+
+TASK_OPTIONS: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(Key(name='good_until'),),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=ORDER),
+        ),
     ),
 )
-_ATTEMPT_ARCHIVE_DIGEST: Final = Ignored(
-    reason='SHA-256 of attempt_snapshot, which is ignored for the reason given there',
+"""Serialized task options; ``good_until`` is ranked like the good_until column."""
+
+RESULT_ENVELOPE: Final = StoredJson(
+    storage=JsonStorage.UTF8_BYTES,
+    format=FormatVersion(column='result_envelope_version', version=1),
+    paths=(),
 )
+"""Result envelope version 1: the result as UTF-8 JSON."""
+
+ATTEMPT_ARCHIVE: Final = StoredJson(
+    storage=JsonStorage.UTF8_BYTES,
+    format=FormatVersion(column='attempt_archive_version', version=1),
+    paths=(
+        JsonPath(
+            steps=(EachItem(), Index(position=3)),
+            rule=JsonTime(encoding=TimeEncoding.EPOCH_MICROSECONDS, rule=RUN_CLOCK),
+        ),
+        JsonPath(
+            steps=(EachItem(), Index(position=4)),
+            rule=JsonTime(encoding=TimeEncoding.EPOCH_MICROSECONDS, rule=RUN_CLOCK),
+        ),
+        JsonPath(steps=(EachItem(), Index(position=8)), rule=WORKER_ID),
+    ),
+)
+"""Attempt archive version 1: one 12-field array per attempt (attempt, outcome,
+will_retry, started_at, finished_at as epoch microseconds, error_code,
+error_message, failed_reason, worker_id, worker_hostname, worker_pid,
+worker_process_name)."""
+
+RERUN_ENVELOPE: Final = StoredJson(
+    storage=JsonStorage.UTF8_BYTES,
+    format=FormatVersion(column='rerun_input_version', version=1),
+    paths=(
+        JsonPath(
+            steps=(Key(name='options'), Key(name='good_until')),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=ORDER),
+        ),
+    ),
+)
+"""Rerun envelope version 1: ``{"input": <input>, "options": <task options>}``."""
+
+SLOTS_DOWN: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(EachItem(), Key(name='down_since')),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK),
+        ),
+    ),
+)
+"""Down slots of a worker; ``down_since`` is a run clock value."""
 
 
 def anchored(column: str) -> TimeWithin:
@@ -139,8 +217,9 @@ _RETENTION_CLASSES: Final = TableRules(
 _LEAF_CATALOG: Final = TableRules(
     name='horsies_task_history_leaf_catalog',
     columns=_columns(
-        ('leaf_name', PARTITION_LEAF),
+        ('leaf_name', LEAF_NAME),
         ('class_key', EXACT),
+        ('lower_bound_kind', EXACT),
         ('lower_anchor', ORDER),
         ('upper_anchor', ORDER),
         ('index_schema_version', EXACT),
@@ -148,15 +227,16 @@ _LEAF_CATALOG: Final = TableRules(
         ('detached_at', RUN_CLOCK),
         ('dropped_at', RUN_CLOCK),
     ),
-    order_by=('class_key', 'lower_anchor', 'upper_anchor'),
+    order_by=('class_key', 'lower_bound_kind', 'lower_anchor', 'upper_anchor'),
     identity=('leaf_name',),
 )
 
 _LOOKUP_MANIFEST: Final = TableRules(
     name='horsies_task_lookup_manifest',
     columns=_columns(
-        ('leaf_name', PARTITION_LEAF),
+        ('leaf_name', LEAF_NAME),
         ('probe_position', EXACT),
+        ('lower_bound_kind', EXACT),
         ('lower_anchor', ORDER),
         ('upper_anchor', ORDER),
         ('published_at', RUN_CLOCK),
@@ -174,9 +254,9 @@ _WORKFLOWS: Final = TableRules(
         ('status', EXACT),
         ('on_error', EXACT),
         ('output_task_index', EXACT),
-        ('success_policy', EXACT),
-        ('result', EXACT),
-        ('error', EXACT),
+        ('success_policy', JSON),
+        ('result', JSON),
+        ('error', JSON),
         ('parent_workflow_id', WORKFLOW_ID),
         ('parent_task_index', EXACT),
         ('root_workflow_id', WORKFLOW_ID),
@@ -207,16 +287,16 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('task_index', EXACT),
         ('node_id', EXACT),
         ('task_name', EXACT),
-        ('input', EXACT),
+        ('input', JSON),
         ('queue_name', EXACT),
         ('priority', EXACT),
         ('dependencies', EXACT),
-        ('args_from', EXACT),
+        ('args_from', JSON),
         ('workflow_ctx_from', EXACT),
         ('allow_failed_deps', EXACT),
         ('join_type', EXACT),
         ('min_success', EXACT),
-        ('task_options', EXACT),
+        ('task_options', TASK_OPTIONS),
         ('max_retries', EXACT),
         ('execution', EXACT),
         ('good_until', ORDER),
@@ -227,9 +307,9 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('sub_workflow_id', WORKFLOW_ID),
         ('sub_workflow_name', EXACT),
         ('sub_definition_key', EXACT),
-        ('sub_workflow_summary', EXACT),
-        ('result', EXACT),
-        ('error', EXACT),
+        ('sub_workflow_summary', JSON),
+        ('result', JSON),
+        ('error', JSON),
         ('created_at', RUN_CLOCK),
         ('started_at', RUN_CLOCK),
         ('completed_at', RUN_CLOCK),
@@ -245,8 +325,8 @@ _TASKS: Final = TableRules(
         ('task_name', EXACT),
         ('queue_name', EXACT),
         ('priority', EXACT),
-        ('input', EXACT),
-        ('task_options', EXACT),
+        ('input', JSON),
+        ('task_options', TASK_OPTIONS),
         ('execution', EXACT),
         ('retention_class_key', EXACT),
         ('sent_at', ORDER),
@@ -290,7 +370,7 @@ _TASKS: Final = TableRules(
 _TASK_HISTORY: Final = TableRules(
     name='horsies_task_history',
     columns=_columns(
-        ('tableoid', PARTITION_LEAF),
+        ('tableoid', LEAF_NAME),
         ('task_id', TASK_ID),
         ('task_name', EXACT),
         ('queue_name', EXACT),
@@ -320,16 +400,16 @@ _TASK_HISTORY: Final = TableRules(
         ('error_code', EXACT),
         ('final_failed_reason', EXACT),
         ('result_envelope_version', EXACT),
-        ('result_payload', EXACT),
-        ('result_digest', EXACT),
+        ('result_payload', RESULT_ENVELOPE),
+        ('result_digest', DigestOf(column='result_payload')),
         ('history_schema_version', EXACT),
         ('attempt_archive_version', EXACT),
-        ('attempt_snapshot', _ATTEMPT_ARCHIVE),
-        ('attempt_snapshot_digest', _ATTEMPT_ARCHIVE_DIGEST),
+        ('attempt_snapshot', ATTEMPT_ARCHIVE),
+        ('attempt_snapshot_digest', DigestOf(column='attempt_snapshot')),
         ('rerun_input_disposition', EXACT),
         ('rerun_input_version', EXACT),
-        ('rerun_input_digest', EXACT),
-        ('rerun_input_inline', EXACT),
+        ('rerun_input_digest', DigestOf(column='rerun_input_inline')),
+        ('rerun_input_inline', RERUN_ENVELOPE),
     ),
     order_by=(
         'task_id',
@@ -366,7 +446,7 @@ _TASK_ATTEMPTS: Final = TableRules(
 _HEARTBEATS: Final = TableRules(
     name='horsies_heartbeats',
     columns=_columns(
-        ('tableoid', PARTITION_LEAF),
+        ('tableoid', LEAF_NAME),
         ('task_id', TASK_ID),
         ('role', EXACT),
         ('sent_at', ORDER),
@@ -390,9 +470,9 @@ _WORKER_STATES: Final = TableRules(
         ('max_claim_per_worker', EXACT),
         ('cluster_wide_cap', EXACT),
         ('queues', EXACT),
-        ('queue_priorities', EXACT),
-        ('queue_max_concurrency', EXACT),
-        ('recovery_config', EXACT),
+        ('queue_priorities', JSON),
+        ('queue_max_concurrency', JSON),
+        ('recovery_config', JSON),
         ('tasks_running', EXACT),
         ('tasks_claimed', EXACT),
         ('memory_usage_mb', _PROCESS_SAMPLE),
@@ -400,8 +480,8 @@ _WORKER_STATES: Final = TableRules(
         ('cpu_percent', _PROCESS_SAMPLE),
         ('children_memory_mb', _PROCESS_SAMPLE),
         ('worker_started_at', RUN_CLOCK),
-        ('slots_down', EXACT),
-        ('class_capacity', EXACT),
+        ('slots_down', SLOTS_DOWN),
+        ('class_capacity', JSON),
     ),
     order_by=('worker_id', 'hostname', 'pid', 'snapshot_at'),
     identity=('worker_id', 'snapshot_at'),
@@ -418,8 +498,8 @@ _PHASE2_QUARANTINE: Final = TableRules(
         ('retention_class_key', EXACT),
         ('history_schema_version', EXACT),
         ('result_envelope_version', EXACT),
-        ('result_payload', EXACT),
-        ('result_digest', EXACT),
+        ('result_payload', RESULT_ENVELOPE),
+        ('result_digest', DigestOf(column='result_payload')),
         ('quarantined_at', RUN_CLOCK),
     ),
     order_by=('task_id',),

@@ -154,12 +154,14 @@ async def _requeued_after_failed_attempt(
             INSERT INTO horsies_task_attempts (
                 task_id, attempt, outcome, will_retry,
                 started_at, finished_at,
-                error_code, error_message, failed_reason, worker_id
+                error_code, error_message, failed_reason, worker_id,
+                worker_hostname, worker_pid, worker_process_name
             )
             VALUES (
                 :id, 1, 'FAILED', TRUE,
                 NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 minute',
-                'TASK_EXCEPTION', 'attempt one raised', :reason, :worker
+                'TASK_EXCEPTION', 'attempt one raised', :reason, :worker,
+                'terminalization-test-host', 4242, 'terminalization-test-proc'
             )
         """),
         {'id': task_id, 'reason': failed_reason, 'worker': WORKER},
@@ -714,8 +716,13 @@ async def _heartbeat(
 ) -> None:
     await session.execute(
         text("""
-            INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at)
-            VALUES (:id, 'staleness-test', :role, NOW() - make_interval(secs => :ago))
+            INSERT INTO horsies_heartbeats (
+                task_id, sender_id, role, sent_at, hostname, pid
+            )
+            VALUES (
+                :id, 'staleness-test', :role, NOW() - make_interval(secs => :ago),
+                'terminalization-test-host', 4242
+            )
         """),
         {'id': task_id, 'role': role, 'ago': seconds_ago},
     )
@@ -951,10 +958,11 @@ class TestFailStale:
         await session.execute(
             text("""
                 INSERT INTO horsies_heartbeats (
-                    task_id, sender_id, role, sent_at
+                    task_id, sender_id, role, sent_at, hostname, pid
                 ) VALUES (
                     :id, 'fractional-threshold-test', 'runner',
-                    NOW() - INTERVAL '1.25 seconds'
+                    NOW() - INTERVAL '1.25 seconds',
+                    'terminalization-test-host', 4242
                 )
             """),
             {'id': task_id},

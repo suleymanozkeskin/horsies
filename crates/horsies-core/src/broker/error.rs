@@ -81,6 +81,10 @@ pub enum BrokerError {
     #[error("invalid idempotency reservation window: {0}")]
     InvalidIdempotencyReservationWindow(String),
 
+    /// The schema install lock could not be used.
+    #[error("schema install lock: {0}")]
+    InstallLock(InstallLockFailure),
+
     /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
     #[error("shared listener closed")]
     ListenerClosed,
@@ -123,6 +127,7 @@ impl BrokerError {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
+            Self::InstallLock(failure) => failure.is_retryable(),
             Self::Migration(_)
             | Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover
@@ -138,6 +143,31 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_) => false,
+        }
+    }
+}
+
+/// Why the schema install lock could not be used (Python
+/// `horsies/core/brokers/postgres.py:1466-1525`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InstallLockFailure {
+    /// Another installer held the lock for the whole wait bound. Nothing was
+    /// installed by this call. Retryable: the other install ends.
+    #[error("another installer held the lock for {} s", waited.as_secs())]
+    WaitBoundReached { waited: std::time::Duration },
+    /// The unlock did not release a lock that this connection held: the
+    /// session lost the lock during the install. The install may or may not
+    /// have completed. Not retryable.
+    #[error("the lock was no longer held at the unlock; ownership was lost")]
+    OwnershipLost,
+}
+
+impl InstallLockFailure {
+    /// Whether a later install can succeed.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::WaitBoundReached { .. } => true,
+            Self::OwnershipLost => false,
         }
     }
 }

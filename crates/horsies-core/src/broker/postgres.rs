@@ -2498,6 +2498,10 @@ impl PostgresBroker {
     /// One statement through the staged result function. While that function
     /// is not published (an upgraded schema before its next coverage pass),
     /// falls back to the live read plus the staged detail read.
+    ///
+    /// An absence from the result reader is confirmed by the detail reader: a
+    /// result reader rendered before a leaf existed does not probe that leaf,
+    /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
         let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
         let read = read_task_result(&mut connection, task_id)
@@ -2514,8 +2518,20 @@ impl PostgresBroker {
             TaskResultRead::History(history) => Ok(ResultRowProbe::Row(history_task_result_row(
                 task_id, history,
             )?)),
-            TaskResultRead::Absent => Ok(ResultRowProbe::Absent),
+            TaskResultRead::Absent => self.confirm_result_absence(task_id).await,
             TaskResultRead::NotPublished => self.fetch_result_row_unstaged(task_id).await,
+        }
+    }
+
+    /// The detail reader's answer for a task id the result reader did not
+    /// find: absent, live again, or the history row's result.
+    async fn confirm_result_absence(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
+        match self.fetch_history_detail(task_id).await? {
+            None | Some(TaskDetailResult::Absent { .. }) => Ok(ResultRowProbe::Absent),
+            Some(TaskDetailResult::Live { .. }) => Ok(ResultRowProbe::Live),
+            Some(TaskDetailResult::History(detail)) => {
+                Ok(ResultRowProbe::Row(history_result_row(detail)?))
+            }
         }
     }
 
@@ -2531,14 +2547,7 @@ impl PostgresBroker {
         if let Some(row) = live {
             return Ok(ResultRowProbe::Row(row));
         }
-
-        match self.fetch_history_detail(task_id).await? {
-            None | Some(TaskDetailResult::Absent { .. }) => Ok(ResultRowProbe::Absent),
-            Some(TaskDetailResult::Live { .. }) => Ok(ResultRowProbe::Live),
-            Some(TaskDetailResult::History(detail)) => {
-                Ok(ResultRowProbe::Row(history_result_row(detail)?))
-            }
-        }
+        self.confirm_result_absence(task_id).await
     }
 
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
@@ -3766,17 +3775,23 @@ mod horsies_claim_tests {
         let expires = lease_offset_secs.map(|s| Utc::now() + chrono::Duration::seconds(s));
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, execution,
-                status, sent_at, enqueued_at, retry_count, max_retries,
-                claimed_by_worker_id, claim_expires_at,
-                is_workflow_task, created_at, updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'pr160_task', $2, $3, 'null', 'ISOLATED',
-                $4, NOW(), NOW(), 0, 0,
-                $5, $6,
-                FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE
+                $1, 'pr160_task', $2, $3, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                $4, NOW(), CASE WHEN $4 IN ('CLAIMED', 'RUNNING') THEN NOW() END, $5, CASE WHEN $4 = 'CLAIMED' THEN COALESCE($6, NOW() + interval '1 minute') END,
+                NULL, NULL, NULL,
+                CASE WHEN $4 = 'RUNNING' THEN 4242 END, CASE WHEN $4 = 'RUNNING' THEN 'test-host' END, CASE WHEN $4 = 'RUNNING' THEN 'test-process' END,
+                0, 0, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(id)
@@ -4265,19 +4280,23 @@ mod fused_finalize_tests {
     async fn seed(pool: &sqlx::PgPool, id: &str, status: &str, worker: Option<&str>, retry: i32) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, execution,
-                status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                claimed_by_worker_id, claimed_at, worker_hostname,
-                worker_pid, worker_process_name, is_workflow_task, created_at,
-                updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'fused_task', 'default', 100, 'null', 'ISOLATED',
-                $2, NOW(), NOW(), NOW(), 3, $4,
-                $3, CASE WHEN $3 IS NOT NULL THEN NOW() END, 'host1',
-                123, 'worker-123', FALSE, NOW(),
-                NOW(),
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE
+                $1, 'fused_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
+                NOW(), NULL, NULL,
+                123, 'host1', 'worker-123',
+                $4, 3, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(id))
@@ -4552,18 +4571,23 @@ mod set_running_heartbeat_tests {
     async fn seed_claimed(pool: &sqlx::PgPool, id: &str, worker: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, execution,
-                status, sent_at, enqueued_at, claimed_at, claimed_by_worker_id,
-                claim_expires_at, retry_count, max_retries, is_workflow_task,
-                created_at, updated_at,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, 'null', 'ISOLATED',
-                'CLAIMED', NOW(), NOW(), NOW(), $2,
-                NOW() + interval '1 hour', 0, 3, FALSE,
-                NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE
+                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'CLAIMED', NOW(), NOW(), $2, NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                0, 3, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(id))
@@ -4693,18 +4717,23 @@ mod set_running_heartbeat_tests {
             .expect("truncate to microseconds");
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, execution,
-                status, sent_at, enqueued_at, claimed_at, claimed_by_worker_id,
-                claim_expires_at, retry_count, max_retries, good_until,
-                is_workflow_task, created_at, updated_at,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, 'null', 'ISOLATED',
-                'CLAIMED', NOW(), NOW(), NOW(), 'w1',
-                NOW() + interval '1 hour', 2, 7, $2,
-                FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE
+                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                2, 7, NULL, $2, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(&id))
@@ -5022,7 +5051,25 @@ mod filter_non_runnable_tests {
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
                 if index == 0 {
-                    sqlx::query("INSERT INTO horsies_tasks(id,task_name,queue_name,priority,input,execution,status,sent_at,enqueued_at,retry_count,max_retries,is_workflow_task,created_at,updated_at,command_fingerprint_version,command_fingerprint,retention_class_key,retain_rerun_input) VALUES($1,'lookup_test','default',100,'null','ISOLATED','PENDING',NOW(),NOW(),0,0,FALSE,NOW(),NOW(),1,decode(repeat('00',32),'hex'),'forever',false)")
+                    sqlx::query("INSERT INTO horsies_tasks (
+                            id, task_name, queue_name, priority, input, task_options, execution,
+                            retention_class_key, sent_at, created_at,
+                            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                            started_at, finalizing_at, finalizing_by_worker_id,
+                            worker_pid, worker_hostname, worker_process_name,
+                            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+                        ) VALUES (
+                            $1, 'lookup_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                            'forever', NOW(), NOW(),
+                            1, decode(repeat('00', 32), 'hex'), NULL,
+                            'PENDING', NOW(), NULL, NULL, NULL,
+                            NULL, NULL, NULL,
+                            NULL, NULL, NULL,
+                            0, 3, NULL, NULL, FALSE,
+                            NOW(), FALSE, NULL, NULL
+                        )")
                         .bind(task_id).execute(&mut *tx).await.unwrap();
                 }
             }
@@ -5116,16 +5163,24 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, execution, status,
-                sent_at, enqueued_at, claimed_at, claim_expires_at, created_at, updated_at,
-                claimed_by_worker_id, retry_count, max_retries, is_workflow_task,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input
-            ) VALUES ($1, 'c15_task', 'default', 100, 'null', 'ISOLATED', 'CLAIMED',
-                      NOW(), NOW(), NOW(), NOW() + interval '1 hour', NOW(), NOW(),
-                      'w1', 0, 3, TRUE,
-                      NULL, NULL, 'standard_30d',
-                      FALSE)",
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+            ) VALUES (
+                $1, 'c15_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                NULL, NULL, NULL,
+                'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                0, 3, NULL, NULL, TRUE,
+                NOW(), FALSE, NULL, NULL
+            )",
         )
         .bind(&task_id)
         .execute(&pool)
@@ -5218,18 +5273,23 @@ mod terminal_at_stamp_tests {
     ) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, execution,
-                status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                claimed_by_worker_id, claim_expires_at, good_until,
-                is_workflow_task, created_at, updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'terminal_at_task', 'default', 100, 'null', 'ISOLATED',
-                $2, NOW(), NOW(), NOW(), 3, 0,
-                $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + INTERVAL '1 hour' END,
-                NOW() + $4 * INTERVAL '1 second',
-                FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE
+                $1, 'terminal_at_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
+                NOW(), NULL, NULL,
+                CASE WHEN $2 = 'RUNNING' THEN 4242 END, CASE WHEN $2 = 'RUNNING' THEN 'test-host' END, CASE WHEN $2 = 'RUNNING' THEN 'test-process' END,
+                0, 3, NULL, NOW() + $4 * INTERVAL '1 second', FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(id))

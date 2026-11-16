@@ -478,20 +478,32 @@ impl Default for Seed {
     }
 }
 
+/// One live task with every column of the baseline task row named. A
+/// CLAIMED row carries a lease; a RUNNING row carries its worker fields; a
+/// workflow task carries no command fingerprint.
 async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
     let task_id = Uuid::parse_str(id).expect("UUID task id");
     sqlx::query(
         "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
-            started_at, claimed_at, claimed_by_worker_id, good_until, is_workflow_task,
-            retry_count, max_retries, command_fingerprint_version, command_fingerprint,
-            retention_class_key, idempotency_key_digest, retain_rerun_input, created_at,
-            updated_at, execution, claim_expires_at
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'matrix_task', 'default', 100, 'null', $2, NOW(), NOW(), $3, $5, $4, $6, $7, 0,
-            3, CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END,
-            'forever', $9, TRUE, NOW(), NOW(), 'ISOLATED',
-            CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 hour' END
+            $1, 'matrix_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END, $9,
+            $2, NOW(), $5, $4, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
+            $3, NULL, NULL,
+            CASE WHEN $2 = 'RUNNING' THEN 4242 END,
+            CASE WHEN $2 = 'RUNNING' THEN 'matrix-host' END,
+            CASE WHEN $2 = 'RUNNING' THEN 'matrix-process' END,
+            0, 3, NULL, $6, $7,
+            NOW(), TRUE, NULL, NULL
         )",
     )
     .bind(task_id)
@@ -586,11 +598,12 @@ struct PostImage {
 
 async fn post_image(pool: &PgPool, id: &str) -> PostImage {
     sqlx::query_as(
-        "SELECT status, terminal_at, terminalization_kind, error_code,
-                failed_reason, claimed_by_worker_id
+        "SELECT status::text, NULL::timestamptz AS terminal_at,
+                NULL::text AS terminalization_kind, NULL::text AS error_code,
+                NULL::text AS failed_reason, claimed_by_worker_id
          FROM horsies_tasks WHERE id = $1
          UNION ALL
-         SELECT status, terminal_at, terminalization_kind, error_code,
+         SELECT status::text, terminal_at, terminalization_kind::text, error_code,
                 final_failed_reason AS failed_reason,
                 last_claimed_worker_id AS claimed_by_worker_id
          FROM horsies_task_history WHERE task_id = $1",
@@ -1089,7 +1102,7 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
 async fn fail_locked_assigns_failed_reason_unconditionally() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
-    seed_task(&pool, &id, Seed { ..Seed::default() }).await;
+    seed_task(&pool, &id, Seed::default()).await;
 
     let outcomes = terminalize(
         &pool,
@@ -1175,72 +1188,11 @@ async fn cross_class_replay_names_the_foreign_kind() {
         panic!("expected foreign terminalization, got {outcomes:?}");
     };
     assert_eq!(foreign.observed_status, TaskStatus::Cancelled);
-    assert_eq!(
-        foreign.committed_kind,
-        Some(TerminalizationKind::CancelAdmin)
-    );
+    assert_eq!(foreign.committed_kind, TerminalizationKind::CancelAdmin);
     assert_eq!(
         post_image(&pool, &id).await.status,
         "CANCELLED",
         "terminal never overwritten"
-    );
-
-    cleanup(&pool, &[&id]).await;
-}
-
-#[tokio::test]
-#[serial]
-async fn legacy_kind_is_foreign_and_never_inferred_as_a_wire_replay() {
-    let pool = migrated_pool().await;
-    let id = Uuid::new_v4().to_string();
-    seed_task(&pool, &id, Seed::default()).await;
-    terminalize(
-        &pool,
-        &TerminalizationCommand::CompleteTaskFused {
-            task_id: uuid(&id),
-            fence: owned("w1", seeded_generation(&pool, &id).await),
-            result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
-        },
-    )
-    .await
-    .expect("first completion");
-    sqlx::query(
-        "UPDATE horsies_task_history
-         SET terminalization_kind = 'LEGACY_TERMINAL'
-         WHERE task_id = $1",
-    )
-    .bind(Uuid::parse_str(&id).unwrap())
-    .execute(&pool)
-    .await
-    .expect("model relocated legacy provenance");
-
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-            error_code: None,
-            failed_reason: None,
-        },
-    )
-    .await
-    .expect("terminalize");
-    let [TerminalizationOutcome::SourceStateConflict {
-        evidence: GuardEvidence::ForeignTerminalization(foreign),
-        ..
-    }] = outcomes.as_slice()
-    else {
-        panic!("expected conflict with unknown provenance, got {outcomes:?}");
-    };
-    assert_eq!(
-        foreign.committed_kind,
-        Some(TerminalizationKind::LegacyTerminal),
-        "relocation-only provenance shares no wire equivalence class"
     );
 
     cleanup(&pool, &[&id]).await;
@@ -1546,7 +1498,6 @@ async fn phase2_expectation_table_matches_every_installed_wire_projection() {
     let mut vocabulary: Vec<&str> = TerminalizationKind::ALL
         .iter()
         .map(|kind| kind.as_str())
-        .filter(|kind| *kind != "LEGACY_TERMINAL")
         .collect();
     vocabulary.sort_unstable();
     let mut expected_vocabulary: Vec<&str> = WIRE_PHASE2_EXPECTATIONS
@@ -1987,16 +1938,23 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50001) AS g
          )
          INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, input, execution, status,
-             sent_at, enqueued_at, is_workflow_task,
-             retry_count, max_retries,
-             command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input, created_at, updated_at
+             id, task_name, queue_name, priority, input, task_options, execution,
+             retention_class_key, sent_at, created_at,
+             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+             status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+             started_at, finalizing_at, finalizing_by_worker_id,
+             worker_pid, worker_hostname, worker_process_name,
+             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          )
-         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, 'null', 'ISOLATED',
-                'PENDING', NOW(), NOW(), TRUE,
-                0, 3, NULL, NULL,
-                'forever', TRUE, NOW(), NOW()
+         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, '{}', NULL,
+                'ISOLATED', 'forever', NOW(), NOW(),
+                NULL, NULL, NULL,
+                'PENDING', NOW(), NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                0, 3, NULL, NULL, TRUE,
+                NOW(), TRUE, NULL, NULL
          FROM generated",
     )
     .execute(&pool)

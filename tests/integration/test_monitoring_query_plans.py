@@ -1,4 +1,4 @@
-"""Plan tests for the monitoring read path (schema v16).
+"""Plan tests for the monitoring read path.
 
 Each test EXPLAINs the statement production executes — compiled from the
 same builders ``list_tasks`` / ``task_facets`` use, or the worker's claim
@@ -25,13 +25,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
-from horsies.monitoring.queries import (
-    facet_statement,
-    list_rows_statement,
-)
-from horsies.core.models.task_pg import TaskModel
+from horsies.monitoring.queries import list_rows_statement
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
+
+# Every column of horsies_tasks, in the order the seed statements give values.
+_TASK_COLUMNS = (
+    'id, task_name, queue_name, priority, input, task_options, execution, '
+    'retention_class_key, sent_at, created_at, command_fingerprint_version, '
+    'command_fingerprint, idempotency_key_digest, status, enqueued_at, '
+    'claimed_at, claimed_by_worker_id, claim_expires_at, started_at, '
+    'finalizing_at, finalizing_by_worker_id, worker_pid, worker_hostname, '
+    'worker_process_name, retry_count, max_retries, next_retry_at, good_until, '
+    'is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id, '
+    'rerun_root_task_id'
+)
 
 
 async def _seed_tasks(session: AsyncSession) -> None:
@@ -51,38 +59,30 @@ async def _seed_tasks(session: AsyncSession) -> None:
     await session.execute(
         text('TRUNCATE horsies_task_attempts, horsies_tasks CASCADE')
     )
-    await session.execute(text("""
-        INSERT INTO horsies_tasks
-            (id, task_name, queue_name, priority, args, kwargs,
-             status, sent_at, enqueued_at, created_at, updated_at, claimed,
-             retry_count, max_retries, started_at, enqueue_sha,
-             retention_class_key, command_fingerprint_version,
-             command_fingerprint, retain_rerun_input,
-             prepared_rerun_input_disposition)
+    await session.execute(text(f"""
+        INSERT INTO horsies_tasks ({_TASK_COLUMNS})
         SELECT gen_random_uuid(),
-               'plan_task_' || (g % 5), 'default', 100, '[]', '{}',
-               'RUNNING', NOW(), NOW() - (g || ' seconds')::interval,
-               NOW(), NOW(), TRUE, 0, 0, NOW(), 'plan-test-sha',
-               'standard_30d', 1,
-               sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
-               FALSE, 'DECLINED_BY_POLICY'
+               'plan_task_' || (g % 5), 'default', 100, '{{}}', NULL,
+               'ISOLATED', 'standard_30d', NOW(), NOW(), 1,
+               sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
+               'RUNNING', NOW() - (g || ' seconds')::interval, NULL, NULL, NULL,
+               NOW(), NULL, NULL,
+               NULL, NULL, NULL,
+               0, 0, NULL, NULL, FALSE,
+               NOW(), FALSE, NULL, NULL
         FROM generate_series(1, 500) AS g
     """))
-    await session.execute(text("""
-        INSERT INTO horsies_tasks
-            (id, task_name, queue_name, priority, args, kwargs,
-             status, sent_at, enqueued_at, created_at, updated_at, claimed,
-             retry_count, max_retries, enqueue_sha,
-             retention_class_key, command_fingerprint_version,
-             command_fingerprint, retain_rerun_input,
-             prepared_rerun_input_disposition)
+    await session.execute(text(f"""
+        INSERT INTO horsies_tasks ({_TASK_COLUMNS})
         SELECT gen_random_uuid(),
-               'plan_task_pending', 'default', 100, '[]', '{}',
-               'PENDING', NOW(), NOW() - (g || ' seconds')::interval,
-               NOW(), NOW(), FALSE, 0, 0, 'plan-test-sha',
-               'standard_30d', 1,
-               sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
-               FALSE, 'DECLINED_BY_POLICY'
+               'plan_task_pending', 'default', 100, '{{}}', NULL,
+               'ISOLATED', 'standard_30d', NOW(), NOW(), 1,
+               sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
+               'PENDING', NOW() - (g || ' seconds')::interval, NULL, NULL, NULL,
+               NULL, NULL, NULL,
+               NULL, NULL, NULL,
+               0, 0, NULL, NULL, FALSE,
+               NOW(), FALSE, NULL, NULL
         FROM generate_series(1, 2000) AS g
     """))
     await session.commit()
@@ -141,19 +141,6 @@ async def test_list_default_sort_plans_on_enqueued_at_index(
         assert 'Sort' not in plan, (sort_dir, plan)
 
 
-async def test_task_name_facet_plans_index_only(
-    broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
-    session: AsyncSession,
-) -> None:
-    """The unfiltered task-name facet is an index-only scan on v16's index."""
-    await _seed_tasks(session)
-
-    statement = _compiled(facet_statement(TaskModel.task_name, []))
-    plan = await _explain(session, statement)
-    assert 'idx_horsies_tasks_task_name' in plan, plan
-    assert 'Index Only Scan' in plan, plan
-
-
 async def _nested_plans(session: AsyncSession, params: dict[str, object]) -> str:
     """Run one claim through HORSIES_CLAIM_SQL and return the plans of the
     statements inside the claim functions, from auto_explain. Rolled back."""
@@ -188,10 +175,9 @@ async def test_claim_streams_plan_on_the_class_indexes(
     session: AsyncSession,
 ) -> None:
     """Each claim stream of a worker with isolated children rides a class
-    index: the pending arm idx_horsies_tasks_claim_pending_class, the expired
-    arm one of the two expired indexes. Neither v16 monitoring index and
-    neither claim index without a class (dropped at v55) appears, and no
-    stream scans the heap.
+    index: the pending arm horsies_tasks_claim_pending, the expired arm one of
+    the two expired indexes. The monitoring enqueued_at index does not
+    appear, and no stream scans the heap.
     """
     await _seed_tasks(session)
 
@@ -225,17 +211,14 @@ async def test_claim_streams_plan_on_the_class_indexes(
     }
     for name, plan in phases.items():
         assert (
-            plan.count('Index Scan using idx_horsies_tasks_claim_pending_class') == 1
+            plan.count('Index Scan using horsies_tasks_claim_pending ') == 1
         ), (name, plan)
         assert (
-            'idx_horsies_tasks_claim_expired_class' in plan
-            or 'idx_horsies_tasks_claim_expired ' in plan
+            'horsies_tasks_claim_expired_order' in plan
+            or 'horsies_tasks_claim_expired_at' in plan
         ), (name, plan)
         for absent in (
             'Seq Scan on horsies_tasks',
             'idx_horsies_tasks_enqueued_at',
-            'idx_horsies_tasks_task_name',
-            'idx_horsies_tasks_claim_pending ',
-            'idx_horsies_tasks_claim_expired_ordered',
         ):
             assert absent not in plan, (name, absent, plan)

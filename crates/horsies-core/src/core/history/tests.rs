@@ -252,10 +252,9 @@ fn input_and_stored_rerun_vectors_match_python() {
 }
 
 #[test]
-fn partition_commands_reject_empty_health_class_and_invalid_timeouts() {
-    use super::commands::{CollectPartitionHealth, FinalizeInterruptedLeafDetach};
+fn partition_commands_reject_invalid_timeouts() {
+    use super::commands::FinalizeInterruptedLeafDetach;
 
-    assert!(CollectPartitionHealth::new("", true).is_err());
     let bounds = super::commands::LeafBounds::new(
         DateTime::from_timestamp(0, 0).unwrap(),
         DateTime::from_timestamp(86_400, 0).unwrap(),
