@@ -65,7 +65,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartResult,
     WorkflowStartValidationFailed,
 )
-from horsies.core.utils.fingerprint import enqueue_fingerprint
+from horsies.core.history.periods import RetentionClassKey
 from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
     GET_WORKFLOW_STATUS_SQL,
@@ -84,7 +84,11 @@ from horsies.core.workflows.sql import (
     GET_READY_WORKFLOW_TASKS_SQL,
     GET_PAUSED_CHILD_WORKFLOWS_SQL,
     RESUME_CHILD_WORKFLOW_SQL,
-    workflow_task_enqueue_stamp,
+    SUBWORKFLOW_NODE_FACT_PARAMS,
+    TaskNodeFacts,
+    task_node_fact_params,
+    task_node_facts,
+    workflow_task_row_params,
 )
 from horsies.core.history.identity.uuid7 import mint_task_id
 
@@ -152,8 +156,8 @@ def guard_no_positional_args(node_name: str, args: tuple[Any, ...]) -> None:
 def root_retry_and_deadline(
     task_options_json: str | None,
     node_name: str,
-) -> tuple[int, str | None, datetime | None]:
-    """Extract (max_retries, good_until_str, good_until_dt) for a fast-path root.
+) -> tuple[int, str | None]:
+    """Extract (max_retries, good_until_str) for a task node at workflow start.
 
     Mirrors enqueue_workflow_task's task_options parsing. One deliberate
     difference: the promotion path folds corrupt options into a FAILED task
@@ -163,15 +167,15 @@ def root_retry_and_deadline(
     workflow start do not catch the ``SerializationError``: it propagates,
     and the caller's transaction rolls back.
 
+    ``good_until_str`` is the ``good_until`` text of the options; the
+    database parses it into the timestamp column.
+
     Raises:
         SerializationError: task_options_json does not parse to an object,
             or its retry_policy does not validate as RetryPolicy.
     """
-    max_retries = 0
-    good_until_str: str | None = None
-    good_until_dt: datetime | None = None
     if not task_options_json:
-        return max_retries, good_until_str, good_until_dt
+        return 0, None
 
     parsed_r = loads_json(task_options_json)
     if _is_err(parsed_r) or not isinstance(parsed_r.ok_value, dict):
@@ -185,22 +189,9 @@ def root_retry_and_deadline(
             f'Invalid retry_policy for root node {node_name}: '
             f'{retry_limit_r.err_value.detail}',
         )
-    max_retries = retry_limit_r.ok_value
     good_until_raw = options.get('good_until')
-    if good_until_raw is not None:
-        good_until_str = str(good_until_raw)
-        try:
-            good_until_dt = datetime.fromisoformat(good_until_str)
-        except (ValueError, TypeError) as exc:
-            # SHA will use None; good_until_str is still passed to the DB
-            # column. Loud — fingerprint and stored deadline diverge.
-            logger.warning(
-                'Unparseable good_until for root node %s (%r): %s',
-                node_name,
-                good_until_raw,
-                exc,
-            )
-    return max_retries, good_until_str, good_until_dt
+    good_until_str = None if good_until_raw is None else str(good_until_raw)
+    return retry_limit_r.ok_value, good_until_str
 
 
 def root_execution(
@@ -233,6 +224,32 @@ def root_execution(
             f'{execution_r.err_value.detail}',
         )
     return execution_r.ok_value
+
+
+def start_task_node_facts(
+    task_options_json: str | None,
+    node_name: str,
+    queue_retention_class: RetentionClassKey | None,
+) -> TaskNodeFacts:
+    """The typed facts that a workflow start writes on a task node row.
+
+    Every task node gets them, root or not; a fast-path root's task row
+    stores the same values. The options are the task decorator's own
+    serialization of a validated ``TaskOptions``, as in
+    ``root_retry_and_deadline`` and ``root_execution``. Does no I/O.
+
+    Raises:
+        SerializationError: the options do not parse to an object, or their
+            ``retry_policy``, ``execution`` or ``cancel_grace_ms`` does not
+            validate.
+    """
+    max_retries, good_until = root_retry_and_deadline(task_options_json, node_name)
+    return task_node_facts(
+        max_retries=max_retries,
+        execution=root_execution(task_options_json, node_name),
+        good_until=good_until,
+        queue_retention_class=queue_retention_class,
+    )
 
 
 def _start_loop_limit(
@@ -526,8 +543,7 @@ async def start_workflow_async(
                             'idx': node.index,
                             'node_id': node.node_id,
                             'name': node.name,
-                            'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
-                            'kwargs': _ser_or_raise(
+                            'input': _ser_or_raise(
                                 dumps_json(stored_kwargs(node)),
                                 f'kwargs for node {node.name}',
                             ),
@@ -540,6 +556,7 @@ async def start_workflow_async(
                             'join_type': node.join,
                             'min_success': node.min_success,
                             'task_options': None,
+                            **SUBWORKFLOW_NODE_FACT_PARAMS,
                             'status': 'PENDING' if dep_indices else 'READY',
                             'is_subworkflow': True,
                             'sub_wf_name': node.workflow_def.name,
@@ -595,7 +612,11 @@ async def start_workflow_async(
                         'with priority=None; start prevalidation refuses it'
                     )
                     resolved_priority = task.priority
-                    args_json = _ser_or_raise(dumps_json([]), 'positional args')  # kwargs-only: positional args not persisted
+                    node_facts = start_task_node_facts(
+                        task_options_json,
+                        task.name,
+                        queue_retention_class(broker, resolved_queue),
+                    )
 
                     is_fast_root = (
                         is_root and not args_from_indices and not ctx_from_ids
@@ -603,10 +624,6 @@ async def start_workflow_async(
                     task_id: str | None = None
                     if is_fast_root:
                         task_id = mint_task_id()
-                        max_retries, good_until_str, good_until_dt = (
-                            root_retry_and_deadline(task_options_json, task.name)
-                        )
-                        root_class = root_execution(task_options_json, task.name)
                         # Task-row kwargs = node kwargs + workflow_meta
                         # (mirrors enqueue_workflow_task; args_from/ctx
                         # injection is structurally absent on fast roots).
@@ -620,47 +637,17 @@ async def start_workflow_async(
                             dumps_json(task_kwargs),
                             f'task kwargs for node {task.name}',
                         )
-                        task_sent_at = datetime.now(timezone.utc)
-                        sha = enqueue_fingerprint(
+                        fast_root_indexes.append(task.index)
+                        fast_root_task_params.append(workflow_task_row_params(
+                            task_id=task_id,
                             task_name=task.name,
                             queue_name=resolved_queue,
                             priority=resolved_priority,
-                            args_json=args_json,
-                            kwargs_json=task_kwargs_json,
-                            sent_at=task_sent_at,
-                            good_until=good_until_dt,
-                            enqueue_delay_seconds=None,
-                            task_options=task_options_json,
-                        )
-                        fast_root_indexes.append(task.index)
-                        fast_root_task_params.append({
-                            'id': task_id,
-                            'name': task.name,
-                            'queue': resolved_queue,
-                            'priority': resolved_priority,
-                            'args': args_json,
-                            'kwargs': task_kwargs_json,
-                            'sent_at': task_sent_at,
-                            'max_retries': max_retries,
-                            'task_options': task_options_json,
-                            'execution': root_class.value,
-                            'good_until': good_until_str,
-                            'enqueue_sha': sha,
-                            **workflow_task_enqueue_stamp(
-                                task_name=task.name,
-                                queue_name=resolved_queue,
-                                priority=resolved_priority,
-                                args_json=args_json,
-                                kwargs_json=task_kwargs_json,
-                                good_until=good_until_dt,
-                                task_options_json=task_options_json,
-                                retention_class_key=(
-                                    queue_retention_class(
-                                        broker, resolved_queue
-                                    )
-                                ),
-                            ),
-                        })
+                            input_json=task_kwargs_json,
+                            sent_at=workflow_sent_at,
+                            task_options_json=task_options_json,
+                            facts=node_facts,
+                        ))
                     elif is_root:
                         slow_root_nodes.append(task)
 
@@ -670,8 +657,7 @@ async def start_workflow_async(
                         'idx': task.index,
                         'node_id': task.node_id,
                         'name': task.name,
-                        'args': args_json,
-                        'kwargs': _ser_or_raise(
+                        'input': _ser_or_raise(
                             dumps_json(encoded_kwargs),
                             f'kwargs for node {task.name}',
                         ),
@@ -684,6 +670,7 @@ async def start_workflow_async(
                         'join_type': task.join,
                         'min_success': task.min_success,
                         'task_options': task_options_json,
+                        **task_node_fact_params(node_facts),
                         'status': 'ENQUEUED'
                         if is_fast_root
                         else ('PENDING' if dep_indices else 'READY'),

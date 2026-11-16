@@ -1,7 +1,7 @@
 """The in-flight count of the claim (``horsies_claim_in_flight``).
 
 A task that finishes leaves dead CLAIMED and RUNNING entries in
-``ix_horsies_tasks_status``. The count is a plain scan of that index, and a
+``horsies_tasks_status``. The count is a plain scan of that index, and a
 plain index scan marks the dead entries that it passes, so later scans skip
 them. A bitmap scan marks none. Each test runs the worker's claim statement
 (``HORSIES_CLAIM_SQL``) and reads what the count did:
@@ -27,12 +27,12 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.schemas.migrations import CLAIM_IN_FLIGHT_ROWS_SQL
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from tests.integration.autocommit_support import QUEUE, TASK_NAME, WORKER_ID
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 ROWS: Final = 2_000
-STATUS_INDEX_SCAN: Final = 'Index Scan using ix_horsies_tasks_status on horsies_tasks'
+STATUS_INDEX_SCAN: Final = 'Index Scan using horsies_tasks_status on horsies_tasks'
 CLAIM_PARAMS: Final[dict[str, object]] = {
     'p_worker_id': 'in-flight-count-worker',
     'p_queues': json.dumps([QUEUE]),
@@ -71,26 +71,31 @@ async def tasks_without_autovacuum(
 
 async def _insert_pending(session: AsyncSession) -> None:
     """``ROWS`` PENDING tasks of ``QUEUE``, committed."""
-    sent_at, sha = compute_test_enqueue_sha(task_name=TASK_NAME, queue_name=QUEUE)
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name=TASK_NAME, queue_name=QUEUE,
+    )
     _ = await session.execute(text('TRUNCATE horsies_task_attempts, horsies_tasks CASCADE'))
     _ = await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries,
-                 enqueue_sha, is_workflow_task, retention_class_key,
-                 command_fingerprint_version, command_fingerprint,
-                 retain_rerun_input, prepared_rerun_input_disposition)
-            SELECT g.id, :task_name, :queue, 100, '[]', '{}',
-                   'PENDING', :sent_at, NOW(), NOW(), NOW(),
-                   FALSE, 0, 0,
-                   :sha, FALSE, 'standard_30d',
-                   1, sha256(convert_to(CAST(g.id AS text), 'UTF8')),
-                   FALSE, 'DECLINED_BY_POLICY'
-            FROM (SELECT gen_random_uuid() AS id FROM generate_series(1, :rows)) AS g
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                )
+                SELECT g.id, :task_name, :queue, 100, '{}', 'PENDING', :sent_at, NOW(),
+                    NOW(), NOW(), 0, 0, FALSE, 'standard_30d', 1, :command_fingerprint,
+                    FALSE, 'ISOLATED'
+                FROM (SELECT gen_random_uuid() AS id FROM generate_series(1, :rows)) AS g
         """),
-        {'task_name': TASK_NAME, 'queue': QUEUE, 'sent_at': sent_at, 'sha': sha, 'rows': ROWS},
+        {
+            'task_name': TASK_NAME,
+            'queue': QUEUE,
+            'sent_at': sent_at,
+            'command_fingerprint': fingerprint,
+            'rows': ROWS,
+        },
     )
     await session.commit()
 
@@ -100,7 +105,7 @@ async def _start(session: AsyncSession, rows: int) -> None:
     _ = await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'RUNNING', claimed = FALSE, claimed_at = NOW(),
+            SET status = 'RUNNING', claimed_at = NOW(),
                 claimed_by_worker_id = :worker_id, started_at = NOW()
             WHERE id IN (
                 SELECT id FROM horsies_tasks WHERE status = 'PENDING' ORDER BY id LIMIT :rows
@@ -150,7 +155,7 @@ async def _claim_once(session: AsyncSession) -> None:
 
 
 async def _bitmap_running_entries(session: AsyncSession) -> float:
-    """The entries that a bitmap scan of ``ix_horsies_tasks_status`` returns
+    """The entries that a bitmap scan of ``horsies_tasks_status`` returns
     for RUNNING. A bitmap scan skips the entries that are marked dead and
     marks none itself. Rolled back."""
     try:
@@ -165,7 +170,7 @@ async def _bitmap_running_entries(session: AsyncSession) -> float:
     while nodes:
         node = nodes.pop()
         if node['Node Type'] == 'Bitmap Index Scan':
-            assert node['Index Name'] == 'ix_horsies_tasks_status', node
+            assert node['Index Name'] == 'horsies_tasks_status', node
             return float(node['Actual Rows'])
         nodes.extend(node.get('Plans', []))
     raise AssertionError(f'no bitmap index scan in {plan}')

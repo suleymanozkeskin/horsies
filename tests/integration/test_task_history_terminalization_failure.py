@@ -3,8 +3,8 @@
 The failure family carries the envelope-eligible branch: FAILED is not
 NEVER_ELIGIBLE, so this suite proves the full disposition ladder against
 the confirmed gate semantics — workflow-backing archives NEVER_ELIGIBLE,
-a declined snapshot archives DECLINED_BY_POLICY, and a retained prepared
-envelope carries byte-identically with its copied digest. It is also the
+a declined snapshot archives DECLINED_BY_POLICY, and a retained input
+is framed byte-identically with its digest. It is also the
 first family to exercise deferred phase-2 pending creation, and the
 staleness guard's single-capture evidence contract.
 """
@@ -37,6 +37,7 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.rerun_envelope_support import frame_rerun_envelope
 
 pytestmark = [pytest.mark.integration]
 
@@ -136,10 +137,11 @@ class TestDispositionLadder:
             assert row.rerun_input_inline is None
 
     @pytest.mark.asyncio
-    async def test_retained_prepared_envelope_carries_byte_identically(
+    async def test_retained_input_is_framed_byte_identically(
         self, terminalization_schema: HistorySchema
     ) -> None:
-        payload = b'{"precious":"failure input"}'
+        input_text = '{"precious":"failure input"}'
+        payload = frame_rerun_envelope(input_text, None)
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
             task_id = await insert_live_task(
@@ -147,8 +149,7 @@ class TestDispositionLadder:
                 class_key=CLASS_KEY,
                 worker=WORKER,
                 retain=True,
-                prepared_disposition='INLINE',
-                prepared_inline=payload,
+                input_text=input_text,
             )
             await fail_locked(connection, task_id)
             row = await history_disposition(connection, task_id)
@@ -174,7 +175,7 @@ class TestDispositionLadder:
                 connection,
                 task_id,
                 workflow_id=workflow_id,
-                node_status='PENDING',
+                node_status='RUNNING',
             )
             outcome = await fail_locked(connection, task_id)
             assert outcome.outcome == 'APPLIED'
@@ -232,13 +233,13 @@ class TestDeferredResultFence:
                 worker=WORKER,
                 is_workflow_task=True,
             )
-            await link_workflow_node(
+            _ = await link_workflow_node(
                 connection,
                 task_id,
                 workflow_id=await create_workflow(
                     connection, status='RUNNING'
                 ),
-                node_status='PENDING',
+                node_status='RUNNING',
             )
             with pytest.raises(
                 DBAPIError, match='requires a result payload'

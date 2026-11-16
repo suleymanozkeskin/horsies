@@ -73,7 +73,7 @@ async def _node_kwargs(
     row = (
         await session.execute(
             text("""
-                SELECT task_kwargs FROM horsies_workflow_tasks
+                SELECT input FROM horsies_workflow_tasks
                 WHERE workflow_id = :wf_id AND task_index = :idx
             """),
             {'wf_id': workflow_id, 'idx': task_index},
@@ -91,7 +91,7 @@ async def _enqueued_kwargs(
     row = (
         await session.execute(
             text("""
-                SELECT t.kwargs FROM horsies_tasks t
+                SELECT t.input FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = :idx
             """),

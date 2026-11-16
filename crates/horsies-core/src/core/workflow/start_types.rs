@@ -4,7 +4,8 @@
 use uuid::Uuid;
 
 /// Categorized workflow start failure codes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
     /// Config error: no broker attached.
     BrokerNotConfigured,
