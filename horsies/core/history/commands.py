@@ -205,6 +205,32 @@ sweeps need it and the pruning module already imports the heartbeat one.
 
 
 @dataclass(frozen=True, slots=True)
+class PruneBounds:
+    """The per-pass bounds of one pruning pass.
+
+    `candidates`: expired leaves one candidate read returns at most,
+    oldest first. `acted_leaves`: leaves the sweeps act on at most,
+    heartbeat leaves first; a leaf counts when the pass detached or
+    dropped it, or when its sweep raised a database error. A leaf left
+    over is a candidate of the next pass.
+    """
+
+    candidates: int
+    acted_leaves: int
+
+    def __post_init__(self) -> None:
+        if self.candidates < 1:
+            raise ValueError('a pruning pass reads at least one candidate')
+        if self.acted_leaves < 0:
+            raise ValueError('a pruning pass acts on zero or more leaves')
+
+
+PRUNE_BOUNDS: Final = PruneBounds(candidates=512, acted_leaves=64)
+"""The bounds of every production pruning pass. The Rust core uses the same
+values (MAX_PRUNE_CANDIDATES_PER_PASS, MAX_PRUNE_LEAVES_PER_PASS)."""
+
+
+@dataclass(frozen=True, slots=True)
 class DetachExpiredHistoryLeaf:
     """Concurrently detach one expired, unblocked leaf.
 
