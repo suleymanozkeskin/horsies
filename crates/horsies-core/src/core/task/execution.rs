@@ -14,7 +14,10 @@ pub const MIN_CANCEL_GRACE_MS: i64 = 100;
 pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
 
 /// How a worker runs a task. The column `execution` holds one of these values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The executor of the worker uses this type too (`ExecutionClass` there):
+/// the class of a row, the budget of a claim and the kind of a child are
+/// one set of values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Execution {
     /// One task at a time in its own child process. The default class.
     Isolated,
@@ -25,6 +28,9 @@ pub enum Execution {
 }
 
 impl Execution {
+    /// Every class, in the order of the stored values.
+    pub const ALL: [Self; 3] = [Self::Isolated, Self::SharedAsync, Self::SharedThread];
+
     /// The stored value: `ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -43,6 +49,12 @@ impl Execution {
             "SHARED_THREAD" => Some(Self::SharedThread),
             _ => None,
         }
+    }
+}
+
+impl std::fmt::Display for Execution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

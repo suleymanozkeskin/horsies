@@ -91,7 +91,8 @@ pub use pool::{
     TaskLimit,
 };
 pub use route::{
-    dispatch_route, ClaimPlan, ClaimRoute, DispatchRoute, IsolatedDeadline, UnservedClass,
+    describe_claim_plan, dispatch_route, unserved_classes_line, ClaimPlan, ClaimRoute,
+    DispatchRoute, IsolatedDeadline, UnservedClass,
 };
 pub use shared::{SharedPool, SharedPoolConfig};
 pub use start::{
