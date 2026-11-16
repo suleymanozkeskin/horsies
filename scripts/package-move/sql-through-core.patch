@@ -223,6 +223,21 @@ index f952636e..4b59d3e4 100644
      module.add_function(wrap_pyfunction!(core_state, module)?)?;
      module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
      module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
+diff --git a/python/horsies/_core.pyi b/python/horsies/_core.pyi
+index c342c2f8..9348674b 100644
+--- a/python/horsies/_core.pyi
++++ b/python/horsies/_core.pyi
+@@ -337,6 +337,10 @@ class TaskInfoNotFound:
+     def task_id(self) -> uuid.UUID: ...
+ 
+ 
++def baseline_sql_files() -> list[tuple[str, str]]:
++    """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
++
++
+ def core_state() -> Literal['not_started', 'running', 'stopped', 'inherited']:
+     """The state of the core in this process. Starts nothing."""
+ 
 diff --git a/python/horsies/core/baseline/__init__.py b/python/horsies/core/baseline/__init__.py
 index 8d584369..c1dd84f6 100644
 --- a/python/horsies/core/baseline/__init__.py
