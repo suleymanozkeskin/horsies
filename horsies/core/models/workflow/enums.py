@@ -1,9 +1,22 @@
-"""Workflow status enums and type variables."""
+"""Workflow status enums and type variables.
+
+`WorkflowStatus`, `WorkflowTaskStatus` and their terminal-state constants
+are the classes generated from horsies-core (`horsies._catalog.status`).
+"""
 
 from __future__ import annotations
 
 from enum import Enum
 from typing import TypeVar
+
+from horsies._catalog.status import (
+    WORKFLOW_TASK_TERMINAL_STATES as WORKFLOW_TASK_TERMINAL_STATES,
+)
+from horsies._catalog.status import (
+    WORKFLOW_TERMINAL_STATES as WORKFLOW_TERMINAL_STATES,
+)
+from horsies._catalog.status import WorkflowStatus as WorkflowStatus
+from horsies._catalog.status import WorkflowTaskStatus as WorkflowTaskStatus
 
 # TypeVar for TaskNode generic parameter (the "ok" type of TaskResult)
 OkT = TypeVar('OkT')
@@ -14,106 +27,6 @@ OutT = TypeVar('OutT')
 # =============================================================================
 # Enums
 # =============================================================================
-
-
-class WorkflowStatus(str, Enum):
-    """
-    Status of a workflow instance.
-
-    State machine:
-        PENDING → RUNNING → COMPLETED
-                         → FAILED (on task failure with on_error=FAIL)
-                         → PAUSED (on task failure with on_error=PAUSE)
-                         → CANCELLED (user requested)
-        PAUSED → EXPIRED (paused past the declared age policy)
-    """
-
-    PENDING = 'PENDING'
-    """Created but not yet started"""
-
-    RUNNING = 'RUNNING'
-    """At least one task executing or ready"""
-
-    COMPLETED = 'COMPLETED'
-    """All tasks terminal and success criteria met"""
-
-    FAILED = 'FAILED'
-    """A task failed and on_error=FAIL (or no success case satisfied)"""
-
-    PAUSED = 'PAUSED'
-    """A task failed with on_error=PAUSE; awaiting resume() or cancel()"""
-
-    CANCELLED = 'CANCELLED'
-    """User cancelled via WorkflowHandle.cancel()"""
-
-    EXPIRED = 'EXPIRED'
-    """Paused past the deployment's declared age policy; time ran out.
-
-    CANCELLED stays purely someone-decided. The error column carries
-    the policy name and configured age — status carries the class,
-    text carries the parameters."""
-
-    @property
-    def is_terminal(self) -> bool:
-        """Whether this status represents a final state (no further transitions)."""
-        return self in WORKFLOW_TERMINAL_STATES
-
-
-WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = frozenset(
-    {
-        WorkflowStatus.COMPLETED,
-        WorkflowStatus.FAILED,
-        WorkflowStatus.CANCELLED,
-        WorkflowStatus.EXPIRED,
-    }
-)
-
-
-class WorkflowTaskStatus(str, Enum):
-    """
-    Status of a single task/node within a workflow.
-
-    State machine:
-        PENDING → READY → ENQUEUED → RUNNING → COMPLETED
-                                             → FAILED
-                       → SKIPPED (deps failed and allow_failed_deps=False)
-    """
-
-    PENDING = 'PENDING'
-    """Waiting for dependencies to become terminal"""
-
-    READY = 'READY'
-    """Dependencies satisfied, waiting to be enqueued"""
-
-    ENQUEUED = 'ENQUEUED'
-    """Task created in tasks table, waiting for worker"""
-
-    RUNNING = 'RUNNING'
-    """Worker is executing the task (or child workflow is running)"""
-
-    COMPLETED = 'COMPLETED'
-    """Task succeeded (TaskResult.is_ok())"""
-
-    FAILED = 'FAILED'
-    """Task failed (TaskResult.is_err()), the child workflow of a
-    SubWorkflowNode did not complete, or that child's output is an Err"""
-
-    SKIPPED = 'SKIPPED'
-    """Skipped due to: upstream failure, condition, or quorum impossible"""
-
-    @property
-    def is_terminal(self) -> bool:
-        """Whether this status represents a final state (no further transitions)."""
-        return self in WORKFLOW_TASK_TERMINAL_STATES
-
-
-WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = frozenset(
-    {
-        WorkflowTaskStatus.COMPLETED,
-        WorkflowTaskStatus.FAILED,
-        WorkflowTaskStatus.SKIPPED,
-    }
-)
 
 WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
 

@@ -13,6 +13,7 @@ pub mod core_rows;
 pub(crate) mod enqueue_history_tests;
 pub mod error;
 pub mod health;
+pub(crate) mod history_reads;
 #[cfg(test)]
 mod lifecycle_tests;
 pub mod listener;
@@ -25,11 +26,11 @@ pub(crate) mod monitoring_test_database;
 mod pgbouncer_contract_tests;
 pub mod pools;
 pub mod postgres;
+pub mod process_listener;
 pub mod result_types;
 pub mod row;
 #[cfg(test)]
 mod send_path_tests;
-pub mod shared_listener;
 pub mod slot_health;
 #[cfg(test)]
 mod start_deadline_tests;
@@ -60,6 +61,7 @@ pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
 };
+pub use process_listener::{ListenError, ListenerPlanError};
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
@@ -68,7 +70,6 @@ pub use row::task::{
 };
 pub use row::worker_state::WorkerStateRow;
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
-pub use shared_listener::SharedNotifyListener;
 pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
