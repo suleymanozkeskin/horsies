@@ -2842,3 +2842,6 @@ mod tests {
             .expect("delete attempts");
     }
 }
+
+#[cfg(test)]
+mod reaper_loop_tests;
