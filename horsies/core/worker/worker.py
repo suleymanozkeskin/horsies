@@ -203,7 +203,6 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _FINALIZE_PARENT_MAX_RETRIES as _FINALIZE_PARENT_MAX_RETRIES,
     _FINALIZE_RETRY_BASE_DELAY_S as _FINALIZE_RETRY_BASE_DELAY_S,
     _FINALIZE_RETRY_MAX_DELAY_S as _FINALIZE_RETRY_MAX_DELAY_S,
-    _REAPER_MAX_PERMANENT_FAILURES as _REAPER_MAX_PERMANENT_FAILURES,
     ChildHookFailedError as ChildHookFailedError,
     ChildStartFailedError as ChildStartFailedError,
     ServiceLoopDiedError as ServiceLoopDiedError,
