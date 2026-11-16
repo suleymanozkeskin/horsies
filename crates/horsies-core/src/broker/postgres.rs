@@ -297,7 +297,7 @@ FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 // dispatch reads them now that `horsies_claim`'s v12 return shape (shared
 // with Python) no longer includes them. The values are exact — read under
 // the row lock, atomically with the transition.
-const SET_RUNNING_SQL: &str = "\
+pub(crate) const SET_RUNNING_SQL: &str = "\
 WITH upd AS (
     UPDATE horsies_tasks
     SET status = 'RUNNING',
