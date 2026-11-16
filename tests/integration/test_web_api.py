@@ -34,8 +34,6 @@ from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
-from horsies.core.models.task_pg import TaskModel
-from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.web import INTENT_HEADER, INTENT_VALUE, AllowAll, create_monitoring_app
@@ -44,8 +42,17 @@ from horsies.web.routes import actions as actions_module
 from horsies.web.routes import events as events_route_module
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows, stored_history_status
+from tests.integration.conftest import DB_URL
+from tests.integration.history_seeding import stored_history_status
+from tests.integration.monitoring_seeding import (
+    NodeRow,
+    SeedRow,
+    TaskNode,
+    TaskRow,
+    WorkflowRow,
+    insert_rows,
+    task_row,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -193,24 +200,6 @@ class AsgiEventStream:
                 return line
 
 
-def _terminal_instant(
-    status: TaskStatus,
-    completed_at: datetime | None,
-    failed_at: datetime | None,
-) -> datetime | None:
-    """The instant a terminal row is dated by, mirroring what production writes.
-
-    Terminal exactly when dated is a database constraint, so a fixture that
-    sets a terminal status without one is not a lighter fixture — it is a row
-    that cannot exist. The instant is taken from whichever end timestamp the
-    row carries, which keeps aged fixtures aged: a row completed sixty days ago
-    is terminal sixty days ago, not now.
-    """
-    if not status.is_terminal:
-        return None
-    return completed_at or failed_at or datetime.now(UTC)
-
-
 def make_task(
     *,
     task_name: str = 'api_task',
@@ -219,51 +208,75 @@ def make_task(
     is_workflow_task: bool = False,
     good_until: datetime | None = None,
     error_code: str | None = None,
-) -> TaskModel:
-    """Build a task row."""
-    sent_at, enqueue_sha = compute_test_enqueue_sha(
-        task_name=task_name, queue_name=queue_name
-    )
-    return TaskModel(
-        id=str(uuid.uuid4()),
+) -> TaskRow:
+    """Build a task row. A terminal row ends now."""
+    return task_row(
+        task_id=str(uuid.uuid4()),
         task_name=task_name,
         queue_name=queue_name,
-        priority=100,
-        args='[]',
-        kwargs='{}',
         status=status,
-        sent_at=sent_at,
-        terminal_at=_terminal_instant(status, None, None),
-        enqueued_at=datetime.now(UTC) - timedelta(seconds=60),
-        good_until=good_until,
-        error_code=error_code,
-        claimed=False,
+        priority=100,
         retry_count=0,
         max_retries=3,
         is_workflow_task=is_workflow_task,
-        enqueue_sha=enqueue_sha,
+        enqueued_at=datetime.now(UTC) - timedelta(seconds=60),
+        claimed_at=None,
+        started_at=None,
+        completed_at=None,
+        failed_at=None,
+        good_until=good_until,
+        error_code=error_code,
+        failed_reason=None,
+        worker_id=None,
+        worker_hostname=None,
+        worker_pid=None,
+        worker_process_name=None,
+        claim_expires_at=None,
     )
 
 
-def make_workflow(*, name: str = 'api_flow', status: str = 'RUNNING') -> WorkflowModel:
-    """Build a workflow run row."""
-    return WorkflowModel(
+def make_workflow(*, name: str = 'api_flow', status: str = 'RUNNING') -> WorkflowRow:
+    """Build a root workflow run row."""
+    created_at = datetime.now(UTC) - timedelta(seconds=120)
+    return WorkflowRow(
         id=str(uuid.uuid4()),
         name=name,
         status=status,
         on_error='fail',
-        depth=0,
-        created_at=datetime.now(UTC) - timedelta(seconds=120),
+        definition_key=None,
+        parent=None,
+        sent_at=created_at,
+        created_at=created_at,
+        completed_at=None,
     )
 
 
-async def persist(session: AsyncSession, *rows: Any) -> None:
+def make_node(*, workflow_id: str, status: str, task_id: str | None) -> NodeRow:
+    """Build node 0 of a run, a task node named ``step``."""
+    return NodeRow(
+        id=str(uuid.uuid4()),
+        workflow_id=workflow_id,
+        task_index=0,
+        node_id=None,
+        task_name='step',
+        status=status,
+        dependencies=(),
+        allow_failed_deps=False,
+        kind=TaskNode(task_id=task_id),
+        error=None,
+        created_at=datetime.now(UTC) - timedelta(seconds=120),
+        started_at=None,
+        completed_at=None,
+    )
+
+
+async def persist(session: AsyncSession, *rows: SeedRow) -> None:
     """Persist rows on their lifecycle side and commit.
 
-    Terminal-status tasks are seeded as history rows — the live table's
-    status domain admits only live rows post-cutover.
+    Terminal-status tasks are seeded as history rows — the live table
+    holds only live rows (``tests/integration/monitoring_seeding.py``).
     """
-    await route_rows(session, rows)
+    await insert_rows(session, *rows)
 
 
 async def read_status(session: AsyncSession, workflow_id: str) -> str:
@@ -465,19 +478,7 @@ class TestWorkflowReads:
         await persist(session, run)
         await persist(
             session,
-            WorkflowTaskModel(
-                id=str(uuid.uuid4()),
-                workflow_id=run.id,
-                task_index=0,
-                task_name='step',
-                queue_name='default',
-                priority=100,
-                dependencies=[],
-                allow_failed_deps=False,
-                join_type='all',
-                status='FAILED',
-                is_subworkflow=False,
-            ),
+            make_node(workflow_id=run.id, status='FAILED', task_id=None),
         )
 
         body = (await api.get(f'/api/workflows/{run.id}')).json()
@@ -511,19 +512,8 @@ class TestWorkflowReads:
         await persist(session, run)
         await persist(
             session,
-            WorkflowTaskModel(
-                id=str(uuid.uuid4()),
-                workflow_id=run.id,
-                task_index=0,
-                task_name='step',
-                queue_name='default',
-                priority=100,
-                dependencies=[],
-                allow_failed_deps=False,
-                join_type='all',
-                status='COMPLETED',
-                task_id=str(uuid.uuid4()),
-                is_subworkflow=False,
+            make_node(
+                workflow_id=run.id, status='COMPLETED', task_id=str(uuid.uuid4()),
             ),
         )
 
@@ -790,15 +780,15 @@ class TestTaskActionMapping:
         task = make_task(status=TaskStatus.FAILED)
         await persist(session, task)
 
-        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
             cancel = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
             detail = await api.get(f'/api/tasks/{task.id}')
 
         assert cancel.status_code == 500
-        assert "'NOT_A_STATUS'" in cancel.json()['detail']
+        assert "'NOT_KNOWN'" in cancel.json()['detail']
         assert detail.status_code == 500
         assert detail.json()['detail'].startswith('Task detail query failed:')
-        assert "'NOT_A_STATUS'" in detail.json()['detail']
+        assert "'NOT_KNOWN'" in detail.json()['detail']
 
 
 @pytest.mark.usefixtures('clean_tables')
