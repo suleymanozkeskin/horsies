@@ -37,11 +37,13 @@ with the published manifest, and a mismatch causes a republication.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..commands import AnchoredLowerBound, LowerBound, OpenLowerBound
 from ..names import (
     HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
@@ -89,9 +91,9 @@ MANIFEST_STAMP_SQL: Final = f"""(
                 '|',
                 manifest.leaf_name,
                 manifest.probe_position,
-                extract(epoch FROM manifest.lower_anchor),
-                extract(epoch FROM manifest.upper_anchor),
-                COALESCE(extract(epoch FROM manifest.min_birth_at)::text, '-')
+                manifest.lower_bound_kind,
+                COALESCE(extract(epoch FROM manifest.lower_anchor)::text, '-'),
+                extract(epoch FROM manifest.upper_anchor)
             ),
             ',' ORDER BY manifest.probe_position
         ),
@@ -268,11 +270,11 @@ async def published_manifest_matches_catalog(
                     SELECT
                         leaf_name,
                         row_number() OVER (
-                            ORDER BY lower_anchor, leaf_name
+                            ORDER BY lower_anchor NULLS FIRST, leaf_name
                         ) - 1 AS probe_position,
+                        lower_bound_kind,
                         lower_anchor,
-                        upper_anchor,
-                        min_birth_at
+                        upper_anchor
                     FROM {LEAF_CATALOG}
                     WHERE detached_at IS NULL
                       AND dropped_at IS NULL
@@ -282,21 +284,21 @@ async def published_manifest_matches_catalog(
                 difference AS (
                     (
                         SELECT leaf_name, probe_position,
-                               lower_anchor, upper_anchor, min_birth_at
+                               lower_bound_kind, lower_anchor, upper_anchor
                         FROM expected
                         EXCEPT
                         SELECT leaf_name, probe_position::bigint,
-                               lower_anchor, upper_anchor, min_birth_at
+                               lower_bound_kind, lower_anchor, upper_anchor
                         FROM {TASK_LOOKUP_MANIFEST}
                     )
                     UNION ALL
                     (
                         SELECT leaf_name, probe_position::bigint,
-                               lower_anchor, upper_anchor, min_birth_at
+                               lower_bound_kind, lower_anchor, upper_anchor
                         FROM {TASK_LOOKUP_MANIFEST}
                         EXCEPT
                         SELECT leaf_name, probe_position,
-                               lower_anchor, upper_anchor, min_birth_at
+                               lower_bound_kind, lower_anchor, upper_anchor
                         FROM expected
                     )
                 )
@@ -307,6 +309,23 @@ async def published_manifest_matches_catalog(
         )
     ).scalar_one()
     return bool(matches)
+
+
+def _lower_bound_kind(bound: LowerBound) -> str:
+    match bound:
+        case OpenLowerBound():
+            return 'OPEN'
+        case AnchoredLowerBound():
+            return 'AT'
+
+
+def _lower_anchor(bound: LowerBound) -> datetime | None:
+    """The stored anchor of a bound: none for an open bound (the pair CHECK)."""
+    match bound:
+        case OpenLowerBound():
+            return None
+        case AnchoredLowerBound(anchor=anchor):
+            return anchor
 
 
 async def _rewrite_manifest_table(
@@ -323,26 +342,30 @@ async def _rewrite_manifest_table(
             f"""
             INSERT INTO {TASK_LOOKUP_MANIFEST} (
                 leaf_name, probe_position,
-                lower_anchor, upper_anchor, min_birth_at,
+                lower_bound_kind, lower_anchor, upper_anchor,
                 published_at
             )
             SELECT leaf.leaf_name, leaf.position - 1,
-                   leaf.lower_anchor, leaf.upper_anchor, leaf.min_birth_at,
+                   leaf.lower_bound_kind, leaf.lower_anchor, leaf.upper_anchor,
                    statement_timestamp()
             FROM unnest(
                 CAST(:leaf_names AS text[]),
+                CAST(:lower_bound_kinds AS text[]),
                 CAST(:lower_anchors AS timestamptz[]),
-                CAST(:upper_anchors AS timestamptz[]),
-                CAST(:min_births AS timestamptz[])
+                CAST(:upper_anchors AS timestamptz[])
             ) WITH ORDINALITY
-                AS leaf(leaf_name, lower_anchor, upper_anchor, min_birth_at,
+                AS leaf(leaf_name, lower_bound_kind, lower_anchor, upper_anchor,
                         position)
             """
         ),
         {
             'leaf_names': [leaf.relation_name for leaf in manifest.leaves],
-            'lower_anchors': [leaf.lower_anchor for leaf in manifest.leaves],
+            'lower_bound_kinds': [
+                _lower_bound_kind(leaf.lower_bound) for leaf in manifest.leaves
+            ],
+            'lower_anchors': [
+                _lower_anchor(leaf.lower_bound) for leaf in manifest.leaves
+            ],
             'upper_anchors': [leaf.upper_anchor for leaf in manifest.leaves],
-            'min_births': [leaf.min_birth_at for leaf in manifest.leaves],
         },
     )

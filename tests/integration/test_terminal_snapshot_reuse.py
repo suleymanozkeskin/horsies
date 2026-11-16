@@ -29,7 +29,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration]
 
-CLASS_KEY = 'it_snapshot_reuse'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-snapshot-reuse'
 
 terminalization_schema = terminalization_schema_fixture(

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from horsies.core.history.commands import AnchoredLowerBound
 from horsies.core.history.names import CLOCK_SKEW_EXCEPTIONS
 from horsies.core.history.reads.lookup_generation import (
     LookupLeaf,
@@ -24,13 +25,12 @@ DAY = datetime(2026, 10, 1, tzinfo=timezone.utc)
 LEAVES = tuple(
     LookupLeaf(
         relation_name=f'horsies_task_history_probe_{index}',
-        lower_anchor=DAY + timedelta(days=index),
+        lower_bound=AnchoredLowerBound(DAY + timedelta(days=index)),
         upper_anchor=DAY + timedelta(days=index + 1),
-        min_birth_at=None,
     )
     for index in range(3)
 )
-MANIFEST = LookupManifest(leaves=LEAVES, birth_floor=DAY)
+MANIFEST = LookupManifest(leaves=LEAVES)
 GUARD = render_staged_duplicate_guard_function(MANIFEST)
 
 
@@ -52,8 +52,9 @@ def test_absence_consults_the_clock_skew_exceptions() -> None:
         f'RETURN EXISTS (SELECT 1 FROM {CLOCK_SKEW_EXCEPTIONS} '
         'WHERE task_id = p_task_id);'
     )
-    # Below the birth floor, and after every probe found nothing.
-    assert GUARD.count(absence) == 2
+    # After every probe found nothing. The catalog records no birth floor,
+    # so there is no earlier exit below one.
+    assert GUARD.count(absence) == 1
 
 
 @pytest.mark.parametrize(

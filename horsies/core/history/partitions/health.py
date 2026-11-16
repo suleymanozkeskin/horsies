@@ -22,7 +22,12 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import CollectPartitionHealth
+from ..commands import (
+    AnchoredLowerBound,
+    CollectPartitionHealth,
+    LowerBound,
+    OpenLowerBound,
+)
 from ..errors import HistoryContractError, HistoryParentAbsent
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..names import (
@@ -45,10 +50,12 @@ from ..outcomes import (
 from .catalog import (
     RetentionClassRow,
     database_now,
+    decode_lower_bound,
     execute_with_utc_rendering,
     read_retention_class,
+    render_partition_bound,
+    required_utc_timestamp,
 )
-from .forever import FOREVER_LEGACY_LEAF
 
 COVERAGE_FLOOR_INTERVALS = 2
 """Complete future daily intervals below which coverage health is red."""
@@ -57,9 +64,8 @@ COVERAGE_FLOOR_INTERVALS = 2
 @dataclass(frozen=True, slots=True)
 class _LeafSurvey:
     leaf_name: str
-    lower_anchor: datetime
+    lower_bound: LowerBound
     upper_anchor: datetime
-    cataloged_bound: str
     relation_exists: bool
     actual_bound: str | None
     requested_bound_matches: bool
@@ -145,7 +151,8 @@ async def collect_partition_health(
             case False:
                 pass
         if (
-            leaf.actual_bound != leaf.cataloged_bound
+            leaf.actual_bound
+            != render_partition_bound(leaf.lower_bound, leaf.upper_anchor)
             or not leaf.requested_bound_matches
             or not leaf.id_index_conformant
             or not leaf.ordering_index_conformant
@@ -165,8 +172,11 @@ async def collect_partition_health(
         attached_count += 1
         if coverage_until is None or leaf.upper_anchor > coverage_until:
             coverage_until = leaf.upper_anchor
-        if leaf.lower_anchor >= now:
-            complete_future += 1
+        match leaf.lower_bound:
+            case AnchoredLowerBound(anchor=anchor) if anchor >= now:
+                complete_future += 1
+            case AnchoredLowerBound() | OpenLowerBound():
+                pass
         if leaf.blocker_count > 0:
             blocked += 1
         elif duration is not None and leaf.upper_anchor + duration <= now:
@@ -233,21 +243,20 @@ async def _survey_attached_leaves(
                 f"""
                 SELECT
                     c.leaf_name,
+                    c.lower_bound_kind,
                     c.lower_anchor,
                     c.upper_anchor,
-                    c.partition_bound AS cataloged_bound,
                     to_regclass(c.leaf_name) IS NOT NULL AS relation_exists,
                     (SELECT pg_get_expr(pc.relpartbound, pc.oid)
                      FROM pg_class AS pc
                      WHERE pc.oid = to_regclass(c.leaf_name)) AS actual_bound,
                     COALESCE(
-                        (
-                            c.leaf_name = :forever_legacy_leaf
-                            AND c.class_key = :forever_class
-                        )
-                        OR (SELECT pg_get_expr(pc.relpartbound, pc.oid) = format(
-                                'FOR VALUES FROM (%L) TO (%L)',
-                                c.lower_anchor,
+                        (SELECT pg_get_expr(pc.relpartbound, pc.oid) = format(
+                                'FOR VALUES FROM (%s) TO (%L)',
+                                CASE c.lower_bound_kind
+                                    WHEN 'OPEN' THEN 'MINVALUE'
+                                    ELSE quote_literal(c.lower_anchor)
+                                END,
                                 c.upper_anchor
                             )
                             FROM pg_class AS pc
@@ -261,7 +270,12 @@ async def _survey_attached_leaves(
                           ON index_relation.oid = task_index.indexrelid
                         JOIN pg_am AS access_method
                           ON access_method.oid = index_relation.relam
-                        WHERE task_index.indexrelid = to_regclass(c.id_index_name)
+                        WHERE task_index.indexrelid = to_regclass(
+                                c.leaf_name || CASE c.class_key
+                                    WHEN :heartbeat_class THEN '_probe_idx'
+                                    ELSE '_task_idx'
+                                END
+                            )
                           AND task_index.indrelid = to_regclass(c.leaf_name)
                           AND access_method.amname = 'btree'
                           AND task_index.indisvalid
@@ -403,20 +417,19 @@ async def _survey_attached_leaves(
                      FROM {WORKFLOW_PHASE2_PENDING} AS p
                      WHERE p.recovery_source = 'HISTORY'
                        AND p.history_class = c.class_key
-                       AND p.history_anchor >= c.lower_anchor
+                       AND (c.lower_anchor IS NULL OR p.history_anchor >= c.lower_anchor)
                        AND p.history_anchor < c.upper_anchor) AS blocker_count
                 FROM {LEAF_CATALOG} AS c
                 WHERE c.class_key = :class_key
                   AND c.detached_at IS NULL
                   AND c.dropped_at IS NULL
-                ORDER BY c.lower_anchor
+                ORDER BY c.lower_anchor NULLS FIRST
                 """
             ),
             {
                 'class_key': class_key,
                 'parent_name': parent_name,
-                'forever_legacy_leaf': FOREVER_LEGACY_LEAF,
-                'forever_class': FOREVER_CLASS_KEY,
+                'heartbeat_class': HEARTBEAT_CLASS_KEY,
                 'heartbeat_index': class_key == HEARTBEAT_CLASS_KEY,
             },
         )
@@ -432,9 +445,8 @@ async def _survey_attached_leaves(
         survey.append(
             _LeafSurvey(
                 leaf_name=str(row.leaf_name),
-                lower_anchor=row.lower_anchor,
-                upper_anchor=row.upper_anchor,
-                cataloged_bound=str(row.cataloged_bound),
+                lower_bound=decode_lower_bound(row.lower_bound_kind, row.lower_anchor),
+                upper_anchor=required_utc_timestamp(row.upper_anchor, 'upper_anchor'),
                 relation_exists=bool(row.relation_exists),
                 actual_bound=(
                     str(row.actual_bound) if row.actual_bound is not None else None
