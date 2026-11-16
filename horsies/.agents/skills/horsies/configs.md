@@ -614,7 +614,7 @@ config = AppConfig(
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `name` | `str` | required | — | Unique queue name; non-empty, no leading or trailing whitespace, at most 100 characters (HRS-200) |
+| `name` | `str` | required | — | Unique queue name; non-empty, no leading or trailing whitespace, at most 52 bytes of UTF-8 text (HRS-200) |
 | `priority` | `int` | `1` | 1–100 | 1 = highest, 100 = lowest |
 | `max_concurrency` | `int \| None` | `5` | `>= 0` | Max simultaneous RUNNING tasks for this queue. `None` = uncapped (omitted from the worker's per-queue counting entirely); `0` = pause claiming; negative rejected |
 

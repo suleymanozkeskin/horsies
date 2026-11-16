@@ -1329,6 +1329,9 @@ pub fn worker_profiles_claim_errors(
 }
 
 #[cfg(test)]
+mod start_log_tests;
+
+#[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
 

@@ -202,11 +202,11 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -634,10 +634,10 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, task_name, input, queue_name, priority,
+                 downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type, max_retries, execution,
                  retention_class_key, status, is_subworkflow, created_at
-             ) VALUES ($1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
                        '{}', FALSE, 'all', 0, 'ISOLATED',
                        $3, 'RUNNING', FALSE, NOW())",
         )
@@ -2486,11 +2486,11 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'ENQUEUED', FALSE, $3, NOW() - INTERVAL '2 hours', 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2630,12 +2630,12 @@ mod tests {
             for i in 0..nodes {
                 sqlx::query(
                     "INSERT INTO horsies_workflow_tasks (
-                        id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                        downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                         priority, dependencies, allow_failed_deps, join_type, status,
                         is_subworkflow, created_at, max_retries, execution,
                         retention_class_key
                     ) VALUES (
-                        $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
+                        'NONE', $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
                         '{}', FALSE, 'all', 'COMPLETED', FALSE, NOW() - INTERVAL '2 hours', 0,
                         'ISOLATED', 'standard_30d'
                     )",

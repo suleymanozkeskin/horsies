@@ -101,6 +101,19 @@ fn without_birth_floor(body: &str) -> String {
     format!("{}{}", &body[..start], &body[end..])
 }
 
+/// The fixture predates Python's `SET enable_seqscan = off` in every rendered
+/// reader (Python commit 2d1fc080; `horsies/core/history/reads/lookup_generation.py:491`).
+/// Puts the setting where Python renders it: the line after `STABLE`.
+fn with_sequential_scans_off(body: &str) -> String {
+    let stable = "\n    STABLE\n";
+    assert_eq!(
+        body.matches(stable).count(),
+        1,
+        "fixture body carries one STABLE line"
+    );
+    body.replacen(stable, "\n    STABLE\n    SET enable_seqscan = off\n", 1)
+}
+
 fn fixture_manifest() -> (LookupManifest, Value) {
     let fixture: Value = serde_json::from_str(PYTHON_STAGED_FIXTURE).expect("parse P0 fixture");
     let rows = fixture["fixture"]["catalog_rows"]
@@ -149,27 +162,27 @@ fn staged_renderer_is_byte_identical_to_the_python_fixture() {
     );
     assert_eq!(
         render_staged_lookup_function(&manifest),
-        without_birth_floor(
+        with_sequential_scans_off(&without_birth_floor(
             fixture["functions"]["lookup"]
                 .as_str()
                 .expect("lookup body")
-        )
+        ))
     );
     assert_eq!(
         render_staged_provenance_function(&manifest),
-        without_birth_floor(
+        with_sequential_scans_off(&without_birth_floor(
             fixture["functions"]["provenance"]
                 .as_str()
                 .expect("provenance body")
-        )
+        ))
     );
     assert_eq!(
         render_staged_detail_function(&manifest),
-        without_birth_floor(
+        with_sequential_scans_off(&without_birth_floor(
             fixture["functions"]["detail"]
                 .as_str()
                 .expect("detail body")
-        )
+        ))
     );
 }
 

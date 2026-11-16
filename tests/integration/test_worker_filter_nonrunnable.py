@@ -153,11 +153,11 @@ async def _get_terminalization_kind(
 
 
 async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str, bool, str | None]:
-    """Read task status/claim ownership fields for a task."""
+    """Read a task's status, whether it holds a claim lease, and its owner."""
     row = (
         await session.execute(
             text("""
-                SELECT status, claimed, claimed_by_worker_id
+                SELECT status, claim_expires_at IS NOT NULL, claimed_by_worker_id
                 FROM itest_task_rows
                 WHERE id = CAST(:id AS uuid)
             """),
