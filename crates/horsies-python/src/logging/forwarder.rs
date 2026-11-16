@@ -4,8 +4,10 @@
 //! It takes the GIL once per batch, never while it holds a core lock. It
 //! ends when the channel closes or when the interpreter can no longer be
 //! attached (shutdown); records it then holds go to stderr. A panic in the
-//! forwarder is a panic in a core background task: the core stops in this
-//! process.
+//! forwarder is a panic in a core background task: the process panic rule
+//! applies (the core stops in this process, or a worker process aborts).
+//! The forwarder counts every record it handles, so that an abort can wait
+//! for the channel to empty.
 
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
@@ -18,7 +20,7 @@ use pyo3::types::PyTuple;
 
 use super::names::LoggerName;
 use super::{CoreLogRecord, DropCounts, LogSink, RecordLevel, RecordSource};
-use crate::process_core::{stop_after_background_panic, take_panic_cause, PanicReport};
+use crate::process_core::{background_task_panicked, take_panic_cause, PanicReport};
 
 /// How often the forwarder reads Python's effective levels again.
 pub const LEVEL_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -35,10 +37,21 @@ pub fn start_forwarder(
     records: Receiver<CoreLogRecord>,
     sink: Arc<LogSink>,
 ) -> std::io::Result<()> {
-    let _detached = std::thread::Builder::new()
+    sink.mark_forwarder_running();
+    let thread_sink = Arc::clone(&sink);
+    let spawned = std::thread::Builder::new()
         .name(FORWARDER_THREAD_NAME.to_owned())
-        .spawn(move || run(&records, &sink))?;
-    Ok(())
+        .spawn(move || {
+            run(&records, &thread_sink);
+            thread_sink.mark_forwarder_stopped();
+        });
+    match spawned {
+        Ok(_detached) => Ok(()),
+        Err(error) => {
+            sink.mark_forwarder_stopped();
+            Err(error)
+        }
+    }
 }
 
 /// What one wait on the channel gave.
@@ -66,20 +79,26 @@ fn run(records: &Receiver<CoreLogRecord>, sink: &LogSink) {
         }));
         match attached {
             Ok(Some(())) => {
+                sink.records_handled(batch.len());
                 if refresh_due {
                     refresh_at = Instant::now() + LEVEL_REFRESH_INTERVAL;
                 }
             }
             Ok(None) => {
-                spill_all(&batch, records);
+                sink.records_handled(spill_all(&batch, records));
                 return;
             }
             Err(payload) => {
-                stop_after_background_panic(PanicReport {
+                let cause = take_panic_cause(payload.as_ref());
+                // Spill first and mark the forwarder stopped: under the abort
+                // rule the panic call below does not return, and its drain
+                // wait must not wait for this thread.
+                sink.records_handled(spill_all(&batch, records));
+                sink.mark_forwarder_stopped();
+                background_task_panicked(PanicReport {
                     subject: format!("thread {FORWARDER_THREAD_NAME}"),
-                    cause: take_panic_cause(payload.as_ref()),
+                    cause,
                 });
-                spill_all(&batch, records);
                 return;
             }
         }
@@ -194,11 +213,12 @@ fn forward_record(
     Ok(())
 }
 
-/// Write the batch and everything left in the channel to stderr. Bounded by
-/// the channel capacity.
-fn spill_all(batch: &[CoreLogRecord], records: &Receiver<CoreLogRecord>) {
+/// Write the batch and everything left in the channel to stderr, and return
+/// how many records were written. Bounded by the channel capacity.
+fn spill_all(batch: &[CoreLogRecord], records: &Receiver<CoreLogRecord>) -> usize {
     let mut stderr = std::io::stderr();
     let left = std::iter::from_fn(|| records.try_recv().ok()).take(super::LOG_CHANNEL_CAPACITY);
+    let mut written = 0;
     for record in batch.iter().cloned().chain(left) {
         let _write_failure_ignored = writeln!(
             stderr,
@@ -207,7 +227,9 @@ fn spill_all(batch: &[CoreLogRecord], records: &Receiver<CoreLogRecord>) {
             record.level,
             record.message
         );
+        written += 1;
     }
+    written
 }
 
 /// The Python logger objects, fetched once each.

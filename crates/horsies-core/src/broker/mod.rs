@@ -10,6 +10,8 @@ pub mod error;
 pub mod health;
 pub(crate) mod history_reads;
 pub(crate) mod key_reservation;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod listener;
 pub mod migrations;
 #[cfg(test)]

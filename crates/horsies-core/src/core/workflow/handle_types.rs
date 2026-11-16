@@ -16,7 +16,8 @@ use uuid::Uuid;
 ///    `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[code_catalog(module = "workflow_handle", base = "str_enum")]
 pub enum HandleErrorCode {
     /// Workflow ID does not exist in the database.
     WorkflowNotFound,
