@@ -1279,7 +1279,7 @@ impl PostgresBroker {
                 BrokerError::EnqueueContract(format!("task identity mint failed: {error}"))
             })?,
         };
-        let max_retries = parse_max_retries(task_options);
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
         let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
         let retention_class_key = retention.class_key();
@@ -3353,7 +3353,8 @@ fn decode_pong(
 /// Maps database statuses to `TaskResult` variants:
 /// - `COMPLETED`/`FAILED` + valid JSON -> decoded `TaskResult<T>`
 /// - `COMPLETED`/`FAILED` + null -> `TaskResult::Err(ResultNotAvailable)`
-/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))`
+/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
+///   `data = {"task_id": "<id>"}`
 #[allow(clippy::needless_pass_by_value)]
 fn parse_task_result_row<T: DeserializeOwned>(
     row: TaskResultRow,
@@ -3385,10 +3386,15 @@ fn parse_task_result_row<T: DeserializeOwned>(
                 format!("task {} expired", row.id),
             ))),
         },
-        "CANCELLED" => Ok(TaskResult::Err(TaskError::builtin(
-            OutcomeCode::TaskCancelled,
-            format!("task {} was cancelled", row.id),
-        ))),
+        // Python `TaskHandle._record_to_task_result`: the code, the message
+        // and the task id in `data`.
+        "CANCELLED" => Ok(TaskResult::Err(TaskError {
+            data: Some(serde_json::json!({ "task_id": row.id.to_string() })),
+            ..TaskError::builtin(
+                OutcomeCode::TaskCancelled,
+                format!("Task {} was cancelled before completion", row.id),
+            )
+        })),
         other => Err(BrokerError::InvalidStatus(format!(
             "task {} has non-terminal status {}",
             row.id, other,
@@ -3396,7 +3402,47 @@ fn parse_task_result_row<T: DeserializeOwned>(
     }
 }
 
-use crate::core::task::retry_utils::parse_max_retries;
+use crate::worker::retry::{read_stored_options, StoredOptions, StoredRetry};
+
+/// The `max_retries` that enqueue stores, by Python's rule
+/// (`horsies/core/brokers/postgres.py:274-311`, `stored_max_retries`): no
+/// options and no `retry_policy` store 0; a policy stores its `max_retries`.
+/// The options are read with the reader of the dispatch, so a text that the
+/// worker would refuse is refused here, before any statement: text that does
+/// not parse, that is not a JSON object, or whose `retry_policy` does not fit
+/// Python's `RetryPolicy` (a limit outside 1 to 20, a wrong field, no code)
+/// is `EnqueueContract`, which a send reports as `VALIDATION_FAILED`. Other
+/// keys are not judged here.
+fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
+    let refused = |reason: String| {
+        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {reason}"))
+    };
+    match read_stored_options(task_options) {
+        StoredOptions::Unreadable { reason } => Err(refused(reason)),
+        StoredOptions::Readable {
+            retry: StoredRetry::NoPolicy,
+            ..
+        } => Ok(0),
+        StoredOptions::Readable {
+            retry: StoredRetry::Invalid { reason },
+            ..
+        } => Err(refused(reason)),
+        StoredOptions::Readable {
+            retry: StoredRetry::Policy(_),
+            ..
+        } => stored_policy_max_retries(task_options).ok_or_else(|| {
+            refused("retry_policy.max_retries is not a stored retry limit".to_owned())
+        }),
+    }
+}
+
+/// `retry_policy.max_retries` of options that the dispatch reader accepted
+/// with a policy, so the value is an integer from 1 to 20.
+fn stored_policy_max_retries(task_options: Option<&str>) -> Option<i32> {
+    let value: serde_json::Value = serde_json::from_str(task_options?).ok()?;
+    let limit = value.get("retry_policy")?.get("max_retries")?.as_u64()?;
+    i32::try_from(limit).ok()
+}
 
 // ---------------------------------------------------------------------------
 // Result wait
@@ -3712,6 +3758,41 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&Uuid::nil().to_string()));
+    }
+
+    /// A CANCELLED task reads as `TASK_CANCELLED` with Python's message and
+    /// its task id in `data` (Python `TaskHandle._record_to_task_result`;
+    /// `tests/e2e/test_layer1_tasks.py::test_task_cancelled`:
+    /// `result.err.data['task_id'] == task_id`).
+    #[test]
+    fn parse_cancelled_carries_the_task_id_in_data() {
+        let task_id = Uuid::new_v4();
+        let row = TaskResultRow {
+            id: task_id,
+            status: "CANCELLED".to_owned(),
+            result: None,
+            failed_reason: None,
+        };
+
+        let task_result: TaskResult<serde_json::Value> =
+            parse_task_result_row(row).expect("a CANCELLED row reads");
+
+        let TaskResult::Err(error) = task_result else {
+            panic!("a CANCELLED task must read as an error");
+        };
+        assert_eq!(
+            error.error_code,
+            TaskError::builtin(OutcomeCode::TaskCancelled, "").error_code
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some(format!("Task {task_id} was cancelled before completion").as_str())
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({ "task_id": task_id.to_string() }))
+        );
+        assert!(error.cause.is_none());
     }
 
     /// Completed task with a string result type.
@@ -6370,6 +6451,91 @@ mod pool_options_tests {
 
         assert!(failed.is_err(), "the dead connection serves the statement");
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod enqueue_task_options_tests {
+    //! Python `test_enqueue_retry_limit.py` and `test_broker_postgres.py`
+    //! (`test_malformed_task_options_raises`,
+    //! `test_task_options_with_non_dict_retry_policy_is_refused`): enqueue
+    //! stores a policy's limit, no policy stores 0, and options the worker
+    //! would refuse are refused before any statement.
+    use super::*;
+
+    fn policy(max_retries: u32, extra: &str) -> String {
+        let intervals = vec!["60"; max_retries as usize].join(", ");
+        format!(
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+                "backoff_strategy": "fixed", "jitter": false,
+                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+              "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
+              "cancel_grace_ms": null}}"#
+        )
+    }
+
+    #[test]
+    fn no_options_and_no_policy_store_zero_retries() {
+        for options in [
+            None,
+            Some(""),
+            Some(r#"{"retry_policy": null, "execution": "ISOLATED"}"#),
+            Some("{}"),
+        ] {
+            assert_eq!(
+                enqueue_max_retries("t", options).expect("accepted"),
+                0,
+                "{options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_policy_stores_its_limit() {
+        for limit in [1, 3, 20] {
+            assert_eq!(
+                enqueue_max_retries("t", Some(&policy(limit, ""))).expect("accepted"),
+                limit as i32
+            );
+        }
+    }
+
+    #[test]
+    fn options_the_worker_would_refuse_are_refused() {
+        let over_limit = policy(21, "");
+        let unknown_field = policy(2, r#", "extra": 1"#);
+        for options in [
+            "not json",
+            "[]",
+            r#"{"retry_policy": 5}"#,
+            r#"{"retry_policy": {"max_retries": 2}}"#,
+            over_limit.as_str(),
+            unknown_field.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    enqueue_max_retries("t", Some(options)),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{options}"
+            );
+        }
+    }
+
+    /// What the core writes for a task is what its enqueue accepts.
+    #[test]
+    fn the_core_written_options_are_accepted() {
+        let options = crate::core::TaskOptions {
+            task_name: "t".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User("X".to_owned())]),
+            retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
+            timeout_ms: Some(1_000),
+        };
+        let text = options.serialize_retry_options().expect("options are set");
+
+        assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
     }
 }
 
