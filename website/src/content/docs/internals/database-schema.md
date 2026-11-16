@@ -115,7 +115,9 @@ sub-workflow (depth 0-32; a root has depth 0 and no parent).
 
 `horsies_workflow_tasks` holds one row per node: `input`, the dependencies and join (`all`, `any`, or `quorum`
 with `min_success`), status, the linked task id, the sub-workflow fields of a sub-workflow node, and the typed
-facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`).
+facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`). A sub-workflow node also
+stores `sub_workflow_params`: `GIVEN` when the node was given params for the child's `build_with`, `NOT_GIVEN`
+when it was given none; a task node stores NULL.
 
 ## Workflow progression outbox and quarantine
 

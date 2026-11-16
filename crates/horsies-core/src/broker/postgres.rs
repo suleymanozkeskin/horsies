@@ -27,13 +27,13 @@ use crate::core::{
 
 use crate::broker::core_rows::{
     checkout_batch, column, execute_in, expired_task_row, one_row, query_in, query_on, read_rows,
-    roll_back, scalar, stale_task_row, task_attempt_row, task_info_row, task_result_row,
-    worker_state_snapshot, RowDecodeError, StatementLog,
+    roll_back, scalar, stale_task_row, stored_worker_state, task_attempt_row, task_info_row,
+    task_result_row, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
-    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    read_worker_snapshot, read_worker_snapshots, DatabasePing, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result};
 use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
@@ -600,7 +600,8 @@ WITH RECURSIVE latest AS (
             worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
             queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-            memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+            memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+            worker_started_at, slots_down, class_capacity
         FROM horsies_worker_states
         ORDER BY worker_id, snapshot_at DESC
         LIMIT 1
@@ -612,7 +613,8 @@ WITH RECURSIVE latest AS (
             w.worker_id, w.snapshot_at, w.hostname, w.pid, w.processes, w.max_claim_batch,
             w.max_claim_per_worker, w.cluster_wide_cap, w.queues, w.queue_priorities,
             w.queue_max_concurrency, w.recovery_config, w.tasks_running, w.tasks_claimed,
-            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.worker_started_at
+            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.children_memory_mb,
+            w.worker_started_at, w.slots_down, w.class_capacity
         FROM horsies_worker_states w
         WHERE w.worker_id > l.worker_id
         ORDER BY w.worker_id, w.snapshot_at DESC
@@ -627,7 +629,8 @@ SELECT
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+    memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+    worker_started_at, slots_down, class_capacity
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -640,7 +643,8 @@ SELECT
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+    memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+    worker_started_at, slots_down, class_capacity
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -1363,7 +1367,7 @@ impl PostgresBroker {
                 BrokerError::EnqueueContract(format!("task identity mint failed: {error}"))
             })?,
         };
-        let max_retries = parse_max_retries(task_options);
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
         let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
         let retention_class_key = retention.class_key();
@@ -2746,15 +2750,23 @@ impl PostgresBroker {
     /// reported a snapshot appears regardless of current load — unlike the
     /// retired `get_worker_stats` (which counted RUNNING tasks only and missed
     /// idle workers). Mirrors Python's `list_worker_states_async`.
+    ///
+    /// A stored `slots_down`, `class_capacity` or map column of another shape
+    /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
+    /// worker and the column (Python `postgres.py:2961-3034`).
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
-        self.read_main(&LIST_WORKER_STATES.bind().finish(), worker_state_snapshot)
+        let rows = self
+            .read_main(&LIST_WORKER_STATES.bind().finish(), stored_worker_state)
             .await
-            .map_err(|error| monitoring_query_error("list_worker_states", error))
+            .map_err(|error| monitoring_query_error("list_worker_states", error))?;
+        read_worker_snapshots("list_worker_states", rows)
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.
     ///
-    /// Mirrors Python's `get_worker_state_async`.
+    /// An unreadable stored row fails the read as in
+    /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
+    /// `get_worker_state_async`.
     pub async fn get_worker_state(
         &self,
         worker_id: &str,
@@ -2762,18 +2774,23 @@ impl PostgresBroker {
         let rows = self
             .read_main(
                 &GET_WORKER_STATE_LATEST.bind().value(&worker_id).finish(),
-                worker_state_snapshot,
+                stored_worker_state,
             )
             .await
             .map_err(|error| monitoring_query_error("get_worker_state", error))?;
-        Ok(rows.into_iter().next())
+        rows.into_iter()
+            .next()
+            .map(|stored| read_worker_snapshot("get_worker_state", stored))
+            .transpose()
     }
 
     /// State-snapshot history for one worker, newest first.
     ///
     /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
     /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
-    /// Mirrors Python's `get_worker_state_history_async`.
+    /// An unreadable stored row fails the read as in
+    /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
+    /// `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,
@@ -2784,16 +2801,18 @@ impl PostgresBroker {
                 "limit must be positive when set, got {refused}"
             )));
         }
-        self.read_main(
-            &GET_WORKER_STATE_HISTORY
-                .bind()
-                .value(&worker_id)
-                .value(&limit)
-                .finish(),
-            worker_state_snapshot,
-        )
-        .await
-        .map_err(|error| monitoring_query_error("get_worker_state_history", error))
+        let rows = self
+            .read_main(
+                &GET_WORKER_STATE_HISTORY
+                    .bind()
+                    .value(&worker_id)
+                    .value(&limit)
+                    .finish(),
+                stored_worker_state,
+            )
+            .await
+            .map_err(|error| monitoring_query_error("get_worker_state_history", error))?;
+        read_worker_snapshots("get_worker_state_history", rows)
     }
 
     /// Find PENDING tasks that have expired (past their `good_until` deadline).
@@ -3433,46 +3452,53 @@ fn decode_pong(
 
 /// Parse the result row into a `TaskResult<T>`.
 ///
-/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED/FAILED.
-/// Maps database statuses to `TaskResult` variants:
-/// - `COMPLETED`/`FAILED` + valid JSON -> decoded `TaskResult<T>`
-/// - `COMPLETED`/`FAILED` + null -> `TaskResult::Err(ResultNotAvailable)`
-/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))`
+/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED,
+/// FAILED and EXPIRED. Maps database statuses to `TaskResult` variants
+/// (Python `TaskHandle._record_to_task_result`):
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + valid JSON -> decoded `TaskResult<T>`
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + null -> `TaskResult::Err(ResultNotAvailable)`
+///   with `data = {"task_id": "<id>", "status": "<status>"}`
+/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
+///   `data = {"task_id": "<id>"}`
 #[allow(clippy::needless_pass_by_value)]
 fn parse_task_result_row<T: DeserializeOwned>(
     row: TaskResultRow,
 ) -> Result<TaskResult<T>, BrokerError> {
     match row.status.as_str() {
-        "COMPLETED" | "FAILED" => match row.result {
+        // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`,
+        // so an EXPIRED row decodes like COMPLETED and FAILED.
+        "COMPLETED" | "FAILED" | "EXPIRED" => match row.result {
             Some(ref result_json) => {
                 let task_result: TaskResult<T> =
                     serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
                 Ok(task_result)
             }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                RetrievalCode::ResultNotAvailable,
-                format!("task {} completed but result is null", row.id),
-            ))),
+            // Python `TaskHandle._record_to_task_result`: a terminal row
+            // that stored no result is RESULT_NOT_AVAILABLE, with the id and
+            // the status in `data`.
+            None => Ok(TaskResult::Err(TaskError {
+                data: Some(serde_json::json!({
+                    "task_id": row.id.to_string(),
+                    "status": row.status,
+                })),
+                ..TaskError::builtin(
+                    RetrievalCode::ResultNotAvailable,
+                    format!(
+                        "Task {} reached terminal status {} but stored no result payload",
+                        row.id, row.status
+                    ),
+                )
+            })),
         },
-        "EXPIRED" => match row.result {
-            // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`;
-            // decode it like COMPLETED/FAILED. A NULL result (older rows, or a
-            // lost write) still yields the terminal expired outcome instead of a
-            // spurious "non-terminal status EXPIRED" broker error (C2).
-            Some(ref result_json) => {
-                let task_result: TaskResult<T> =
-                    serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
-                Ok(task_result)
-            }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                OutcomeCode::TaskExpired,
-                format!("task {} expired", row.id),
-            ))),
-        },
-        "CANCELLED" => Ok(TaskResult::Err(TaskError::builtin(
-            OutcomeCode::TaskCancelled,
-            format!("task {} was cancelled", row.id),
-        ))),
+        // Python `TaskHandle._record_to_task_result`: the code, the message
+        // and the task id in `data`.
+        "CANCELLED" => Ok(TaskResult::Err(TaskError {
+            data: Some(serde_json::json!({ "task_id": row.id.to_string() })),
+            ..TaskError::builtin(
+                OutcomeCode::TaskCancelled,
+                format!("Task {} was cancelled before completion", row.id),
+            )
+        })),
         other => Err(BrokerError::InvalidStatus(format!(
             "task {} has non-terminal status {}",
             row.id, other,
@@ -3480,7 +3506,47 @@ fn parse_task_result_row<T: DeserializeOwned>(
     }
 }
 
-use crate::core::task::retry_utils::parse_max_retries;
+use crate::worker::retry::{read_stored_options, StoredOptions, StoredRetry};
+
+/// The `max_retries` that enqueue stores, by Python's rule
+/// (`horsies/core/brokers/postgres.py:274-311`, `stored_max_retries`): no
+/// options and no `retry_policy` store 0; a policy stores its `max_retries`.
+/// The options are read with the reader of the dispatch, so a text that the
+/// worker would refuse is refused here, before any statement: text that does
+/// not parse, that is not a JSON object, or whose `retry_policy` does not fit
+/// Python's `RetryPolicy` (a limit outside 1 to 20, a wrong field, no code)
+/// is `EnqueueContract`, which a send reports as `VALIDATION_FAILED`. Other
+/// keys are not judged here.
+fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
+    let refused = |reason: String| {
+        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {reason}"))
+    };
+    match read_stored_options(task_options) {
+        StoredOptions::Unreadable { reason } => Err(refused(reason)),
+        StoredOptions::Readable {
+            retry: StoredRetry::NoPolicy,
+            ..
+        } => Ok(0),
+        StoredOptions::Readable {
+            retry: StoredRetry::Invalid { reason },
+            ..
+        } => Err(refused(reason)),
+        StoredOptions::Readable {
+            retry: StoredRetry::Policy(_),
+            ..
+        } => stored_policy_max_retries(task_options).ok_or_else(|| {
+            refused("retry_policy.max_retries is not a stored retry limit".to_owned())
+        }),
+    }
+}
+
+/// `retry_policy.max_retries` of options that the dispatch reader accepted
+/// with a policy, so the value is an integer from 1 to 20.
+fn stored_policy_max_retries(task_options: Option<&str>) -> Option<i32> {
+    let value: serde_json::Value = serde_json::from_str(task_options?).ok()?;
+    let limit = value.get("retry_policy")?.get("max_retries")?.as_u64()?;
+    i32::try_from(limit).ok()
+}
 
 // ---------------------------------------------------------------------------
 // Result wait
@@ -3621,7 +3687,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3650,7 +3716,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3698,21 +3764,49 @@ mod tests {
         assert_eq!(err.error_code, expected);
     }
 
-    /// C2: an EXPIRED row with a NULL result must still yield the terminal
-    /// expired outcome (fallback), not an `InvalidStatus` broker error.
+    /// A terminal row that stored no result reads as `RESULT_NOT_AVAILABLE`
+    /// with Python's message and the id and status in `data`, for each of
+    /// COMPLETED, FAILED and EXPIRED (Python
+    /// `TaskHandle._record_to_task_result`). An EXPIRED row is no
+    /// `InvalidStatus` broker error.
     #[test]
-    fn parse_expired_null_result() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "EXPIRED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        let err = task_result.unwrap_err();
-        let expected = TaskError::builtin(OutcomeCode::TaskExpired, "").error_code;
-        assert_eq!(err.error_code, expected);
-        assert!(err.message.unwrap().contains("expired"));
+    fn a_terminal_row_without_a_result_reads_as_result_not_available() {
+        let task_id = Uuid::new_v4();
+        for status in ["COMPLETED", "FAILED", "EXPIRED"] {
+            let row = TaskResultRow {
+                id: task_id,
+                status: status.to_owned(),
+                result: None,
+                failed_reason: None,
+            };
+
+            let task_result: TaskResult<serde_json::Value> =
+                parse_task_result_row(row).expect("a terminal row reads");
+
+            let TaskResult::Err(error) = task_result else {
+                panic!("{status}: a row with no result must read as an error");
+            };
+            assert_eq!(
+                error.error_code,
+                TaskError::builtin(RetrievalCode::ResultNotAvailable, "").error_code,
+                "{status}"
+            );
+            assert_eq!(
+                error.message.as_deref(),
+                Some(
+                    format!(
+                        "Task {task_id} reached terminal status {status} but stored no result payload"
+                    )
+                    .as_str()
+                ),
+                "{status}"
+            );
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({ "task_id": task_id.to_string(), "status": status })),
+                "{status}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3796,6 +3890,41 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&Uuid::nil().to_string()));
+    }
+
+    /// A CANCELLED task reads as `TASK_CANCELLED` with Python's message and
+    /// its task id in `data` (Python `TaskHandle._record_to_task_result`;
+    /// `tests/e2e/test_layer1_tasks.py::test_task_cancelled`:
+    /// `result.err.data['task_id'] == task_id`).
+    #[test]
+    fn parse_cancelled_carries_the_task_id_in_data() {
+        let task_id = Uuid::new_v4();
+        let row = TaskResultRow {
+            id: task_id,
+            status: "CANCELLED".to_owned(),
+            result: None,
+            failed_reason: None,
+        };
+
+        let task_result: TaskResult<serde_json::Value> =
+            parse_task_result_row(row).expect("a CANCELLED row reads");
+
+        let TaskResult::Err(error) = task_result else {
+            panic!("a CANCELLED task must read as an error");
+        };
+        assert_eq!(
+            error.error_code,
+            TaskError::builtin(OutcomeCode::TaskCancelled, "").error_code
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some(format!("Task {task_id} was cancelled before completion").as_str())
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({ "task_id": task_id.to_string() }))
+        );
+        assert!(error.cause.is_none());
     }
 
     /// Completed task with a string result type.
@@ -6454,6 +6583,91 @@ mod pool_options_tests {
 
         assert!(failed.is_err(), "the dead connection serves the statement");
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod enqueue_task_options_tests {
+    //! Python `test_enqueue_retry_limit.py` and `test_broker_postgres.py`
+    //! (`test_malformed_task_options_raises`,
+    //! `test_task_options_with_non_dict_retry_policy_is_refused`): enqueue
+    //! stores a policy's limit, no policy stores 0, and options the worker
+    //! would refuse are refused before any statement.
+    use super::*;
+
+    fn policy(max_retries: u32, extra: &str) -> String {
+        let intervals = vec!["60"; max_retries as usize].join(", ");
+        format!(
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+                "backoff_strategy": "fixed", "jitter": false,
+                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+              "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
+              "cancel_grace_ms": null}}"#
+        )
+    }
+
+    #[test]
+    fn no_options_and_no_policy_store_zero_retries() {
+        for options in [
+            None,
+            Some(""),
+            Some(r#"{"retry_policy": null, "execution": "ISOLATED"}"#),
+            Some("{}"),
+        ] {
+            assert_eq!(
+                enqueue_max_retries("t", options).expect("accepted"),
+                0,
+                "{options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_policy_stores_its_limit() {
+        for limit in [1, 3, 20] {
+            assert_eq!(
+                enqueue_max_retries("t", Some(&policy(limit, ""))).expect("accepted"),
+                limit as i32
+            );
+        }
+    }
+
+    #[test]
+    fn options_the_worker_would_refuse_are_refused() {
+        let over_limit = policy(21, "");
+        let unknown_field = policy(2, r#", "extra": 1"#);
+        for options in [
+            "not json",
+            "[]",
+            r#"{"retry_policy": 5}"#,
+            r#"{"retry_policy": {"max_retries": 2}}"#,
+            over_limit.as_str(),
+            unknown_field.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    enqueue_max_retries("t", Some(options)),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{options}"
+            );
+        }
+    }
+
+    /// What the core writes for a task is what its enqueue accepts.
+    #[test]
+    fn the_core_written_options_are_accepted() {
+        let options = crate::core::TaskOptions {
+            task_name: "t".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User("X".to_owned())]),
+            retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
+            timeout_ms: Some(1_000),
+        };
+        let text = options.serialize_retry_options().expect("options are set");
+
+        assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
     }
 }
 
