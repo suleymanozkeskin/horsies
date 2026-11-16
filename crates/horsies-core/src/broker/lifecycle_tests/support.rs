@@ -13,18 +13,27 @@ use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
+use crate::broker::terminalization::terminalize;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, encode_attempt_snapshot};
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
 };
 use crate::core::history::outcomes::LeafCreation;
-use crate::core::lifecycle::OwnedClaim;
+use crate::core::lifecycle::{
+    BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+};
 
 /// The worker that holds the seeded claims.
 pub(super) const WORKER: &str = "lifecycle-test-worker";
 
 /// A worker that is not this test's worker.
 pub(super) const OTHER_WORKER: &str = "someone-else";
+
+/// Bound of the passes that drain a sweep before a test seeds its rows.
+const DRAIN_PASS_LIMIT: u32 = 10_000;
+
+/// Rows per pass of a drained sweep.
+const DRAIN_BATCH_SIZE: i32 = 500;
 
 /// Bound of the wait for a lock: 100 polls of 10 ms.
 const LOCK_WAIT_POLLS: u32 = 100;
@@ -441,6 +450,7 @@ pub(super) struct HistoryImage {
     pub(super) error_code: Option<String>,
     pub(super) final_failed_reason: Option<String>,
     pub(super) workflow_id: Option<Uuid>,
+    pub(super) claimed_at: Option<DateTime<Utc>>,
     pub(super) last_claimed_worker_id: Option<String>,
     pub(super) result_payload: Option<Vec<u8>>,
     pub(super) rerun_input_disposition: String,
@@ -450,7 +460,7 @@ pub(super) struct HistoryImage {
 pub(super) async fn history_row(pool: &PgPool, task_id: Uuid) -> Option<HistoryImage> {
     sqlx::query_as(
         "SELECT status::text AS status, terminalization_kind::text AS terminalization_kind,
-                error_code, final_failed_reason, workflow_id,
+                error_code, final_failed_reason, workflow_id, claimed_at,
                 last_claimed_worker_id::text AS last_claimed_worker_id,
                 result_payload, rerun_input_disposition::text AS rerun_input_disposition
          FROM horsies_task_history WHERE task_id = $1",
@@ -563,6 +573,20 @@ pub(super) async fn seed_node(
     .await
     .expect("seed workflow node");
     node_row_id
+}
+
+/// A workflow with `workflow_status` and one task node linked to
+/// `task_id`. Returns the workflow id.
+pub(super) async fn link_workflow_task(
+    pool: &PgPool,
+    task_id: Uuid,
+    node_status: &str,
+    workflow_status: &str,
+) -> Uuid {
+    let workflow_id = Uuid::new_v4();
+    seed_workflow(pool, workflow_id, workflow_status).await;
+    seed_node(pool, workflow_id, Some(task_id), node_status).await;
+    workflow_id
 }
 
 /// The status of a workflow node row.
@@ -715,6 +739,74 @@ pub(super) async fn waits_on(pool: &PgPool, waiter_pid: i32, holder_pid: i32) ->
         tokio::time::sleep(LOCK_WAIT_POLL_INTERVAL).await;
     }
     false
+}
+
+/// Expire every PENDING row that is already due, so the rows a test seeds
+/// next are the only due rows of the sweep.
+pub(super) async fn drain_pending_expiry(pool: &PgPool) {
+    for _ in 0..DRAIN_PASS_LIMIT {
+        let drained = terminalize(
+            pool,
+            &TerminalizationCommand::ExpirePendingTasks {
+                batch_size: BatchSize::new(DRAIN_BATCH_SIZE).expect("positive batch size"),
+                result_json: r#"{"err": 4}"#.to_owned(),
+                error_code: "TASK_EXPIRED".to_owned(),
+            },
+        )
+        .await
+        .expect("drain pending expiry");
+        if drained.len() < DRAIN_BATCH_SIZE as usize {
+            return;
+        }
+    }
+    panic!("pending expiry did not drain in {DRAIN_PASS_LIMIT} passes");
+}
+
+/// The cycle count and the rows of the last pass of the orphan audit cursor.
+async fn orphan_audit_progress(pool: &PgPool) -> (i64, i32) {
+    sqlx::query_as(
+        "SELECT completed_cycles, last_scan_rows
+         FROM horsies_recovery_scan_cursors
+         WHERE scan_name = 'orphan_workflow_tasks'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read orphan audit progress")
+}
+
+/// Run orphan sweep passes until the audit cycle that is open at the call
+/// ends, and return every outcome of those passes.
+async fn sweep_orphans_to_cycle_end(pool: &PgPool) -> Vec<TerminalizationOutcome> {
+    let (initial_cycles, _) = orphan_audit_progress(pool).await;
+    let mut outcomes = Vec::new();
+    for _ in 0..DRAIN_PASS_LIMIT {
+        let pass = terminalize(
+            pool,
+            &TerminalizationCommand::CancelOrphanedTasks {
+                batch_size: BatchSize::new(DRAIN_BATCH_SIZE).expect("positive batch size"),
+            },
+        )
+        .await
+        .expect("orphan sweep pass");
+        outcomes.extend(pass);
+        let (completed_cycles, scanned) = orphan_audit_progress(pool).await;
+        if scanned == 0 || completed_cycles > initial_cycles {
+            return outcomes;
+        }
+    }
+    panic!("the orphan audit did not end its cycle in {DRAIN_PASS_LIMIT} passes");
+}
+
+/// End the open orphan audit cycle, so the rows a test seeds next are inside
+/// the next cycle.
+pub(super) async fn drain_orphan_sweep(pool: &PgPool) {
+    let _drained: Vec<TerminalizationOutcome> = sweep_orphans_to_cycle_end(pool).await;
+}
+
+/// One full orphan audit cycle over the rows that exist now: the outcomes
+/// of every pass of that cycle. Call `drain_orphan_sweep` before seeding.
+pub(super) async fn sweep_orphans_one_cycle(pool: &PgPool) -> Vec<TerminalizationOutcome> {
+    sweep_orphans_to_cycle_end(pool).await
 }
 
 /// Delete every row that a test wrote for these tasks.

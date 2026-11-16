@@ -18,10 +18,11 @@ use crate::broker::attempt_writes::{
     FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
 use crate::broker::terminalization::{terminalize, terminalize_in_tx};
-use crate::core::lifecycle::outcomes::ObservedClaim;
+use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
-    AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, TerminalizationCommand,
-    TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
+    AttemptWriteRefusal, BatchSize, CallerHoldsRowLock, FailedAttemptOutcome, GuardEvidence,
+    OwnedClaim, OwnedClaimBatch, TerminalizationCommand, TerminalizationKind,
+    TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
 
@@ -127,7 +128,8 @@ mod terminal_at_invariant {
             sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
                 .bind(task_id)
                 .execute(&pool)
-                .await;
+                .await
+                .map(|done| done.rows_affected());
         assert_refused(
             terminal_in_live_table,
             "23514",
@@ -934,5 +936,1056 @@ mod expire_owned_claim {
             ),
             "{outcomes:?}"
         );
+    }
+}
+
+fn expire_pending(batch_size: i32) -> TerminalizationCommand {
+    TerminalizationCommand::ExpirePendingTasks {
+        batch_size: BatchSize::new(batch_size).expect("positive batch size"),
+        result_json: r#"{"err": 4}"#.to_owned(),
+        error_code: "TASK_EXPIRED".to_owned(),
+    }
+}
+
+fn cancel_locked(task_id: Uuid) -> TerminalizationCommand {
+    TerminalizationCommand::CancelLockedTask {
+        task_id,
+        fence: CallerHoldsRowLock,
+        permitted_source_statuses: vec![TaskStatus::Pending, TaskStatus::Claimed],
+    }
+}
+
+fn cancel_owned_orphan(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
+    TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
+}
+
+fn abandon_owned(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
+    TerminalizationCommand::AbandonOwnedNode { task_id, fence }
+}
+
+fn cancel_owned_node(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
+    TerminalizationCommand::CancelOwnedNode {
+        task_id,
+        fence,
+        accepts_requeued_pending: true,
+    }
+}
+
+/// The fence of `WORKER` one second before `generation()`.
+fn stale_claim() -> OwnedClaim {
+    OwnedClaim {
+        worker_id: WORKER.to_owned(),
+        claimed_at: generation() - Duration::seconds(1),
+    }
+}
+
+/// A claimed workflow task of `WORKER` at `generation()`.
+fn claimed_workflow_task() -> TaskSeed {
+    TaskSeed {
+        origin: Origin::WorkflowNode,
+        ..TaskSeed::claimed()
+    }
+}
+
+/// The task ids of `outcomes` that are in `task_ids`, in outcome order.
+fn outcome_ids_among(outcomes: &[TerminalizationOutcome], task_ids: &[Uuid]) -> Vec<Uuid> {
+    outcomes
+        .iter()
+        .map(TerminalizationOutcome::task_id)
+        .filter(|task_id| task_ids.contains(task_id))
+        .collect()
+}
+
+mod expire_pending_tasks {
+    use super::*;
+
+    /// Python `TestExpirePendingTasks::test_the_sweep_clears_an_earlier_attempts_reason`:
+    /// a requeued PENDING row expires without its old reason, and attempt one
+    /// keeps its reason.
+    #[tokio::test]
+    #[serial]
+    async fn the_sweep_clears_an_earlier_attempts_reason() {
+        let pool = pool().await;
+        drain_pending_expiry(&pool).await;
+        let task_id = seed_task(&pool, &TaskSeed::pending()).await;
+        set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(60.0)).await;
+        record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
+
+        let outcomes = terminalize(&pool, &expire_pending(10))
+            .await
+            .expect("expire pending");
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(TerminalizationOutcome::task_id)
+                .collect::<Vec<_>>(),
+            vec![task_id]
+        );
+        let image = history_row(&pool, task_id).await.expect("history row");
+        assert_eq!(image.status, "EXPIRED");
+        assert_eq!(image.error_code.as_deref(), Some("TASK_EXPIRED"));
+        assert_eq!(image.final_failed_reason, None);
+        assert_eq!(
+            archived_attempts(&pool, task_id).await,
+            vec![(
+                1,
+                "FAILED".to_owned(),
+                Some("attempt one crashed".to_owned())
+            )]
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestExpirePendingTasks::test_a_row_a_concurrent_claim_holds_is_stepped_around`:
+    /// SKIP LOCKED, so neither side waits.
+    #[tokio::test]
+    #[serial]
+    async fn a_row_a_concurrent_claim_holds_is_stepped_around() {
+        let pool = pool().await;
+        drain_pending_expiry(&pool).await;
+        let held = seed_task(&pool, &TaskSeed::pending()).await;
+        set_deadline(&pool, held, Deadline::PassedSecondsAgo(60.0)).await;
+        let free = seed_task(&pool, &TaskSeed::pending()).await;
+        set_deadline(&pool, free, Deadline::PassedSecondsAgo(60.0)).await;
+
+        let mut holder = pool.begin().await.expect("begin holder");
+        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+            .bind(held)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the row lock");
+        let outcomes = terminalize(&pool, &expire_pending(10))
+            .await
+            .expect("expire pending");
+        holder.rollback().await.expect("release the row lock");
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(TerminalizationOutcome::task_id)
+                .collect::<Vec<_>>(),
+            vec![free]
+        );
+        assert_eq!(
+            live_row(&pool, held).await.expect("held row")["status"],
+            "PENDING"
+        );
+        cleanup_tasks(&pool, &[held, free]).await;
+    }
+}
+
+mod cancel_locked_task {
+    use super::*;
+
+    /// Python `TestCancelLockedTask::test_replay_is_already_applied`.
+    #[tokio::test]
+    #[serial]
+    async fn replay_is_already_applied() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
+        let first = terminalize(&pool, &cancel_locked(task_id))
+            .await
+            .expect("cancel");
+        assert!(
+            matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
+            "{first:?}"
+        );
+
+        let replay = terminalize(&pool, &cancel_locked(task_id))
+            .await
+            .expect("replay");
+
+        assert!(
+            matches!(
+                replay.as_slice(),
+                [TerminalizationOutcome::AlreadyApplied {
+                    kind: TerminalizationKind::CancelAdmin,
+                    ..
+                }]
+            ),
+            "{replay:?}"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestCancelLockedTask::test_absence_is_an_outcome`.
+    #[tokio::test]
+    #[serial]
+    async fn absence_is_an_outcome() {
+        let pool = pool().await;
+        let outcomes = terminalize(&pool, &cancel_locked(Uuid::new_v4()))
+            .await
+            .expect("cancel");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::TaskAbsent { .. }]
+            ),
+            "{outcomes:?}"
+        );
+    }
+}
+
+mod cancel_owned_orphan {
+    use super::*;
+
+    /// Python `TestCancelOwnedOrphan::test_a_terminal_link_still_leaves_the_backing_task_orphaned`:
+    /// a node that is already COMPLETED is not a runnable link.
+    #[tokio::test]
+    #[serial]
+    async fn a_terminal_link_still_leaves_the_backing_task_orphaned() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+        let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "RUNNING").await;
+
+        let outcomes = terminalize(&pool, &cancel_owned_orphan(task_id, owned_claim()))
+            .await
+            .expect("cancel orphan");
+
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::Applied {
+                    kind: TerminalizationKind::CancelOrphan,
+                    ..
+                }]
+            ),
+            "{outcomes:?}"
+        );
+        let image = history_row(&pool, task_id).await.expect("history row");
+        assert_eq!(image.status, "CANCELLED");
+        assert_eq!(image.workflow_id, Some(workflow_id));
+        cleanup_tasks(&pool, &[task_id]).await;
+        cleanup_workflows(&pool, &[workflow_id]).await;
+    }
+
+    /// Python `TestCancelOwnedOrphan::test_a_stale_generation_is_a_lost_claim_even_with_a_live_link`:
+    /// the fence is judged before the link guard.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_generation_is_a_lost_claim_even_with_a_live_link() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+        let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
+
+        let outcomes = terminalize(
+            &pool,
+            &cancel_owned_orphan(
+                task_id,
+                OwnedClaim {
+                    worker_id: WORKER.to_owned(),
+                    claimed_at: generation() - Duration::minutes(1),
+                },
+            ),
+        )
+        .await
+        .expect("cancel orphan");
+
+        let [TerminalizationOutcome::LostClaim { observed, .. }] = outcomes.as_slice() else {
+            panic!("expected a lost claim, got {outcomes:?}");
+        };
+        assert_eq!(observed.claimed_at, Some(generation()));
+        assert_eq!(
+            live_row(&pool, task_id).await.expect("live row")["status"],
+            "CLAIMED"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+        cleanup_workflows(&pool, &[workflow_id]).await;
+    }
+
+    /// Python `TestCancelOwnedOrphan::test_the_sweep_kind_counts_as_the_same_work`.
+    #[tokio::test]
+    #[serial]
+    async fn the_sweep_kind_counts_as_the_same_work() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, task_id, "CANCELLED", "CANCEL_ORPHAN_SWEEP").await;
+
+        let outcomes = terminalize(&pool, &cancel_owned_orphan(task_id, owned_claim()))
+            .await
+            .expect("cancel orphan");
+
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::AlreadyApplied {
+                    kind: TerminalizationKind::CancelOrphanSweep,
+                    ..
+                }]
+            ),
+            "{outcomes:?}"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestCancelOwnedOrphan::test_an_administrative_cancellation_is_a_conflict`.
+    #[tokio::test]
+    #[serial]
+    async fn an_administrative_cancellation_is_a_conflict() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, task_id, "CANCELLED", "CANCEL_ADMIN").await;
+
+        let outcomes = terminalize(&pool, &cancel_owned_orphan(task_id, owned_claim()))
+            .await
+            .expect("cancel orphan");
+
+        let [TerminalizationOutcome::SourceStateConflict {
+            evidence: GuardEvidence::ForeignTerminalization(foreign),
+            ..
+        }] = outcomes.as_slice()
+        else {
+            panic!("expected a foreign terminalization, got {outcomes:?}");
+        };
+        assert_eq!(foreign.committed_kind, TerminalizationKind::CancelAdmin);
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestCancelOwnedOrphan::test_absence_is_an_outcome`.
+    #[tokio::test]
+    #[serial]
+    async fn absence_is_an_outcome() {
+        let pool = pool().await;
+        let outcomes = terminalize(&pool, &cancel_owned_orphan(Uuid::new_v4(), owned_claim()))
+            .await
+            .expect("cancel orphan");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::TaskAbsent { .. }]
+            ),
+            "{outcomes:?}"
+        );
+    }
+}
+
+mod cancel_orphaned_tasks {
+    use super::*;
+
+    /// Python `TestCancelOrphanedTasks::test_transitions_only_orphans_in_the_effective_source_set`:
+    /// the sweep cancels unlinked workflow tasks that are CLAIMED or PENDING;
+    /// a linked task, a plain task and a RUNNING task stay.
+    #[tokio::test]
+    #[serial]
+    async fn transitions_only_orphans_in_the_effective_source_set() {
+        let pool = pool().await;
+        drain_orphan_sweep(&pool).await;
+        let claimed = seed_task(&pool, &claimed_workflow_task()).await;
+        let pending = seed_task(
+            &pool,
+            &TaskSeed {
+                origin: Origin::WorkflowNode,
+                ..TaskSeed::pending()
+            },
+        )
+        .await;
+        let linked = seed_task(&pool, &claimed_workflow_task()).await;
+        let workflow_id = link_workflow_task(&pool, linked, "READY", "RUNNING").await;
+        let plain = seed_task(&pool, &TaskSeed::claimed()).await;
+        let running = seed_task(
+            &pool,
+            &TaskSeed {
+                origin: Origin::WorkflowNode,
+                ..TaskSeed::running()
+            },
+        )
+        .await;
+        let mine = [claimed, pending, linked, plain, running];
+
+        let outcomes = sweep_orphans_one_cycle(&pool).await;
+
+        let mut swept = outcome_ids_among(&outcomes, &mine);
+        swept.sort_unstable();
+        let mut expected = vec![claimed, pending];
+        expected.sort_unstable();
+        assert_eq!(swept, expected);
+        for outcome in outcomes.iter().filter(|o| mine.contains(&o.task_id())) {
+            assert!(
+                matches!(
+                    outcome,
+                    TerminalizationOutcome::Applied {
+                        kind: TerminalizationKind::CancelOrphanSweep,
+                        ordinality: None,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+        }
+        for (task_id, status) in [
+            (linked, "CLAIMED"),
+            (plain, "CLAIMED"),
+            (running, "RUNNING"),
+        ] {
+            assert_eq!(
+                live_row(&pool, task_id).await.expect("live row")["status"],
+                status
+            );
+        }
+        for task_id in [claimed, pending] {
+            assert_eq!(
+                history_row(&pool, task_id)
+                    .await
+                    .expect("history row")
+                    .status,
+                "CANCELLED"
+            );
+        }
+        cleanup_tasks(&pool, &mine).await;
+        cleanup_workflows(&pool, &[workflow_id]).await;
+    }
+
+    /// Python `TestCancelOrphanedTasks::test_a_locked_orphan_is_stepped_around`.
+    #[tokio::test]
+    #[serial]
+    async fn a_locked_orphan_is_stepped_around() {
+        let pool = pool().await;
+        drain_orphan_sweep(&pool).await;
+        let held = seed_task(&pool, &claimed_workflow_task()).await;
+        let free = seed_task(&pool, &claimed_workflow_task()).await;
+
+        let mut holder = pool.begin().await.expect("begin holder");
+        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+            .bind(held)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the row lock");
+        let outcomes = sweep_orphans_one_cycle(&pool).await;
+        holder.rollback().await.expect("release the row lock");
+
+        assert_eq!(outcome_ids_among(&outcomes, &[held, free]), vec![free]);
+        assert_eq!(
+            live_row(&pool, held).await.expect("held row")["status"],
+            "CLAIMED"
+        );
+        cleanup_tasks(&pool, &[held, free]).await;
+    }
+}
+
+mod abandon_owned_node {
+    use super::*;
+
+    /// Python `TestAbandonOwnedNode::test_a_null_generation_keeps_the_worker_fence`,
+    /// with the core's rule: the stored function refuses a NULL generation
+    /// before any lock or write (differences ledger, row 3).
+    #[tokio::test]
+    #[serial]
+    #[ignore = "waits on #697"]
+    async fn a_null_generation_is_refused() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+        let before = live_row(&pool, task_id).await;
+
+        let refused = sqlx::query("SELECT * FROM horsies_abandon_owned_node($1, $2, NULL)")
+            .bind(task_id)
+            .bind(WORKER)
+            .fetch_all(&pool)
+            .await
+            .map(|rows| rows.len());
+
+        assert_refused(refused, "22023", Constraint::Unnamed);
+        assert_eq!(live_row(&pool, task_id).await, before);
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestAbandonOwnedNode::test_pause_kinds_are_equivalent_but_workflow_cancel_is_not`.
+    #[tokio::test]
+    #[serial]
+    async fn pause_kinds_are_equivalent_but_workflow_cancel_is_not() {
+        let pool = pool().await;
+        let same = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, same, "CANCELLED", "PAUSE_ABANDON_WORKFLOW").await;
+        let foreign = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, foreign, "CANCELLED", "WORKFLOW_CANCEL_CLAIM").await;
+
+        let same_outcomes = terminalize(&pool, &abandon_owned(same, owned_claim()))
+            .await
+            .expect("abandon");
+        let foreign_outcomes = terminalize(&pool, &abandon_owned(foreign, owned_claim()))
+            .await
+            .expect("abandon");
+
+        assert!(
+            matches!(
+                same_outcomes.as_slice(),
+                [TerminalizationOutcome::AlreadyApplied {
+                    kind: TerminalizationKind::PauseAbandonWorkflow,
+                    ..
+                }]
+            ),
+            "{same_outcomes:?}"
+        );
+        let [TerminalizationOutcome::SourceStateConflict {
+            evidence: GuardEvidence::ForeignTerminalization(foreign_kind),
+            ..
+        }] = foreign_outcomes.as_slice()
+        else {
+            panic!("expected a foreign terminalization, got {foreign_outcomes:?}");
+        };
+        assert_eq!(
+            foreign_kind.committed_kind,
+            TerminalizationKind::WorkflowCancelClaim
+        );
+        cleanup_tasks(&pool, &[same, foreign]).await;
+    }
+
+    /// Python `TestAbandonOwnedNode::test_absence_is_an_outcome`.
+    #[tokio::test]
+    #[serial]
+    async fn absence_is_an_outcome() {
+        let pool = pool().await;
+        let outcomes = terminalize(&pool, &abandon_owned(Uuid::new_v4(), owned_claim()))
+            .await
+            .expect("abandon");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::TaskAbsent { .. }]
+            ),
+            "{outcomes:?}"
+        );
+    }
+}
+
+mod cancel_owned_node {
+    use super::*;
+
+    /// Python `TestCancelOwnedNode::test_the_terminal_record_carries_its_own_summary`.
+    /// A worker-side node cancel has no error summary of its own, so the
+    /// summary of an earlier attempt does not reach the history row.
+    #[tokio::test]
+    #[serial]
+    async fn the_terminal_record_carries_its_own_summary() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+        record_failed_first_attempt(&pool, task_id, "old reason").await;
+
+        let outcomes = terminalize(&pool, &cancel_owned_node(task_id, owned_claim()))
+            .await
+            .expect("cancel node");
+
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::Applied {
+                    kind: TerminalizationKind::WorkflowCancelClaim,
+                    ..
+                }]
+            ),
+            "{outcomes:?}"
+        );
+        let image = history_row(&pool, task_id).await.expect("history row");
+        assert_eq!(image.status, "CANCELLED");
+        assert_eq!(image.error_code, None);
+        assert_eq!(image.final_failed_reason, None);
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestCancelOwnedNode::test_a_stale_claim_is_lost`.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_claim_is_lost() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+
+        let outcomes = terminalize(&pool, &cancel_owned_node(task_id, stale_claim()))
+            .await
+            .expect("cancel node");
+
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [TerminalizationOutcome::LostClaim { .. }]
+            ),
+            "{outcomes:?}"
+        );
+        assert_eq!(
+            live_row(&pool, task_id).await.expect("live row")["status"],
+            "CLAIMED"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestCancelOwnedNode::test_replay_foreign_kind_wrong_source_and_absence_are_distinct`.
+    #[tokio::test]
+    #[serial]
+    async fn replay_foreign_kind_wrong_source_and_absence_are_distinct() {
+        let pool = pool().await;
+        let replay_id = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, replay_id, "CANCELLED", "WORKFLOW_CANCEL_WORKFLOW").await;
+        let foreign_id = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, foreign_id, "CANCELLED", "PAUSE_ABANDON_CLAIM").await;
+        let running_id = seed_task(
+            &pool,
+            &TaskSeed {
+                origin: Origin::WorkflowNode,
+                ..TaskSeed::running()
+            },
+        )
+        .await;
+
+        let replay = terminalize(&pool, &cancel_owned_node(replay_id, owned_claim()))
+            .await
+            .expect("replay");
+        let foreign = terminalize(&pool, &cancel_owned_node(foreign_id, owned_claim()))
+            .await
+            .expect("foreign");
+        let wrong_source = terminalize(&pool, &cancel_owned_node(running_id, owned_claim()))
+            .await
+            .expect("wrong source");
+        let absent = terminalize(&pool, &cancel_owned_node(Uuid::new_v4(), owned_claim()))
+            .await
+            .expect("absent");
+
+        assert!(
+            matches!(
+                replay.as_slice(),
+                [TerminalizationOutcome::AlreadyApplied {
+                    kind: TerminalizationKind::WorkflowCancelWorkflow,
+                    ..
+                }]
+            ),
+            "{replay:?}"
+        );
+        assert!(
+            matches!(
+                foreign.as_slice(),
+                [TerminalizationOutcome::SourceStateConflict {
+                    evidence: GuardEvidence::ForeignTerminalization(_),
+                    ..
+                }]
+            ),
+            "{foreign:?}"
+        );
+        let [TerminalizationOutcome::SourceStateConflict { observed, .. }] =
+            wrong_source.as_slice()
+        else {
+            panic!("expected a source state conflict, got {wrong_source:?}");
+        };
+        assert_eq!(observed.status, Some(TaskStatus::Running));
+        assert!(
+            matches!(
+                absent.as_slice(),
+                [TerminalizationOutcome::TaskAbsent { .. }]
+            ),
+            "{absent:?}"
+        );
+        cleanup_tasks(&pool, &[replay_id, foreign_id, running_id]).await;
+    }
+}
+
+mod id_keyed_workflow_batches {
+    use super::*;
+
+    /// The id-keyed batch under test.
+    #[derive(Debug, Clone, Copy)]
+    enum Batch {
+        Abandon,
+        Cancel,
+    }
+
+    impl Batch {
+        fn command(self, fence: OwnedClaimBatch) -> TerminalizationCommand {
+            match self {
+                Self::Abandon => TerminalizationCommand::AbandonOwnedNodes { fence },
+                Self::Cancel => TerminalizationCommand::CancelOwnedNodes { fence },
+            }
+        }
+
+        /// The kind that is the same work, the foreign kind, and the kind
+        /// that this batch writes.
+        fn kinds(self) -> (&'static str, &'static str, TerminalizationKind) {
+            match self {
+                Self::Abandon => (
+                    "PAUSE_ABANDON_WORKFLOW",
+                    "WORKFLOW_CANCEL_WORKFLOW",
+                    TerminalizationKind::PauseAbandonClaimBatch,
+                ),
+                Self::Cancel => (
+                    "WORKFLOW_CANCEL_WORKFLOW",
+                    "PAUSE_ABANDON_WORKFLOW",
+                    TerminalizationKind::WorkflowCancelClaimBatch,
+                ),
+            }
+        }
+
+        /// The error code and reason that the batch writes on its history
+        /// row: pause-abandon states its cause; a workflow cancel has none.
+        fn summary(self) -> (Option<&'static str>, Option<&'static str>) {
+            match self {
+                Self::Abandon => (
+                    Some("TASK_CANCELLED"),
+                    Some("Workflow paused before task start"),
+                ),
+                Self::Cancel => (None, None),
+            }
+        }
+    }
+
+    /// Python `TestIdKeyedWorkflowBatches::test_one_ordered_outcome_per_input_across_every_outcome`.
+    /// The Python case of a kindless history row is not ported: the core
+    /// has no such row (differences ledger, row 4).
+    async fn one_ordered_outcome_per_input(batch: Batch) {
+        let pool = pool().await;
+        let (same_kind, foreign_kind, applied_kind) = batch.kinds();
+        let applied_id = seed_task(&pool, &claimed_workflow_task()).await;
+        record_failed_first_attempt(&pool, applied_id, "old reason").await;
+        let lost_id = seed_task(&pool, &claimed_workflow_task()).await;
+        let conflict_id = seed_task(
+            &pool,
+            &TaskSeed {
+                origin: Origin::WorkflowNode,
+                ..TaskSeed::running()
+            },
+        )
+        .await;
+        let same_id = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, same_id, "CANCELLED", same_kind).await;
+        let foreign_id = seed_task(&pool, &claimed_workflow_task()).await;
+        force_terminal(&pool, foreign_id, "CANCELLED", foreign_kind).await;
+        let absent_id = Uuid::new_v4();
+        let fence = OwnedClaimBatch::new(
+            WORKER.to_owned(),
+            vec![
+                (applied_id, generation()),
+                (lost_id, generation() - Duration::seconds(1)),
+                (conflict_id, generation()),
+                (same_id, generation()),
+                (foreign_id, generation()),
+                (absent_id, generation()),
+            ],
+        )
+        .expect("distinct ids");
+
+        let outcomes = terminalize(&pool, &batch.command(fence))
+            .await
+            .expect("batch");
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(TerminalizationOutcome::task_id)
+                .collect::<Vec<_>>(),
+            vec![
+                applied_id,
+                lost_id,
+                conflict_id,
+                same_id,
+                foreign_id,
+                absent_id
+            ]
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(TerminalizationOutcome::ordinality)
+                .collect::<Vec<_>>(),
+            (1..=6).map(Some).collect::<Vec<_>>()
+        );
+        let [applied, lost, conflict, same, foreign, absent] = outcomes.as_slice() else {
+            panic!("expected six outcomes, got {outcomes:?}");
+        };
+        assert!(
+            matches!(applied, TerminalizationOutcome::Applied { kind, .. } if *kind == applied_kind),
+            "{applied:?}"
+        );
+        assert!(
+            matches!(lost, TerminalizationOutcome::LostClaim { .. }),
+            "{lost:?}"
+        );
+        assert!(
+            matches!(conflict, TerminalizationOutcome::SourceStateConflict { .. }),
+            "{conflict:?}"
+        );
+        assert!(
+            matches!(same, TerminalizationOutcome::AlreadyApplied { .. }),
+            "{same:?}"
+        );
+        assert!(
+            matches!(
+                foreign,
+                TerminalizationOutcome::SourceStateConflict {
+                    evidence: GuardEvidence::ForeignTerminalization(_),
+                    ..
+                }
+            ),
+            "{foreign:?}"
+        );
+        assert!(
+            matches!(absent, TerminalizationOutcome::TaskAbsent { .. }),
+            "{absent:?}"
+        );
+
+        let image = history_row(&pool, applied_id).await.expect("history row");
+        let (error_code, failed_reason) = batch.summary();
+        assert_eq!(image.error_code.as_deref(), error_code);
+        assert_eq!(image.final_failed_reason.as_deref(), failed_reason);
+
+        cleanup_tasks(
+            &pool,
+            &[applied_id, lost_id, conflict_id, same_id, foreign_id],
+        )
+        .await;
+    }
+
+    /// `test_one_ordered_outcome_per_input_across_every_outcome`, abandon batch.
+    #[tokio::test]
+    #[serial]
+    async fn one_ordered_outcome_per_input_across_every_outcome_abandon() {
+        one_ordered_outcome_per_input(Batch::Abandon).await;
+    }
+
+    /// `test_one_ordered_outcome_per_input_across_every_outcome`, cancel batch.
+    #[tokio::test]
+    #[serial]
+    async fn one_ordered_outcome_per_input_across_every_outcome_cancel() {
+        one_ordered_outcome_per_input(Batch::Cancel).await;
+    }
+
+    /// Python `TestIdKeyedWorkflowBatches::test_a_null_generation_keeps_the_per_task_worker_fence`,
+    /// with the core's rule: a NULL element of the generation array is
+    /// refused before any lock or write (differences ledger, row 3).
+    #[tokio::test]
+    #[serial]
+    #[ignore = "waits on #697"]
+    async fn a_null_generation_is_refused() {
+        let pool = pool().await;
+        for function in ["horsies_abandon_owned_nodes", "horsies_cancel_owned_nodes"] {
+            let task_id = seed_task(&pool, &claimed_workflow_task()).await;
+            let before = live_row(&pool, task_id).await;
+
+            let refused = sqlx::query(&format!(
+                "SELECT * FROM {function}(ARRAY[$1]::uuid[], ARRAY[NULL]::timestamptz[], $2)"
+            ))
+            .bind(task_id)
+            .bind(WORKER)
+            .fetch_all(&pool)
+            .await
+            .map(|rows| rows.len());
+
+            assert_refused(refused, "22023", Constraint::Unnamed);
+            assert_eq!(live_row(&pool, task_id).await, before, "{function}");
+            cleanup_tasks(&pool, &[task_id]).await;
+        }
+    }
+
+    /// Python `TestIdKeyedWorkflowBatches::test_empty_input_is_valid`.
+    #[tokio::test]
+    #[serial]
+    async fn empty_input_is_valid() {
+        let pool = pool().await;
+        for batch in [Batch::Abandon, Batch::Cancel] {
+            let fence = OwnedClaimBatch::new(WORKER.to_owned(), Vec::new()).expect("empty batch");
+            let outcomes = terminalize(&pool, &batch.command(fence))
+                .await
+                .expect("batch");
+            assert!(outcomes.is_empty(), "{batch:?}: {outcomes:?}");
+        }
+    }
+}
+
+mod workflow_scoped_batches {
+    use super::*;
+
+    /// Python `TestWorkflowScopedBatches::test_pause_applies_only_under_both_live_guards`:
+    /// a CLAIMED row with an ENQUEUED or RUNNING node under a PAUSED
+    /// workflow. The history row keeps the claim time as provenance; the
+    /// live claim ends with the live row.
+    #[tokio::test]
+    #[serial]
+    async fn pause_applies_only_under_both_live_guards() {
+        let pool = pool().await;
+        let eligible = seed_task(&pool, &claimed_workflow_task()).await;
+        let eligible_workflow = link_workflow_task(&pool, eligible, "RUNNING", "PAUSED").await;
+        let eligible_enqueued = seed_task(&pool, &claimed_workflow_task()).await;
+        let eligible_enqueued_workflow =
+            link_workflow_task(&pool, eligible_enqueued, "ENQUEUED", "PAUSED").await;
+        let wrong_workflow = seed_task(&pool, &claimed_workflow_task()).await;
+        let wrong_workflow_id =
+            link_workflow_task(&pool, wrong_workflow, "RUNNING", "RUNNING").await;
+        let wrong_link = seed_task(&pool, &claimed_workflow_task()).await;
+        let wrong_link_workflow = link_workflow_task(&pool, wrong_link, "READY", "PAUSED").await;
+        let wrong_task_source = seed_task(
+            &pool,
+            &TaskSeed {
+                origin: Origin::WorkflowNode,
+                ..TaskSeed::pending()
+            },
+        )
+        .await;
+        let wrong_task_workflow =
+            link_workflow_task(&pool, wrong_task_source, "ENQUEUED", "PAUSED").await;
+        let workflows = vec![
+            eligible_workflow,
+            eligible_enqueued_workflow,
+            wrong_workflow_id,
+            wrong_link_workflow,
+            wrong_task_workflow,
+        ];
+
+        let outcomes = terminalize(
+            &pool,
+            &TerminalizationCommand::AbandonNodesOfPausedWorkflows {
+                workflow_ids: workflows.clone(),
+            },
+        )
+        .await
+        .expect("pause sweep");
+
+        let mut swept: Vec<Uuid> = outcomes
+            .iter()
+            .map(TerminalizationOutcome::task_id)
+            .collect();
+        swept.sort_unstable();
+        let mut expected = vec![eligible, eligible_enqueued];
+        expected.sort_unstable();
+        assert_eq!(swept, expected);
+        let eligible_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.task_id() == eligible)
+            .expect("outcome of the eligible task");
+        assert!(
+            matches!(
+                eligible_outcome,
+                TerminalizationOutcome::Applied {
+                    kind: TerminalizationKind::PauseAbandonWorkflow,
+                    ordinality: None,
+                    ..
+                }
+            ),
+            "{eligible_outcome:?}"
+        );
+        let image = history_row(&pool, eligible).await.expect("history row");
+        assert_eq!(image.status, "CANCELLED");
+        assert_eq!(image.terminalization_kind, "PAUSE_ABANDON_WORKFLOW");
+        assert_eq!(image.error_code.as_deref(), Some("TASK_CANCELLED"));
+        assert_eq!(
+            image.final_failed_reason.as_deref(),
+            Some("Workflow paused before task start")
+        );
+        assert_eq!(image.claimed_at, Some(generation()));
+        assert_eq!(live_row(&pool, eligible).await, None);
+        for (task_id, status) in [
+            (wrong_workflow, "CLAIMED"),
+            (wrong_link, "CLAIMED"),
+            (wrong_task_source, "PENDING"),
+        ] {
+            assert_eq!(
+                live_row(&pool, task_id).await.expect("live row")["status"],
+                status
+            );
+        }
+
+        cleanup_tasks(
+            &pool,
+            &[
+                eligible,
+                eligible_enqueued,
+                wrong_workflow,
+                wrong_link,
+                wrong_task_source,
+            ],
+        )
+        .await;
+        cleanup_workflows(&pool, &workflows).await;
+    }
+
+    /// Python `TestWorkflowScopedBatches::test_cancel_accepts_all_three_legacy_task_source_states`:
+    /// PENDING, CLAIMED and RUNNING rows under a CANCELLED workflow. The
+    /// sweep carries no error summary of its own.
+    #[tokio::test]
+    #[serial]
+    async fn cancel_accepts_all_three_legacy_task_source_states() {
+        let pool = pool().await;
+        let mut task_ids = Vec::new();
+        let mut workflow_ids = Vec::new();
+        for base in [
+            TaskSeed::pending(),
+            TaskSeed::claimed(),
+            TaskSeed::running(),
+        ] {
+            let task_id = seed_task(
+                &pool,
+                &TaskSeed {
+                    origin: Origin::WorkflowNode,
+                    ..base
+                },
+            )
+            .await;
+            workflow_ids.push(link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await);
+            task_ids.push(task_id);
+        }
+        record_failed_first_attempt(&pool, task_ids[0], "old reason").await;
+
+        let outcomes = terminalize(
+            &pool,
+            &TerminalizationCommand::CancelNodesOfCancelledWorkflow {
+                workflow_ids: workflow_ids.clone(),
+            },
+        )
+        .await
+        .expect("cancel sweep");
+
+        let mut swept: Vec<Uuid> = outcomes
+            .iter()
+            .map(TerminalizationOutcome::task_id)
+            .collect();
+        swept.sort_unstable();
+        let mut expected = task_ids.clone();
+        expected.sort_unstable();
+        assert_eq!(swept, expected);
+        for outcome in &outcomes {
+            assert!(
+                matches!(
+                    outcome,
+                    TerminalizationOutcome::Applied {
+                        kind: TerminalizationKind::WorkflowCancelWorkflow,
+                        ordinality: None,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+        }
+        let image = history_row(&pool, task_ids[0]).await.expect("history row");
+        assert_eq!(image.status, "CANCELLED");
+        assert_eq!(image.error_code, None);
+        assert_eq!(image.final_failed_reason, None);
+
+        cleanup_tasks(&pool, &task_ids).await;
+        cleanup_workflows(&pool, &workflow_ids).await;
+    }
+
+    /// Python `TestWorkflowScopedBatches::test_cancel_refuses_a_live_workflow_or_non_enqueued_link`.
+    #[tokio::test]
+    #[serial]
+    async fn cancel_refuses_a_live_workflow_or_non_enqueued_link() {
+        let pool = pool().await;
+        let live_workflow_task = seed_task(&pool, &claimed_workflow_task()).await;
+        let live_workflow_id =
+            link_workflow_task(&pool, live_workflow_task, "ENQUEUED", "RUNNING").await;
+        let ready_link_task = seed_task(&pool, &claimed_workflow_task()).await;
+        let ready_link_workflow =
+            link_workflow_task(&pool, ready_link_task, "READY", "CANCELLED").await;
+
+        let outcomes = terminalize(
+            &pool,
+            &TerminalizationCommand::CancelNodesOfCancelledWorkflow {
+                workflow_ids: vec![live_workflow_id, ready_link_workflow],
+            },
+        )
+        .await
+        .expect("cancel sweep");
+
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+        for task_id in [live_workflow_task, ready_link_task] {
+            assert_eq!(
+                live_row(&pool, task_id).await.expect("live row")["status"],
+                "CLAIMED"
+            );
+        }
+        cleanup_tasks(&pool, &[live_workflow_task, ready_link_task]).await;
+        cleanup_workflows(&pool, &[live_workflow_id, ready_link_workflow]).await;
     }
 }
