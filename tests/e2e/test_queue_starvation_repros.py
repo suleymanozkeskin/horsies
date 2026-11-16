@@ -6,6 +6,7 @@ import asyncio
 import json
 from typing import Protocol
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import text
@@ -145,6 +146,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 queue_name='high',
                 task_id=str(uuid4()),
                 enqueue_sha=f'high-{idx}',
+                sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': 3000}),
             )).unwrap()
             for idx in range(10)
@@ -161,6 +163,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 queue_name='normal',
                 task_id=str(uuid4()),
                 enqueue_sha=f'normal-{idx}',
+                sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': 1000}),
             )).unwrap()
             for idx in range(2)
