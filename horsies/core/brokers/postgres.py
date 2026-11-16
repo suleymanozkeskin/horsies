@@ -232,6 +232,83 @@ _ENQUEUE_WRITE_ERRORS: Final = (*_DRIVER_ERRORS, HistoryContractError)
 
 
 @dataclass(frozen=True, slots=True)
+class SendCommand:
+    """The stored values of one send command, checked. Only the database can refuse it now.
+
+    The version-1 fingerprint leaves the task id and ``sent_at`` out, so one
+    value serves every row of the command: each slot of a schedule fire.
+    ``stored_input`` is the ``input`` text the row stores; ``execution`` and
+    ``max_retries`` are read from ``task_options``.
+    """
+
+    task_name: str
+    queue_name: str
+    priority: int
+    stored_input: str
+    task_options: str | None
+    execution: Execution
+    max_retries: int
+    retention_class_key: str
+    retain_rerun_input: bool
+    fingerprint_version: int
+    fingerprint: bytes
+
+
+def _send_command(
+    *,
+    task_name: str,
+    queue_name: str,
+    priority: int,
+    kwargs_json: str | None,
+    good_until: datetime | None,
+    enqueue_delay_seconds: int | None,
+    task_options: str | None,
+    retention_class_key: str,
+    retain_rerun_input: bool,
+) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
+    """Check the input and the options of one send and build its command. Pure.
+
+    Refusals, in this order: the kwargs text (``INVALID_INPUT``), the
+    options text (``INVALID_TASK_OPTIONS``), a value the fingerprint
+    refuses (``INVALID_INPUT``).
+    """
+    input_r = _parse_enqueue_input(task_name, kwargs_json)
+    if is_err(input_r):
+        return input_r
+    stored_input = input_r.ok_value
+    options_r = _parse_enqueue_task_options(task_name, task_options)
+    if is_err(options_r):
+        return options_r
+    parsed_options = options_r.ok_value
+    fingerprint_r = _command_fingerprint(
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        stored_input=stored_input,
+        good_until=good_until,
+        enqueue_delay_seconds=enqueue_delay_seconds,
+        task_options=task_options,
+        retention_class_key=retention_class_key,
+        retain_rerun_input=retain_rerun_input,
+    )
+    if is_err(fingerprint_r):
+        return fingerprint_r
+    return Ok(SendCommand(
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        stored_input=stored_input,
+        task_options=task_options,
+        execution=parsed_options.execution,
+        max_retries=parsed_options.max_retries,
+        retention_class_key=retention_class_key,
+        retain_rerun_input=retain_rerun_input,
+        fingerprint_version=COMMAND_FINGERPRINT_VERSION,
+        fingerprint=fingerprint_r.ok_value,
+    ))
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedEnqueue:
     """The checked input of one enqueue. Only the database can refuse it now.
 
@@ -1681,29 +1758,20 @@ class PostgresBroker:
         args_r = _check_enqueue_args(task_name, args_json)
         if is_err(args_r):
             return args_r
-        input_r = _parse_enqueue_input(task_name, kwargs_json)
-        if is_err(input_r):
-            return input_r
-        stored_input = input_r.ok_value
-        options_r = _parse_enqueue_task_options(task_name, task_options)
-        if is_err(options_r):
-            return options_r
-        parsed_options = options_r.ok_value
-
-        fingerprint_r = _command_fingerprint(
+        command_r = _send_command(
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            stored_input=stored_input,
+            kwargs_json=kwargs_json,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options=task_options,
             retention_class_key=retention_class_key,
             retain_rerun_input=retain_rerun_input,
         )
-        if is_err(fingerprint_r):
-            return fingerprint_r
-        command_fingerprint = fingerprint_r.ok_value
+        if is_err(command_r):
+            return command_r
+        command = command_r.ok_value
 
         scoped_key_digest: bytes | None = None
         if idempotency_key is not None:
@@ -1724,20 +1792,20 @@ class PostgresBroker:
                 task_name=task_name,
                 queue_name=queue_name,
                 priority=priority,
-                stored_input=stored_input,
+                stored_input=command.stored_input,
                 call_site_sent_at=sent_at,
                 enqueued_at=enqueued_at,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
-                max_retries=parsed_options.max_retries,
+                max_retries=command.max_retries,
                 task_options=task_options,
-                execution=parsed_options.execution,
+                execution=command.execution,
                 scoped_key_digest=scoped_key_digest,
-                command_fingerprint=command_fingerprint,
+                command_fingerprint=command.fingerprint,
                 retention_class_key=retention_class_key,
                 retain_rerun_input=retain_rerun_input,
             ),
-            command_fingerprint=command_fingerprint,
+            command_fingerprint=command.fingerprint,
             sent_at=sent_at,
             scoped_key_digest=scoped_key_digest,
         ))
@@ -1791,6 +1859,36 @@ class PostgresBroker:
             'retention_class_key': retention_class_key,
             'retain_rerun_input': retain_rerun_input,
         }
+
+    def prepare_send_command(
+        self,
+        *,
+        task_name: str,
+        queue_name: str,
+        priority: int,
+        kwargs_json: str | None,
+        task_options: str | None,
+        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
+    ) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
+        """The stored values of an unkeyed send with no deadline and no delay, without a write.
+
+        The values are those ``enqueue_async`` writes for the same arguments:
+        the retention class resolves as there (an explicit None is
+        ``forever``), and the rerun-input posture is the broker's default.
+        Touches no database; the refusals are those of ``enqueue_async``
+        before its write.
+        """
+        return _send_command(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            kwargs_json=kwargs_json,
+            good_until=None,
+            enqueue_delay_seconds=None,
+            task_options=task_options,
+            retention_class_key=resolve_retention_class_key(retention_class_key),
+            retain_rerun_input=self.config.retain_rerun_input_default,
+        )
 
     async def enqueue_async(
         self,
@@ -2658,9 +2756,9 @@ class PostgresBroker:
         # when called from any thread except the loop-runner thread itself.
         # stop() joins the runner thread (up to 2 s), so it runs on a worker
         # thread and this loop keeps running during the join.
-        loop_thread = self._loop_runner._thread
+        loop_thread = self._loop_runner._thread  # pyright: ignore[reportPrivateUsage]
         if (
-            self._loop_runner._started
+            self._loop_runner._started  # pyright: ignore[reportPrivateUsage]
             and loop_thread is not None
             and threading.current_thread() is not loop_thread
         ):
