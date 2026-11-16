@@ -1726,7 +1726,7 @@ mod set_running_gate_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'p1_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'p1_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 CASE WHEN $2 THEN NULL ELSE 1 END, CASE WHEN $2 THEN NULL ELSE decode(repeat('00', 32), 'hex') END, NULL,
                 'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
@@ -2108,3 +2108,6 @@ mod set_running_gate_tests {
 #[cfg(test)]
 #[path = "finalizing_tests.rs"]
 mod finalizing_tests;
+
+#[cfg(test)]
+mod finalize_spec_tests;
