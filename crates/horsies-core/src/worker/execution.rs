@@ -220,7 +220,7 @@ pub(crate) async fn confirm_ownership_and_set_running(
     pid: i32,
     hostname: &str,
     is_workflow_task: bool,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
     orphan_self_heal: bool,
 ) -> OwnershipOutcome {
     // Workflow tasks: the node RUNNING handoff precedes the task transition,
@@ -384,7 +384,7 @@ async fn handle_workflow_stop_with_retry(
     task_id: Uuid,
     workflow_status: &str,
     worker_id: &str,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
 ) -> Result<(), crate::broker::BrokerError> {
     let mut last_err: Option<crate::broker::BrokerError> = None;
 
@@ -425,7 +425,7 @@ pub(crate) async fn unclaim_task_with_retry(
     broker: &PostgresBroker,
     task_id: Uuid,
     worker_id: &str,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
     context: &str,
 ) -> Result<bool, crate::broker::BrokerError> {
     let mut last_err: Option<crate::broker::BrokerError> = None;
@@ -904,7 +904,7 @@ async fn persist_ok_result(
     process_name: &str,
     is_workflow_task: bool,
     queue_name: &str,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     // Wrap the task's result bytes via `&RawValue`: parsing validates the JSON
     // exactly like the previous full `Value` parse, but the adjacently-tagged
@@ -1056,7 +1056,7 @@ async fn persist_workflow_success_locked(
     hostname: &str,
     pid: i32,
     process_name: &str,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let tx_result = finalize_with_retry(task_id, "complete-locked", || async {
         let mut tx = broker
@@ -1071,7 +1071,7 @@ async fn persist_workflow_success_locked(
              WHERE id = $1
                AND status = 'RUNNING'
                AND claimed_by_worker_id = $2
-               AND ($3::timestamptz IS NULL OR claimed_at = $3)
+               AND claimed_at = $3
              FOR UPDATE",
         )
         .bind(task_id)
@@ -1227,7 +1227,7 @@ async fn persist_failure_locked(
     hostname: &str,
     pid: i32,
     process_name: &str,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let tx_result = finalize_with_retry(task_id, label, || async {
         let mut tx = broker
@@ -1243,7 +1243,7 @@ async fn persist_failure_locked(
              WHERE id = $1
                AND status = 'RUNNING'
                AND claimed_by_worker_id = $2
-               AND ($3::timestamptz IS NULL OR claimed_at = $3)
+               AND claimed_at = $3
              FOR UPDATE",
         )
         .bind(task_id)
@@ -1357,7 +1357,7 @@ async fn persist_err_terminal(
     process_name: &str,
     task_name: &str,
     payload_policy: &PayloadPolicy,
-    claimed_at: Option<chrono::DateTime<Utc>>,
+    claimed_at: chrono::DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let wrapped = TaskResult::<serde_json::Value>::Err(task_error.clone());
     let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned());
@@ -1582,26 +1582,64 @@ pub(crate) async fn finalize_pre_execution_failure(
 // Orchestrator: execute_and_finalize (mirrors Python's _finalize_after)
 // ---------------------------------------------------------------------------
 
-/// Stamp the finalization handoff only for the current owner and claim.
-/// A missing generation retains the worker-only OwnedClaim check.
+/// What the finalizing marker found on the task row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinalizingMark {
+    /// The row is RUNNING under this worker's claim generation; the marker is
+    /// written.
+    Marked,
+    /// The row is absent, not RUNNING, or held by another worker or another
+    /// claim generation; nothing is written.
+    NotHeld,
+}
+
+/// The finalizing marker, as Python's `MARK_FINALIZING_SQL`
+/// (`core/worker/child_runner.py`). The row is read by id alone in a
+/// MATERIALIZED CTE that locks it, so only the primary key serves the read;
+/// the fence (RUNNING, this worker, this claim generation) is one boolean
+/// checked on the locked row. The generation comparison has no NULL arm.
+const MARK_FINALIZING_SQL: &str = "\
+WITH target AS MATERIALIZED (
+    SELECT id,
+           (
+               status = 'RUNNING'
+               AND claimed_by_worker_id = $2
+               AND claimed_at = $3
+           ) IS TRUE AS fenced
+    FROM horsies_tasks
+    WHERE id = $1
+    FOR NO KEY UPDATE
+)
+UPDATE horsies_tasks t
+SET finalizing_at = NOW(),
+    finalizing_by_worker_id = $2,
+    updated_at = NOW()
+FROM target
+WHERE t.id = target.id
+  AND target.fenced";
+
+/// Stamp the finalization handoff only for the current owner and claim
+/// generation. One statement in autocommit: its row lock ends with it.
 async fn mark_task_finalizing(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     worker_id: &str,
-    claimed_at: Option<chrono::DateTime<Utc>>,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE horsies_tasks SET finalizing_at = NOW(), finalizing_by_worker_id = $2 \
-         WHERE id = $1 AND status = 'RUNNING' \
-           AND claimed_by_worker_id = $2 \
-           AND ($3::timestamptz IS NULL OR claimed_at = $3)",
-    )
-    .bind(task_id)
-    .bind(worker_id)
-    .bind(claimed_at)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    claimed_at: chrono::DateTime<Utc>,
+) -> Result<FinalizingMark, sqlx::Error> {
+    let result = sqlx::query(MARK_FINALIZING_SQL)
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(claimed_at)
+        .execute(pool)
+        .await?;
+    match result.rows_affected() {
+        0 => Ok(FinalizingMark::NotHeld),
+        1 => Ok(FinalizingMark::Marked),
+        changed => unreachable!(
+            "finalizing marker of task {task_id} changed {changed} rows; \
+             the statement reads one row by its primary key"
+        ),
+    }
 }
 
 /// Execute a task through Phase 1 finalize, returning Phase 2 work if needed.
@@ -1688,10 +1726,10 @@ pub(crate) async fn execute_and_finalize(
     // a failed stamp does not abort finalize — phase-1 CAS still protects
     // correctness. Mirrors Python's finalizing_at / finalizing_by_worker_id.
     match mark_task_finalizing(broker.pool(), task_id, &worker_id, row.claimed_at).await {
-        Ok(0) => {
+        Ok(FinalizingMark::NotHeld) => {
             tracing::debug!(task_id = %task_id, "finalizing handoff skipped: claim changed");
         }
-        Ok(_) => {}
+        Ok(FinalizingMark::Marked) => {}
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "failed to stamp finalizing handoff");
         }
@@ -2150,6 +2188,15 @@ mod set_running_gate_tests {
         .expect("seed task");
     }
 
+    /// The claim generation the seeded row carries.
+    async fn generation(pool: &PgPool, task_id: Uuid) -> chrono::DateTime<chrono::Utc> {
+        sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .expect("seeded claim generation")
+    }
+
     #[tokio::test]
     #[serial]
     async fn workflow_task_still_transitions_node_to_running() {
@@ -2184,6 +2231,7 @@ mod set_running_gate_tests {
         .await
         .expect("insert node");
         seed_claimed(&pool, &task_id, true).await;
+        let claimed_at = generation(&pool, test_uuid(&task_id)).await;
 
         let outcome = confirm_ownership_and_set_running(
             &broker,
@@ -2192,7 +2240,7 @@ mod set_running_gate_tests {
             1,
             "h1",
             true,
-            None,
+            claimed_at,
             false,
         )
         .await;
@@ -2271,6 +2319,7 @@ mod set_running_gate_tests {
         .await
         .unwrap();
         seed_claimed(&pool, &task_id.to_string(), true).await;
+        let claimed_at = generation(&pool, task_id).await;
 
         let before: String = sqlx::query_scalar(
             "SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1",
@@ -2279,9 +2328,10 @@ mod set_running_gate_tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let outcome =
-            confirm_ownership_and_set_running(&broker, task_id, "w1", 1, "h1", true, None, false)
-                .await;
+        let outcome = confirm_ownership_and_set_running(
+            &broker, task_id, "w1", 1, "h1", true, claimed_at, false,
+        )
+        .await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let persisted: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
@@ -2328,6 +2378,7 @@ mod set_running_gate_tests {
         let pool = broker.pool().clone();
         let task_id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &task_id, false).await;
+        let claimed_at = generation(&pool, test_uuid(&task_id)).await;
 
         let outcome = confirm_ownership_and_set_running(
             &broker,
@@ -2336,7 +2387,7 @@ mod set_running_gate_tests {
             1,
             "h1",
             false,
-            None,
+            claimed_at,
             false,
         )
         .await;
@@ -2378,9 +2429,11 @@ mod set_running_gate_tests {
                 sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id,started_at) VALUES($1,$2,0,'handoff_contract',$3,$4,timestamptz '2026-01-01')").bind(node).bind(wf).bind(status).bind(task).execute(&pool).await.unwrap();
             }
             seed_claimed(&pool, &task.to_string(), true).await;
-            let result =
-                confirm_ownership_and_set_running(&broker, task, "w1", 1, "h1", true, None, true)
-                    .await;
+            let claimed_at = generation(&pool, task).await;
+            let result = confirm_ownership_and_set_running(
+                &broker, task, "w1", 1, "h1", true, claimed_at, true,
+            )
+            .await;
             let outcome = match result {
                 OwnershipOutcome::Running(_) => "running",
                 OwnershipOutcome::Aborted => "aborted",
@@ -2426,6 +2479,7 @@ mod set_running_gate_tests {
         sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key) VALUES($1,'handoff_race','RUNNING','handoff_contract')").bind(wf).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id) VALUES($1,$2,0,'handoff_race','ENQUEUED',$3)").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
         seed_claimed(&pool, &task.to_string(), true).await;
+        let claimed_at = generation(&pool, task).await;
         let mut held = pool.begin().await.unwrap();
         sqlx::query("UPDATE horsies_workflow_tasks SET status='FAILED' WHERE id=$1")
             .bind(node)
@@ -2434,8 +2488,17 @@ mod set_running_gate_tests {
             .unwrap();
         let race_broker = PostgresBroker::from_pool(pool.clone());
         let handoff = tokio::spawn(async move {
-            confirm_ownership_and_set_running(&race_broker, task, "w1", 1, "h1", true, None, true)
-                .await
+            confirm_ownership_and_set_running(
+                &race_broker,
+                task,
+                "w1",
+                1,
+                "h1",
+                true,
+                claimed_at,
+                true,
+            )
+            .await
         });
         let mut waited = false;
         for _ in 0..500 {
