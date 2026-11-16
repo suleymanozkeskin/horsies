@@ -2415,7 +2415,7 @@ fn subworkflow_failed_error(
 /// is not JSON or is JSON `null`; none for other JSON and for no text.
 fn child_error_summary(child_error: Option<&str>) -> Option<String> {
     let text = child_error.filter(|text| !text.is_empty())?;
-    match serde_json::from_str::<serde_json::Value>(text) {
+    match crate::core::codec::from_json_str::<serde_json::Value>(text) {
         Ok(serde_json::Value::Object(fields)) => fields
             .get("message")
             .and_then(serde_json::Value::as_str)

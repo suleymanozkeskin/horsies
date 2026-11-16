@@ -1480,7 +1480,7 @@ where
     }
 
     let raw = kwargs_json.or(args_json).unwrap_or("null");
-    serde_json::from_str(raw).map_err(|e| {
+    crate::core::codec::from_json_str(raw).map_err(|e| {
         HorsiesError::new(format!(
             "failed to decode params for workflow '{}': {}",
             workflow_name, e,

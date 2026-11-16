@@ -533,7 +533,7 @@ impl WorkflowSpecBuilder {
 
             // Validate kwargs_json is a JSON object when present.
             if let Some(ref kwargs_json) = task.kwargs_json {
-                let parsed = serde_json::from_str::<serde_json::Value>(kwargs_json);
+                let parsed = crate::core::codec::from_json_str::<serde_json::Value>(kwargs_json);
                 match parsed {
                     Ok(serde_json::Value::Object(map)) => {
                         // Reserved key must not be provided explicitly.
