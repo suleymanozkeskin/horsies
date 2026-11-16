@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::workflow::node::NO_NODE_INPUT;
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -15,6 +15,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 #[cfg(test)]
@@ -133,7 +134,7 @@ const FIND_READY_TASKS_SQL: &str = "\
 SELECT task_index, task_name, input,
        queue_name, priority, task_options, node_id,
        args_from, workflow_ctx_from, dependencies, is_subworkflow,
-       sub_workflow_name, sub_definition_key
+       sub_workflow_name, sub_definition_key, sub_workflow_params
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1::uuid AND status = 'READY'";
 
@@ -146,6 +147,7 @@ WHERE workflow_id = $1 AND task_index = ANY($2)
 
 // An engine-minted task row carries no command fingerprint, no idempotency
 // key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+// `sent_at` is the start call time of the node's workflow ($11).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -155,12 +157,13 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -279,6 +282,9 @@ struct ReadyTaskRow {
     is_subworkflow: bool,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
+    /// `GIVEN`); `NULL` on a task node.
+    sub_workflow_params: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -337,6 +343,19 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
     }
 }
 
+/// Checks, once per broker handle, that the database records the handle's client family, before the
+/// first write of a workflow operation (pause, resume, cancel).
+///
+/// A database of the other family, or with no family row, is `BrokerError::ClientFamilyMismatch`:
+/// `DB_OPERATION_FAILED`, not retryable, and nothing is written. A database failure of the check is
+/// `DB_OPERATION_FAILED`, retryable by the core's rule; the next call checks again.
+async fn admit_workflow_write(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<()> {
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(|error| to_handle_error(WorkflowError::Broker(error), workflow_id))
+}
+
 /// Check if a workflow exists. Returns `Err(WorkflowNotFound)` if not.
 async fn ensure_workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<(), WorkflowError> {
     let exists: Option<IdRow> = sqlx::query_as(CHECK_WORKFLOW_EXISTS_SQL)
@@ -358,9 +377,11 @@ async fn ensure_workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<(), 
 /// Transitions RUNNING/PAUSED -> CANCELLED. Skips all non-terminal
 /// workflow_tasks and cancels any enqueued horsies_tasks.
 ///
-/// Returns `true` if the workflow was actually cancelled.
-pub async fn cancel_workflow(pool: &PgPool, workflow_id: Uuid) -> HandleResult<bool> {
-    cancel_workflow_inner(pool, workflow_id)
+/// Returns `true` if the workflow was actually cancelled. The handle's client family is checked before
+/// the first write (`admit_workflow_write`).
+pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
+    admit_workflow_write(broker, workflow_id).await?;
+    cancel_workflow_inner(broker.pool(), workflow_id)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))
 }
@@ -473,13 +494,14 @@ pub async fn expire_paused_workflows(
         format_python_timedelta(older_than)?,
     );
     let error_json = serde_json::to_string(&crate::core::TaskError {
-        error_code: Some(crate::core::OutcomeCode::WorkflowExpired.into()),
-        message: Some(error_text),
-        cause: None,
+        exception: None,
+        error_code: crate::core::OutcomeCode::WorkflowExpired.into(),
         data: Some(serde_json::json!({
             "policy": "paused_workflow_auto_cancel_after",
             "older_than_seconds": seconds,
         })),
+        message: Some(error_text),
+        kind: crate::core::TaskErrorKind::Plain,
     })?;
     let mut expired = 0_u64;
     for candidate in candidates {
@@ -603,9 +625,11 @@ async fn cancel_workflow_inner(pool: &PgPool, workflow_id: Uuid) -> Result<bool,
 /// Cascades pause to all running child workflows (iterative BFS),
 /// matching Python's `_cascade_pause_to_children()` behavior.
 ///
-/// Returns `true` if the workflow was actually paused.
-pub async fn pause_workflow(pool: &PgPool, workflow_id: Uuid) -> HandleResult<bool> {
-    pause_workflow_inner(pool, workflow_id)
+/// Returns `true` if the workflow was actually paused. The handle's client family is checked before
+/// the first write (`admit_workflow_write`).
+pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
+    admit_workflow_write(broker, workflow_id).await?;
+    pause_workflow_inner(broker.pool(), workflow_id)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))
 }
@@ -703,13 +727,17 @@ pub(crate) async fn pause_tree_and_relocate(
 /// - `Ok(false)` when there was nothing to do: the workflow is already RUNNING
 ///   and consistent, or it is in a terminal state.
 /// - `WorkflowNotFound` when the workflow does not exist.
+///
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn resume_workflow(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
+    admit_workflow_write(broker, workflow_id).await?;
+    let pool = broker.pool();
     let steps = resume_workflow_inner(pool, workflow_id, registry, payload, retention)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))?;
@@ -1046,6 +1074,7 @@ async fn reevaluate_and_enqueue(
                 .bind(&facts.retention_class_key)
                 .bind(max_retries)
                 .bind(good_until)
+                .bind(workflow_id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -1145,7 +1174,7 @@ async fn enqueue_subworkflow_on_resume(
     };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
-    let has_child_inputs = task.input != NO_NODE_INPUT || task.args_from.is_some();
+    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
 
     let merged_input = merge_args_from_for_ready(
         pool,
@@ -1155,7 +1184,7 @@ async fn enqueue_subworkflow_on_resume(
         &task.dependencies,
     )
     .await?;
-    let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
@@ -1304,7 +1333,7 @@ mod resume_idempotency_tests {
         insert_running_task(&pool, &child).await;
 
         let resumed = resume_workflow(
-            &pool,
+            &broker,
             Uuid::parse_str(&parent).expect("test identity must be UUID"),
             &registry,
             &PayloadPolicy::default(),
@@ -1340,7 +1369,7 @@ mod resume_idempotency_tests {
 
         // No paused children, no ready nodes → genuinely nothing to do.
         let resumed = resume_workflow(
-            &pool,
+            &broker,
             Uuid::parse_str(&id).expect("test identity must be UUID"),
             &registry,
             &PayloadPolicy::default(),
@@ -1377,6 +1406,14 @@ mod resume_idempotency_tests {
         .execute(&pool)
         .await
         .expect("insert ready resume node");
+        sqlx::query(
+            "UPDATE horsies_workflows SET sent_at = timestamptz '2026-01-01 00:00:00+00'
+             WHERE id = $1::uuid",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .expect("set the start call time");
         let mut retention = RetentionConfig::default();
         retention
             .queue_retention
@@ -1392,6 +1429,18 @@ mod resume_idempotency_tests {
         .await
         .expect("resume enqueue path");
         assert_eq!(enqueued, 1);
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the resume node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input
@@ -1407,6 +1456,18 @@ mod resume_idempotency_tests {
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
         assert!(!facts.3);
+        // The task row stores the start call time of its workflow as `sent_at`.
+        let sent_at_is_the_start_call_time: bool = sqlx::query_scalar(
+            "SELECT t.sent_at = timestamptz '2026-01-01 00:00:00+00'
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read resume task sent_at");
+        assert!(sent_at_is_the_start_call_time);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (
@@ -1543,7 +1604,7 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, unrelated_id, "RUNNING", None).await;
 
         assert!(resume_workflow(
-            &pool,
+            &PostgresBroker::from_pool(pool.clone()),
             root_id,
             &WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
@@ -1606,7 +1667,7 @@ mod p7_lifecycle_tests {
         );
 
         assert!(resume_workflow(
-            &pool,
+            &PostgresBroker::from_pool(pool.clone()),
             workflow_id,
             &WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
@@ -1660,7 +1721,7 @@ mod p7_lifecycle_tests {
         assert_eq!(status, "EXPIRED");
         assert_eq!(node_status, "SKIPPED");
         let error: TaskError = serde_json::from_str(&error_json).unwrap();
-        assert_eq!(error.error_code, Some(OutcomeCode::WorkflowExpired.into()));
+        assert_eq!(error.error_code, OutcomeCode::WorkflowExpired.into());
         assert_eq!(
             error.message.as_deref(),
             Some("paused_workflow_auto_cancel_after elapsed: 1:00:00"),
@@ -1694,9 +1755,9 @@ mod p7_lifecycle_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
              ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -1779,9 +1840,9 @@ mod p7_lifecycle_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
              ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -1901,9 +1962,9 @@ mod p7_lifecycle_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
              ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -2182,7 +2243,11 @@ mod cancel_tree_tests {
         seed_pending_node(&pool, parent_id).await;
         seed_pending_node(&pool, child_id).await;
 
-        assert!(cancel_workflow(&pool, parent_id).await.unwrap());
+        assert!(
+            cancel_workflow(&PostgresBroker::from_pool(pool.clone()), parent_id)
+                .await
+                .unwrap()
+        );
 
         for workflow_id in [parent_id, child_id] {
             assert_eq!(
@@ -2227,7 +2292,7 @@ mod cancel_tree_tests {
         .await
         .unwrap();
 
-        let outcome = cancel_workflow(&pool, parent_id).await;
+        let outcome = cancel_workflow(&PostgresBroker::from_pool(pool.clone()), parent_id).await;
 
         sqlx::query("DROP TRIGGER cw_refuse_child_cancel ON horsies_workflows")
             .execute(&pool)
@@ -2282,5 +2347,84 @@ mod cancel_tree_tests {
             workflow_id,
         );
         assert_eq!(missing.code, HandleErrorCode::WorkflowNotFound);
+    }
+}
+
+#[cfg(test)]
+mod client_family_tests {
+    //! A workflow operation of a handle checks the client family before its first write.
+    use super::*;
+    use crate::broker::client_family::ClientFamily;
+    use serial_test::serial;
+
+    async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .fetch_one(pool)
+            .await
+            .expect("workflow status")
+    }
+
+    /// Pause, resume and cancel through a handle of the other client family are refused as
+    /// `DB_OPERATION_FAILED`, not retryable, and write nothing. A handle of the recorded family
+    /// passes the same check.
+    #[tokio::test]
+    #[serial]
+    async fn pause_resume_and_cancel_of_another_family_write_nothing() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'family_check', 'RUNNING', 'fail', 'tests.family.v1', 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+        let python =
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+
+        let refusals = [
+            pause_workflow(&python, workflow_id)
+                .await
+                .expect_err("pause of another family"),
+            resume_workflow(
+                &python,
+                workflow_id,
+                &WorkflowSpecRegistry::new(),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await
+            .expect_err("resume of another family"),
+            cancel_workflow(&python, workflow_id)
+                .await
+                .expect_err("cancel of another family"),
+        ];
+        for refused in refusals {
+            assert_eq!(refused.code, HandleErrorCode::DbOperationFailed);
+            assert!(!refused.retryable);
+            assert!(
+                refused.message.contains("its own family"),
+                "{}",
+                refused.message
+            );
+        }
+        assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
+
+        let rust = PostgresBroker::from_pool(pool.clone());
+        assert!(pause_workflow(&rust, workflow_id)
+            .await
+            .expect("pause of the recorded family"));
+        assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

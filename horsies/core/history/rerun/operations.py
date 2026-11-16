@@ -2,11 +2,12 @@
 
 Resolution goes through the staged detail function; a live source is a
 typed refusal (a live task is retried by its own lifecycle, never
-rerun), and absence classifies against the published birth floor.
-Eligibility precedes input, mirroring the ratified ladder: workflow
-backing tasks and completed sources refuse before any envelope is
-touched. Input reconstruction is content v1 with the digest verified
-before parse; every non-INLINE disposition is typed unavailable.
+rerun), and an absence carries the detail read's reason. Eligibility
+precedes input, mirroring the ratified ladder: workflow backing tasks
+and completed sources refuse before any envelope is touched. Input
+reconstruction reads the envelope that the move built, with the digest
+verified before parse; every non-INLINE disposition is typed
+unavailable.
 
 The new row is written strictly by the provenance table: replayed
 fields from the source row or its carried envelope, the deadline as the
@@ -22,13 +23,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from hashlib import sha256
-from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.codec.json_io import dumps_canonical_json
 from horsies.core.codec.task_options import stored_execution
 
 from ..ddl.tables import FOREVER_CLASS_KEY
@@ -51,7 +49,6 @@ from ..identity.reservations import (
 from ..identity.uuid7 import mint_task_id
 from ..names import LIVE_TASKS
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from ..reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
@@ -60,15 +57,11 @@ from ..reads.detail import (
     read_task_detail,
 )
 from .input_envelope import (
-    INPUT_ENVELOPE_CODEC,
-    INPUT_ENVELOPE_CONTENT_TYPE,
-    INPUT_ENVELOPE_INLINE_MAX_BYTES,
-    INPUT_ENVELOPE_VERSION,
     InputEnvelopeCorrupt,
     InputEnvelopeVersionUnknown,
     ReconstructedInput,
+    StoredTaskOptions,
     decode_input_envelope,
-    encode_input_envelope_v1,
 )
 
 
@@ -300,8 +293,15 @@ async def rerun_task(
             return RerunInputCorrupt(
                 task_id=command.source_task_id, detail=corruption
             )
+    match decoded.options:
+        case None:
+            options_json = None
+            options_value = None
+        case StoredTaskOptions(text=stored_text, value=stored_value):
+            options_json = stored_text
+            options_value = stored_value
     # The rerun runs with the execution class of the stored request.
-    match stored_execution(decoded.options):
+    match stored_execution(options_value):
         case Err(err_value=invalid_execution):
             return RerunInputCorrupt(
                 task_id=command.source_task_id,
@@ -312,19 +312,14 @@ async def rerun_task(
 
     new_task_id = mint_task_id()
     root_task_id = detail.rerun_root_task_id or detail.task_id
-    args_json = dumps_canonical_json(list(decoded.args))
-    kwargs_json = dumps_canonical_json(decoded.kwargs)
-    options_json = (
-        dumps_canonical_json(decoded.options)
-        if decoded.options is not None
-        else None
-    )
+    # The one fingerprint over the stored input: the args element is
+    # always null and the kwargs element is the input text.
     fingerprint = EnqueueCommandV1(
         task_name=detail.task_name,
         queue_name=detail.queue_name,
         priority=detail.priority,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
+        args_json=None,
+        kwargs_json=decoded.input_json,
         good_until=command.deadline,
         enqueue_delay_seconds=None,
         task_options_json=options_json,
@@ -360,74 +355,19 @@ async def rerun_task(
             case ReservationApplied():
                 pass
 
-    envelope = _prepare_envelope(decoded, retain=policy.retain_rerun_input)
-    # enqueue_sha reconciliation: the same helper the send path uses,
-    # computed over the rerun's OWN request values — it remains the
-    # exact-ID resend comparator, never the key contract.
-    rerun_sent_at = datetime.now(timezone.utc)
-    rerun_enqueue_sha = enqueue_fingerprint(
-        task_name=detail.task_name,
-        queue_name=detail.queue_name,
-        priority=detail.priority,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        sent_at=rerun_sent_at,
-        good_until=command.deadline,
-        enqueue_delay_seconds=None,
-        task_options=options_json,
-    )
     await connection.execute(
-        text(
-            f"""
-            INSERT INTO {LIVE_TASKS} (
-                id, task_name, queue_name, priority, args, kwargs,
-                task_options, execution, status, sent_at, enqueued_at,
-                created_at,
-                retry_count, max_retries, good_until, is_workflow_task,
-                enqueue_sha,
-                command_fingerprint_version, command_fingerprint,
-                retention_class_key, input_digest,
-                rerun_of_task_id, rerun_root_task_id,
-                idempotency_key_digest,
-                retain_rerun_input, prepared_rerun_input_disposition,
-                prepared_rerun_input_version, prepared_rerun_input_codec,
-                prepared_rerun_input_content_type,
-                prepared_rerun_input_digest, prepared_rerun_input_inline,
-                prepared_rerun_input_reference
-            ) VALUES (
-                CAST(:id AS uuid), :task_name, :queue_name, :priority,
-                :args, :kwargs, :task_options, :execution, 'PENDING',
-                :sent_at, statement_timestamp(), statement_timestamp(),
-                0, :max_retries, :good_until, FALSE,
-                :enqueue_sha,
-                1, :fingerprint,
-                :retention_class_key, :input_digest,
-                CAST(:rerun_of AS uuid), CAST(:rerun_root AS uuid),
-                :key_digest,
-                :retain, :disposition,
-                :env_version, :env_codec, :env_content_type,
-                :env_digest, :env_inline, NULL
-            )
-            """
-        ),
+        _INSERT_RERUN_SQL,
         {
             'id': new_task_id,
-            'sent_at': rerun_sent_at,
-            'enqueue_sha': rerun_enqueue_sha,
             'task_name': detail.task_name,
             'queue_name': detail.queue_name,
             'priority': detail.priority,
-            'args': args_json,
-            'kwargs': kwargs_json,
+            'input': decoded.input_json,
             'task_options': options_json,
             'execution': execution.value,
-            'max_retries': detail.max_retries,
-            'good_until': command.deadline,
-            'fingerprint': fingerprint,
             'retention_class_key': policy.retention_class_key,
-            'input_digest': envelope['input_digest'],
-            'rerun_of': detail.task_id,
-            'rerun_root': root_task_id,
+            'sent_at': datetime.now(timezone.utc),
+            'fingerprint': fingerprint,
             'key_digest': (
                 ScopedIdempotencyKey(
                     task_name=detail.task_name, key=command.caller_key
@@ -435,13 +375,11 @@ async def rerun_task(
                 if command.caller_key is not None
                 else None
             ),
+            'max_retries': detail.max_retries,
+            'good_until': command.deadline,
             'retain': policy.retain_rerun_input,
-            'disposition': envelope['disposition'],
-            'env_version': envelope['version'],
-            'env_codec': envelope['codec'],
-            'env_content_type': envelope['content_type'],
-            'env_digest': envelope['digest'],
-            'env_inline': envelope['inline'],
+            'rerun_of': detail.task_id,
+            'rerun_root': root_task_id,
         },
     )
     return RerunEnqueued(
@@ -451,50 +389,27 @@ async def rerun_task(
     )
 
 
-def _prepare_envelope(
-    decoded: ReconstructedInput,
-    *,
-    retain: bool,
-) -> dict[str, Any]:
-    """Re-prepare the new request's envelope under current policy.
-
-    The canonical serializer makes re-encoding byte-identical to the
-    source envelope, so the digest carries over content identity; the
-    disposition ladder mirrors enqueue: policy declines first, the
-    inline bound judges the whole payload second.
-    """
-    payload = encode_input_envelope_v1(
-        args=decoded.args, kwargs=decoded.kwargs, options=decoded.options
+_INSERT_RERUN_SQL = text(
+    f"""
+    INSERT INTO {LIVE_TASKS} (
+        id, task_name, queue_name, priority, input, task_options,
+        execution, retention_class_key, sent_at, created_at,
+        command_fingerprint_version, command_fingerprint,
+        idempotency_key_digest, status, enqueued_at, retry_count,
+        max_retries, good_until, is_workflow_task, updated_at,
+        retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+    ) VALUES (
+        CAST(:id AS uuid), :task_name, :queue_name, :priority, :input,
+        :task_options,
+        :execution, :retention_class_key, :sent_at, statement_timestamp(),
+        1, :fingerprint,
+        :key_digest, 'PENDING', statement_timestamp(), 0,
+        :max_retries, :good_until, FALSE, now(),
+        :retain, CAST(:rerun_of AS uuid), CAST(:rerun_root AS uuid)
     )
-    # input_digest identifies the input itself and carries on every
-    # disposition; the envelope digest exists only when bytes are stored.
-    digest = sha256(payload).digest()
-    if not retain:
-        return {
-            'disposition': 'DECLINED_BY_POLICY',
-            'version': None,
-            'codec': None,
-            'content_type': None,
-            'digest': None,
-            'inline': None,
-            'input_digest': digest,
-        }
-    if len(payload) > INPUT_ENVELOPE_INLINE_MAX_BYTES:
-        return {
-            'disposition': 'OVER_BOUND',
-            'version': None,
-            'codec': None,
-            'content_type': None,
-            'digest': None,
-            'inline': None,
-            'input_digest': digest,
-        }
-    return {
-        'disposition': 'INLINE',
-        'version': INPUT_ENVELOPE_VERSION,
-        'codec': INPUT_ENVELOPE_CODEC,
-        'content_type': INPUT_ENVELOPE_CONTENT_TYPE,
-        'digest': digest,
-        'inline': payload,
-        'input_digest': digest,
-    }
+    """
+)
+"""The new PENDING row. The row stores no envelope: the move builds it
+from ``input`` and ``task_options``. Both texts are the source's,
+unchanged, so when the new row's policy retains its input, its envelope
+has the source envelope's bytes and digest."""

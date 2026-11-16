@@ -247,7 +247,7 @@ my_task.send(connection_url=str(db_connection.url))
 
 ## Retrying Failed Sends
 
-When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The `enqueue_sha` on the stored `TaskSendPayload` guarantees the retry carries the identical serialized payload.
+When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The stored `TaskSendPayload` carries the task id, the serialized arguments and the `sent_at` of the first send; if that send was written, the retry finds the same command on the same task id and returns it instead of writing a second row.
 
 ```python
 from horsies import Err, Ok, TaskSendEnqueueFailed, TaskSendIdempotencyKeyConflict

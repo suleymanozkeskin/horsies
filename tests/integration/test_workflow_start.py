@@ -810,7 +810,7 @@ class TestNodeBuilder:
         # Verify task was created with correct args
         task_result = await session.execute(
             text("""
-                SELECT task_kwargs FROM horsies_workflow_tasks
+                SELECT input FROM horsies_workflow_tasks
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {'wf_id': handle.workflow_id},
@@ -1116,7 +1116,7 @@ class TestNodeBuilder:
 
         result = await session.execute(
             text("""
-                SELECT args_from, task_kwargs FROM horsies_workflow_tasks
+                SELECT args_from, input FROM horsies_workflow_tasks
                 WHERE workflow_id = :wf_id AND node_id = 'mix_cons'
             """),
             {'wf_id': handle.workflow_id},
@@ -1124,6 +1124,6 @@ class TestNodeBuilder:
         row = result.fetchone()
         assert row is not None
         args_from = row[0]
-        task_kwargs = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+        node_input = json.loads(row[1])
         assert args_from == {'upstream': 0}
-        assert task_kwargs == {'multiplier': 3}
+        assert node_input == {'multiplier': 3}

@@ -7,10 +7,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
-use super::outcome::{
-    killed_child_write, read_envelope, retry_request, task_error_write, worker_failure_write,
-    ReportedResult,
-};
+use super::outcome::{killed_child_write, retry_request, task_error_write, worker_failure_write};
 use super::pool::Answer;
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
@@ -349,34 +346,6 @@ fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
 }
 
 #[test]
-fn the_result_envelope_is_read_strictly() {
-    let ok = ResultEnvelopeText::new(r#"{"value": {"b": 1, "a": [2]}, "__type": "ok"}"#.to_owned());
-    match read_envelope(&ok) {
-        ReportedResult::Value(value) => assert_eq!(value.get(), r#"{"b": 1, "a": [2]}"#),
-        _ => panic!("expected a value"),
-    }
-    let err = ResultEnvelopeText::new(
-        r#"{"__type": "err", "value": {"error_code": "TASK_ERROR", "message": "m"}}"#.to_owned(),
-    );
-    assert!(matches!(read_envelope(&err), ReportedResult::Error(_)));
-    for text in [
-        "not json",
-        r#"{"__type": "ok", "value": 1, "value": 2}"#,
-        r#"{"__type": "maybe", "value": 1}"#,
-        r#"{"__type": "ok", "value": 1, "extra": 0}"#,
-        r#"{"__type": "ok", "value": NaN}"#,
-    ] {
-        assert!(
-            matches!(
-                read_envelope(&ResultEnvelopeText::new(text.to_owned())),
-                ReportedResult::Undecodable(_)
-            ),
-            "{text}"
-        );
-    }
-}
-
-#[test]
 fn every_task_gets_exactly_one_answer() {
     let (sender, mut receiver) = tokio::sync::oneshot::channel();
     drop(Answer::new(sender));
@@ -516,7 +485,7 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     let result = encode_child_frame(&ChildFrame::Result(ResultFrame {
         task_id: claimed.task_id,
         end: RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__type":"ok","value":3}"#.to_owned(),
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
@@ -530,7 +499,7 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     assert_eq!(
         run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,
         AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__type":"ok","value":3}"#.to_owned()
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned()
         )))
     );
 }

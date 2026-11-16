@@ -11,9 +11,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from tests.session_database import database_name_prefix
 
-_GENERATED_DATABASE = re.compile(r'^horsies_term_iso_[0-9a-f]{32}$')
-_PREFIX = 'horsies_term_iso_'
+
 _SETUP_LOCK_SQL = text(
     "SELECT pg_advisory_lock(hashtext('horsies_terminalization_database_setup'))"
 )
@@ -22,8 +22,14 @@ _SETUP_UNLOCK_SQL = text(
 )
 
 
+def isolated_database_prefix() -> str:
+    '''The name prefix of isolated databases: the run's prefix and ``iso_``.'''
+    return f'{database_name_prefix()}iso_'
+
+
 def _checked_database_name(name: str) -> str:
-    if _GENERATED_DATABASE.fullmatch(name) is None:
+    generated = re.compile(rf'^{re.escape(isolated_database_prefix())}[0-9a-f]{{32}}$')
+    if generated.fullmatch(name) is None:
         raise RuntimeError(f'refuse to drop non-generated database {name!r}')
     return name
 
@@ -36,7 +42,8 @@ async def isolated_test_database(base_url: str) -> AsyncGenerator[str]:
         base.set(database='postgres'),
         isolation_level='AUTOCOMMIT',
     )
-    name = f'{_PREFIX}{uuid.uuid4().hex}'
+    prefix = isolated_database_prefix()
+    name = f'{prefix}{uuid.uuid4().hex}'
     created = False
     guard_engine: AsyncEngine | None = None
     guard_connection: AsyncConnection | None = None
@@ -56,7 +63,7 @@ async def isolated_test_database(base_url: str) -> AsyncGenerator[str]:
                               )
                             ORDER BY database.datname
                         '''),
-                        {'prefix': _PREFIX},
+                        {'prefix': prefix},
                     )
                 ).scalars()
                 for stale_name in stale:
