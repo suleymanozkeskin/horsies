@@ -1220,35 +1220,48 @@ async fn an_installed_database_has_its_history_readers() {
         .await
         .expect("install into an empty database");
 
-    let missing: Vec<String> = sqlx::query_scalar(
-        "SELECT s.signature FROM horsies_history_reader_signatures() AS s \
-         WHERE to_regprocedure(s.signature) IS NULL ORDER BY 1",
-    )
-    .fetch_all(&database.pool)
-    .await
-    .expect("read the reader signatures");
-    assert!(missing.is_empty(), "missing readers: {missing:?}");
-    let current: bool = sqlx::query_scalar("SELECT horsies_history_readers_current()")
-        .fetch_one(&database.pool)
+    let client = database.client();
+    let missing: Vec<String> = client
+        .query(
+            "SELECT s.signature FROM horsies_history_reader_signatures() AS s \
+             WHERE to_regprocedure(s.signature) IS NULL ORDER BY 1",
+            &[],
+        )
         .await
-        .expect("read the reader stamps");
+        .expect("read the reader signatures")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(missing.is_empty(), "missing readers: {missing:?}");
+    let current: bool = client
+        .query_one("SELECT horsies_history_readers_current()", &[])
+        .await
+        .expect("read the reader stamps")
+        .get(0);
     assert!(current);
-    let manifest: Vec<String> = sqlx::query_scalar(
-        "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
-    )
-    .fetch_all(&database.pool)
-    .await
-    .expect("read the manifest");
+    let manifest: Vec<String> = client
+        .query(
+            "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+            &[],
+        )
+        .await
+        .expect("read the manifest")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
     assert_eq!(
         manifest,
         vec!["horsies_task_history_forever_open".to_owned()]
     );
-    let detail_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_task_detail_staged($1)")
-            .bind(Uuid::new_v4())
-            .fetch_one(&database.pool)
-            .await
-            .expect("call the detail reader");
+    let unknown = uuid::Uuid::new_v4();
+    let detail_rows: i64 = client
+        .query_one(
+            "SELECT count(*) FROM horsies_task_detail_staged($1)",
+            &[&unknown],
+        )
+        .await
+        .expect("call the detail reader")
+        .get(0);
     assert_eq!(detail_rows, 0);
     database.drop().await;
 }
@@ -1262,7 +1275,7 @@ async fn the_readers_are_published_under_a_serializable_server_default() {
     database
         .execute(&format!(
             "ALTER DATABASE \"{}\" SET default_transaction_isolation = 'serializable'",
-            database.name
+            database.database.name()
         ))
         .await;
 
@@ -1271,10 +1284,12 @@ async fn the_readers_are_published_under_a_serializable_server_default() {
         .await
         .expect("install under a serializable default");
 
-    let current: bool = sqlx::query_scalar("SELECT horsies_history_readers_current()")
-        .fetch_one(&database.pool)
+    let current: bool = database
+        .client()
+        .query_one("SELECT horsies_history_readers_current()", &[])
         .await
-        .expect("read the reader stamps");
+        .expect("read the reader stamps")
+        .get(0);
     assert!(current);
     database.drop().await;
 }
@@ -1319,9 +1334,9 @@ async fn a_failed_reader_publication_rolls_back_migration_1000() {
         }
         other => panic!("expected the refused publication, got {other:?}"),
     }
-    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
-    assert!(!relation_exists(&database.pool, "horsies_client_family").await);
-    assert!(!relation_exists(&database.pool, "horsies_task_lookup_manifest").await);
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, "horsies_client_family").await);
+    assert!(!relation_exists(&database, "horsies_task_lookup_manifest").await);
     database.drop().await;
 }
 
