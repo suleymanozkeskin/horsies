@@ -31,7 +31,6 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
     decode_outcome_row,
 )
-from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.task_history_prototypes.archive import (
@@ -43,6 +42,7 @@ from tests.task_history_prototypes.archive import (
     encode_attempts,
 )
 from tests.task_history_prototypes.schema import (
+    OUTCOME_COLUMNS,
     PrototypeSchema,
     install_archive_candidates,
     remove_archive_candidates,

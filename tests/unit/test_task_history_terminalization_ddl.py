@@ -14,9 +14,6 @@ import re
 import pytest
 
 from horsies.core.history.ddl.fragments import frozen_fragments
-from horsies.core.history.terminalization.live_cutover import (
-    LIVE_CUTOVER_COLUMNS_DDL,
-)
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
     ATTEMPT_ENCODER_FUNCTION,
@@ -593,20 +590,12 @@ class TestAttemptEncoder:
 
 
 class TestLiveStatusDomain:
-    """The classifier's premise is a declared fragment, not fixture folklore."""
+    """The classifier's premise is a declared constraint, not fixture folklore."""
 
-    def test_live_only_status_domain_is_production_ddl(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            LIVE_STATUS_DOMAIN_DDL,
-        )
-
-        assert 'ADD CONSTRAINT horsies_tasks_live_status_only' in (
-            LIVE_STATUS_DOMAIN_DDL
-        )
-        assert (
-            "CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING'))"
-            in LIVE_STATUS_DOMAIN_DDL
-        )
+    def test_live_only_status_domain_is_a_baseline_check(self) -> None:
+        sql = ' '.join(baseline_sql().split())
+        assert 'CONSTRAINT horsies_tasks_status_live CHECK (' in sql
+        assert "status IN ('PENDING', 'CLAIMED', 'RUNNING')" in sql
 
 
 class TestNodeRowIdentityType:
@@ -622,65 +611,26 @@ class TestNodeRowIdentityType:
         assert 'v_workflow_node_row_id bigint' not in MOVE_BODY
 
 
-class TestLiveCutover:
-    def test_prepared_disposition_is_not_null_with_the_ratified_set(
-        self,
-    ) -> None:
-        combined = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
-        assert 'prepared_rerun_input_disposition varchar(32) NOT NULL' in (
-            combined
-        )
-        assert 'retain_rerun_input boolean NOT NULL' in combined
-        assert 'idempotency_key_digest bytea' in combined
+class TestLiveRerunColumns:
+    """The live columns the rerun path classifies by: typed, no defaults."""
 
-    def test_no_defaults_on_classification_columns(self) -> None:
-        combined = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
-        assert 'DEFAULT' not in combined
+    def test_classification_columns_are_typed(self) -> None:
+        table = _live_tasks_table()
+        assert 'retain_rerun_input boolean NOT NULL' in table
+        assert 'idempotency_key_digest bytea' in table
+
+    def test_no_defaults_on_the_live_table(self) -> None:
+        assert 'DEFAULT' not in _live_tasks_table()
 
 
-class TestTighteningRendering:
-    """Three renderings, one structured authority, no text parsing."""
-
-    def test_set_not_null_covers_exactly_the_declared_columns(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            CUTOVER_COLUMNS,
-            tightening_cutover_ddl,
-        )
-
-        rendered = '\n'.join(tightening_cutover_ddl())
-        for column in CUTOVER_COLUMNS:
-            clause = f'ALTER COLUMN {column.name} SET NOT NULL'
-            assert (clause in rendered) is column.not_null, column.name
-
-    def test_every_declared_check_lands_once(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            CUTOVER_COLUMNS,
-            tightening_cutover_ddl,
-        )
-
-        rendered = tightening_cutover_ddl()
-        checked = [c for c in CUTOVER_COLUMNS if c.check is not None]
-        constraint_statements = [
-            s for s in rendered if 'ADD CONSTRAINT' in s
-        ]
-        # One per declared column check, plus the lineage pair.
-        assert len(constraint_statements) == len(checked) + 1
-        assert any(
-            'rerun_lineage_pair' in s for s in constraint_statements
-        )
-
-    def test_final_and_transitional_share_the_column_set(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            LIVE_CUTOVER_COLUMNS_DDL,
-            cutover_column_definitions,
-            transitional_cutover_columns_ddl,
-        )
-
-        final = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
-        transitional = transitional_cutover_columns_ddl()
-        for name, _ in cutover_column_definitions():
-            assert f'ADD COLUMN {name} ' in final
-            assert f'ADD COLUMN IF NOT EXISTS {name} ' in transitional
+def _live_tasks_table() -> str:
+    match = re.search(
+        r'^CREATE TABLE horsies_tasks \(.*?^\);$',
+        baseline_sql(),
+        re.DOTALL | re.MULTILINE,
+    )
+    assert match is not None, 'CREATE TABLE horsies_tasks'
+    return match.group(0)
 
 
 class TestBatchedFusedCompletion:

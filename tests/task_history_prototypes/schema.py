@@ -4,12 +4,53 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.schemas.migrations import SCHEMA_VERSION
+
+# Three facts of the v61 schema program the prototypes were written against,
+# copied here when that program (horsies/core/schemas/,
+# horsies/core/history/terminalization/live_cutover.py) was deleted for the
+# baseline migration. The prototypes run only on a v61 database.
+
+SCHEMA_VERSION: Final = 61
+"""The last version of the v61 schema program."""
+
+OUTCOME_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
+    ('task_id', 'varchar'),
+    ('ordinality', 'bigint'),
+    ('outcome', 'text'),
+    ('terminal_at', 'timestamptz'),
+    ('terminalization_kind', 'text'),
+    ('observed_status', 'text'),
+    ('observed_worker_id', 'varchar'),
+    ('observed_claimed_at', 'timestamptz'),
+    ('guard_kind', 'text'),
+    ('observed_guard', 'jsonb'),
+)
+"""The row shape of the v61 terminalization functions."""
+
+TRANSITIONAL_CUTOVER_COLUMNS: Final[tuple[str, ...]] = (
+    'command_fingerprint_version',
+    'command_fingerprint',
+    'retention_class_key',
+    'input_digest',
+    'rerun_of_task_id',
+    'rerun_root_task_id',
+    'idempotency_key_digest',
+    'retain_rerun_input',
+    'prepared_rerun_input_disposition',
+    'prepared_rerun_input_version',
+    'prepared_rerun_input_codec',
+    'prepared_rerun_input_content_type',
+    'prepared_rerun_input_digest',
+    'prepared_rerun_input_inline',
+    'prepared_rerun_input_reference',
+)
+"""The live columns the v27 cutover added, which the LIKE clones drop."""
 
 
 _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')

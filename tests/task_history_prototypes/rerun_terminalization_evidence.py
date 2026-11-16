@@ -27,11 +27,7 @@ from enum import StrEnum
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from horsies.core.history.terminalization.live_cutover import (
-    cutover_column_definitions,
-)
 from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
 from tests.perf.counters import Counts
 from tests.perf.statistics import (
     Budget,
@@ -52,6 +48,8 @@ from tests.task_history_prototypes.qualification_io import (
     QualificationProgressReporter,
 )
 from tests.task_history_prototypes.schema import (
+    OUTCOME_COLUMNS,
+    TRANSITIONAL_CUTOVER_COLUMNS,
     PrototypeSchema,
     install_archive_candidates,
     remove_archive_candidates,
@@ -65,7 +63,7 @@ def _drop_inherited_transitional_columns(relation: str) -> str:
     """Restore the qualified v26 clone shape after LIKE horsies_tasks."""
     drops = ',\n    '.join(
         f'DROP COLUMN IF EXISTS {name}'
-        for name, _ in cutover_column_definitions()
+        for name in TRANSITIONAL_CUTOVER_COLUMNS
     )
     return f'ALTER TABLE {relation}\n    {drops}'
 

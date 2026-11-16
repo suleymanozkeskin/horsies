@@ -97,10 +97,17 @@ SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
 # import because the baseline must not import anything from this checkout —
 # importing from here is the very thing the protection prevents.
 SIDE_IDENTITY_SNIPPET: Final = f"""
-import json as _json, horsies as _horsies
-from horsies.core.schemas.migrations import (
-    SCHEMA_VERSION as _schema_version,
-)
+import importlib, importlib.util, json as _json, horsies as _horsies
+# A build of the baseline migration has no v61 schema program; its schema
+# version is the baseline migration's version.
+if importlib.util.find_spec('horsies.core.baseline') is None:
+    _schema_version = importlib.import_module(
+        'horsies.core.schemas.migrations'
+    ).SCHEMA_VERSION
+else:
+    _schema_version = importlib.import_module(
+        'horsies.core.baseline.migration'
+    ).BASELINE_VERSION
 print(
     '{SIDE_IDENTITY_MARKER} '
     + _json.dumps(

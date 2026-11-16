@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import re
 
-from horsies.core.schemas.migrations import SCHEMA_VERSION
 from tests.task_history_prototypes import schema
+from tests.task_history_prototypes.schema import SCHEMA_VERSION
 
 
 def _refusal_messages() -> list[str]:

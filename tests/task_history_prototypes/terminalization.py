@@ -5,19 +5,19 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.history.terminalization.live_cutover import (
-    cutover_column_definitions,
-)
 from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
-from tests.task_history_prototypes.schema import PrototypeSchema
+from tests.task_history_prototypes.schema import (
+    OUTCOME_COLUMNS,
+    TRANSITIONAL_CUTOVER_COLUMNS,
+    PrototypeSchema,
+)
 
 
 def _drop_inherited_transitional_columns_ddl(namespace: str) -> str:
     """Restore the qualified v26 clone shape after LIKE horsies_tasks."""
     drops = ',\n    '.join(
         f'DROP COLUMN IF EXISTS {name}'
-        for name, _ in cutover_column_definitions()
+        for name in TRANSITIONAL_CUTOVER_COLUMNS
     )
     return f'ALTER TABLE {namespace}.live_tasks\n    {drops}'
 
