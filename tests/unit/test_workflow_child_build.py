@@ -50,7 +50,7 @@ pytestmark = [pytest.mark.unit]
 APP = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr('postgresql+psycopg://u@127.0.0.1:1/unused')),
+        broker=PostgresConfig(database_url=SecretStr('postgresql://u@127.0.0.1:1/unused')),
     ),
 )
 
