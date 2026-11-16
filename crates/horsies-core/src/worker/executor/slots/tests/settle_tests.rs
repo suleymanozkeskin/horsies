@@ -22,7 +22,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work};
+use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work, PhaseTwoForm};
 use crate::worker::executor::protocol::FailureDetail;
 
 const WORKER: &str = "worker-1";
@@ -341,7 +341,7 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
     let broker = unreachable_broker();
     let started = std::time::Instant::now();
     run_phase2(
-        broker.pool(),
+        &broker,
         &WorkflowSpecRegistry::new(),
         Phase2Work {
             task_id: Uuid::new_v4(),
@@ -349,6 +349,7 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
             queue_name: "default".to_owned(),
             is_workflow_task: true,
             capacity_notified: true,
+            phase_two: PhaseTwoForm::NotKnown,
         },
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
