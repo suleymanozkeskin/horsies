@@ -475,9 +475,12 @@ class TestUnclaimSqlClearsLeaseExpiry:
         normalised = ' '.join(
             baseline_function('horsies_abandon_owned_nodes').split()
         )
-        assert "t.command_fingerprint, 'CANCELLED'," in normalised
-        assert "'TASK_CANCELLED'," in normalised
-        assert 'DELETE FROM horsies_tasks WHERE id = ANY(v_applied_ids)' in normalised
+        assert (
+            "horsies_move_tasks_to_history( v_applied_ids, 'CANCELLED', "
+            "'PAUSE_ABANDON_CLAIM_BATCH', v_terminal_at, NULL, 'TASK_CANCELLED',"
+        ) in normalised
+        stage = ' '.join(baseline_function('horsies_move_tasks_to_history').split())
+        assert 'DELETE FROM horsies_tasks AS t WHERE t.id = ANY(p_task_ids)' in stage
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""

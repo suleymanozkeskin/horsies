@@ -14,7 +14,7 @@ from horsies.core.history.reads.lookup_generation import (
     render_staged_duplicate_guard_function,
     render_staged_provenance_function,
 )
-from tests.baseline_sql import baseline_function, baseline_overload
+from tests.baseline_sql import baseline_function
 
 pytestmark = [pytest.mark.unit]
 
@@ -57,8 +57,8 @@ def test_absence_consults_the_clock_skew_exceptions() -> None:
 @pytest.mark.parametrize(
     'body',
     [
-        baseline_overload('horsies_move_task_to_history', 'p_task_id uuid'),
-        baseline_function('horsies_expire_pending_tasks'),
+        baseline_function('horsies_move_task_to_history'),
+        baseline_function('horsies_move_tasks_to_history'),
     ],
     ids=['single_move', 'batch_move'],
 )
@@ -69,4 +69,6 @@ def test_moves_record_skewed_ids_between_the_insert_and_the_deletes(
     record = body.index(f'INSERT INTO {CLOCK_SKEW_EXCEPTIONS}')
     deletes = body.index('DELETE FROM horsies_tasks')
     assert insert < record < deletes
-    assert "INTERVAL '5 seconds' >" in body[record:deletes]
+    # The single move tests the skew before its record insert; the batch
+    # move filters the rows of its record insert by it.
+    assert "interval '5 seconds' >" in body[insert:deletes].lower()
