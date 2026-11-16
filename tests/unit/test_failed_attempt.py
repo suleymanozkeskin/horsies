@@ -11,15 +11,9 @@ import pytest
 
 from horsies.core.history.terminalization.move import (
     FAILED_ATTEMPT_OUTCOME_TYPE,
-    FAILED_ATTEMPT_OUTCOME_TYPE_DDL,
     FINISH_FAILED_ATTEMPT_FUNCTION,
     LOCK_RUNNING_TASK_FUNCTION,
-    RETRY_IN_SAME_CLASS,
-    RETRY_ISOLATED,
-    failed_attempt_fragments,
-    failed_attempt_program_ddl,
 )
-from horsies.core.history.terminalization.outcome import OUTCOME_TYPE_DDL
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
@@ -41,8 +35,11 @@ from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode, TaskErr
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.dispatch import _error_code_text
 from horsies.core.worker.failed_attempt import (
+    RETRY_IN_SAME_CLASS,
+    RETRY_ISOLATED,
     AttemptFailure,
     AttemptFailureKind,
+    ClaimedRowRule,
     FinishFailedAttempt,
     NoRetry,
     RetryAfter,
@@ -56,9 +53,20 @@ from horsies.core.lifecycle.classify import (
     WorkerLevelFailure,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
-from tests.baseline_sql import baseline_sql
+from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
 
 pytestmark = [pytest.mark.unit]
+
+OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
+FAILED_ATTEMPT_OUTCOME_TYPE_DDL = baseline_type(FAILED_ATTEMPT_OUTCOME_TYPE)
+
+
+def failed_attempt_fragments() -> list[str]:
+    """The baseline type and function of the failed attempt."""
+    return [
+        FAILED_ATTEMPT_OUTCOME_TYPE_DDL,
+        baseline_function(FINISH_FAILED_ATTEMPT_FUNCTION),
+    ]
 
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e01'
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
@@ -85,6 +93,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         'is_workflow_task': False,
         'queue_name': 'q1',
         'task_name': 'task_a',
+        'node_has_dependents': None,
     }
     row.update(overrides)
     return row
@@ -137,7 +146,9 @@ class TestDecodeWrites:
         )
 
     def test_a_workflow_failure_owes_phase_two(self) -> None:
-        decoded = decode_failed_attempt_row(_row(is_workflow_task=True))
+        decoded = decode_failed_attempt_row(
+            _row(is_workflow_task=True, node_has_dependents=True),
+        )
 
         assert isinstance(decoded, FailureApplied)
         assert decoded.after == PhaseTwoOwed(task_name='task_a', queue_name='q1')
@@ -226,7 +237,10 @@ class TestDecodeFailsClosed:
             _row(retry_count=1),
             _row(terminalization_kind='FAIL_STALE'),
             _row(is_workflow_task=None),
-            _row(is_workflow_task=True, task_name=None),
+            _row(is_workflow_task=True, node_has_dependents=True, task_name=None),
+            _row(is_workflow_task=True),
+            _row(node_has_dependents=False),
+            _retry_row(node_has_dependents=False),
             _retry_row(terminal_at=NOW),
             _retry_row(retry_count=None),
             _retry_row(queue_name=None),
@@ -244,6 +258,9 @@ class TestDecodeFailsClosed:
             'applied_of_another_kind',
             'applied_without_the_task_kind',
             'phase_two_without_a_task_name',
+            'workflow_failure_without_the_dependents_fact',
+            'plain_failure_with_a_dependents_fact',
+            'retry_with_a_dependents_fact',
             'retry_with_a_terminal_time',
             'retry_without_a_count',
             'retry_without_a_queue',
@@ -276,12 +293,13 @@ def _command(retry: NoRetry | RetryAfter) -> FinishFailedAttempt:
 
 class TestParameters:
     def test_no_retry_sends_no_retry_argument(self) -> None:
-        parameters = finish_parameters(_command(NoRetry()))
+        parameters = finish_parameters(_command(NoRetry()), ClaimedRowRule.REFUSE)
 
         assert parameters == {
             'task_id': TASK_ID,
             'worker_id': 'w-1',
             'claimed_at': NOW,
+            'retry_kind': 'NONE',
             'expected_retry_count': None,
             'retry_delay_s': None,
             'retry_placement': None,
@@ -291,7 +309,14 @@ class TestParameters:
             'attempt_outcome': 'WORKER_FAILURE',
             'attempt_error_message': 'message',
             'attempt_failed_reason': 'reason',
+            'claimed_row_rule': 'REFUSE',
         }
+
+    @pytest.mark.parametrize('rule', list(ClaimedRowRule))
+    def test_the_rule_sends_its_value(self, rule: ClaimedRowRule) -> None:
+        parameters = finish_parameters(_command(NoRetry()), rule)
+
+        assert parameters['claimed_row_rule'] == rule.value
 
     @pytest.mark.parametrize(
         ('placement', 'value'),
@@ -307,6 +332,7 @@ class TestParameters:
     ) -> None:
         parameters = finish_parameters(
             _command(RetryAfter(retry_count=3, delay_s=12.5, placement=placement)),
+            ClaimedRowRule.REFUSE,
         )
 
         assert (
@@ -316,7 +342,9 @@ class TestParameters:
         ) == (3, 12.5, value)
 
     def test_every_placement_has_a_value_the_function_accepts(self) -> None:
-        body = failed_attempt_fragments()[1]
+        sql = baseline_sql()
+        start = sql.index(f'CREATE FUNCTION {FINISH_FAILED_ATTEMPT_FUNCTION}(')
+        body = sql[start : sql.index('$$;', start)]
 
         for placement in RetryPlacement:
             assert f"'{_placement_value(placement)}'" in body
@@ -396,7 +424,7 @@ class TestProgram:
 
         move = body.index('horsies_move_task_to_history(')
         assert body.index('pg_notify') > move
-        assert 'IF NOT v_ctx.is_workflow_task THEN' in body[move:]
+        assert 'IF NOT v_ctx.is_workflow_task AND p_wake THEN' in body[move:]
 
     def test_installation_has_the_type_before_the_function(self) -> None:
         sql = baseline_sql()
@@ -406,10 +434,3 @@ class TestProgram:
         assert type_at < function_at
         assert f'CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}' not in sql
 
-    def test_the_upgrade_drops_before_it_creates(self) -> None:
-        statements = failed_attempt_program_ddl()
-
-        drops = [index for index, s in enumerate(statements) if s.startswith('DROP')]
-        creates = [index for index, s in enumerate(statements) if 'CREATE' in s]
-        assert max(drops) < min(creates)
-        assert len(creates) == 2

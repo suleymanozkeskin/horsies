@@ -20,15 +20,18 @@ so no read can place an id before or within retained history.
 
 from __future__ import annotations
 
-import enum
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies._catalog.history import TaskAbsenceReason as TaskAbsenceReason
+
 from ...types.status import TaskStatus
+from ...utils.db import uuid_column_value
 from ..archive.attempts import AttemptRecord, decode_attempt_snapshot
 from ..archive.versions import DecodedArchiveValue
 from ..errors import HistoryContractError
@@ -43,14 +46,14 @@ _STATUS_BY_VALUE: dict[str, TaskStatus] = {
 class LiveTaskLocation:
     """The task is live; the live read layer owns its detail."""
 
-    task_id: str
+    task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
 class HistoryTaskDetail:
     """One terminal task's full history detail, attempts decoded."""
 
-    task_id: str
+    task_id: UUID
     task_name: str
     queue_name: str
     priority: int
@@ -74,8 +77,8 @@ class HistoryTaskDetail:
     result_digest: bytes | None
     error_code: str | None
     final_failed_reason: str | None
-    rerun_of_task_id: str | None
-    rerun_root_task_id: str | None
+    rerun_of_task_id: UUID | None
+    rerun_root_task_id: UUID | None
     workflow_id: str | None
     is_workflow_task: bool
     rerun_input_disposition: str
@@ -85,31 +88,13 @@ class HistoryTaskDetail:
     attempts: tuple[AttemptRecord, ...]
 
 
-class TaskAbsenceReason(str, enum.Enum):
-    """What a read knows about a task id that no table holds.
-
-    The live table and the task history have no row for the id. The reason
-    says whether retention can explain that.
-    """
-
-    # The id's UUIDv7 birth is before the oldest retained history, so
-    # retention can have removed the task.
-    PREDATES_RETAINED_HISTORY = 'PREDATES_RETAINED_HISTORY'
-    # Retained history covers the id's birth and has no row: the task did
-    # not exist, or its history partition was removed out of band.
-    WITHIN_RETAINED_HISTORY = 'WITHIN_RETAINED_HISTORY'
-    # The id is not a UUIDv7, no attached history partition has a birth, or
-    # the database has no staged history read.
-    NOT_CLASSIFIED = 'NOT_CLASSIFIED'
-
-
 @dataclass(frozen=True, slots=True)
 class TaskDetailAbsent:
     """No row anywhere. `reason` says what the read knows about the id;
     `read_task_detail` gives NOT_CLASSIFIED, because no attached leaf
     records a birth floor."""
 
-    task_id: str
+    task_id: UUID
     reason: TaskAbsenceReason
 
 
@@ -120,7 +105,7 @@ type TaskDetailResult = LiveTaskLocation | HistoryTaskDetail | TaskDetailAbsent
 class HistoryTaskState:
     """The status and the workflow flag of a history row. Nothing else."""
 
-    task_id: str
+    task_id: UUID
     status: TaskStatus
     is_workflow_task: bool
 
@@ -129,7 +114,7 @@ class HistoryTaskState:
 class TaskStateAbsent:
     """Neither the live table nor history holds the task."""
 
-    task_id: str
+    task_id: UUID
 
 
 type TaskStateResult = LiveTaskLocation | HistoryTaskState | TaskStateAbsent
@@ -138,7 +123,7 @@ type TaskStateResult = LiveTaskLocation | HistoryTaskState | TaskStateAbsent
 async def read_task_state(
     connection: AsyncConnection,
     *,
-    task_id: str,
+    task_id: UUID,
 ) -> TaskStateResult:
     """Resolve one task to LIVE, its history status and workflow flag, or absent.
 
@@ -159,7 +144,7 @@ async def read_task_state(
                 f'FROM {TASK_DETAIL_FUNCTION}(CAST(:task_id AS uuid)) '
                 'AS detail'
             ),
-            {'task_id': task_id},
+            {'task_id': str(task_id)},
         )
     ).one_or_none()
     if row is None:
@@ -180,7 +165,7 @@ async def read_task_state(
 async def read_task_detail(
     connection: AsyncConnection,
     *,
-    task_id: str,
+    task_id: UUID,
 ) -> TaskDetailResult:
     """Resolve one task through the staged detail function.
 
@@ -197,7 +182,7 @@ async def read_task_detail(
                 f'FROM {TASK_DETAIL_FUNCTION}(CAST(:task_id AS uuid)) '
                 'AS detail'
             ),
-            {'task_id': task_id},
+            {'task_id': str(task_id)},
         )
     ).one_or_none()
     if row is None:
@@ -216,7 +201,7 @@ async def read_task_detail(
     return _decode_history_detail(row)
 
 
-def _history_status(task_id: str, value: str) -> TaskStatus:
+def _history_status(task_id: UUID, value: str) -> TaskStatus:
     """The stored status of a history row as a ``TaskStatus`` member.
 
     Raises:
@@ -233,7 +218,8 @@ def _history_status(task_id: str, value: str) -> TaskStatus:
 
 
 def _decode_history_detail(row: Any) -> HistoryTaskDetail:
-    status = _history_status(str(row.task_id), row.status)
+    task_id = uuid_column_value(row.task_id, column='task_id')
+    status = _history_status(task_id, row.status)
     decoded = decode_attempt_snapshot(
         version=row.attempt_archive_version,
         payload=bytes(row.attempt_snapshot),
@@ -247,7 +233,7 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
                 f'attempt snapshot failed to decode: {decoded!r}'
             )
     return HistoryTaskDetail(
-        task_id=str(row.task_id),
+        task_id=task_id,
         task_name=row.task_name,
         queue_name=row.queue_name,
         priority=row.priority,
@@ -280,12 +266,14 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
         error_code=row.error_code,
         final_failed_reason=row.final_failed_reason,
         rerun_of_task_id=(
-            str(row.rerun_of_task_id)
+            uuid_column_value(row.rerun_of_task_id, column='rerun_of_task_id')
             if row.rerun_of_task_id is not None
             else None
         ),
         rerun_root_task_id=(
-            str(row.rerun_root_task_id)
+            uuid_column_value(
+                row.rerun_root_task_id, column='rerun_root_task_id',
+            )
             if row.rerun_root_task_id is not None
             else None
         ),
@@ -311,7 +299,7 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
 
 async def _classify_absence(
     connection: AsyncConnection,
-    task_id: str,
+    task_id: UUID,
 ) -> TaskAbsenceReason:
     """The absence reason of a task id with no row anywhere.
 

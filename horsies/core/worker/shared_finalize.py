@@ -25,7 +25,6 @@ declares the slice of ``Worker`` it relies on.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, assert_never
 
 from horsies.core.logging import get_logger
@@ -37,6 +36,7 @@ from horsies.core.worker.child_protocol import (
     SharedWork,
     ThreadSeatTask,
 )
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.runtime import (
     CrashRecoveryCode,
     FinalizeStage,
@@ -74,20 +74,20 @@ class SharedKillFinalizeMixin:
             queue_name: str,
             is_workflow_task: bool,
             task_name: str,
-            claimed_at: datetime,
+            claim: DispatchClaim,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_shared_timeout(
             self,
             task_id: str,
             timeout_ms: int,
-            claimed_at: datetime,
+            claim: DispatchClaim,
             retry: RetryPlacement,
         ) -> Result[None, _FinalizeError]: ...
         async def _recover_worker_future_failure(
             self,
             task_id: str,
             reason: str,
-            claimed_at: datetime,
+            claim: DispatchClaim,
             *,
             failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
             retry: RetryPlacement = RetryPlacement.SAME_CLASS,
@@ -108,7 +108,7 @@ class SharedKillFinalizeMixin:
         task_id: str,
         killed: SeatKilled,
         work: SharedWork,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         *,
         queue_name: str,
         is_workflow_task: bool,
@@ -124,7 +124,7 @@ class SharedKillFinalizeMixin:
                     task_id,
                     killed_by,
                     work,
-                    claimed_at,
+                    claim,
                     retry,
                 )
             case BlockedTheLoop(blocked_ms=blocked_ms, where=where):
@@ -136,7 +136,7 @@ class SharedKillFinalizeMixin:
                 return await self._fail_killed_run(
                     task_id,
                     reason,
-                    claimed_at,
+                    claim,
                     OperationalErrorCode.TASK_BLOCKED_LOOP,
                     RetryPlacement.ISOLATED,
                 )
@@ -149,7 +149,7 @@ class SharedKillFinalizeMixin:
                 return await self._fail_killed_run(
                     task_id,
                     reason,
-                    claimed_at,
+                    claim,
                     OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
                     RetryPlacement.SAME_CLASS,
                 )
@@ -169,7 +169,7 @@ class SharedKillFinalizeMixin:
                     queue_name=queue_name,
                     is_workflow_task=is_workflow_task,
                     task_name=task_name,
-                    claimed_at=claimed_at,
+                    claim=claim,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -179,7 +179,7 @@ class SharedKillFinalizeMixin:
         task_id: str,
         killed_by: str,
         work: SharedWork,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
         """Write ``TASK_TIMEOUT`` for a run that was past its deadline at the
@@ -209,7 +209,7 @@ class SharedKillFinalizeMixin:
         return await self._finalize_shared_timeout(
             task_id,
             timeout_ms,
-            claimed_at,
+            claim,
             retry,
         )
 
@@ -217,7 +217,7 @@ class SharedKillFinalizeMixin:
         self,
         task_id: str,
         reason: str,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         failure_code: OperationalErrorCode,
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
@@ -230,7 +230,7 @@ class SharedKillFinalizeMixin:
         requeue_outcome = await self._recover_worker_future_failure(
             task_id,
             reason,
-            claimed_at=claimed_at,
+            claim=claim,
             failure_code=failure_code,
             retry=retry,
         )
@@ -248,7 +248,7 @@ class SharedKillFinalizeMixin:
                         stage=_FINALIZE_STAGE_FUTURE,
                         message=reason,
                         retryable=True,
-                        data=future_retry_data(failure_code, retry, claimed_at),
+                        data=future_retry_data(failure_code, retry, claim),
                     )
                 )
             case _ as unreachable:
@@ -258,14 +258,14 @@ class SharedKillFinalizeMixin:
 def future_retry_data(
     failure_code: CrashRecoveryCode,
     retry: RetryPlacement,
-    claimed_at: datetime,
+    claim: DispatchClaim,
 ) -> dict[str, Any]:
     """The data of a future-stage error whose retry must write
     ``failure_code`` with ``retry``. Pure."""
     return {
         'failure_code': failure_code.value,
         'retry': retry.value,
-        'claimed_at': claimed_at,
+        'claim': claim,
     }
 
 
@@ -288,7 +288,7 @@ def future_retry_write(
 def timeout_retry_data(
     timeout_ms: int,
     retry: RetryPlacement,
-    claimed_at: datetime,
+    claim: DispatchClaim,
 ) -> dict[str, Any]:
     """The data of a timeout-stage error: the TASK_TIMEOUT write that its
     retry runs again, for an attempt of ``timeout_ms`` whose retry runs at
@@ -296,43 +296,43 @@ def timeout_retry_data(
     return {
         'timeout_ms': timeout_ms,
         'retry': retry.value,
-        'claimed_at': claimed_at,
+        'claim': claim,
     }
 
 
 def timeout_retry_write(
     data: dict[str, Any] | None,
-) -> tuple[int, RetryPlacement, datetime]:
-    """The ``timeout_ms``, the retry placement and the claim generation that
-    ``timeout_retry_data`` kept. Data of another shape is a defect: only
+) -> tuple[int, RetryPlacement, DispatchClaim]:
+    """The ``timeout_ms``, the retry placement and the claim of the dispatch
+    that ``timeout_retry_data`` kept. Data of another shape is a defect: only
     ``timeout_retry_data`` builds the data of a timeout-stage error.
     ``AssertionError``. Pure."""
     match data:
         case {
             'timeout_ms': int() as timeout_ms,
             'retry': str() as placement,
-            'claimed_at': datetime() as claimed_at,
+            'claim': DispatchClaim() as claim,
         }:
-            return timeout_ms, RetryPlacement(placement), claimed_at
+            return timeout_ms, RetryPlacement(placement), claim
         case _:
             raise AssertionError(
                 f'the data of a timeout-stage error has no TASK_TIMEOUT write: {data!r}',
             )
 
 
-def kept_claim_time(data: dict[str, Any] | None) -> datetime:
-    """The claim generation that the data of a finalize error kept, for the
-    fence of its retry.
+def kept_claim(data: dict[str, Any] | None) -> DispatchClaim:
+    """The claim of the dispatch that the data of a finalize error kept, for
+    the fence and the retry facts of its retry.
 
     Each writer of the data of a phase-1, future-stage or timeout-stage
-    error keeps the claim time of the dispatch. Data without one is a
-    defect: ``AssertionError``, which names the keys the data has. Pure.
+    error keeps the claim of the dispatch. Data without one is a defect:
+    ``AssertionError``, which names the keys the data has. Pure.
     """
     match data:
-        case {'claimed_at': datetime() as claimed_at}:
-            return claimed_at
+        case {'claim': DispatchClaim() as claim}:
+            return claim
         case _:
             raise AssertionError(
-                'the data of a finalize error has no claim time; its keys are '
+                'the data of a finalize error has no claim; its keys are '
                 f'{sorted(data or {})}',
             )

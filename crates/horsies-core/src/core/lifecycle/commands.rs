@@ -63,13 +63,13 @@ pub enum TerminalizationCommand {
     /// Success as one statement: locks the row, writes the attempt from the
     /// locked row's own context, transitions, and wakes queue capacity — one
     /// round trip. The fence lives in the locking read ahead of the update,
-    /// not in the update's predicate.
+    /// not in the update's predicate. The function builds the capacity wake
+    /// from the locked row: channel `task_queue_<queue>`, payload
+    /// `capacity`.
     CompleteTaskFused {
         task_id: Uuid,
         fence: OwnedClaim,
         result_json: String,
-        notify_channel: String,
-        notify_payload: String,
     },
 
     /// Failure for a task whose row the caller already locked and read.

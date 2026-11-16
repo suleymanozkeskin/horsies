@@ -1,15 +1,21 @@
 //! Render the code catalogs of horsies-core as Python modules under
 //! `_catalog/`: one module per `python_module`, one enum class per catalog,
-//! in the order of `CODE_CATALOGS`.
+//! in the order of `CODE_CATALOGS`. A lifecycle status class also gets the
+//! `is_terminal` property, and the module gets the `frozenset` constant of
+//! its terminal members right after the class.
 
 use std::collections::BTreeMap;
 
-use horsies_core::catalog::{CodeCatalog, PythonEnumBase};
+use horsies_core::catalog::{CodeCatalog, PythonEnumBase, TerminalStates};
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 
 /// The folder of the catalog modules, inside the package folder.
 pub const CATALOG_FOLDER: &str = "_catalog";
+
+/// The docstring of the generated `is_terminal` property.
+const IS_TERMINAL_DOC: &str =
+    "Whether this status represents a final state (no further transitions).";
 
 /// The catalogs grouped by module, modules in name order, catalogs in
 /// the given order.
@@ -46,13 +52,26 @@ pub fn render_module(module: &str, catalogs: &[CodeCatalog]) -> String {
         classes.join(", ")
     ));
     text.push_str("from __future__ import annotations\n\nfrom enum import Enum\n\n");
-    let exported: Vec<String> = classes.iter().map(|name| string_literal(name)).collect();
+    let exported: Vec<String> = catalogs
+        .iter()
+        .flat_map(exported_names)
+        .map(string_literal)
+        .collect();
     text.push_str(&format!("__all__ = [{}]\n", exported.join(", ")));
     for catalog in catalogs {
         text.push_str("\n\n");
         text.push_str(&render_class(catalog));
     }
     text
+}
+
+/// The module names of one catalog: the class, then the terminal constant
+/// of a lifecycle.
+fn exported_names(catalog: &CodeCatalog) -> Vec<&'static str> {
+    match catalog.terminal_states {
+        TerminalStates::Lifecycle { constant, .. } => vec![catalog.python_class, constant],
+        TerminalStates::NotALifecycle => vec![catalog.python_class],
+    }
 }
 
 fn render_class(catalog: &CodeCatalog) -> String {
@@ -84,6 +103,35 @@ fn render_class(catalog: &CodeCatalog) -> String {
             text.push_str(&doc);
         }
     }
+    match catalog.terminal_states {
+        TerminalStates::Lifecycle { constant, members } => {
+            text.push_str(&render_is_terminal(constant));
+            text.push_str("\n\n");
+            text.push_str(&render_terminal_constant(
+                catalog.python_class,
+                constant,
+                members,
+            ));
+        }
+        TerminalStates::NotALifecycle => {}
+    }
+    text
+}
+
+/// The `is_terminal` property, at the end of a class body.
+fn render_is_terminal(constant: &str) -> String {
+    format!(
+        "\n    @property\n    def is_terminal(self) -> bool:\n        \"\"\"{IS_TERMINAL_DOC}\"\"\"\n        return self in {constant}\n"
+    )
+}
+
+/// The module constant of the terminal members of `class`.
+fn render_terminal_constant(class: &str, constant: &str, members: &[&str]) -> String {
+    let mut text = format!("{constant}: frozenset[{class}] = frozenset(\n    {{\n");
+    for member in members {
+        text.push_str(&format!("        {class}.{member},\n"));
+    }
+    text.push_str("    }\n)\n");
     text
 }
 
@@ -111,6 +159,17 @@ mod tests {
             python_base: base,
             doc: "Task status.",
             members: MEMBERS,
+            terminal_states: TerminalStates::NotALifecycle,
+        }
+    }
+
+    fn lifecycle_catalog() -> CodeCatalog {
+        CodeCatalog {
+            terminal_states: TerminalStates::Lifecycle {
+                constant: "STATUS_TERMINAL_STATES",
+                members: &["RUNNING"],
+            },
+            ..catalog("status", "Status", PythonEnumBase::StrEnum)
         }
     }
 
@@ -121,6 +180,25 @@ mod tests {
             rendered,
             "class Status(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    PENDING = 'PENDING'\n    \"\"\"Waits for a worker.\"\"\"\n\n    RUNNING = 'RUNNING'\n"
         );
+    }
+
+    #[test]
+    fn a_lifecycle_renders_is_terminal_and_its_constant() {
+        let rendered = render_class(&lifecycle_catalog());
+        assert_eq!(
+            rendered,
+            "class Status(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    PENDING = 'PENDING'\n    \"\"\"Waits for a worker.\"\"\"\n\n    RUNNING = 'RUNNING'\n\n    @property\n    def is_terminal(self) -> bool:\n        \"\"\"Whether this status represents a final state (no further transitions).\"\"\"\n        return self in STATUS_TERMINAL_STATES\n\n\nSTATUS_TERMINAL_STATES: frozenset[Status] = frozenset(\n    {\n        Status.RUNNING,\n    }\n)\n"
+        );
+    }
+
+    #[test]
+    fn a_module_exports_the_terminal_constant_after_its_class() {
+        let catalogs = [
+            lifecycle_catalog(),
+            catalog("status", "Outcome", PythonEnumBase::StrEnum),
+        ];
+        let rendered = render_module("status", &catalogs);
+        assert!(rendered.contains("__all__ = ['Status', 'STATUS_TERMINAL_STATES', 'Outcome']\n"));
     }
 
     #[test]

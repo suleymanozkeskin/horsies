@@ -1,26 +1,31 @@
-"""Frozen inventory of database-owned terminal writes on ``horsies_tasks``.
+"""Frozen inventory of the terminal writes: the history rows.
 
-Every terminal status update belongs to the database program in
-``horsies/core/schemas/terminalization.py``. This inventory is the tripwire: an
-added, removed, moved, or status-drifted writer fails here and must be reviewed
-before the inventory changes.
+A task reaches a terminal status only by leaving ``horsies_tasks``: a baseline
+SQL function inserts its history row and deletes the live row. The live table
+refuses a terminal status (CHECK ``horsies_tasks_status_live``). So the
+terminal writers are the history inserts of the baseline functions, and this
+inventory pins them: an added, removed, moved, or status-drifted history
+insert fails here and must be reviewed before the inventory changes.
 
-``tests/lifecycle_matrix.py`` describes what each of these writers does, and
-is cross-checked against this allowlist.
+``tests/lifecycle_matrix.py`` describes the sixteen terminal operations that
+reach these inserts, and is cross-checked against this allowlist.
 
-Scope: UPDATE statements assigning ``status`` on ``horsies_tasks`` in any
-string literal of the runtime package — SQLAlchemy ``text()`` statements,
-raw psycopg SQL, and DDL function bodies alike. Writers assigning only
-live statuses (PENDING/CLAIMED/RUNNING) are out of scope. A parameterized
-``status = :param`` assignment is terminal-capable and must be listed.
-INSERT-shaped terminal writes are out of scope; no runtime SQL inserts a task
-in a terminal state.
+Two scans:
+
+- The baseline functions (``tests/baseline_sql.baseline_function_statements``): their
+  history inserts, with the status each one writes (a literal, or ``PARAM``
+  for a status bound from a parameter), and their UPDATEs of
+  ``horsies_tasks``, which must assign no terminal status.
+- Every string literal of the runtime package, as before the baseline:
+  UPDATE statements assigning ``status`` on ``horsies_tasks``. Writers that
+  assign only live statuses (PENDING/CLAIMED/RUNNING) are out of scope; a
+  parameterized ``status = :param`` assignment is terminal-capable. No
+  Python string may hold a terminal writer or a history insert.
 
 Known limit of static per-string scanning: SQL assembled across separate
 string constants (``HEAD + TAIL`` concatenation, ``.join`` of fragments)
-is not reassembled, so a writer split that way evades this test. No
-runtime SQL is built that way today. The authoritative-module assertion below
-also prevents a detected terminal update from being approved in a caller.
+is not reassembled, so a writer split that way evades the Python scan. No
+runtime SQL is built that way today.
 """
 
 from __future__ import annotations
@@ -32,10 +37,14 @@ from pathlib import Path
 
 import pytest
 
+from horsies.core.history.names import CLOCK_SKEW_EXCEPTIONS, LEAF_CATALOG
+from tests.baseline_sql import baseline_function_statements
+
 pytestmark = [pytest.mark.unit]
 
 _RUNTIME_ROOT = Path(__file__).resolve().parents[2] / 'horsies'
-_AUTHORITATIVE_MODULE = 'horsies/core/schemas/terminalization.py'
+_BASELINE = 'baseline'
+"""Inventory key of a baseline function, in place of a module path."""
 
 _TERMINAL_STATUSES = frozenset({'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'})
 
@@ -68,89 +77,136 @@ _STATUS_PARAM_RE = re.compile(
 # parameter (terminal-capable regardless of literals).
 _InventoryKey = tuple[str, str, str]
 
-# Keys are stable across line moves: module path plus
-# the assigned statement name (module-level ``NAME = text(...)``) or the
-# enclosing function name (raw SQL in child paths). The count catches a
-# writer being duplicated or removed within the same context.
+# Keys are stable across line moves: ``baseline`` plus the function that holds
+# the history insert, and the status it writes. The count catches an insert
+# being duplicated or removed within the same function.
 FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
-    # The fifteen typed operations implement the original sixteen writer
-    # contracts; T04 and T05 share CREATE_FAIL_LOCKED_TASK_SQL.
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_COMPLETE_LOCKED_TASK_SQL',
-        'COMPLETED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_COMPLETE_TASK_FUSED_SQL',
-        'COMPLETED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_FAIL_LOCKED_TASK_SQL',
-        'FAILED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_FAIL_STALE_TASK_SQL',
-        'FAILED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_EXPIRE_OWNED_CLAIM_SQL',
-        'EXPIRED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_EXPIRE_PENDING_TASKS_SQL',
-        'EXPIRED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_CANCEL_LOCKED_TASK_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_CANCEL_OWNED_ORPHAN_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_CANCEL_ORPHANED_TASKS_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_ABANDON_OWNED_NODE_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_ABANDON_OWNED_NODES_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_CANCEL_OWNED_NODE_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_CANCEL_OWNED_NODES_SQL',
-        'CANCELLED',
-    ): 1,
-    (
-        'horsies/core/schemas/terminalization.py',
-        'CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL',
-        'CANCELLED',
-    ): 1,
+    # The single-row move, one insert in each of its two overloads: by task
+    # id, which every single-row terminal operation calls with its own status
+    # literal, and by locked row.
+    (_BASELINE, 'horsies_move_task_to_history', 'PARAM'): 2,
+    # The batch move of locked rows, by task ids.
+    (_BASELINE, 'horsies_move_tasks_to_history', 'PARAM'): 1,
+    # The batch moves: each inserts its history rows itself.
+    (_BASELINE, 'horsies_abandon_nodes_of_paused_workflows', 'CANCELLED'): 1,
+    (_BASELINE, 'horsies_abandon_owned_nodes', 'CANCELLED'): 1,
+    (_BASELINE, 'horsies_cancel_nodes_of_cancelled_workflow', 'CANCELLED'): 1,
+    (_BASELINE, 'horsies_cancel_orphaned_tasks', 'CANCELLED'): 1,
+    (_BASELINE, 'horsies_cancel_owned_nodes', 'CANCELLED'): 1,
+    (_BASELINE, 'horsies_expire_pending_tasks', 'EXPIRED'): 1,
 }
+
+
+_HISTORY_INSERT_RE = re.compile(
+    r'\bINSERT\s+INTO\s+horsies_task_history\s*\(',
+    re.IGNORECASE,
+)
+"""An insert into the history parent (not into its side tables)."""
+
+_SOURCE_HISTORY_INSERT_RE = re.compile(
+    r'\bINSERT\s+INTO\s+(?:horsies_task_history|\{TASK_HISTORY_PARENT\})\s*\(',
+    re.IGNORECASE,
+)
+"""A history insert in Python source, named or interpolated."""
+
+_STATUS_VALUE_LITERAL_RE = re.compile(r"^'(\w+)'$")
+
+
+def _parenthesised(text: str, open_at: int) -> tuple[str, int]:
+    """The text inside the parentheses opening at ``open_at``, and the end offset."""
+    depth = 0
+    for offset in range(open_at, len(text)):
+        match text[offset]:
+            case '(':
+                depth += 1
+            case ')':
+                depth -= 1
+                if depth == 0:
+                    return text[open_at + 1 : offset], offset + 1
+            case _:
+                continue
+    raise AssertionError(f'unbalanced parentheses after offset {open_at}')
+
+
+def _top_level_items(text: str) -> list[str]:
+    """The comma-separated items of ``text`` at parenthesis depth zero."""
+    items: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in text:
+        match char:
+            case '(':
+                depth += 1
+            case ')':
+                depth -= 1
+            case ',' if depth == 0:
+                items.append(''.join(current).strip())
+                current = []
+                continue
+            case _:
+                pass
+        current.append(char)
+    items.append(''.join(current).strip())
+    return items
+
+
+def _select_list(text: str) -> str:
+    """The select list of the SELECT that starts ``text``: up to its FROM."""
+    depth = 0
+    for match in re.finditer(r'[()]|\bFROM\b', text, re.IGNORECASE):
+        match match.group(0):
+            case '(':
+                depth += 1
+            case ')':
+                depth -= 1
+            case _ if depth == 0:
+                return text[: match.start()]
+            case _:
+                continue
+    return text
+
+
+def history_insert_statuses(body: str) -> list[str]:
+    """The status each history insert of a function body writes.
+
+    A quoted literal gives the status; any other expression gives ``PARAM``.
+    """
+    statuses: list[str] = []
+    for insert in _HISTORY_INSERT_RE.finditer(body):
+        columns_text, after_columns = _parenthesised(body, insert.end() - 1)
+        columns = [column.strip() for column in columns_text.split(',')]
+        assert columns.count('status') == 1, columns
+        rest = body[after_columns:].lstrip()
+        if rest.upper().startswith('VALUES'):
+            values_text, _ = _parenthesised(rest, rest.index('('))
+            values = _top_level_items(values_text)
+        else:
+            select_at = re.search(r'\bSELECT\b', rest, re.IGNORECASE)
+            assert select_at is not None, rest[:200]
+            values = _top_level_items(_select_list(rest[select_at.end() :]))
+        assert len(values) == len(columns), (len(values), len(columns))
+        value = values[columns.index('status')]
+        literal = _STATUS_VALUE_LITERAL_RE.match(value)
+        statuses.append('PARAM' if literal is None else literal.group(1).upper())
+    return statuses
+
+
+def history_insert_columns(body: str) -> list[list[str]]:
+    """The column list of each history insert of a function body."""
+    lists: list[list[str]] = []
+    for insert in _HISTORY_INSERT_RE.finditer(body):
+        columns_text, _ = _parenthesised(body, insert.end() - 1)
+        lists.append([column.strip() for column in columns_text.split(',')])
+    return lists
+
+
+def _scan_baseline_history_inserts() -> Counter[_InventoryKey]:
+    """History inserts of the baseline functions, keyed by the status written."""
+    found: Counter[_InventoryKey] = Counter()
+    for name, body in baseline_function_statements():
+        for status in history_insert_statuses(body):
+            found[(_BASELINE, name, status)] += 1
+    return found
 
 
 def _constant_text(node: ast.expr) -> str:
@@ -318,60 +374,34 @@ def _scan_runtime_package() -> Counter[_InventoryKey]:
     return found
 
 
-def _terminal_set_windows(
-    tree: ast.Module,
-    module_path: str,
-) -> list[tuple[str, str, str]]:
-    """(module, context, SET window) per terminal-status-assigning window.
+def _revives(window: str, predicate: str) -> bool:
+    """Whether one UPDATE moves a terminal row back to a live status.
 
-    One entry per SET clause that assigns a terminal status literal, so a
-    statement with two such UPDATEs yields two entries.
+    A revival assigns a live status while its predicate restricts the source
+    to terminal statuses — the shape of manual in-place retry. Automatic
+    retry and requeue are live-to-live and do not match.
     """
-    contexts = _statement_contexts(tree)
-    windows: list[tuple[str, str, str]] = []
-    for lineno, text in _task_update_strings(tree):
-        context = contexts.get(lineno, '<module>')
-        for window in _set_clause_windows(text):
-            assigned = {
-                m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)
-            }
-            if assigned & _TERMINAL_STATUSES:
-                windows.append((module_path, context, window))
-    return windows
-
-
-def _scan_runtime_terminal_windows() -> list[tuple[str, str, str]]:
-    """Terminal-assigning SET windows across the whole runtime package."""
-    windows: list[tuple[str, str, str]] = []
-    for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
-        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
-        tree = ast.parse(path.read_text(encoding='utf-8'))
-        windows.extend(_terminal_set_windows(tree, rel))
-    return windows
+    assigned = {m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)}
+    if assigned & _TERMINAL_STATUSES or not assigned:
+        return False
+    # In a function body the remainder runs on past the statement; only the
+    # text before its ';' is the predicate.
+    statement_predicate = predicate.split(';', 1)[0]
+    guarded = {m.upper() for m in _STATUS_WORD_RE.findall(statement_predicate)}
+    return bool(guarded & _TERMINAL_STATUSES)
 
 
 def _revival_set_windows(
     tree: ast.Module,
     module_path: str,
 ) -> list[tuple[str, str, str]]:
-    """(module, context, SET window) per terminal-to-live transition.
-
-    A revival assigns a live status while its predicate restricts the source
-    to terminal statuses — the shape of manual in-place retry. Automatic
-    retry and requeue are live-to-live and do not match.
-    """
+    """(module, context, SET window) per terminal-to-live transition."""
     contexts = _statement_contexts(tree)
     windows: list[tuple[str, str, str]] = []
     for lineno, text in _task_update_strings(tree):
         context = contexts.get(lineno, '<module>')
         for window, predicate in update_clauses(text):
-            assigned = {
-                m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)
-            }
-            if assigned & _TERMINAL_STATUSES or not assigned:
-                continue
-            guarded = {m.upper() for m in _STATUS_WORD_RE.findall(predicate)}
-            if guarded & _TERMINAL_STATUSES:
+            if _revives(window, predicate):
                 windows.append((module_path, context, window))
     return windows
 
@@ -387,11 +417,17 @@ def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
 
 
 
+_HISTORY_SIDE_TABLES = (LEAF_CATALOG, CLOCK_SKEW_EXCEPTIONS)
+"""Tables under the history name prefix that hold no history record: the
+leaf catalog and the clock-skew exceptions."""
+
 _HISTORY_UPDATE_RE = re.compile(
-    r'UPDATE\s+(?:horsies_task_history|\{TASK_HISTORY_PARENT\})',
+    r'UPDATE\s+(?:(?!(?:' + '|'.join(_HISTORY_SIDE_TABLES) + r')\b)horsies_task_history\w*'
+    r'|\{TASK_HISTORY_PARENT\})',
     re.IGNORECASE,
 )
-"""An UPDATE against the history relation, named or interpolated.
+"""An UPDATE against the history relation, one of its class parents or
+leaves, named or interpolated; not against a side table.
 
 The DDL builds its statements by interpolating TASK_HISTORY_PARENT, so a
 scan for the literal name alone would read as clean while the generated
@@ -417,33 +453,74 @@ class TestTerminalWriterInventory:
     """The reviewed terminal-writer set and the scanner that enforces it."""
 
     def test_inventory_is_frozen(self) -> None:
-        """Every terminal-capable writer is in the allowlist, exactly.
+        """Every history insert of the baseline is in the allowlist, exactly.
 
         A failure means a terminal writer was added, removed, moved, or
-        changed which statuses it assigns. Do not update the allowlist to
+        changed which status it writes. Do not update the allowlist to
         make this pass without establishing that the new write is correct:
         every entry here is a statement that can end a task's life.
         ``tests/lifecycle_matrix.py`` must be updated in step.
         """
-        discovered = _scan_runtime_package()
+        discovered = _scan_baseline_history_inserts()
         assert discovered == Counter(FROZEN_TERMINAL_WRITERS), (
-            'Terminal-status writer inventory drifted.\n'
+            'Terminal writer inventory drifted.\n'
             f'Unexpected: {sorted(discovered - Counter(FROZEN_TERMINAL_WRITERS))}\n'
             f'Missing: {sorted(Counter(FROZEN_TERMINAL_WRITERS) - discovered)}'
         )
 
     def test_terminal_writes_are_owned_by_the_database_program(self) -> None:
-        """Callers cannot grow a second terminalization implementation."""
-        discovered = _scan_runtime_package()
-        outside_boundary = sorted(
-            (module, context, statuses)
-            for module, context, statuses in discovered
-            if module != _AUTHORITATIVE_MODULE
+        """Callers cannot grow a second terminalization implementation.
+
+        No Python string assigns a terminal status to a live row or inserts
+        a history row: both belong to the baseline functions.
+        """
+        assert _scan_runtime_package() == Counter()
+        history_inserts = sorted(
+            str(path.relative_to(_RUNTIME_ROOT.parent))
+            for path in _RUNTIME_ROOT.rglob('*.py')
+            if _SOURCE_HISTORY_INSERT_RE.search(path.read_text(encoding='utf-8'))
         )
-        assert not outside_boundary, (
-            'Terminal task updates must be defined in '
-            f'{_AUTHORITATIVE_MODULE}: {outside_boundary}'
+        assert not history_inserts, (
+            f'History rows must be inserted by the baseline functions: {history_inserts}'
         )
+
+    def test_no_baseline_function_assigns_a_terminal_status_to_a_live_row(
+        self,
+    ) -> None:
+        """The baseline functions update live rows with live statuses only.
+
+        CHECK ``horsies_tasks_status_live`` refuses the write at run time;
+        this finds it in the text, for every function, whether or not a test
+        calls it.
+        """
+        writers = sorted(
+            (name, sorted(statuses), parameterized)
+            for name, body in baseline_function_statements()
+            for statuses, parameterized in (_set_clause_statuses(body),)
+            if statuses & _TERMINAL_STATUSES or parameterized
+        )
+        assert not writers, writers
+
+    def test_the_history_insert_scan_reads_literal_and_bound_statuses(
+        self,
+    ) -> None:
+        """Presence half: the status reader reads both insert forms."""
+        values_form = (
+            'INSERT INTO horsies_task_history (task_id, status, terminal_at)\n'
+            'VALUES (p_task_id, p_terminal_status, NOW());'
+        )
+        select_form = (
+            'INSERT INTO horsies_task_history (task_id, status, terminal_at)\n'
+            "SELECT t.id, 'EXPIRED', coalesce(t.good_until, NOW())\n"
+            'FROM horsies_tasks t;'
+        )
+        side_table = (
+            'INSERT INTO horsies_task_history_clock_exceptions (task_id)\n'
+            'SELECT t.id FROM horsies_tasks t;'
+        )
+        assert history_insert_statuses(values_form) == ['PARAM']
+        assert history_insert_statuses(select_form) == ['EXPIRED']
+        assert history_insert_statuses(side_table) == []
 
     def test_scanner_detects_terminal_literal(self) -> None:
         """A terminal literal in a SET clause is detected."""
@@ -543,28 +620,22 @@ class TestTerminalWriterInventory:
         )
 
     def test_terminal_writers_set_terminal_at(self) -> None:
-        """Every terminal writer assigns terminal_at in the same SET clause.
+        """Every history insert writes ``terminal_at``.
 
-        The frozen inventory proves which statuses are assigned and where;
-        it does not prove the terminal_at assignment is present and spelled
-        correctly. A missed or misspelled writer would otherwise surface
-        only when the CHECK constraint lands, as a finalize failure on
-        whichever path the tests exercise least.
+        The frozen inventory proves which statuses are written and where;
+        it does not prove that each insert carries the terminal time.
         """
-        windows = _scan_runtime_terminal_windows()
-        expected = sum(FROZEN_TERMINAL_WRITERS.values())
-        assert len(windows) == expected, (
-            f'Expected {expected} terminal-assigning SET clauses, found '
-            f'{len(windows)}; the inventory and this assertion disagree.'
-        )
-        missing = [
-            (module, context)
-            for module, context, window in windows
-            if 'terminal_at' not in window
+        inserts = [
+            (name, columns)
+            for name, body in baseline_function_statements()
+            for columns in history_insert_columns(body)
         ]
+        assert len(inserts) == sum(FROZEN_TERMINAL_WRITERS.values()), (
+            'the inventory and this assertion disagree'
+        )
+        missing = sorted(name for name, columns in inserts if 'terminal_at' not in columns)
         assert not missing, (
-            'Terminal writers that do not assign terminal_at in the same '
-            f'SET clause as their terminal status: {sorted(missing)}'
+            f'History inserts that do not write terminal_at: {missing}'
         )
 
     def test_no_terminal_to_live_transition_exists(self) -> None:
@@ -576,7 +647,12 @@ class TestTerminalWriterInventory:
         immutability. Automatic retry and requeue are live-to-live and
         are not matched.
         """
-        windows = _scan_runtime_revival_windows()
+        windows = _scan_runtime_revival_windows() + [
+            (_BASELINE, name, window)
+            for name, body in baseline_function_statements()
+            for window, predicate in update_clauses(body)
+            if _revives(window, predicate)
+        ]
         assert not windows, (
             'Statements that move a terminal status back to a live one: '
             f'{sorted((module, context) for module, context, _ in windows)}'
@@ -598,6 +674,12 @@ class TestTerminalWriterInventory:
         assert not _scan_history_updates(
             "UPDATE horsies_tasks SET status = 'PENDING'"
         )
+        assert _scan_history_updates(
+            'UPDATE horsies_task_history_forever_open SET result_payload = NULL'
+        )
+        assert not _scan_history_updates(
+            'UPDATE horsies_task_history_leaf_catalog AS c SET dropped_at = NULL'
+        )
 
     def test_no_runtime_statement_updates_a_history_record(self) -> None:
         """A terminal record is immutable IN THE RELATION THAT HOLDS IT.
@@ -613,7 +695,11 @@ class TestTerminalWriterInventory:
         the lock-contention test that asserted it was retired: the race
         needs a row that can be changed, and there is none.
         """
-        updates = _scan_runtime_history_updates()
+        updates = _scan_runtime_history_updates() + [
+            (f'{_BASELINE} {name}', window)
+            for name, body in baseline_function_statements()
+            for window in _scan_history_updates(body)
+        ]
         assert not updates, (
             'Runtime statements that UPDATE a history record: '
             f'{sorted(updates)}'

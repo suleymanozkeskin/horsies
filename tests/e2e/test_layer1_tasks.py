@@ -9,12 +9,13 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from typing import Protocol
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.types.status import TaskStatus
 from horsies.core.models.tasks import OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskResult, TaskError
@@ -156,7 +157,9 @@ def test_an_async_task_cannot_wait_for_another_task() -> None:
             workflow_get_async_refused=True,
         )
         sent = unwrap_get_result(
-            default_instance.app.get_result(value.sent_task_id, timeout_ms=10000),
+            default_instance.app.get_result(
+                UUID(value.sent_task_id), timeout_ms=10000,
+            ),
         )
         assert_ok(sent, expected_value=2)
 
@@ -616,6 +619,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         queue_name='low',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         priority=100,
         enqueued_at=enqueue_base,
@@ -627,6 +631,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         queue_name='high',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         priority=1,
         enqueued_at=enqueue_base + timedelta(milliseconds=50),
@@ -685,6 +690,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=expiry,
     )).unwrap()
@@ -724,6 +730,7 @@ async def test_task_completes_before_expiry(
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=expiry,
     )).unwrap()
@@ -754,6 +761,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=past,
     )).unwrap()
@@ -795,6 +803,7 @@ async def test_retry_blocked_by_good_until_expiry(
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=good_until,
         task_options=task_options,
@@ -844,6 +853,7 @@ async def test_retry_succeeds_within_good_until(
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             good_until=good_until,
             task_options=task_options,
@@ -882,6 +892,7 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
         task_name='nonexistent_task_xyz',
         queue_name='default',
         task_id=str(uuid4()),
+        send_kind=SendKind.FIRST,
         enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
     ).unwrap()
@@ -930,6 +941,7 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
         kwargs_json='{"x": 5}',
         queue_name='default',
         task_id=str(uuid4()),
+        send_kind=SendKind.FIRST,
         enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
     ).unwrap()
@@ -1071,6 +1083,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
     )).unwrap()
 

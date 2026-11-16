@@ -49,7 +49,7 @@ async def async_sends(*, x: int) -> TaskResult[str, TaskError]:
     """Send a task with `send_async` from an async task. Return its id."""
     match await simple_task.send_async(x=x):
         case Ok(handle):
-            return TaskResult(ok=handle.task_id)
+            return TaskResult(ok=str(handle.task_id))
         case Err(send_err):
             return TaskResult(
                 err=TaskError(error_code='SEND_FAILED', message=send_err.message),
@@ -109,7 +109,7 @@ async def async_wait_inside_task() -> TaskResult[AsyncWaitProbe, TaskError]:
     started = await spec_single_node.start_async()
     return TaskResult(
         ok=AsyncWaitProbe(
-            sent_task_id=handle.task_id,
+            sent_task_id=str(handle.task_id),
             get_async_refused=_refused(
                 await handle.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
             ),

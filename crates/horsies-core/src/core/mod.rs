@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod app;
+pub mod boot_failure;
 pub mod codec;
 pub mod config;
 pub mod defaults;
@@ -13,7 +14,10 @@ pub mod types;
 pub mod workflow;
 
 // Re-exports for convenience.
-pub use app::{Horsies, ResolvedEnqueue, WorkflowBuilderRegistration, WorkflowRegistrationBuilder};
+pub use app::{
+    Horsies, PreparedSchedules, ResolvedEnqueue, ScheduleSendFacts, WorkflowBuilderRegistration,
+    WorkflowRegistrationBuilder,
+};
 pub use config::{
     mask_database_url, AppConfig, AppConfigError, CronEnumTerm, CronNumericTerm, CronOrdinal,
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
@@ -23,7 +27,10 @@ pub use config::{
     SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
-pub use registry::{RegisteredWorkflowSpec, SpecBuilderFn, TaskRegistry, WorkflowSpecRegistry};
+pub use registry::{
+    BuilderHookName, RegisteredWorkflowSpec, SpecBuildError, SpecBuilderFn, TaskRegistry,
+    WorkflowSpecRegistry,
+};
 pub use task::{
     AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode, ExceptionRecord,
     Execution, ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode,

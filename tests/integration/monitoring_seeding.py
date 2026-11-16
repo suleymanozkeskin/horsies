@@ -182,7 +182,8 @@ class NodeRow:
     dependencies: tuple[int, ...]
     allow_failed_deps: bool
     kind: TaskNode | SubworkflowNode
-    error: str | None
+    result: str | None
+    """The stored result text; a failed node's error is in it."""
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
@@ -401,7 +402,7 @@ _INSERT_NODE_SQL = text(
         :execution, NULL, :retention_class_key, :status,
         CAST(:task_id AS uuid), :is_subworkflow,
         CAST(:sub_workflow_id AS uuid), NULL, NULL,
-        :sub_workflow_params, NULL, NULL, :error, :created_at, :started_at,
+        :sub_workflow_params, NULL, :result, NULL, :created_at, :started_at,
         :completed_at
     )
     """
@@ -609,7 +610,7 @@ def _node_params(row: NodeRow) -> dict[str, object]:
         'dependencies': list(row.dependencies),
         'allow_failed_deps': row.allow_failed_deps,
         'status': row.status,
-        'error': row.error,
+        'result': row.result,
         'created_at': row.created_at,
         'started_at': row.started_at,
         'completed_at': row.completed_at,
