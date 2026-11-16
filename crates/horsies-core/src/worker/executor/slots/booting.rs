@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use super::board::{DownState, PoolBoard, PoolFailure, SlotPhase};
-use crate::worker::executor::protocol::{ChildFrame, InitFrame, ParentFrame};
+use super::board::{DownState, PoolBoard, PoolFailure, ReadyChild, SlotPhase};
+use crate::worker::executor::protocol::{ChildFrame, InitFrame, ParentFrame, RssReading};
 use crate::worker::executor::supervisor::{
     boot_end_of, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause, BootReply,
     ChildChannel, ChildCommand, ChildLost, FrameWait, LossCause, MailboxBound, SpawnError,
@@ -28,7 +28,8 @@ pub(super) struct BootSlot<'a> {
 
 /// The end of a boot attempt.
 enum BootAttempt {
-    Ready(ChildChannel),
+    /// The child sent its ready frame, with the RSS it read then.
+    Ready(ChildChannel, RssReading),
     Ended(BootEnd),
     Stopped,
 }
@@ -61,7 +62,7 @@ pub(super) async fn boot_child(slot: &BootSlot<'_>) -> Booted {
             (false, false) => {}
         }
         let failure = match boot_attempt(slot).await {
-            BootAttempt::Ready(channel) => {
+            BootAttempt::Ready(channel, rss) => {
                 if let SlotPhase::Down(down) = board.phase(index) {
                     tracing::warn!(
                         slot = index,
@@ -70,7 +71,13 @@ pub(super) async fn boot_child(slot: &BootSlot<'_>) -> Booted {
                         "a slot is back in service",
                     );
                 }
-                board.set(index, SlotPhase::Serving { pid: channel.pid() });
+                board.ready(
+                    index,
+                    ReadyChild {
+                        pid: channel.pid(),
+                        rss,
+                    },
+                );
                 return Booted::Child(channel);
             }
             BootAttempt::Stopped => return Booted::PoolStopped,
@@ -232,7 +239,7 @@ async fn boot_attempt(slot: &BootSlot<'_>) -> BootAttempt {
 /// Read the first answer of a booting child.
 async fn boot_reply(mut channel: ChildChannel, reply: FrameWait) -> BootAttempt {
     match reply {
-        FrameWait::Frame(ChildFrame::Ready(_)) => BootAttempt::Ready(channel),
+        FrameWait::Frame(ChildFrame::Ready(ready)) => BootAttempt::Ready(channel, ready.rss),
         FrameWait::Frame(ChildFrame::BootFailed(frame)) => {
             let _ = channel.dispose_lost().await;
             BootAttempt::Ended(boot_end_of(BootReply::BootFailed(frame)))

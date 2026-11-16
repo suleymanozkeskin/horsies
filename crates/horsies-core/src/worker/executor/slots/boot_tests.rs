@@ -60,8 +60,8 @@ async fn stop_pool(pool: IsolatedPool, spawner: Spawner) {
 // ---------------------------------------------------------------------------
 
 /// Python `TestBoot::test_start_reports_one_baseline_per_child` (the slot
-/// half; the baseline report of the start waits on #927): each slot boots a
-/// child of its own.
+/// half; the baseline report of the start is in `start_tests.rs`): each slot
+/// boots a child of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_slot_boots_its_own_child() {
     let spawner = Spawner::start().unwrap();
@@ -334,9 +334,9 @@ async fn a_repeating_boot_cause_counts_while_another_slot_serves() {
 // ---------------------------------------------------------------------------
 
 /// Python `TestDownSlots::test_the_first_start_is_degraded_when_one_slot_boots`
-/// (the slot half; the degraded start of the first generation waits on
-/// #927): one slot is down with its cause, the other serves, the down slot
-/// leaves the budget, and the pool does not fail.
+/// (the slot half; the degraded start of the first generation is in
+/// `start_tests.rs`): one slot is down with its cause, the other serves, the
+/// down slot leaves the budget, and the pool does not fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_slot_short_of_resources_is_down_while_the_other_serves() {
     let dir = TestDir::new();
