@@ -259,7 +259,8 @@ pub fn send_error_from_enqueue(
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
         | BrokerError::TerminalizationContract(_)
-        | BrokerError::HistoryReadContract(_) => TaskSendError::EnqueueFailed {
+        | BrokerError::HistoryReadContract(_)
+        | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,
