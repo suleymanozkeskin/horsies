@@ -37,8 +37,6 @@ fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
         task_id,
         fence,
         result_json: r#"{"ok": 1}"#.to_owned(),
-        notify_channel: CHANNEL.to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -80,10 +78,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
         matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
         "{first:?}"
     );
-    assert_eq!(
-        wakes.payloads(&pool).await,
-        vec![format!("capacity:{task_id}")]
-    );
+    assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
     let replay = terminalize(&pool, &command).await.expect("replay");
 
@@ -232,7 +227,6 @@ async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
 /// phase-2 error.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #722"]
 async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pool = pool().await;
     let unpinged = unpinged_single_connection_pool(database_options(&pool)).await;

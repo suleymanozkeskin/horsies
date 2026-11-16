@@ -22,8 +22,10 @@ mod run_work;
 mod seats;
 
 #[cfg(test)]
+mod start_tests;
+#[cfg(test)]
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
-pub use host::{child_command, run_child_host, ChildApp, ChildHostExit, OrphanSelfHeal};
+pub use host::{child_command, run_child_host, ChildApp, ChildHostExit};
 pub use run_work::{spawn_in_run, RunSpawnRefused, MAX_RUN_WORK};

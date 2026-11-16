@@ -20,6 +20,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::config::recovery::RecoveryConfigError;
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
     ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame,
@@ -34,6 +35,7 @@ use crate::worker::executor::slots::{
 use crate::worker::executor::supervisor::channel::KillMark;
 use crate::worker::executor::supervisor::{
     wait_for_exit, ChildCommand, ChildExit, ExitState, ReapedExit, SpawnedChild, Spawner,
+    CHILD_KILL_WAIT,
 };
 use crate::worker::retry::read_stored_options;
 
@@ -788,6 +790,8 @@ fn start_pool(spawner: &Spawner, live: &LiveDispatches, command: ChildCommand) -
             tasks_per_child: TaskLimit::Off,
             memory_per_child: MemoryLimit::Off,
             exit_not_seen: ExitNotSeen::LeaveToRecovery,
+            child_cpus: ChildCpus::Inherited,
+            kill_wait: CHILD_KILL_WAIT,
         },
         board,
         spawner.handle(),

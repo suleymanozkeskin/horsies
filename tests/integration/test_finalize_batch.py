@@ -67,6 +67,7 @@ from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.slots import Assigned, TaskFinished
 from horsies.core.worker.worker import Worker
 from horsies.core.utils.db import PooledStatements, StatementRunner
+from tests.dispatch_claim_support import claim_at
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.autocommit_support import (
     QUEUE,
@@ -95,7 +96,9 @@ WAIT_POLL_S: Final = 0.05
 REPLY_DROP_WAIT_S: Final = 5.0
 OUTER_BOUND_S: Final = 30.0
 TASK_LOCK_SEED: Final = 731
-UNREGISTERED_CLASS: Final = 'batch_no_partition'
+UNREGISTERED_CLASS: Final = 'standard_1777d'
+"""A class of the baseline key form that no test registers: no history leaf
+covers it, so the move of its row raises."""
 QUEUE_ROOM: Final = 4 * BATCH_ROWS
 """The batch queue bound of the test workers. A worker's bound is twice its
 claim budget, which is 2 for the one-slot test worker; these tests finalize
@@ -247,7 +250,7 @@ async def _finalize(
         queue_name=QUEUE,
         is_workflow_task=False,
         task_name=TASK_NAME,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 
@@ -815,7 +818,7 @@ async def test_the_row_is_written_only_after_its_attempt_ended(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
     )
     for _ in range(10):
@@ -1024,7 +1027,7 @@ async def test_two_flushers_and_workflow_node_finalizes_do_not_deadlock(
             queue_name=QUEUE,
             is_workflow_task=True,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
 
     first = asyncio.create_task(_finalize_together(worker, plain_first))

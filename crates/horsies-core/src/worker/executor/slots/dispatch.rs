@@ -13,37 +13,10 @@ use crate::worker::executor::protocol::{
 };
 use crate::worker::retry::StoredOptions;
 
-/// The execution class of a task row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ExecutionClass {
-    /// One task at a time in its child; a hard stop at the deadline.
-    Isolated,
-    /// Many async tasks at once on one event loop or runtime of a shared
-    /// child.
-    SharedAsync,
-    /// Many blocking tasks at once, each on a thread of a shared child.
-    SharedThread,
-}
-
-impl ExecutionClass {
-    /// Every class, in the order of the stored values.
-    pub const ALL: [Self; 3] = [Self::Isolated, Self::SharedAsync, Self::SharedThread];
-
-    /// The stored value of the class.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Isolated => "ISOLATED",
-            Self::SharedAsync => "SHARED_ASYNC",
-            Self::SharedThread => "SHARED_THREAD",
-        }
-    }
-}
-
-impl fmt::Display for ExecutionClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+/// The execution class of a task row: the class that the claim reads, the
+/// budget that claims it and the kind of child that runs it. It is the
+/// stored class of the core, so a claimed row needs no conversion.
+pub use crate::core::task::Execution as ExecutionClass;
 
 /// Whether a task is a node of a workflow: one type with the frames. A
 /// workflow task owes phase 2 after its terminal write.
