@@ -40,15 +40,18 @@ impl SuccessPolicy {
 
     /// Evaluate whether the workflow should be considered successful.
     ///
-    /// Returns `true` if any case has all its required indices in COMPLETED status.
+    /// Returns `true` if any case with at least one required index has all its required indices in
+    /// COMPLETED status. A case with no required index is skipped, as in Python
+    /// (`core/workflows/engine.py:3511-3514`); a spec build refuses such a case.
     /// `task_statuses` maps task index to its current `WorkflowTaskStatus`.
     pub fn evaluate(&self, task_statuses: &[WorkflowTaskStatus]) -> bool {
         self.cases.iter().any(|case| {
-            case.required_indices.iter().all(|&idx| {
-                task_statuses
-                    .get(idx)
-                    .is_some_and(|s| *s == WorkflowTaskStatus::Completed)
-            })
+            !case.required_indices.is_empty()
+                && case.required_indices.iter().all(|&idx| {
+                    task_statuses
+                        .get(idx)
+                        .is_some_and(|s| *s == WorkflowTaskStatus::Completed)
+                })
         })
     }
 }
@@ -169,6 +172,30 @@ mod tests {
         };
         let statuses = vec![WorkflowTaskStatus::Completed];
         assert!(!policy.evaluate(&statuses));
+    }
+
+    #[test]
+    fn a_case_with_no_required_index_is_skipped() {
+        let empty_only = SuccessPolicy {
+            cases: vec![SuccessCase {
+                required_indices: vec![],
+            }],
+            optional_indices: None,
+        };
+        assert!(!empty_only.evaluate(&[WorkflowTaskStatus::Completed]));
+        let empty_then_real = SuccessPolicy {
+            cases: vec![
+                SuccessCase {
+                    required_indices: vec![],
+                },
+                SuccessCase {
+                    required_indices: vec![0],
+                },
+            ],
+            optional_indices: None,
+        };
+        assert!(!empty_then_real.evaluate(&[WorkflowTaskStatus::Failed]));
+        assert!(empty_then_real.evaluate(&[WorkflowTaskStatus::Completed]));
     }
 
     #[test]
