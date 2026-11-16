@@ -7,13 +7,16 @@
 //! a value out of bounds is refused when the config or the manifest is
 //! deserialized. The defaults are the statement layer's
 //! [`DEFAULT_SOCKET_SETTINGS`](crate::db::DEFAULT_SOCKET_SETTINGS), which are
-//! Python's defaults.
+//! Python's defaults. The two config enums are manifest types
+//! ([`crate::manifest::DatabaseManifest`]); each bounded type implements
+//! [`ManifestValue`] next to its parser, so the bound has one definition.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Keepalives, SocketSettings, TcpUserTimeout};
+use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
 
 /// Largest keepalive idle time and interval in seconds: Linux's limit for
 /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` (tcp(7)).
@@ -61,6 +64,14 @@ impl From<KeepaliveSeconds> for u32 {
     }
 }
 
+impl ManifestValue for KeepaliveSeconds {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "KEEPALIVE_SECONDS",
+        min: 1,
+        max: MAX_KEEPALIVE_SECONDS as u64,
+    });
+}
+
 /// Unanswered keepalive probes before the kernel drops the connection, from 1
 /// to [`MAX_KEEPALIVE_PROBES`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +101,14 @@ impl From<KeepaliveProbes> for u32 {
     fn from(probes: KeepaliveProbes) -> Self {
         probes.0
     }
+}
+
+impl ManifestValue for KeepaliveProbes {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "KEEPALIVE_PROBES",
+        min: 1,
+        max: MAX_KEEPALIVE_PROBES as u64,
+    });
 }
 
 /// A TCP user timeout in milliseconds, from 1 to [`MAX_TCP_USER_TIMEOUT_MS`].
@@ -122,9 +141,19 @@ impl From<TcpUserTimeoutMs> for u32 {
     }
 }
 
+impl ManifestValue for TcpUserTimeoutMs {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "TCP_USER_TIMEOUT_MS",
+        min: 1,
+        max: MAX_TCP_USER_TIMEOUT_MS as u64,
+    });
+}
+
 /// TCP keepalives of every core connection. Python's
 /// `tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TcpKeepalivesConfig {
     Off,
@@ -169,7 +198,9 @@ impl TcpKeepalivesConfig {
 
 /// The TCP user timeout of every core connection. Python's
 /// `tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TcpUserTimeoutConfig {
     /// The operating system's timeout.
