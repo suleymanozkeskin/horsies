@@ -97,10 +97,11 @@ async def _insert_subworkflow_node(
                 (id, workflow_id, task_index, node_id, task_name,
                  input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
-                 is_subworkflow, sub_workflow_id, status, created_at)
+                 is_subworkflow, sub_workflow_id, sub_workflow_params,
+                 status, created_at)
             VALUES (:id, :wf, :idx, :node, 'denest_sub', '{}',
                     'default', 100, '{}', FALSE, 'all',
-                    TRUE, :sub_id, 'RUNNING', NOW())
+                    TRUE, :sub_id, 'NOT_GIVEN', 'RUNNING', NOW())
         """),
         {
             'id': str(uuid.uuid4()),
