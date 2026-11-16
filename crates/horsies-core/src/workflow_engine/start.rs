@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -160,6 +161,8 @@ struct PreparedNode<'a> {
     task_facts: Option<NodeTaskFacts>,
     is_root: bool,
     fast_path: bool,
+    /// Whether a sub-workflow node is below this node in its workflow.
+    downstream_subworkflow: DownstreamSubworkflow,
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +504,7 @@ fn classify_workflow_error(
         WorkflowError::Serialization(_) | WorkflowError::Validation(_) => {
             WorkflowStartErrorCode::ValidationFailed
         }
-        WorkflowError::Database(_) | WorkflowError::Broker(_) => {
+        WorkflowError::Database(_) | WorkflowError::Broker(_) | WorkflowError::StepContract(_) => {
             WorkflowStartErrorCode::EnqueueFailed
         }
         WorkflowError::WorkflowNotFound { .. }
@@ -552,6 +555,65 @@ const SUBWORKFLOW_NODE_QUEUE: &str = "default";
 
 /// The priority that the row of a sub-workflow node stores. Python: `core/workflows/lifecycle.py:535`.
 const SUBWORKFLOW_NODE_PRIORITY: i32 = 100;
+
+/// Whether a sub-workflow node is reachable below a node along the dependency edges of its workflow.
+///
+/// The start computes it from the static graph, and the node row stores it
+/// (`horsies_workflow_tasks.downstream_subworkflow`). Every node that the phase 2 of a node can
+/// promote is below it, so the phase 2 of a `NotReachable` node never owes a child start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DownstreamSubworkflow {
+    /// No sub-workflow node is below the node. Stored as `NONE`.
+    NotReachable,
+    /// At least one sub-workflow node is below the node. Stored as `REACHABLE`.
+    Reachable,
+}
+
+impl DownstreamSubworkflow {
+    /// The value that the node row stores.
+    pub(crate) fn as_stored(self) -> &'static str {
+        match self {
+            Self::NotReachable => "NONE",
+            Self::Reachable => "REACHABLE",
+        }
+    }
+}
+
+/// The `downstream_subworkflow` fact of each node of one workflow, in the order of `nodes`.
+///
+/// The walk starts at the dependencies of each sub-workflow node and goes up through the
+/// dependencies. It visits each index once, so it takes at most one step per node and edge. A
+/// sub-workflow node is `Reachable` only when another sub-workflow node is below it. Does no I/O.
+///
+/// Python computes the same at start (`with_downstream_subworkflow`, `horsies/core/workflows/sql.py`),
+/// and so does the SQL start (`horsies_workflow_start_nodes`).
+pub(crate) fn downstream_subworkflow_facts(nodes: &[AnyNode]) -> Vec<DownstreamSubworkflow> {
+    let dependencies: HashMap<usize, &[usize]> = nodes
+        .iter()
+        .map(|node| (node.index, node.dependencies.as_slice()))
+        .collect();
+    let mut pending: Vec<usize> = nodes
+        .iter()
+        .filter(|node| node.is_subworkflow)
+        .flat_map(|node| node.dependencies.iter().copied())
+        .collect();
+    let mut reachable: HashSet<usize> = HashSet::with_capacity(nodes.len());
+    while let Some(index) = pending.pop() {
+        if !reachable.insert(index) {
+            continue;
+        }
+        if let Some(upstream) = dependencies.get(&index) {
+            pending.extend_from_slice(upstream);
+        }
+    }
+    nodes
+        .iter()
+        .map(|node| match reachable.contains(&node.index) {
+            true => DownstreamSubworkflow::Reachable,
+            false => DownstreamSubworkflow::NotReachable,
+        })
+        .collect()
+}
 
 /// The queue and priority that a node row stores.
 ///
@@ -616,8 +678,9 @@ fn insert_workflow_tasks<'a>(
         }
 
         // ── Phase 1: prepare every row in memory ──
+        let downstream_facts = downstream_subworkflow_facts(tasks);
         let mut prepared: Vec<PreparedNode> = Vec::with_capacity(tasks.len());
-        for task in tasks {
+        for (task, downstream_subworkflow) in tasks.iter().zip(downstream_facts) {
             let is_root = task.dependencies.is_empty();
             let (queue, priority) = stored_queue_and_priority(task)?;
 
@@ -699,6 +762,7 @@ fn insert_workflow_tasks<'a>(
                 task_facts,
                 is_root,
                 fast_path,
+                downstream_subworkflow,
             });
         }
 
@@ -711,7 +775,7 @@ fn insert_workflow_tasks<'a>(
              allow_failed_deps, join_type, min_success, \
              task_options, max_retries, execution, good_until, \
              retention_class_key, status, is_subworkflow, sub_workflow_params, \
-             sub_workflow_name, sub_definition_key, \
+             downstream_subworkflow, sub_workflow_name, sub_definition_key, \
              task_id, started_at, created_at) ",
         );
         qb.push_values(prepared.iter(), |mut b, p| {
@@ -752,6 +816,7 @@ fn insert_workflow_tasks<'a>(
                     true => Some(p.node.sub_workflow_params.as_stored()),
                     false => None,
                 })
+                .push_bind(p.downstream_subworkflow.as_stored())
                 .push_bind(p.sub_workflow_name.clone())
                 .push_bind(p.node.sub_definition_key.clone())
                 .push_bind(p.task_id.clone())
@@ -1220,6 +1285,119 @@ mod tests {
             "expected fail-closed unresolved-queue error, got: {:?}",
             err
         );
+    }
+
+    /// A node of the given kind at `index` with the given dependencies.
+    fn graph_node(index: usize, is_subworkflow: bool, dependencies: Vec<usize>) -> AnyNode {
+        let mut node = node_with(is_subworkflow, Some(10));
+        node.index = index;
+        node.node_id = Some(format!("n{index}"));
+        node.dependencies = dependencies;
+        node.sub_definition_key = match is_subworkflow {
+            true => Some("tests.downstream.child.v1".to_owned()),
+            false => None,
+        };
+        node
+    }
+
+    #[test]
+    fn a_node_above_a_subworkflow_node_is_reachable() {
+        use DownstreamSubworkflow::{NotReachable, Reachable};
+        // 0 -> 1 -> 2 (sub-workflow) -> 4 (sub-workflow); 0 -> 3.
+        let nodes = vec![
+            graph_node(0, false, vec![]),
+            graph_node(1, false, vec![0]),
+            graph_node(2, true, vec![1]),
+            graph_node(3, false, vec![0]),
+            graph_node(4, true, vec![2]),
+        ];
+        assert_eq!(
+            downstream_subworkflow_facts(&nodes),
+            vec![Reachable, Reachable, Reachable, NotReachable, NotReachable]
+        );
+        // Diamond: both paths lead to the one sub-workflow node, each node is visited once.
+        let diamond = vec![
+            graph_node(0, false, vec![]),
+            graph_node(1, false, vec![0]),
+            graph_node(2, false, vec![0]),
+            graph_node(3, true, vec![1, 2]),
+        ];
+        assert_eq!(
+            downstream_subworkflow_facts(&diamond),
+            vec![Reachable, Reachable, Reachable, NotReachable]
+        );
+    }
+
+    #[test]
+    fn a_workflow_without_subworkflow_nodes_has_no_reachable_node() {
+        let nodes = vec![graph_node(0, false, vec![]), graph_node(1, false, vec![0])];
+        assert_eq!(
+            downstream_subworkflow_facts(&nodes),
+            vec![DownstreamSubworkflow::NotReachable; 2]
+        );
+        assert_eq!(DownstreamSubworkflow::NotReachable.as_stored(), "NONE");
+        assert_eq!(DownstreamSubworkflow::Reachable.as_stored(), "REACHABLE");
+    }
+
+    /// The start stores each node's `downstream_subworkflow` from the static graph, and
+    /// `sub_workflow_params` on the sub-workflow node only.
+    #[tokio::test]
+    #[serial]
+    async fn the_start_stores_the_downstream_subworkflow_fact_of_each_node() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let spec = keyed_spec(
+            Some("tests.downstream.start.v1"),
+            vec![
+                graph_node(0, false, vec![]),
+                graph_node(1, true, vec![0]),
+                graph_node(2, false, vec![0]),
+            ],
+        );
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let workflow_id = Uuid::new_v4();
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+            &broker,
+            &spec,
+            Some(workflow_id),
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("start workflow");
+
+        let nodes: Vec<(i32, String, Option<String>)> = sqlx::query_as(
+            "SELECT task_index, downstream_subworkflow, sub_workflow_params
+             FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
+        )
+        .bind(workflow_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            nodes,
+            vec![
+                (0, "REACHABLE".to_owned(), None),
+                (1, "NONE".to_owned(), Some("NOT_GIVEN".to_owned())),
+                (2, "NONE".to_owned(), None),
+            ]
+        );
+
+        sqlx::query(
+            "DELETE FROM horsies_tasks WHERE id IN (
+                SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[test]
