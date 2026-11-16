@@ -286,12 +286,8 @@ impl BrokerClaimSteps {
 
 impl ClaimPassSteps for BrokerClaimSteps {
     async fn claim(&self, request: &ClaimPassRequest) -> Result<ClaimPass, BrokerError> {
-        claim_pass(
-            self.broker.core_main_pool(),
-            self.broker.statement_log(),
-            request,
-        )
-        .await
+        let (open, _write) = self.broker.core_pools_for_write()?;
+        claim_pass(open.main(), self.broker.statement_log(), request).await
     }
 
     async fn non_runnable_workflow_tasks(
@@ -308,6 +304,7 @@ impl ClaimPassSteps for BrokerClaimSteps {
         &self,
         claims: &[(Uuid, DateTime<Utc>)],
     ) -> Result<Vec<(Uuid, ReleaseOutcome)>, BrokerError> {
+        let (open, _write) = self.broker.core_pools_for_write()?;
         let mut outcomes = Vec::with_capacity(claims.len());
         for chunk in claims.chunks(MAX_RELEASED_CLAIMS) {
             let batch = ReleaseBatch::new(chunk).expect(
@@ -319,14 +316,8 @@ impl ClaimPassSteps for BrokerClaimSteps {
                 batch,
                 placement: ReleasePlacement::Isolated,
             };
-            outcomes.extend(
-                release_claims(
-                    self.broker.core_main_pool(),
-                    self.broker.statement_log(),
-                    &command,
-                )
-                .await?,
-            );
+            outcomes
+                .extend(release_claims(open.main(), self.broker.statement_log(), &command).await?);
         }
         Ok(outcomes)
     }
