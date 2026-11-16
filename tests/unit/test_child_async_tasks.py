@@ -71,7 +71,7 @@ def _app() -> Horsies:
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr(
-                    'postgresql+psycopg://user:password@localhost/unused'
+                    'postgresql://user:password@localhost/unused'
                 ),
             ),
             exception_mapper={MappedError: 'MAPPED_BY_APP'},
@@ -430,7 +430,7 @@ class TestEntriesTheChildCannotRun:
         assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
 
 
-UNREACHABLE_URL = 'postgresql+psycopg://u:p@127.0.0.1:1/db'
+UNREACHABLE_URL = 'postgresql://u:p@127.0.0.1:1/db'
 WORKFLOW_ID = '0b6f2f0e-6c1d-4f7a-9a52-3d2b1c0e9f81'
 
 
@@ -665,7 +665,7 @@ class TestASelfCancel:
             AppConfig(
                 broker=PostgresConfig(
                     database_url=SecretStr(
-                        'postgresql+psycopg://user:password@localhost/unused'
+                        'postgresql://user:password@localhost/unused'
                     ),
                 ),
                 exception_mapper=mapper,
@@ -731,7 +731,7 @@ class TestAGeneratorExitFromTheBody:
             AppConfig(
                 broker=PostgresConfig(
                     database_url=SecretStr(
-                        'postgresql+psycopg://user:password@localhost/unused'
+                        'postgresql://user:password@localhost/unused'
                     ),
                 ),
                 exception_mapper=mapper,

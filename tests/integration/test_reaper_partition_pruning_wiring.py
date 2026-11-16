@@ -56,7 +56,7 @@ def _reaper_worker(broker: PostgresBroker) -> Worker:
     reached.
     """
     config = WorkerConfig(
-        dsn='postgresql+psycopg://unused:unused@localhost/unused',
+        dsn='postgresql://unused:unused@localhost/unused',
         psycopg_dsn='postgresql://unused:unused@localhost/unused',
         queues=['default'],
     )

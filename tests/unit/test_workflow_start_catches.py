@@ -48,7 +48,7 @@ from tests.broker_resources_support import attach_resources, fake_resources
 
 pytestmark = [pytest.mark.unit]
 
-DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
+DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 WORKFLOW_ID = '3c7e9a10-5b2d-4f8e-a1c3-7d9e0f1a2b3c'
 DEFECT_MARKER = 'defect-marker-7d41'
 GOOD_UNTIL = datetime(2099, 1, 1, tzinfo=timezone.utc)

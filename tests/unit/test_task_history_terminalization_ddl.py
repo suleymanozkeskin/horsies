@@ -16,7 +16,6 @@ import pytest
 from horsies.core.lifecycle.operations import TerminalizationKind
 from tests.baseline_sql import (
     baseline_function,
-    baseline_overload,
     baseline_sql,
     baseline_table,
     baseline_type,
