@@ -46,6 +46,8 @@ mod shared_pool_tests;
 #[cfg(test)]
 mod shared_rules_tests;
 #[cfg(test)]
+mod shared_thread_tests;
+#[cfg(test)]
 mod stop_and_loss_tests;
 #[cfg(test)]
 mod tests;

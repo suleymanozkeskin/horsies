@@ -342,12 +342,21 @@ pub(super) fn answer_runs(answers: &[(&ClaimedTask, Vec<ChildFrame>)], runs: usi
 /// As [`answer_runs`], with a shell action for each task in place of its
 /// frames.
 pub(super) fn act_on_runs(actions: &[(&ClaimedTask, String)], runs: usize) -> String {
+    act_on_runs_then(actions, runs, &format!("{}exit 3", read_frame()))
+}
+
+/// As [`act_on_runs`], then `tail` in place of the wait for the stop frame.
+pub(super) fn act_on_runs_then(
+    actions: &[(&ClaimedTask, String)],
+    runs: usize,
+    tail: &str,
+) -> String {
     let cases: String = actions
         .iter()
         .map(|(task, action)| format!("*{}*) {action};; ", task.task_id))
         .collect();
     let one_run = format!("{}case $meta in {cases}*) exit 3;; esac; ", read_frame());
-    format!("{}{}exit 3", one_run.repeat(runs), read_frame())
+    format!("{}{tail}", one_run.repeat(runs))
 }
 
 /// Boot, then serve nothing: exit at the stop frame.
