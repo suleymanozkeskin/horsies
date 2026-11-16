@@ -225,7 +225,7 @@ SELECT fixture_node(
     '00000000-0000-7000-8000-00000000000b'
 );
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-00000000000b', 'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
+    '00000000-0000-7000-8000-00000000000b'::uuid, 'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
 );
 SELECT expect_value(
     'phase2_consume history',
