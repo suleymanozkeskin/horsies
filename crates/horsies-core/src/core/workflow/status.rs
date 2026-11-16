@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
 )]
-#[code_catalog(module = "status", base = "str_enum")]
+#[code_catalog(
+    module = "status",
+    base = "str_enum",
+    terminal_states = "WORKFLOW_TERMINAL_STATES"
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowStatus {
     /// Created but not yet started.
@@ -19,14 +23,18 @@ pub enum WorkflowStatus {
     /// At least one task executing or ready.
     Running,
     /// All tasks terminal and success criteria met.
+    #[code_catalog(terminal)]
     Completed,
     /// A task failed and on_error=FAIL (or no success case satisfied).
+    #[code_catalog(terminal)]
     Failed,
     /// A task failed with on_error=PAUSE; awaiting resume() or cancel().
     Paused,
     /// User cancelled via WorkflowHandle.cancel().
+    #[code_catalog(terminal)]
     Cancelled,
     /// A paused workflow exceeded `paused_workflow_auto_cancel_after`.
+    #[code_catalog(terminal)]
     Expired,
 }
 
@@ -88,7 +96,11 @@ impl std::fmt::Display for WorkflowStatus {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
 )]
-#[code_catalog(module = "status", base = "str_enum")]
+#[code_catalog(
+    module = "status",
+    base = "str_enum",
+    terminal_states = "WORKFLOW_TASK_TERMINAL_STATES"
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowTaskStatus {
     /// Waiting for dependencies to become terminal.
@@ -100,10 +112,13 @@ pub enum WorkflowTaskStatus {
     /// Worker is executing the task (or child workflow is running).
     Running,
     /// Task succeeded (result is Ok).
+    #[code_catalog(terminal)]
     Completed,
     /// Task failed (result is Err).
+    #[code_catalog(terminal)]
     Failed,
     /// Skipped due to upstream failure, condition, or quorum impossible.
+    #[code_catalog(terminal)]
     Skipped,
 }
 

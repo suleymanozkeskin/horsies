@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -255,10 +255,11 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
 /// The entry of a SKIPPED dependency (Python `core/workflows/engine.py:2830-2835`).
 pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
     TaskError {
-        error_code: Some(OutcomeCode::UpstreamSkipped.into()),
-        message: Some("Upstream dependency was SKIPPED".to_owned()),
-        cause: None,
+        exception: None,
+        error_code: OutcomeCode::UpstreamSkipped.into(),
         data: Some(serde_json::json!({ "dependency_index": dep_idx })),
+        message: Some("Upstream dependency was SKIPPED".to_owned()),
+        kind: TaskErrorKind::Plain,
     }
 }
 
@@ -266,12 +267,13 @@ pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
 /// dependency.
 pub(crate) fn missing_result_error(dep_idx: i32, status: &str) -> TaskError {
     TaskError {
-        error_code: Some(OperationalErrorCode::ResultDeserializationError.into()),
+        exception: None,
+        error_code: OperationalErrorCode::ResultDeserializationError.into(),
+        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
         message: Some(format!(
             "Upstream dependency at index {dep_idx} is {status} with no stored result"
         )),
-        cause: None,
-        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
+        kind: TaskErrorKind::Plain,
     }
 }
 
@@ -282,9 +284,14 @@ fn task_result_to_value(
 ) -> serde_json::Value {
     serde_json::to_value(&wrapped).unwrap_or_else(|e| {
         tracing::warn!(dep_idx, error = %e, context, "dependency result wrapping failed");
+        // A decodable envelope with a code: no code-less fallback.
         serde_json::json!({
-            "__type": "err",
-            "value": {
+            "__h_task_result__": true,
+            "ok": null,
+            "err": {
+                "exception": null,
+                "error_code": {"__builtin_task_code__": "WORKER_SERIALIZATION_ERROR"},
+                "data": null,
                 "message": context,
             }
         })
@@ -370,10 +377,7 @@ mod tests {
             key: "x".to_owned(),
         };
         let task = conflict.node_error(workflow_id, 3, MergedNodeKind::Task);
-        assert_eq!(
-            task.error_code.as_ref().map(ToString::to_string).as_deref(),
-            Some("WORKFLOW_ENQUEUE_FAILED")
-        );
+        assert_eq!(task.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
         assert_eq!(
             task.message.as_deref(),
             Some("args_from key 'x' conflicts with static kwarg (task 3)")
@@ -419,8 +423,8 @@ mod tests {
         let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "ok");
-        assert_eq!(answer["value"], 42);
+        assert_eq!(answer["__h_task_result__"], true);
+        assert_eq!(answer["ok"], 42);
     }
 
     #[test]
@@ -438,8 +442,8 @@ mod tests {
         let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
-        assert!(answer["value"]["message"]
+        assert!(answer["err"].is_object());
+        assert!(answer["err"]["message"]
             .as_str()
             .unwrap()
             .contains("no stored result"));
@@ -452,7 +456,7 @@ mod tests {
         let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
+        assert!(answer["err"].is_object());
     }
 
     #[test]
@@ -472,8 +476,8 @@ mod tests {
         let result = merged(r#"{"existing": true}"#, &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["existing"], true);
-        assert_eq!(parsed["dep_val"]["__type"], "ok");
-        assert_eq!(parsed["dep_val"]["value"], "hello");
+        assert_eq!(parsed["dep_val"]["__h_task_result__"], true);
+        assert_eq!(parsed["dep_val"]["ok"], "hello");
     }
 
     #[test]
@@ -493,14 +497,7 @@ mod tests {
         let TaskResult::Err(error) = answer else {
             panic!("a skipped dependency must give an error entry");
         };
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("UPSTREAM_SKIPPED")
-        );
+        assert_eq!(error.error_code.to_string(), "UPSTREAM_SKIPPED");
         assert_eq!(
             error.message.as_deref(),
             Some("Upstream dependency was SKIPPED")
@@ -526,14 +523,7 @@ mod tests {
             let TaskResult::Err(error) = answer else {
                 panic!("a dependency with no result must give an error entry");
             };
-            assert_eq!(
-                error
-                    .error_code
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .as_deref(),
-                Some("RESULT_DESERIALIZATION_ERROR")
-            );
+            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
             assert_eq!(
                 error.data,
                 Some(json!({"dependency_index": 2, "status": status}))
@@ -575,8 +565,8 @@ mod tests {
         let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
-        assert!(answer["value"]["message"]
+        assert!(answer["err"].is_object());
+        assert!(answer["err"]["message"]
             .as_str()
             .unwrap()
             .contains("failed to parse upstream task result"));

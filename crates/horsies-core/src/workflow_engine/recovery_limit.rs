@@ -548,14 +548,14 @@ pub(crate) fn recovery_limit_error(
 ) -> TaskError {
     let error_type = stored_error_type(failure.error_type());
     TaskError {
-        error_code: Some(OperationalErrorCode::WorkflowRecoveryLimitReached.into()),
+        error_code: OperationalErrorCode::WorkflowRecoveryLimitReached.into(),
         message: Some(format!(
             "Workflow recovery raised a persistent error in {failed_passes} passes. \
              Last case: {}. Last raise: {error_type}: {}",
             case.stored_name(),
             failure.detail(),
         )),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "case": case.stored_name(),
@@ -563,6 +563,7 @@ pub(crate) fn recovery_limit_error(
             "failed_passes": failed_passes,
             "exception_type": error_type,
         })),
+        kind: crate::core::TaskErrorKind::Plain,
     }
 }
 
@@ -809,12 +810,8 @@ mod tests {
             25,
         );
         assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_RECOVERY_LIMIT_REACHED")
+            error.error_code.to_string(),
+            "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         let message = error.message.clone().unwrap();
         assert!(message.contains("25 passes"));
@@ -1014,12 +1011,8 @@ mod tests {
         assert_eq!(status, "FAILED");
         let error: TaskError = serde_json::from_str(&error.unwrap()).unwrap();
         assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_RECOVERY_LIMIT_REACHED")
+            error.error_code.to_string(),
+            "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         let (node_status, node_result, node_done) = node_state(&pool, workflow_id, 0).await;
         assert_eq!(node_status, "FAILED");
@@ -1038,7 +1031,8 @@ mod tests {
     async fn the_limit_keeps_a_stored_first_error_and_leaves_a_live_node_to_finish() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        let first_error = serde_json::to_string(&TaskError::new("FIRST", "first failure")).unwrap();
+        let first_error =
+            serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
         seed_workflow(&pool, workflow_id, "RUNNING", Some(&first_error)).await;
         seed_node(&pool, workflow_id, 0, "RUNNING").await;
         seed_node(&pool, workflow_id, 1, "PENDING").await;
