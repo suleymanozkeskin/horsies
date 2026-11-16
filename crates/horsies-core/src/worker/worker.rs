@@ -32,6 +32,9 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
+use crate::worker::profile_fit::{
+    log_connection_fit_at_boot, log_memory_fit_at_boot, SelectedProfile, WorkerProfileSelection,
+};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
 use crate::worker::runner_beats::{
     launch_runner_beats, runner_beat_pool, BeatSender, DispatchRunner, FailClosedState,
@@ -401,6 +404,8 @@ pub struct Worker {
     /// Dispatches whose rows the runner-beat writer beats, with their claim
     /// generations.
     live_dispatches: LiveDispatches,
+    /// The profile the worker runs; its fit is logged at boot.
+    profile: WorkerProfileSelection,
 }
 
 impl Worker {
@@ -432,7 +437,17 @@ impl Worker {
             hostname,
             in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             live_dispatches: LiveDispatches::default(),
+            profile: WorkerProfileSelection::InProcess,
         })
+    }
+
+    /// Run this worker on `selected`, the profile that the host resolved
+    /// from `--profile`. At boot the worker logs the fit of the profile to
+    /// the machine and to the server (Python `horsies/core/cli.py:886`,
+    /// `:955`); the fit never stops the start.
+    pub fn with_profile(mut self, selected: SelectedProfile) -> Self {
+        self.profile = WorkerProfileSelection::Selected(selected);
+        self
     }
 
     /// Run the worker with automatic SIGINT/SIGTERM signal handling.
@@ -556,6 +571,14 @@ impl Worker {
 
     /// Run the worker until cancelled or a fatal error occurs.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Machine facts of the profile: a warning, never a refusal (Python
+        // `_log_memory_fit`, before the schema step).
+        match &self.profile {
+            WorkerProfileSelection::InProcess => {}
+            WorkerProfileSelection::Selected(selected) => {
+                let _logged = log_memory_fit_at_boot(selected);
+            }
+        }
         // Fleet authorization and partition coverage precede every runtime
         // surface: no LISTEN, heartbeat, or claim may race an incomplete
         // install or a missing current-hour heartbeat leaf. A transient
@@ -564,6 +587,17 @@ impl Worker {
         match self.start_database_with_resilience().await? {
             StartOutcome::Started => {}
             StartOutcome::StopRequested => return Ok(()),
+        }
+
+        // Server facts of the profile, before any claim: a warning, never a
+        // refusal (Python `_log_connection_fit`).
+        match &self.profile {
+            WorkerProfileSelection::InProcess => {}
+            WorkerProfileSelection::Selected(selected) => {
+                let _logged =
+                    log_connection_fit_at_boot(selected, &self.app_config.broker, &self.broker)
+                        .await;
+            }
         }
 
         // Print the startup banner before any log lines.
@@ -851,12 +885,12 @@ impl Worker {
     /// Check the pools and the session URL, then subscribe the claim wakes of
     /// every queue and the ping channel on the broker's listener.
     ///
-    /// The checks run at every worker boot, with or without PgBouncer mode
-    /// (Python `validate_worker_database_paths`): the pool checks
-    /// ([`PostgresBroker::check_worker_session`]), then the session check
-    /// ([`PostgresBroker::check_session_delivery`]). A statement-pooled URL
-    /// or a URL that does not keep session state is refused, not retryable; a
-    /// database that cannot be reached is retryable.
+    /// The check runs at every worker boot, with or without PgBouncer mode
+    /// (Python `validate_worker_database_paths`): one session check on the
+    /// statement layer ([`PostgresBroker::check_worker_session`]). A
+    /// statement-pooled URL or a URL that does not keep session state is
+    /// refused, not retryable; a database that cannot be reached is
+    /// retryable.
     async fn try_connect_listener(&self) -> Result<WorkerSubscriptions, WorkerError> {
         let channels = self
             .worker_config
@@ -866,10 +900,6 @@ impl Worker {
             .collect::<Result<Vec<ChannelName>, WorkerError>>()?;
         self.broker
             .check_worker_session()
-            .await
-            .map_err(WorkerError::Broker)?;
-        self.broker
-            .check_session_delivery()
             .await
             .map_err(WorkerError::SessionCheck)?;
         let listener = self.broker.listener();
@@ -1933,6 +1963,32 @@ mod tests {
         let _: fn(&Worker) -> &str = |w| w.worker_id();
     }
 
+    /// Python `horsies/core/cli.py:886` and `:955`: the memory fit of the
+    /// profile is logged before the database start, the connection fit after
+    /// it and before the banner and the claim loop; neither returns an error.
+    #[test]
+    fn the_profile_fit_is_logged_at_boot_before_any_claim() {
+        let source = include_str!("worker.rs");
+        let run = &source[source
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")..];
+        let memory = run
+            .find("log_memory_fit_at_boot(selected)")
+            .expect("memory fit at boot");
+        let start = run
+            .find("self.start_database_with_resilience().await")
+            .expect("database start with retry");
+        let connections = run
+            .find("log_connection_fit_at_boot(selected, &self.app_config.broker, &self.broker)")
+            .expect("connection fit at boot");
+        let banner = run.find("print_banner(").expect("startup banner");
+        let claims = run.find("claim_batch(").expect("claim loop");
+        assert!(memory < start);
+        assert!(start < connections);
+        assert!(connections < banner);
+        assert!(connections < claims);
+    }
+
     /// A start attempt that does not finish in time is retryable, as in
     /// Python, where `asyncio.TimeoutError` takes the retry path.
     #[test]
@@ -2760,9 +2816,13 @@ mod tests {
         assert_eq!(workflow_result, None);
     }
 
+    /// Python's start of a workflow task: a database error in the start
+    /// gives no run (`core/worker/child_runner.py`, OWNERSHIP_UNCONFIRMED),
+    /// and the claim is released at once with the fenced release. Before, a
+    /// failed node statement was treated as informational and user code ran.
     #[tokio::test]
     #[serial]
-    async fn finalize_prestart_workflow_update_failure_is_nonfatal_and_runs_user_code() {
+    async fn a_failed_workflow_node_check_runs_no_user_code_and_releases_the_claim() {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
@@ -2781,30 +2841,16 @@ mod tests {
             )
             .await;
 
-            // C4: the workflow_task RUNNING update is purely informational
-            // (set_running already committed the CLAIMED->RUNNING flip durably,
-            // and completion tolerates an ENQUEUED workflow_task). A transient
-            // failure of it must NOT fail the task closed — user code runs and
-            // the task completes normally.
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
-                1,
-                "user code must still run when the informational workflow_task RUNNING update fails",
+                0,
+                "user code must not run when the workflow node check fails",
             );
-
             let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
-            assert_eq!(status, "COMPLETED");
+            assert_eq!(status, "PENDING", "the claim is released at once");
+            assert_eq!(result, None);
             assert_eq!(error_code, None);
-
-            let persisted: TaskResult<serde_json::Value> =
-                serde_json::from_str(result.as_deref().unwrap()).unwrap();
-            assert_eq!(
-                persisted.unwrap(),
-                serde_json::Value::String("counted".to_owned()),
-            );
-
-            let attempts = broker.get_task_attempts(task_id).await.unwrap();
-            assert_eq!(attempts.len(), 1);
+            assert!(broker.get_task_attempts(task_id).await.unwrap().is_empty());
         })
         .catch_unwind()
         .await;
@@ -2814,6 +2860,46 @@ mod tests {
         if let Err(panic) = result {
             resume_unwind(panic);
         }
+    }
+
+    /// Python `test_orphaned_workflow_task_repro.py::test_workflow_check_failed_disabled_leaves_orphan_claimed`:
+    /// a workflow task with no runnable node does not run; with orphan
+    /// self-heal off nothing is written and the row stays CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn an_unlinked_workflow_task_with_self_heal_off_runs_nothing_and_stays_claimed() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        let outcome = crate::worker::execution::confirm_ownership_and_set_running(
+            &broker,
+            task_id,
+            "worker-1",
+            1,
+            "localhost",
+            true,
+            test_claim_generation(),
+            false,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            crate::worker::execution::OwnershipOutcome::Aborted
+        ));
+        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        let (status, _, _) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "CLAIMED");
     }
 
     #[tokio::test]
@@ -4221,3 +4307,6 @@ mod tests {
 
 #[cfg(test)]
 mod live_worker_tests;
+
+#[cfg(test)]
+mod start_tests;

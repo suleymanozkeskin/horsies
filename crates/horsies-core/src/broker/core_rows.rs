@@ -4,7 +4,7 @@
 //! the Rust type the sqlx `FromRow` of the same type reads.
 
 use crate::broker::error::BrokerError;
-use crate::broker::health::StoredWorkerState;
+use crate::broker::health::{ListedWorkerStateRow, StoredWorkerState};
 use crate::broker::row::task::{
     ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
 };
@@ -365,6 +365,18 @@ pub(crate) fn stored_worker_state(
         worker_started_at: column(row, statement, "worker_started_at")?,
         slots_down: column(row, statement, "slots_down")?,
         class_capacity: column(row, statement, "class_capacity")?,
+    })
+}
+
+/// Reads a [`ListedWorkerStateRow`]: a row of the worker list statement,
+/// with its `read_at`.
+pub(crate) fn listed_worker_state_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<ListedWorkerStateRow, RowDecodeError> {
+    Ok(ListedWorkerStateRow {
+        stored: stored_worker_state(row, statement)?,
+        read_at: column(row, statement, "read_at")?,
     })
 }
 

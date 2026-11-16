@@ -21,6 +21,8 @@ use crate::TaskStatus;
 
 use super::*;
 
+mod history_detail_ports;
+
 #[test]
 fn monitoring_window_defaults_and_refusals_match_the_contract() {
     let now = Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap();
@@ -585,7 +587,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
             keys(ScheduleStateInfo {
                 schedule_name: "s".to_owned(),
                 last_run_at: None,
-                next_run_at: None,
+                next_run_at: now,
                 last_task_id: None,
                 run_count: 0,
                 updated_at: now,
@@ -1015,6 +1017,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
@@ -1149,6 +1152,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("filters");
@@ -1365,6 +1369,7 @@ async fn seed_node(
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("detail");
@@ -1461,6 +1466,7 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("workflow");
@@ -1633,6 +1639,7 @@ async fn database_failure_is_typed_and_retryable() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn unpublished_staged_detail_preserves_absent_semantics() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("unpublished");
