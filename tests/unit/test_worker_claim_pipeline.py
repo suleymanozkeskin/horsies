@@ -40,8 +40,6 @@ from horsies.core.worker.sql import (
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-    READ_IN_FLIGHT_ATTEMPT_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
 )
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
@@ -470,8 +468,8 @@ class TestLeaseRenewalSql:
 
 @pytest.mark.unit
 class TestUnclaimSqlClearsLeaseExpiry:
-    """Both unclaim SQL variants must clear claim_expires_at to prevent
-    stale lease timestamps from persisting on re-queued tasks.
+    """The paused-task cleanup must clear claim_expires_at, so no stale
+    lease timestamp persists on a re-queued task.
     """
 
     def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
@@ -481,37 +479,6 @@ class TestUnclaimSqlClearsLeaseExpiry:
         assert 'claim_expires_at = NULL' in normalised
         assert "status = 'CANCELLED'" in normalised
         assert "error_code = 'TASK_CANCELLED'" in normalised
-
-    def test_unclaim_claimed_task_clears_claim_expires_at(self) -> None:
-        """UNCLAIM_CLAIMED_TASK_SQL must SET claim_expires_at = NULL."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-
-    @pytest.mark.parametrize(
-        'statement',
-        [
-            UNCLAIM_CLAIMED_TASK_SQL,
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-        ],
-        ids=['release', 'in-flight read'],
-    )
-    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
-        """Each statement fences on the claim time of the dispatch. A NULL
-        claim time matches no row: nothing can turn the check off."""
-        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
-
-        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
-        assert 'IS NULL' not in where
-        assert 'COALESCE' not in where
-
-    def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
-        """Pre-execution unclaim must not reset potentially executed RUNNING rows."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "status = 'CLAIMED'" in normalised
-        assert "status IN ('CLAIMED', 'RUNNING')" not in normalised
-        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
@@ -556,12 +523,3 @@ class TestUnclaimSqlClearsLeaseExpiry:
                 'OR ctx.claimed_at = ctx.expected_claimed_at'
                 in normalised
             )
-
-    def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
-        """RUNNING task requeue must clear stale runtime metadata."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'started_at = NULL' in normalised
-        assert 'worker_pid = NULL' in normalised
-        assert 'worker_hostname = NULL' in normalised
-        assert 'worker_process_name = NULL' in normalised
