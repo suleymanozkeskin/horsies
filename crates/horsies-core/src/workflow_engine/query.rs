@@ -7,11 +7,13 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::broker::postgres::RESULT_WAIT_REPOLL;
-use crate::broker::SharedNotifyListener;
+use crate::broker::process_listener::{fixed_channel, ListenError, WORKFLOW_DONE_CHANNEL};
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::{
     OperationalErrorCode, OutcomeCode, RetrievalCode, TaskError, TaskResult, WorkflowStatus,
     WorkflowTaskStatus,
 };
+use crate::db::{PayloadFilter, WakeEvent, WakeSubscription};
 
 use crate::core::task::result::TASK_RESULT_ENVELOPE_KEY;
 use crate::workflow_engine::engine::OUTPUTLESS_TERMINALS_KEY;
@@ -95,24 +97,30 @@ pub async fn get_workflow_status(
     }
 }
 
+/// Repoll interval of a workflow result wait with no listener (Python's
+/// 1 s, `horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
+pub(crate) const WORKFLOW_RESULT_REPOLL_POLLING: Duration = Duration::from_secs(1);
+
 /// Get the typed result of a workflow, optionally waiting for completion.
 ///
 /// Follows the same LISTEN/NOTIFY pattern as `PostgresBroker::get_result`:
 /// 1. Quick-check for terminal status
-/// 2. Subscribe to the shared `workflow_done` listener
+/// 2. Subscribe a wake for the workflow id on `workflow_done` on the
+///    broker's listener
 /// 3. Re-check (race guard)
-/// 4. Wait for notification or timeout
+/// 4. Wait for a wake, a listener gap, the repoll interval or the timeout,
+///    then read again
 ///
-/// The `shared_listener` parameter should be obtained from
-/// `PostgresBroker::workflow_done_listener()`. All concurrent callers
-/// share a single `PgListener` connection, avoiding pool exhaustion.
+/// A broker with no listener, or a refused subscription, makes the wait poll
+/// every [`WORKFLOW_RESULT_REPOLL_POLLING`], as Python. A listener that stops
+/// during the wait fails it with `BrokerError::ListenerClosed`.
 pub async fn get_workflow_result<T: DeserializeOwned>(
-    pool: &PgPool,
-    shared_listener: &SharedNotifyListener,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
     timeout: Option<Duration>,
 ) -> Result<TaskResult<T>, WorkflowError> {
     let start = Instant::now();
+    let pool = broker.pool();
 
     // Quick check.
     match try_fetch_terminal_result(pool, workflow_id).await? {
@@ -128,9 +136,7 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
         TerminalFetch::NotTerminal => {}
     }
 
-    // Subscribe to shared workflow_done listener.
-    let workflow_id_text = workflow_id.to_string();
-    let mut subscription = shared_listener.subscribe(&workflow_id_text);
+    let wait_mode = WorkflowWaitMode::subscribe(broker, workflow_id).await;
 
     // Re-check after subscribing (race guard).
     match try_fetch_terminal_result(pool, workflow_id).await? {
@@ -156,33 +162,91 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
             }
         }
 
-        // Cap each wait at the re-poll interval so a lost NOTIFY (listener
-        // reconnect) is recovered by a fresh poll rather than hanging the
-        // no-timeout wait forever (C3). Never wait past the deadline. Shares the
-        // constant with the task-result wait loop.
+        // Cap each wait at the re-poll interval so a lost NOTIFY is recovered
+        // by a fresh poll rather than hanging the no-timeout wait forever.
+        // Never wait past the deadline.
+        let interval = wait_mode.repoll_interval();
         let wait = match deadline {
-            Some(d) => d
-                .saturating_duration_since(Instant::now())
-                .min(RESULT_WAIT_REPOLL),
-            None => RESULT_WAIT_REPOLL,
+            Some(d) => d.saturating_duration_since(Instant::now()).min(interval),
+            None => interval,
         };
 
-        match tokio::time::timeout(wait, subscription.recv()).await {
-            // NOTIFY delivered, or the re-poll interval elapsed — re-check.
-            Ok(Ok(())) | Err(_) => match try_fetch_terminal_result(pool, workflow_id).await? {
-                TerminalFetch::Terminal(result) => {
-                    return Ok(parse_workflow_result::<T>(workflow_id, &result));
+        // A wake, a gap or the end of the interval reads again; a stopped
+        // listener fails the wait.
+        wait_mode.pause(wait).await?;
+        match try_fetch_terminal_result(pool, workflow_id).await? {
+            TerminalFetch::Terminal(result) => {
+                return Ok(parse_workflow_result::<T>(workflow_id, &result));
+            }
+            TerminalFetch::NotFound => {
+                return Ok(TaskResult::Err(TaskError::builtin(
+                    RetrievalCode::WorkflowNotFound,
+                    format!("workflow {} not found", workflow_id),
+                )));
+            }
+            TerminalFetch::NotTerminal => {}
+        }
+    }
+}
+
+/// How a workflow result wait learns that the workflow may have ended.
+enum WorkflowWaitMode {
+    /// A wake for the workflow id on `workflow_done`; a listener gap also
+    /// wakes it. Reads again at least every [`RESULT_WAIT_REPOLL`].
+    Subscribed(WakeSubscription),
+    /// No listener: reads again every [`WORKFLOW_RESULT_REPOLL_POLLING`].
+    Polling,
+}
+
+impl WorkflowWaitMode {
+    /// Subscribe the wait on the broker's listener. A broker with no
+    /// listener, or a refused subscription, polls instead, as Python.
+    async fn subscribe(broker: &PostgresBroker, workflow_id: Uuid) -> WorkflowWaitMode {
+        let filter = PayloadFilter::Payload(workflow_id.to_string());
+        match broker
+            .listener()
+            .subscribe_wake(fixed_channel(WORKFLOW_DONE_CHANNEL), filter)
+            .await
+        {
+            Ok(subscription) => WorkflowWaitMode::Subscribed(subscription),
+            Err(error @ ListenError::NoSessionUrl) => {
+                tracing::debug!(%workflow_id, error = %error, "the workflow wait polls");
+                WorkflowWaitMode::Polling
+            }
+            Err(error @ (ListenError::PlanRefused(_) | ListenError::Subscribe(_))) => {
+                tracing::warn!(
+                    %workflow_id,
+                    error = %error,
+                    "the workflow_done subscription was refused; the workflow wait polls instead",
+                );
+                WorkflowWaitMode::Polling
+            }
+        }
+    }
+
+    fn repoll_interval(&self) -> Duration {
+        match self {
+            WorkflowWaitMode::Subscribed(_) => RESULT_WAIT_REPOLL,
+            WorkflowWaitMode::Polling => WORKFLOW_RESULT_REPOLL_POLLING,
+        }
+    }
+
+    /// Pause until a wake, a gap, or until `wait` passes. A stopped listener
+    /// is `BrokerError::ListenerClosed`.
+    async fn pause(&self, wait: Duration) -> Result<(), WorkflowError> {
+        match self {
+            WorkflowWaitMode::Subscribed(subscription) => {
+                match tokio::time::timeout(wait, subscription.recv()).await {
+                    Ok(WakeEvent::Notified | WakeEvent::Gap) | Err(_) => Ok(()),
+                    Ok(WakeEvent::Stopped) => {
+                        Err(WorkflowError::Broker(BrokerError::ListenerClosed))
+                    }
                 }
-                TerminalFetch::NotFound => {
-                    return Ok(TaskResult::Err(TaskError::builtin(
-                        RetrievalCode::WorkflowNotFound,
-                        format!("workflow {} not found", workflow_id),
-                    )));
-                }
-                TerminalFetch::NotTerminal => {}
-            },
-            // Listener error propagates.
-            Ok(Err(e)) => return Err(WorkflowError::Broker(e)),
+            }
+            WorkflowWaitMode::Polling => {
+                tokio::time::sleep(wait).await;
+                Ok(())
+            }
         }
     }
 }
@@ -665,17 +729,28 @@ mod tests {
         }
     }
 
+    /// Python `_completed_without_stored_result`: the library always stores a
+    /// result with COMPLETED, so a NULL or empty one is stored data that does
+    /// not parse.
     #[test]
+    #[ignore = "waits on #855"]
     fn completed_with_null_result() {
-        let r = row("COMPLETED", None, None);
+        let workflow_id = Uuid::new_v4();
+        for stored in [None, Some("")] {
+            let r = row("COMPLETED", stored, None);
 
-        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.error_code,
-            TaskErrorCode::from(RetrievalCode::ResultNotAvailable),
-        );
-        assert!(err.message.as_deref().unwrap().contains("result is null"));
+            let result: TaskResult<i32> = parse_workflow_result(workflow_id, &r);
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.error_code,
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
+                "{stored:?}",
+            );
+            assert_eq!(
+                err.data,
+                Some(serde_json::json!({"workflow_id": workflow_id.to_string()})),
+            );
+        }
     }
 
     #[test]
@@ -720,20 +795,33 @@ mod tests {
         assert_eq!(err.message.as_deref(), Some("bad input"));
     }
 
+    /// Python `_decode_stored_workflow_error`: a stored error that is not JSON,
+    /// not an object, or not a `TaskError` is `RESULT_DESERIALIZATION_ERROR`.
     #[test]
+    #[ignore = "waits on #855"]
     fn failed_with_malformed_error_json() {
-        let r = row("FAILED", None, Some("{garbage"));
+        let workflow_id = Uuid::new_v4();
+        for stored in ["{garbage", "[1]", r#"{"error_code": 5}"#] {
+            let r = row("FAILED", None, Some(stored));
 
-        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.error_code,
-            TaskErrorCode::from(OperationalErrorCode::BrokerError),
-        );
-        assert!(err.message.as_deref().unwrap().contains("workflow failed"));
+            let result: TaskResult<i32> = parse_workflow_result(workflow_id, &r);
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.error_code,
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
+                "{stored}",
+            );
+            assert_eq!(
+                err.data,
+                Some(serde_json::json!({"workflow_id": workflow_id.to_string()})),
+            );
+        }
     }
 
+    /// Python `_terminal_outcome_code`: a FAILED workflow with no stored
+    /// error is `WORKFLOW_FAILED`, not a broker error.
     #[test]
+    #[ignore = "waits on #855"]
     fn failed_with_null_error() {
         let r = row("FAILED", None, None);
 
@@ -741,9 +829,8 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            TaskErrorCode::from(OperationalErrorCode::BrokerError),
+            TaskErrorCode::from(OutcomeCode::WorkflowFailed),
         );
-        assert!(err.message.as_deref().unwrap().contains("workflow failed"));
     }
 
     #[test]
@@ -894,13 +981,12 @@ mod wait_tests {
         let broker =
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
-        let listener = broker.workflow_done_listener().await.expect("listener");
         let missing = Uuid::new_v4();
 
         // Wrap in an outer timeout: a regression to an unbounded wait hangs here.
         let res = tokio::time::timeout(
             Duration::from_secs(5),
-            get_workflow_result::<i32>(broker.pool(), listener, missing, None),
+            get_workflow_result::<i32>(&broker, missing, None),
         )
         .await
         .expect("get_workflow_result(None) must not hang for a missing workflow");

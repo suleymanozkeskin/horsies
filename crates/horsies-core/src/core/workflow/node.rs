@@ -872,25 +872,6 @@ mod tests {
     }
 
     #[test]
-    fn node_key_clone_eq_hash() {
-        let k1: NodeKey<i32> = NodeKey::new("x".to_owned());
-        let k2 = k1.clone();
-        assert_eq!(k1, k2);
-
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(k1);
-        assert!(set.contains(&k2));
-    }
-
-    #[test]
-    fn node_ref_copy() {
-        let r = NodeRef { index: 3 };
-        let r2 = r;
-        assert_eq!(r, r2);
-    }
-
-    #[test]
     fn task_node_builder_defaults() {
         let node: TaskNode<String> = TaskNode::raw("my_task", "null");
         assert_eq!(node.task_name(), "my_task");

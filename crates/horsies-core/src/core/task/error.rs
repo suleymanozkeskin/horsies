@@ -13,23 +13,18 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 ///
 /// Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 ///
-/// Note: The Rust port uses different names than Python for two variants:
-///
-/// - Python `UNHANDLED_EXCEPTION` → Rust `UNHANDLED_ERROR`
-/// - Python `TASK_EXCEPTION`      → Rust `TASK_ERROR`
-///
-/// Rust has no exceptions — tasks return `Result<T, TaskError>`. "Exception"
-/// is a Python-specific concept. Since the Rust port uses its own database
-/// (not shared with Python), wire-format compatibility is not required.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Members, wire values and order are Python's (`horsies/core/models/tasks.py`), plus
+/// `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OperationalErrorCode {
-    /// Task panicked or produced an unexpected error the worker couldn't handle.
-    /// Python equivalent: `UNHANDLED_EXCEPTION`.
-    UnhandledError,
-    /// Task returned `Err(TaskError)` during execution.
-    /// Python equivalent: `TASK_EXCEPTION`.
-    TaskError,
+    /// The task panicked or raised an error that no exception mapper turned into a task error.
+    UnhandledException,
+    /// The worker caught an exception outside the task wrapper, or a validator raised on a default.
+    TaskException,
     WorkerCrashed,
     BrokerError,
     WorkerResolutionError,
@@ -42,14 +37,22 @@ pub enum OperationalErrorCode {
     WorkflowRecoveryLimitReached,
     /// A child workflow would pass the depth limit (32), so it did not start and its sub-workflow node failed.
     SubworkflowDepthLimitReached,
+    /// This task held the event loop of its shared async child past the block limit, before its
+    /// `timeout_ms`. The worker killed the child; a retry (only when `auto_retry_for` names this code)
+    /// runs in an isolated child.
+    TaskBlockedLoop,
+    /// Another task held the event loop of this task's shared async child past the block limit, before
+    /// this task's `timeout_ms`. The worker killed the child. A retry runs only when `auto_retry_for`
+    /// names this code.
+    NeighbourBlockedLoop,
     /// A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code.
     WorkflowStartIncomplete,
 }
 
 impl OperationalErrorCode {
-    pub const ALL: [Self; 12] = [
-        Self::UnhandledError,
-        Self::TaskError,
+    pub const ALL: [Self; 14] = [
+        Self::UnhandledException,
+        Self::TaskException,
         Self::WorkerCrashed,
         Self::BrokerError,
         Self::WorkerResolutionError,
@@ -59,6 +62,8 @@ impl OperationalErrorCode {
         Self::SubworkflowLoadFailed,
         Self::WorkflowRecoveryLimitReached,
         Self::SubworkflowDepthLimitReached,
+        Self::TaskBlockedLoop,
+        Self::NeighbourBlockedLoop,
         Self::WorkflowStartIncomplete,
     ];
 }
@@ -66,26 +71,35 @@ impl OperationalErrorCode {
 /// A code/typing/usage contract was violated.
 ///
 /// Typical caller behavior: fix code or type assumptions, do not blindly retry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ContractCode {
-    ArgumentTypeMismatch,
     ReturnTypeMismatch,
     WorkflowCtxMissingId,
+    /// A handle-level read (`TaskHandle.get`, `WorkflowHandle.get`) asked for a typed value, but the ok
+    /// type cannot be obtained, for example on a handle rebuilt by id without the task or workflow
+    /// registered in this process. The result-returning form is `BrokerErrorCode.NO_TYPE_AVAILABLE`.
+    NoTypeAvailable,
 }
 
 impl ContractCode {
     pub const ALL: [Self; 3] = [
-        Self::ArgumentTypeMismatch,
         Self::ReturnTypeMismatch,
         Self::WorkflowCtxMissingId,
+        Self::NoTypeAvailable,
     ];
 }
 
 /// The caller cannot get the value right now or cannot locate it.
 ///
 /// Typical caller behavior: wait, poll again, handle missing value as normal flow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RetrievalCode {
     WaitTimeout,
@@ -93,59 +107,74 @@ pub enum RetrievalCode {
     WorkflowNotFound,
     ResultNotAvailable,
     ResultNotReady,
+    /// The broker already holds resource sets for its limit of open event loops, so this new loop
+    /// cannot read the value now. Never cached: it clears when one of those loops closes.
+    EventLoopLimit,
+    /// A sync get was called on a thread that runs an event loop, so this call site cannot wait for
+    /// the value. Never cached: the async form, or a sync call from a thread without a running loop,
+    /// reads it.
+    AsyncContext,
     /// An argument of the get call was refused before anything ran, for
     /// example a wait limit above 2^32 - 1 ms. Never cached: a call with a
     /// valid argument reads the value.
     InvalidInput,
+    /// A result wait was called in a process that runs task bodies, so it returns at once and waits
+    /// for nothing. Never cached: a task composes with other tasks through a workflow, not through a
+    /// wait.
+    WaitInsideTask,
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
         Self::ResultNotAvailable,
         Self::ResultNotReady,
+        Self::EventLoopLimit,
+        Self::AsyncContext,
         Self::InvalidInput,
+        Self::WaitInsideTask,
     ];
 }
 
 /// A non-bug execution outcome or control-flow result.
 ///
 /// Typical caller behavior: branch on outcome, continue control flow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OutcomeCode {
     TaskCancelled,
     TaskExpired,
     TaskTimeout,
     WorkflowPaused,
+    WorkflowExpired,
     WorkflowFailed,
     WorkflowCancelled,
-    WorkflowExpired,
     UpstreamSkipped,
     SubworkflowFailed,
     WorkflowSuccessCaseNotMet,
     /// A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
     /// SKIPPED.
     WorkflowOutputSkipped,
-    SendSuppressed,
 }
 
 impl OutcomeCode {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::TaskCancelled,
         Self::TaskExpired,
         Self::TaskTimeout,
         Self::WorkflowPaused,
+        Self::WorkflowExpired,
         Self::WorkflowFailed,
         Self::WorkflowCancelled,
-        Self::WorkflowExpired,
         Self::UpstreamSkipped,
         Self::SubworkflowFailed,
         Self::WorkflowSuccessCaseNotMet,
         Self::WorkflowOutputSkipped,
-        Self::SendSuppressed,
     ];
 }
 
@@ -1191,6 +1220,20 @@ mod tests {
         }
     }
 
+    /// Python `OperationalErrorCode` names the two codes of a blocked event
+    /// loop this way.
+    #[test]
+    fn the_blocked_loop_codes_have_python_names() {
+        assert_eq!(
+            serde_json::to_string(&OperationalErrorCode::TaskBlockedLoop).unwrap(),
+            "\"TASK_BLOCKED_LOOP\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationalErrorCode::NeighbourBlockedLoop).unwrap(),
+            "\"NEIGHBOUR_BLOCKED_LOOP\""
+        );
+    }
+
     #[test]
     fn all_outcome_codes_round_trip() {
         for code in OutcomeCode::ALL {
@@ -1218,7 +1261,9 @@ mod tests {
         assert!(BuiltInTaskCode::parse("BROKER_ERROR").is_some());
         assert!(BuiltInTaskCode::parse("WAIT_TIMEOUT").is_some());
         assert!(BuiltInTaskCode::parse("TASK_CANCELLED").is_some());
-        assert!(BuiltInTaskCode::parse("ARGUMENT_TYPE_MISMATCH").is_some());
+        assert!(BuiltInTaskCode::parse("NO_TYPE_AVAILABLE").is_some());
+        assert!(BuiltInTaskCode::parse("WAIT_INSIDE_TASK").is_some());
+        assert!(BuiltInTaskCode::parse("NEIGHBOUR_BLOCKED_LOOP").is_some());
         assert!(BuiltInTaskCode::parse("RETURN_TYPE_MISMATCH").is_some());
     }
 
@@ -1226,6 +1271,41 @@ mod tests {
     fn builtin_from_str_unknown() {
         assert!(BuiltInTaskCode::parse("NOT_A_CODE").is_none());
         assert!(BuiltInTaskCode::parse("my_user_code").is_none());
+    }
+
+    #[test]
+    fn names_that_python_does_not_have_are_not_built_in() {
+        // The core's former names and members; Python's catalogs
+        // (`horsies/core/models/tasks.py`) hold none of them.
+        for text in [
+            "UNHANDLED_ERROR",
+            "TASK_ERROR",
+            "ARGUMENT_TYPE_MISMATCH",
+            "SEND_SUPPRESSED",
+        ] {
+            assert!(BuiltInTaskCode::parse(text).is_none(), "{text}");
+            assert!(UserCode::parse(text).is_ok(), "{text}");
+        }
+    }
+
+    #[test]
+    fn python_s_added_members_are_built_in_names() {
+        for text in [
+            "UNHANDLED_EXCEPTION",
+            "TASK_EXCEPTION",
+            "TASK_BLOCKED_LOOP",
+            "NEIGHBOUR_BLOCKED_LOOP",
+            "NO_TYPE_AVAILABLE",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+            "WAIT_INSIDE_TASK",
+        ] {
+            assert!(BuiltInTaskCode::parse(text).is_some(), "{text}");
+            assert!(
+                matches!(UserCode::parse(text), Err(UserCodeRefused::BuiltInName(_))),
+                "{text}"
+            );
+        }
     }
 
     #[test]

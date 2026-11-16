@@ -36,7 +36,7 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.workflows.lifecycle import pause_workflow
 from tests.fixtures.slots.handles import task_finished_handle
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
@@ -87,37 +87,36 @@ async def _insert_owned_running_task(
 ) -> str:
     """A RUNNING row of ``worker_id``; a workflow task gets its node."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='lifecycle_regression_task',
         task_options=task_options,
     )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, started_at, enqueue_sha,
-                 claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
-                 worker_process_name, task_options, finalizing_at,
-                 finalizing_by_worker_id, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'lifecycle_regression_task', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), NOW(),
-                 FALSE, 0, :max_retries, :started_at, :enqueue_sha,
-                 :worker_id, :claimed_at, 'itest-host', 4321,
-                 'itest-process', :task_options, :finalizing_at,
-                 :finalizing_by_worker_id, :is_workflow_task,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    started_at, claimed_by_worker_id, claimed_at, worker_hostname,
+                    worker_pid, worker_process_name, task_options, finalizing_at,
+                    finalizing_by_worker_id, is_workflow_task, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution
+                ) VALUES (
+                    :id, 'lifecycle_regression_task', 'default', 100, '{}', 'RUNNING',
+                    :sent_at, NOW(), NOW(), NOW(), 0, :max_retries, :started_at,
+                    :worker_id, :claimed_at, 'itest-host', 4321, 'itest-process',
+                    :task_options, :finalizing_at, :finalizing_by_worker_id,
+                    :is_workflow_task, 'standard_30d',
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE :command_fingerprint END,
+                    FALSE, 'ISOLATED'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'worker_id': worker_id,
             'claimed_at': CLAIMED_AT,
             'max_retries': max_retries,
@@ -150,14 +149,16 @@ async def _link_running_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, task_id,
-                 is_subworkflow, created_at, started_at)
+                 is_subworkflow, created_at, started_at,
+                 max_retries, execution, retention_class_key)
             VALUES (:node_id, :workflow_id, 0, 'node-0',
-                    'lifecycle_regression_task', '[]', '{}', 'default', 100,
+                    'lifecycle_regression_task', '{}', 'default', 100,
                     ARRAY[]::integer[], FALSE, 'all', 'RUNNING',
-                    CAST(:task_id AS uuid), FALSE, NOW(), NOW())
+                    CAST(:task_id AS uuid), FALSE, NOW(), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'node_id': str(uuid.uuid4()),
@@ -208,7 +209,7 @@ async def _insert_retry_window_workflow_task(
     workflow_id = str(uuid.uuid4())
     workflow_task_id = str(uuid.uuid4())
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='lifecycle_regression_task')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='lifecycle_regression_task')
     await session.execute(
         text("""
             INSERT INTO horsies_workflows
@@ -223,41 +224,40 @@ async def _insert_retry_window_workflow_task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs, status,
-                 sent_at, enqueued_at, created_at, updated_at, claimed, claimed_at,
-                 claimed_by_worker_id, claim_expires_at, retry_count, max_retries,
-                 enqueue_sha, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:task_id, 'lifecycle_regression_task', 'default', 100, '[]', '{}',
-                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(), TRUE, NOW(),
-                 :worker_id, NOW() + INTERVAL '60 seconds', 1, 3,
-                 :enqueue_sha, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:task_id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, claimed_at,
+                    claimed_by_worker_id, claim_expires_at, retry_count, max_retries,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                ) VALUES (
+                    :task_id, 'lifecycle_regression_task', 'default', 100, '{}',
+                    'CLAIMED', :sent_at, NOW(), NOW(), NOW(), NOW(), :worker_id,
+                    NOW() + INTERVAL '60 seconds', 1, 3, TRUE, 'standard_30d', NULL,
+                    NULL, FALSE, 'ISOLATED'
+                )
         """),
         {
             'task_id': task_id,
             'sent_at': sent_at,
             'worker_id': worker_id,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies, args_from,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies, args_from,
                  workflow_ctx_from, allow_failed_deps, join_type, task_options,
-                 status, task_id, is_subworkflow, created_at, started_at)
+                 status, task_id, is_subworkflow, created_at, started_at,
+                 max_retries, execution, retention_class_key)
             VALUES
                 (:workflow_task_id, :workflow_id, 0, 'retry_node',
-                 'lifecycle_regression_task', '[]', '{}', 'default', 100,
+                 'lifecycle_regression_task', '{}', 'default', 100,
                  ARRAY[]::integer[], NULL, NULL, FALSE, 'all', NULL,
-                 'RUNNING', :task_id, FALSE, NOW(), NOW())
+                 'RUNNING', :task_id, FALSE, NOW(), NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """),
         {
             'workflow_task_id': workflow_task_id,

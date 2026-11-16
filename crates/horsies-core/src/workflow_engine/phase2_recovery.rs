@@ -9,13 +9,14 @@ use crate::core::history::phase2::consumption::{
     consume_phase2, Phase2Disposition, Phase2DispositionKind,
 };
 use crate::core::history::phase2::quarantine::{quarantine_one, QuarantineVerdict};
+use crate::core::lifecycle::TerminalizationKind;
 use crate::core::types::status::TaskStatus;
 use crate::workflow_engine::engine::apply_phase2_progression_in_tx;
 
 use super::WorkflowError;
 
 const DISCOVER_PENDING_SQL: &str = "
-SELECT task_id, terminal_status
+SELECT task_id, terminalization_kind
 FROM horsies_workflow_phase2_pending
 WHERE created_at < NOW() - ($1::double precision / 1000.0) * INTERVAL '1 second'
   AND attempt_count < $2::integer
@@ -34,10 +35,12 @@ const COUNT_OVER_ATTEMPT_BOUND_SQL: &str = "
 SELECT count(*) FROM horsies_workflow_phase2_pending
 WHERE attempt_count >= $1::integer";
 
+/// One discovered phase-2 record. The record has no status column: the
+/// status follows from the kind (`terminal_status_of_pending_kind`).
 #[derive(Debug, FromRow)]
 struct PendingCandidate {
     task_id: Uuid,
-    terminal_status: String,
+    terminalization_kind: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -68,6 +71,53 @@ fn node_status_for_terminal_task(status: &str) -> Result<&'static str, WorkflowE
     } else {
         "FAILED"
     })
+}
+
+/// A phase-2 record names a kind whose terminal move writes no phase-2
+/// record. The pending CHECK admits five kinds, so this is a value that the
+/// table refuses or that a later schema added.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("phase-2 record names terminalization kind {kind:?}, which writes no phase-2 record")]
+pub(crate) struct PendingKindWithoutPhase2 {
+    pub kind: String,
+}
+
+/// The task status that the terminal move wrote with the kind of a phase-2
+/// record (Python `terminal_status_of_pending_kind`).
+///
+/// The move pairs each kind with one terminal status and refuses any other
+/// pair, and only five kinds write a phase-2 record: `COMPLETE_LOCKED` is
+/// COMPLETED; `FAIL_RUNNING` and `FAIL_STALE` are FAILED; `EXPIRE_CLAIMED`
+/// and `EXPIRE_PENDING` are EXPIRED. No cancel kind writes a record, so a
+/// record never stands for a CANCELLED task. Every other value, known kind
+/// or not, is `PendingKindWithoutPhase2`. Pure.
+pub(crate) fn terminal_status_of_pending_kind(
+    kind: &str,
+) -> Result<TaskStatus, PendingKindWithoutPhase2> {
+    match TerminalizationKind::parse(kind) {
+        Some(TerminalizationKind::CompleteLocked) => Ok(TaskStatus::Completed),
+        Some(TerminalizationKind::FailRunning | TerminalizationKind::FailStale) => {
+            Ok(TaskStatus::Failed)
+        }
+        Some(TerminalizationKind::ExpireClaimed | TerminalizationKind::ExpirePending) => {
+            Ok(TaskStatus::Expired)
+        }
+        Some(
+            TerminalizationKind::CompleteFused
+            | TerminalizationKind::CancelAdmin
+            | TerminalizationKind::CancelOrphan
+            | TerminalizationKind::CancelOrphanSweep
+            | TerminalizationKind::PauseAbandonClaim
+            | TerminalizationKind::PauseAbandonClaimBatch
+            | TerminalizationKind::PauseAbandonWorkflow
+            | TerminalizationKind::WorkflowCancelClaim
+            | TerminalizationKind::WorkflowCancelClaimBatch
+            | TerminalizationKind::WorkflowCancelWorkflow,
+        )
+        | None => Err(PendingKindWithoutPhase2 {
+            kind: kind.to_owned(),
+        }),
+    }
 }
 
 async fn apply_progression(
@@ -150,7 +200,16 @@ pub async fn drive_phase2_recovery(
     };
     for candidate in candidates {
         summary.considered += 1;
-        let node_status = match node_status_for_terminal_task(&candidate.terminal_status) {
+        let terminal_status = match terminal_status_of_pending_kind(&candidate.terminalization_kind)
+        {
+            Ok(status) => status,
+            Err(refusal) => {
+                summary.failed += 1;
+                tracing::error!(task_id = %candidate.task_id, %refusal, "phase-2 record refused");
+                continue;
+            }
+        };
+        let node_status = match node_status_for_terminal_task(&terminal_status.to_string()) {
             Ok(status) => status,
             Err(error) => {
                 summary.failed += 1;
@@ -406,13 +465,69 @@ mod tests {
     }
 
     #[test]
+    fn a_complete_locked_record_stands_for_a_completed_task() {
+        assert_eq!(
+            terminal_status_of_pending_kind("COMPLETE_LOCKED"),
+            Ok(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn a_running_or_stale_failure_record_stands_for_a_failed_task() {
+        for kind in ["FAIL_RUNNING", "FAIL_STALE"] {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Ok(TaskStatus::Failed),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expiry_record_stands_for_an_expired_task() {
+        for kind in ["EXPIRE_CLAIMED", "EXPIRE_PENDING"] {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Ok(TaskStatus::Expired),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Every kind that writes no phase-2 record, and a value that is no kind,
+    /// is refused with the value named.
+    #[test]
+    fn every_other_kind_writes_no_phase_two_record() {
+        let record_kinds = [
+            TerminalizationKind::CompleteLocked,
+            TerminalizationKind::FailRunning,
+            TerminalizationKind::FailStale,
+            TerminalizationKind::ExpireClaimed,
+            TerminalizationKind::ExpirePending,
+        ];
+        let other_kinds = TerminalizationKind::ALL
+            .into_iter()
+            .filter(|kind| !record_kinds.contains(kind))
+            .map(TerminalizationKind::as_str);
+        for kind in other_kinds.chain(["KIND_FROM_THE_FUTURE", ""]) {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Err(PendingKindWithoutPhase2 {
+                    kind: kind.to_owned()
+                }),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Python `tests/unit/test_phase2_recovery_policy.py::TestDurableDispositions::test_only_the_three_durable_ones_are_listed`.
+    /// The discovery order, the attempt bound and the cap are behaviour:
+    /// `discovery_is_oldest_first_strictly_graced_and_capped`.
+    #[test]
     fn durable_vocabulary_is_exact() {
         assert_eq!(Phase2DispositionKind::DURABLE.len(), 3);
         assert!(Phase2DispositionKind::AppliedToNode.is_durable());
         assert!(!Phase2DispositionKind::SourceAbsent.is_durable());
-        assert!(DISCOVER_PENDING_SQL.contains("ORDER BY created_at, task_id"));
-        assert!(DISCOVER_PENDING_SQL.contains("attempt_count <"));
-        assert!(DISCOVER_PENDING_SQL.contains("LIMIT"));
     }
 
     #[tokio::test]
@@ -489,9 +604,11 @@ mod tests {
         assert_eq!(statuses[1].1, "ENQUEUED");
         assert_eq!(statuses[1].2.expect("dependent task").get_version_num(), 7);
         assert!(statuses[0].4.is_some(), "source completion must be stamped");
-        assert!(
-            statuses[1].3.is_none(),
-            "ENQUEUED is not a workflow-node start",
+        // A promoted node starts at its enqueue: the time of the phase-2
+        // transaction that completed its dependency.
+        assert_eq!(
+            statuses[1].3, statuses[0].4,
+            "the dependent's started_at is the source's completed_at",
         );
 
         let replay = finalize_phase2(
@@ -631,12 +748,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // A transient failure (lock_not_available): it rolls the row back
+        // and adds no attempt. A persistent raise adds one (#819).
         sqlx::query(&format!(
             "CREATE OR REPLACE FUNCTION p7_phase2_inject_row_failure() RETURNS trigger
              LANGUAGE plpgsql AS $body$
              BEGIN
                  IF NEW.workflow_id = '{bad_workflow}'::uuid THEN
-                     RAISE EXCEPTION 'injected phase-2 row failure';
+                     RAISE EXCEPTION 'injected phase-2 row failure' USING ERRCODE = '55P03';
                  END IF;
                  RETURN NEW;
              END
@@ -821,6 +940,9 @@ mod tests {
             .ok();
     }
 
+    /// Python `tests/integration/test_task_history_phase2_consumption.py::TestDurableDispositions::test_terminal_workflow_supersedes_without_touching_the_node`:
+    /// the consume function supersedes the record of an ended workflow and
+    /// leaves the node. The worker's phase 2 writes such a node (#998).
     #[tokio::test]
     #[serial]
     async fn terminal_workflow_supersedes_pending_evidence_without_touching_the_node() {
@@ -841,16 +963,11 @@ mod tests {
             .await
             .unwrap();
 
-            let disposition = finalize_phase2(
-                &pool,
-                task_id,
-                "COMPLETED",
-                &crate::core::WorkflowSpecRegistry::new(),
-                &PayloadPolicy::default(),
-                &RetentionConfig::default(),
-            )
-            .await
-            .unwrap();
+            let mut transaction = pool.begin().await.unwrap();
+            let disposition = consume_phase2(&mut transaction, task_id, "COMPLETED")
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
             assert_eq!(
                 disposition.disposition,
                 Phase2DispositionKind::SupersededByWorkflowTerminal,
@@ -985,6 +1102,88 @@ mod tests {
         assert!(still_pending);
         transaction.rollback().await.unwrap();
         cleanup_case(&pool, state_workflow, state_task).await;
+    }
+
+    /// Discovery reads the record's kind (the baseline record has no status
+    /// column) and recovers a `FAIL_RUNNING` record with the FAILED node
+    /// status (Python `core/workflows/phase2_recovery.py`, discovery and
+    /// `terminal_status_of_pending_kind`).
+    #[tokio::test]
+    #[serial]
+    async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
+        let workflow_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        seed_workflow_task(&pool, workflow_id, task_id, false).await;
+        let failure = serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(
+            crate::core::TaskError::new("NODE_FAILURE", "the node failed"),
+        ))
+        .expect("encode the failure result");
+        let outcomes = terminalize(
+            &pool,
+            &TerminalizationCommand::FailLockedTask {
+                task_id,
+                fence: PriorLockedRead {
+                    worker_id: "p7-worker".to_owned(),
+                },
+                result_json: failure,
+                error_code: Some("NODE_FAILURE".to_owned()),
+                failed_reason: Some("the node failed".to_owned()),
+            },
+        )
+        .await
+        .expect("fail the workflow task");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ));
+        let kind: String = sqlx::query_scalar(
+            "UPDATE horsies_workflow_phase2_pending
+             SET created_at = NOW() - INTERVAL '1 hour'
+             WHERE task_id = $1
+             RETURNING terminalization_kind",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("age the phase-2 record");
+        assert_eq!(kind, "FAIL_RUNNING");
+
+        let summary = drive_phase2_recovery(
+            &pool,
+            &crate::core::WorkflowSpecRegistry::new(),
+            0,
+            1,
+            25,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("recovery pass");
+
+        let node_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the node");
+        let records: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count the phase-2 records");
+        cleanup_case(&pool, workflow_id, task_id).await;
+        assert_eq!(summary.considered, 1, "{summary:?}");
+        assert_eq!(summary.applied, 1, "{summary:?}");
+        assert_eq!(summary.failed, 0, "{summary:?}");
+        assert_eq!(node_status, "FAILED");
+        assert_eq!(records, 0);
     }
 
     #[tokio::test]

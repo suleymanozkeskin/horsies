@@ -174,7 +174,11 @@ fn check_input(input_json: &str) -> Result<(), EnqueuePreparationError> {
     })
 }
 
-fn parse_optional_object(
+/// The task options as a JSON object, read with the strict rule; `None`
+/// for no options or `null`. Refuses text that breaks the strict read rule,
+/// does not parse, holds an integer the parse would round, or is not an
+/// object.
+pub(crate) fn parse_optional_object(
     value: Option<&str>,
 ) -> Result<Option<Map<String, Value>>, EnqueuePreparationError> {
     let Some(value) = value else {
