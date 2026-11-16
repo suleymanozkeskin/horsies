@@ -83,7 +83,7 @@ fn failure(seeded: &Seeded, retry: RetryRequest) -> FinishFailedAttempt {
             claimed_at: seeded.claimed_at,
         },
         retry,
-        result_json: r#"{"__type":"err","value":{"error_code":"BOOM","message":"boom"}}"#
+        result_json: r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":"BOOM","data":null,"message":"boom"}}"#
             .to_owned(),
         error_code: Some("BOOM".to_owned()),
         failed_reason: None,
@@ -339,7 +339,7 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
                 worker_id: WORKER.to_owned(),
                 claimed_at: seeded.claimed_at - Duration::seconds(1),
             },
-            result_json: r#"{"__type":"ok","value":1}"#.to_owned(),
+            result_json: r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
         },
     )
     .await
@@ -369,7 +369,7 @@ async fn a_plain_task_success_through_the_workflow_writer_is_refused() {
                 worker_id: WORKER.to_owned(),
                 claimed_at: seeded.claimed_at,
             },
-            result_json: r#"{"__type":"ok","value":1}"#.to_owned(),
+            result_json: r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
         },
     )
     .await;

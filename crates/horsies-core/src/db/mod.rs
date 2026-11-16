@@ -61,7 +61,7 @@ pub use listener::{
 pub use pool::{
     CheckoutClass, ConnectionAge, CorePool, IdlePing, PoolPlan, PoolRole, PoolSizing,
     PoolSizingError, PoolStatus, PooledConnection, Reserve, DEFAULT_IDLE_PING_AFTER,
-    IDLE_PING_BOUND, POSTGRES_MAX_BACKENDS, WORKER_RESERVED_CONNECTIONS,
+    IDLE_PING_BOUND, KEPT_SESSION_SETUP_SQL, POSTGRES_MAX_BACKENDS, WORKER_RESERVED_CONNECTIONS,
 };
 pub use pooling_check::STATEMENT_POOLING_CHECK_BOUND;
 pub use statement::{
