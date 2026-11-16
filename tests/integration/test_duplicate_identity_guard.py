@@ -161,9 +161,8 @@ async def test_dropping_a_leaf_deletes_the_exceptions_of_its_rows(
             await connection.execute(
                 text(
                     f'INSERT INTO {CLOCK_SKEW_EXCEPTIONS} (task_id, '
-                    'retention_class_key, terminal_at, birth_at, recorded_at) '
-                    'VALUES (CAST(:id AS uuid), :class_key, :terminal_at, '
-                    ':terminal_at, NOW())'
+                    'retention_class_key, terminal_at) '
+                    'VALUES (CAST(:id AS uuid), :class_key, :terminal_at)'
                 ),
                 {'id': task_id, 'class_key': CLASS_KEY, 'terminal_at': terminal_at},
             )
@@ -171,7 +170,7 @@ async def test_dropping_a_leaf_deletes_the_exceptions_of_its_rows(
     detached = await detach_expired_leaf(
         PartitionMaintenanceDatabase(terminalization_schema.engine, connection_capacity=2),
         DetachExpiredHistoryLeaf(
-            leaf=ref, quarantine_horizon=None, statement_timeout_ms=None,
+            leaf=ref, statement_timeout_ms=None,
         ),
         StagedLoaderPublisher(),
     )

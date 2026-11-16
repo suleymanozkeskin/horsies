@@ -2,10 +2,10 @@
 
 A failed plain task reruns end to end — new identity, atomic lineage,
 source record byte-untouched, the new PENDING row written strictly by
-the provenance table with its envelope re-prepared canonically. Every
-typed refusal is exercised: live source, absent source with floor
-classification, both ineligibilities, input unavailable carrying the
-caller's reference locator, corrupt envelope failing closed. Keyed
+the provenance table with the source's input and options texts, so its
+own move stores the source's envelope bytes. Every typed refusal is
+exercised: live source, absent source, both ineligibilities, input
+unavailable with its disposition, corrupt envelope failing closed. Keyed
 rerun rides the real reservation registry: replay returns the committed
 rerun, and a key still reserved by the source conflicts by contract.
 Policy resolution at enqueue is proven by flipping the effective class
@@ -32,9 +32,6 @@ from horsies.core.history.identity.reservations import (
     ReservationApplied,
     claim_key_reservation,
 )
-from horsies.core.history.rerun.input_envelope import (
-    encode_input_envelope_v1,
-)
 from horsies.core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,
@@ -53,10 +50,8 @@ from horsies.core.history.rerun.operations import (
 from horsies.core.types.status import TaskStatus
 
 from tests.broker_resources_support import current_resources
-from tests.integration.history_seeding import (
-    route_rows,
-    stored_history_status,
-)
+from tests.integration.history_seeding import stored_history_status
+from tests.integration.monitoring_seeding import insert_rows
 from tests.integration.task_history_harness import (
     HistorySchema,
     create_workflow,
@@ -67,6 +62,7 @@ from tests.integration.task_history_harness import (
 )
 
 from tests.integration.test_monitoring_queries import make_task
+from tests.rerun_envelope_support import frame_rerun_envelope
 
 pytestmark = [pytest.mark.integration]
 
@@ -79,9 +75,8 @@ SECOND_DAYS = 12
 SECOND_CLASS = period_class_key(SECOND_DAYS)
 NEVER_REGISTERED_DAYS = 13
 WORKER = 'worker-rerun-1'
-INPUT_PAYLOAD = encode_input_envelope_v1(
-    args=[1, 'x'], kwargs={'k': 'v'}, options={'timeout_ms': 5}
-)
+SOURCE_INPUT = '{"k":"v"}'
+SOURCE_OPTIONS = '{"timeout_ms":5}'
 
 terminalization_schema = terminalization_schema_fixture(
     'task_history_it_rerun'
@@ -103,17 +98,23 @@ def policy(
 async def seed_failed_source(
     connection: AsyncConnection,
     *,
-    prepared_inline: bytes = INPUT_PAYLOAD,
-    prepared_disposition: str = 'INLINE',
+    input_text: str = SOURCE_INPUT,
+    task_options: str | None = SOURCE_OPTIONS,
 ) -> str:
+    """A failed task whose move retained its input: an INLINE envelope."""
     task_id = await insert_live_task(
         connection,
         class_key=CLASS_KEY,
         worker=WORKER,
         retain=True,
-        prepared_disposition=prepared_disposition,
-        prepared_inline=prepared_inline,
+        input_text=input_text,
+        task_options=task_options,
     )
+    await fail_running(connection, task_id)
+    return task_id
+
+
+async def fail_running(connection: AsyncConnection, task_id: str) -> None:
     outcome = (
         await connection.execute(
             text(
@@ -129,7 +130,6 @@ async def seed_failed_source(
         )
     ).one()
     assert outcome.outcome == 'APPLIED'
-    return task_id
 
 
 async def live_row(connection: AsyncConnection, task_id: str) -> Any:
@@ -184,9 +184,8 @@ class TestRerunEndToEnd:
             assert row.task_name == 'it.move'
             assert row.queue_name == 'default'
             assert row.priority == 50
-            assert row.args == '[1,"x"]'
-            assert row.kwargs == '{"k":"v"}'
-            assert row.task_options == '{"timeout_ms":5}'
+            assert row.input == SOURCE_INPUT
+            assert row.task_options == SOURCE_OPTIONS
             # Options written before the execution class have no key.
             assert row.execution == 'ISOLATED'
             assert row.max_retries == 0
@@ -200,32 +199,47 @@ class TestRerunEndToEnd:
             assert row.status == 'PENDING'
             assert row.retry_count == 0
             assert row.claimed_by_worker_id is None
-            # Policy resolved at enqueue, envelope re-prepared
-            # canonically: byte-identical to the source's.
+            # Policy resolved at enqueue.
             assert row.retention_class_key == CLASS_KEY
-            assert row.prepared_rerun_input_disposition == 'INLINE'
-            assert bytes(row.prepared_rerun_input_inline) == INPUT_PAYLOAD
-            assert bytes(row.input_digest) == sha256(INPUT_PAYLOAD).digest()
+            assert row.retain_rerun_input is True
 
             after = await history_row_bytes(connection, source)
             assert before == after
+
+            # The rerun's own move stores the source's envelope bytes.
+            await connection.execute(
+                text(
+                    'UPDATE horsies_tasks '
+                    "SET status = 'RUNNING', "
+                    'claimed_by_worker_id = :worker '
+                    'WHERE id = CAST(:task_id AS uuid)'
+                ),
+                {'task_id': outcome.new_task_id, 'worker': WORKER},
+            )
+            await fail_running(connection, outcome.new_task_id)
+            rerun_history = await history_row_bytes(
+                connection, outcome.new_task_id
+            )
+            envelope = frame_rerun_envelope(SOURCE_INPUT, SOURCE_OPTIONS)
+            assert bytes(before.rerun_input_inline) == envelope
+            assert bytes(rerun_history.rerun_input_inline) == envelope
+            assert bytes(rerun_history.rerun_input_digest) == (
+                sha256(envelope).digest()
+            )
 
     @pytest.mark.asyncio
     async def test_a_rerun_keeps_the_execution_class_of_the_request(
         self, terminalization_schema: HistorySchema
     ) -> None:
-        payload = encode_input_envelope_v1(
-            args=[],
-            kwargs={'k': 'v'},
-            options={
-                'timeout_ms': 1000,
-                'execution': 'SHARED_THREAD',
-                'cancel_grace_ms': None,
-            },
-        )
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
-            source = await seed_failed_source(connection, prepared_inline=payload)
+            source = await seed_failed_source(
+                connection,
+                task_options=(
+                    '{"timeout_ms":1000,"execution":"SHARED_THREAD",'
+                    '"cancel_grace_ms":null}'
+                ),
+            )
 
             outcome = await rerun_task(
                 connection,
@@ -336,12 +350,9 @@ class TestRerunEndToEnd:
             )
             assert isinstance(outcome, RerunEnqueued)
             row = await live_row(connection, outcome.new_task_id)
-            assert row.prepared_rerun_input_disposition == (
-                'DECLINED_BY_POLICY'
-            )
-            assert row.prepared_rerun_input_inline is None
-            # The input identity still carries.
-            assert bytes(row.input_digest) == sha256(INPUT_PAYLOAD).digest()
+            assert row.retain_rerun_input is False
+            # The input still carries.
+            assert row.input == SOURCE_INPUT
 
 
 class TestTypedRefusals:
@@ -349,12 +360,13 @@ class TestTypedRefusals:
     async def test_an_invalid_stored_execution_is_input_corrupt(
         self, terminalization_schema: HistorySchema
     ) -> None:
-        payload = encode_input_envelope_v1(
-            args=[], kwargs={}, options={'execution': 'PARALLEL'}
-        )
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
-            source = await seed_failed_source(connection, prepared_inline=payload)
+            source = await seed_failed_source(
+                connection,
+                input_text='{}',
+                task_options='{"execution":"PARALLEL"}',
+            )
             count_tasks = text('SELECT count(*) FROM horsies_tasks')
             before = (await connection.execute(count_tasks)).scalar_one()
 
@@ -484,7 +496,6 @@ class TestTypedRefusals:
                 class_key=CLASS_KEY,
                 worker=WORKER,
                 retain=False,
-                prepared_disposition='DECLINED_BY_POLICY',
             )
             await connection.execute(
                 text(
@@ -501,7 +512,6 @@ class TestTypedRefusals:
             assert outcome == RerunInputUnavailable(
                 task_id=source,
                 disposition='DECLINED_BY_POLICY',
-                reference_locator=None,
             )
 
     @pytest.mark.asyncio
@@ -529,32 +539,23 @@ class TestTypedRefusals:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('payload', 'detail'),
+        ('input_text', 'detail'),
         [
-            (
-                b'{"args":[],"kwargs":{"x":Infinity},"options":null}',
-                'Non-standard JSON constant',
-            ),
-            (
-                b'{"args":[],"kwargs":{"x":1e9999},"options":null}',
-                'finite binary64',
-            ),
-            (
-                rb'{"args":[],"kwargs":{"x":"\ud800"},"options":null}',
-                'lone surrogate',
-            ),
+            ('{"x":Infinity}', 'Non-standard JSON constant'),
+            ('{"x":1e9999}', 'finite binary64'),
+            ('{"x":"\\ud800"}', 'lone surrogate'),
         ],
     )
     async def test_refused_value_in_a_stored_envelope_fails_closed(
         self,
         terminalization_schema: HistorySchema,
-        payload: bytes,
+        input_text: str,
         detail: str,
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(
-                connection, prepared_inline=payload
+                connection, input_text=input_text, task_options=None
             )
             count_tasks = text('SELECT count(*) FROM horsies_tasks')
             tasks_before = (await connection.execute(count_tasks)).scalar_one()
@@ -659,9 +660,9 @@ class TestKeyedRerun:
 class TestStoredSourceDoesNotDecode:
     """Stored data that does not parse is an outcome with its cause.
 
-    Schema v49 has no status CHECK on the history parent, so this runs on
-    the broker database, where an out-of-band write can store a status that
-    is not a ``TaskStatus`` member.
+    The history parent has no status CHECK, so this runs on the broker
+    database, where an out-of-band write can store a status that is not a
+    ``TaskStatus`` member.
     """
 
     @pytest.mark.asyncio(loop_scope='function')
@@ -669,10 +670,11 @@ class TestStoredSourceDoesNotDecode:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         source = make_task(status=TaskStatus.FAILED)
-        await route_rows(session, (source,))
+        await insert_rows(session, source)
         count_tasks = text('SELECT count(*) FROM horsies_tasks')
 
-        async with stored_history_status(session, source.id, 'NOT_A_STATUS'):
+        # The status column holds 9 characters; the value is not a member.
+        async with stored_history_status(session, source.id, 'UNKNOWN'):
             async with current_resources(broker).engine.begin() as connection:
                 tasks_before = (await connection.execute(count_tasks)).scalar_one()
                 outcome = await rerun_task(
@@ -689,5 +691,5 @@ class TestStoredSourceDoesNotDecode:
         assert isinstance(outcome, RerunSourceCorrupt)
         assert outcome.task_id == source.id
         assert isinstance(outcome.exception, HistoryContractError)
-        assert "'NOT_A_STATUS'" in str(outcome.exception)
+        assert "'UNKNOWN'" in str(outcome.exception)
         assert tasks_after == tasks_before

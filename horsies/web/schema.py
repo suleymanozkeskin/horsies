@@ -12,6 +12,8 @@ bookkeeping and adapts:
   a contract this build does not share is how data gets corrupted;
 * no version at all — the database has no horsies schema, and the app says so
   rather than creating one;
+* a horsies 0.x schema — this build neither reads nor upgrades it, and the app
+  says so: the remedy is a new database, not a worker start;
 * the database could not be reached at all — which is deliberately NOT the
   same answer. "No schema" tells an operator to start a worker; saying that
   about a database that is merely down sends them to fix the wrong thing.
@@ -45,8 +47,9 @@ SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 EXPECTED_SCHEMA_VERSION = BASELINE_VERSION
 """The schema version this build writes through."""
 
-_MIGRATIONS_TABLE_EXISTS_SQL = text(
-    "SELECT to_regclass('horsies_migrations') IS NOT NULL"
+_BOOKKEEPING_TABLES_SQL = text(
+    "SELECT to_regclass('horsies_migrations') IS NOT NULL, "
+    "to_regclass('horsies_schema_version') IS NOT NULL"
 )
 _READ_SCHEMA_VERSION_SQL = text(
     'SELECT COALESCE(max(version), 0) FROM horsies_migrations WHERE success'
@@ -60,6 +63,10 @@ class SchemaState(str, Enum):
     MISMATCH = 'MISMATCH'
     # Only ever the result of a successful observation.
     ABSENT = 'ABSENT'
+    # A horsies 0.x schema: ``horsies_schema_version`` without
+    # ``horsies_migrations`` (Python 0.x), or a highest version below the
+    # baseline's (horsies-rust 0.x, whose versions end at 65).
+    ZERO_X = 'ZERO_X'
     # The probe has never succeeded, so there is nothing to report yet.
     UNKNOWN = 'UNKNOWN'
 
@@ -96,11 +103,23 @@ class SchemaIncompatible(Exception):
                     'initialize it; the monitoring tool never modifies the '
                     'database schema.'
                 )
-            case _:
+            case SchemaState.ZERO_X:
+                self.detail = (
+                    'This database holds a horsies 0.x schema, so actions '
+                    'are unavailable. This build does not read or upgrade a '
+                    '0.x database: drain it and point the fleet at a new '
+                    'database.'
+                )
+            case SchemaState.MISMATCH:
                 self.detail = (
                     f'Database schema is v{status.version}; this build '
                     f'expects v{status.expected_version}. Actions are '
                     f'disabled until the versions match.'
+                )
+            case SchemaState.MATCH:
+                raise AssertionError(
+                    'SchemaIncompatible needs a status this build cannot '
+                    'write through; MATCH is compatible'
                 )
         super().__init__(self.detail)
 
@@ -168,14 +187,11 @@ class SchemaProbe:
                 pass
         try:
             async with resources.session_factory() as session:
-                present = (
-                    await session.execute(_MIGRATIONS_TABLE_EXISTS_SQL)
-                ).scalar()
-                if not bool(present):
-                    return SchemaStatus(
-                        state=SchemaState.ABSENT,
-                        version=None,
-                        expected_version=EXPECTED_SCHEMA_VERSION,
+                bookkeeping = (await session.execute(_BOOKKEEPING_TABLES_SQL)).one()
+                migrations_table, schema_version_table = bookkeeping
+                if not bool(migrations_table):
+                    return classify_without_migrations(
+                        schema_version_table=bool(schema_version_table),
                     )
                 stored = int(
                     (await session.execute(_READ_SCHEMA_VERSION_SQL)).scalar_one()
@@ -183,22 +199,50 @@ class SchemaProbe:
         except SQLAlchemyError as exc:
             logger.warning(f'Schema version probe failed: {exc}')
             return None
+        return classify_stored_version(stored)
 
-        if stored == 0:
+
+def classify_without_migrations(*, schema_version_table: bool) -> SchemaStatus:
+    """The verdict for a database without ``horsies_migrations``.
+
+    ``horsies_schema_version`` is the bookkeeping of horsies 0.x Python, so
+    with it the database holds a 0.x schema (ZERO_X); without it the database
+    has no horsies schema (ABSENT). The 0.x version is not read: this build
+    reports it as None.
+    """
+    return SchemaStatus(
+        state=SchemaState.ZERO_X if schema_version_table else SchemaState.ABSENT,
+        version=None,
+        expected_version=EXPECTED_SCHEMA_VERSION,
+    )
+
+
+def classify_stored_version(stored: int) -> SchemaStatus:
+    """The verdict for the highest successful version in ``horsies_migrations``.
+
+    ``stored`` is 0 when no row is recorded as successful: ABSENT. A version
+    below the baseline's is horsies-rust 0.x bookkeeping, since the first
+    version of this schema line is the baseline: ZERO_X. Otherwise the
+    version matches or differs from the one this build expects.
+    """
+    match stored:
+        case 0:
             return SchemaStatus(
                 state=SchemaState.ABSENT,
                 version=None,
                 expected_version=EXPECTED_SCHEMA_VERSION,
             )
-        return SchemaStatus(
-            state=(
-                SchemaState.MATCH
-                if stored == EXPECTED_SCHEMA_VERSION
-                else SchemaState.MISMATCH
-            ),
-            version=stored,
-            expected_version=EXPECTED_SCHEMA_VERSION,
-        )
+        case _ if stored < BASELINE_VERSION:
+            state = SchemaState.ZERO_X
+        case _ if stored == EXPECTED_SCHEMA_VERSION:
+            state = SchemaState.MATCH
+        case _:
+            state = SchemaState.MISMATCH
+    return SchemaStatus(
+        state=state,
+        version=stored,
+        expected_version=EXPECTED_SCHEMA_VERSION,
+    )
 
 
 def schema_guard(probe: SchemaProbe) -> Callable[[], Awaitable[None]]:

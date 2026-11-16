@@ -39,6 +39,11 @@ pub enum BrokerError {
     #[error("invalid task status: {0}")]
     InvalidStatus(String),
 
+    /// A live task row's `execution` column holds a value outside
+    /// `ISOLATED`, `SHARED_ASYNC` and `SHARED_THREAD`.
+    #[error("invalid execution class: {0}")]
+    InvalidExecutionClass(String),
+
     /// A connection or delivery check failed in a way that can clear.
     #[error("connection failed: {0}")]
     ConnectionFailed(String),
@@ -59,7 +64,8 @@ pub enum BrokerError {
     PayloadMismatch { task_id: Uuid },
 
     /// Enqueue observed a conflict, but the conflicting row disappeared before
-    /// its `enqueue_sha` could be compared — payload identity cannot be proven.
+    /// its fingerprint and `sent_at` could be compared — payload identity cannot
+    /// be proven.
     #[error(
         "task_id {task_id} conflict detected but row disappeared before verification \
          for {task_name}; cannot verify payload identity"
@@ -79,6 +85,22 @@ pub enum BrokerError {
     /// The broker's keyed-enqueue reservation window is outside `(0, 30d]`.
     #[error("invalid idempotency reservation window: {0}")]
     InvalidIdempotencyReservationWindow(String),
+
+    /// The database records another client family, or none. Nothing was
+    /// written. Not retryable: the database stays of its family.
+    #[error(
+        "this database was installed by {stored}; this is the {} client, which writes only \
+         into a database of its own family",
+        own.as_str()
+    )]
+    ClientFamilyMismatch {
+        stored: crate::broker::client_family::RecordedFamily,
+        own: crate::broker::client_family::ClientFamily,
+    },
+
+    /// The schema install lock could not be used.
+    #[error("schema install lock: {0}")]
+    InstallLock(InstallLockFailure),
 
     /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
     #[error("shared listener closed")]
@@ -122,13 +144,16 @@ impl BrokerError {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
+            Self::InstallLock(failure) => failure.is_retryable(),
             Self::Migration(_)
             | Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover
             | Self::SchemaVersionMismatch { .. }
             | Self::InvalidConnectionSettings(_)
+            | Self::ClientFamilyMismatch { .. }
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
+            | Self::InvalidExecutionClass(_)
             | Self::PayloadMismatch { .. }
             | Self::EnqueueConflictUnverifiable { .. }
             | Self::IdempotencyKeyConflict { .. }
@@ -137,6 +162,31 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_) => false,
+        }
+    }
+}
+
+/// Why the schema install lock could not be used (Python
+/// `horsies/core/brokers/postgres.py:1466-1525`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InstallLockFailure {
+    /// Another installer held the lock for the whole wait bound. Nothing was
+    /// installed by this call. Retryable: the other install ends.
+    #[error("another installer held the lock for {} s", waited.as_secs())]
+    WaitBoundReached { waited: std::time::Duration },
+    /// The unlock did not release a lock that this connection held: the
+    /// session lost the lock during the install. The install may or may not
+    /// have completed. Not retryable.
+    #[error("the lock was no longer held at the unlock; ownership was lost")]
+    OwnershipLost,
+}
+
+impl InstallLockFailure {
+    /// Whether a later install can succeed.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::WaitBoundReached { .. } => true,
+            Self::OwnershipLost => false,
         }
     }
 }

@@ -2,16 +2,14 @@
 
 Each domain versions independently: a result-envelope change must not
 falsely version attempts, rerun input, or the row projection. Version 1 is
-the sole retained version of every domain at the 0.5.0 cutover; the
-vocabulary here is what lets a later version join one domain without
-touching the others.
+the sole retained version of every domain; the vocabulary here is what
+lets a later version join one domain without touching the others.
 
-Codec and content-type discriminants are constrained text rather than
-database enums, so introducing a codec never rewrites an enum type. The
-decode failure union is shared by every domain codec: unknown version,
-unknown codec, unknown content type, corrupt payload, digest mismatch —
-and nothing else, so a reader matching over it is exhaustive by
-construction.
+The version is the whole format contract. History stores no codec or
+content-type column: version 1 of every domain is UTF-8 JSON. The decode
+failure union is shared by every domain codec: unknown version, corrupt
+payload, digest mismatch — and nothing else, so a reader matching over it
+is exhaustive by construction.
 """
 
 from __future__ import annotations
@@ -19,11 +17,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
-
-
-JSON_UTF8_CODEC: Final = 'json-utf8'
-JSON_CONTENT_TYPE: Final = 'application/json'
 
 
 class ArchiveDomain(StrEnum):
@@ -44,22 +37,6 @@ class UnknownArchiveVersion:
 
 
 @dataclass(frozen=True, slots=True)
-class UnknownArchiveCodec:
-    """The stored codec identifier is not one this version defines."""
-
-    domain: ArchiveDomain
-    codec: str
-
-
-@dataclass(frozen=True, slots=True)
-class UnknownArchiveContentType:
-    """The stored content type is not one this version defines."""
-
-    domain: ArchiveDomain
-    content_type: str
-
-
-@dataclass(frozen=True, slots=True)
 class CorruptArchiveValue:
     """The stored value does not satisfy its own declared format."""
 
@@ -76,8 +53,6 @@ class ArchiveDigestMismatch:
 
 type ArchiveDecodeFailure = (
     UnknownArchiveVersion
-    | UnknownArchiveCodec
-    | UnknownArchiveContentType
     | CorruptArchiveValue
     | ArchiveDigestMismatch
 )
@@ -99,28 +74,20 @@ def archive_digest(payload: bytes) -> bytes:
     return hashlib.sha256(payload).digest()
 
 
-def validate_envelope_contract(
+def validate_archive_version(
     *,
     domain: ArchiveDomain,
     version: int,
-    codec: str,
-    content_type: str,
-) -> ArchiveDecodeFailure | None:
-    """Check the version/codec/content-type triple of a stored envelope.
+) -> UnknownArchiveVersion | None:
+    """Check that a stored envelope version is one this build decodes.
 
-    Version is judged first: an unknown version cannot know which codecs it
-    defines, so it reports as unknown version rather than unknown codec.
+    Returns ``None`` for a retained version. Reads no payload.
     """
     match version:
-        case 1 if codec != JSON_UTF8_CODEC:
-            return UnknownArchiveCodec(domain=domain, codec=codec)
         case 1:
-            pass
+            return None
         case _:
             return UnknownArchiveVersion(domain=domain, version=version)
-    if content_type != JSON_CONTENT_TYPE:
-        return UnknownArchiveContentType(domain=domain, content_type=content_type)
-    return None
 
 
 def verify_payload_digest(

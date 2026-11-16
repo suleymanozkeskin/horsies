@@ -36,9 +36,7 @@ from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
-    ClassCapacityNotRecorded,
     DownSlot,
-    SlotHealthNotRecorded,
     SlotsDown,
 )
 from horsies.core.models.payload import PayloadPolicy
@@ -1088,9 +1086,37 @@ class TestEnqueueAsync:
 # ---------------------------------------------------------------------------
 
 
+_CONFLICT_SENT_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+"""The ``sent_at`` of the sends in TestEnqueueIdempotency."""
+
+
+def _conflict_send_fingerprint() -> bytes:
+    """The command fingerprint that the broker computes for the sends of
+    TestEnqueueIdempotency: ``my_task`` on ``default``, no input, no options,
+    the default retention class, no retained input."""
+    from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+
+    return EnqueueCommandV1(
+        task_name='my_task',
+        queue_name='default',
+        priority=100,
+        args_json=None,
+        kwargs_json=None,
+        good_until=None,
+        enqueue_delay_seconds=None,
+        task_options_json=None,
+        retention_class_key='standard_30d',
+        retain_rerun_input=False,
+        rerun_of_task_id=None,
+        rerun_root_task_id=None,
+    ).fingerprint
+
+
 def _make_conflict_session(
     *,
-    existing_sha: str | None = 'same-sha',
+    stored_fingerprint: bytes | None = None,
+    stored_fingerprint_version: int | None = 1,
+    stored_sent_at: datetime = _CONFLICT_SENT_AT,
     select_raises: Exception | None = None,
     row_exists: bool = True,
 ) -> AsyncMock:
@@ -1098,20 +1124,23 @@ def _make_conflict_session(
 
     The conflicting INSERT itself happens on the autocommit engine
     connection (see _make_enqueue_engine(inserted=False)); this session
-    serves only the follow-up SELECT of the stored enqueue_sha.
+    serves only the follow-up SELECT of the stored fingerprint and
+    ``sent_at``. ``stored_fingerprint`` None with version None is a row
+    that the workflow engine wrote.
     """
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
 
-    # SELECT returns existing_sha or raises
     if select_raises is not None:
         session.execute = AsyncMock(side_effect=select_raises)
     else:
         select_result = MagicMock()
         if row_exists:
             mock_row = MagicMock()
-            mock_row.enqueue_sha = existing_sha
+            mock_row.command_fingerprint_version = stored_fingerprint_version
+            mock_row.command_fingerprint = stored_fingerprint
+            mock_row.sent_at = stored_sent_at
             select_result.fetchone.return_value = mock_row
         else:
             select_result.fetchone.return_value = None  # row purged
@@ -1125,36 +1154,40 @@ class TestEnqueueIdempotency:
     """Tests for ON CONFLICT path and _verify_enqueue_conflict."""
 
     @pytest.mark.asyncio
-    async def test_enqueue_same_id_same_sha_returns_ok(self) -> None:
-        """INSERT conflicts, SELECT finds matching SHA -> Ok(task_id)."""
+    async def test_enqueue_same_id_same_send_returns_ok(self) -> None:
+        """INSERT conflicts, SELECT finds the same fingerprint and sent_at -> Ok(task_id)."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
         _set_resources(broker, engine=engine)
-        session = _make_conflict_session(existing_sha='test-sha')
+        session = _make_conflict_session(
+            stored_fingerprint=_conflict_send_fingerprint(),
+        )
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
             task_id='dup-id',
             enqueue_sha='test-sha',
+            sent_at=_CONFLICT_SENT_AT,
         )
 
         assert is_ok(result)
         assert result.ok_value == 'dup-id'
 
     @pytest.mark.asyncio
-    async def test_enqueue_same_id_different_sha_returns_err(self) -> None:
-        """INSERT conflicts, SELECT finds mismatched SHA -> Err(non-retryable)."""
+    async def test_enqueue_same_id_different_fingerprint_returns_err(self) -> None:
+        """INSERT conflicts, SELECT finds another fingerprint -> Err(non-retryable)."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
         _set_resources(broker, engine=engine)
-        session = _make_conflict_session(existing_sha='different-sha')
+        session = _make_conflict_session(stored_fingerprint=b'\x00' * 32)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
             task_id='dup-id',
             enqueue_sha='test-sha',
+            sent_at=_CONFLICT_SENT_AT,
         )
 
         assert is_err(result)
@@ -1162,25 +1195,51 @@ class TestEnqueueIdempotency:
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
-    async def test_enqueue_same_id_null_sha_raises_assertion(self) -> None:
-        """INSERT conflicts, existing row has NULL SHA -> AssertionError (data corruption).
-
-        enqueue_sha is NOT NULL in the schema. A NULL value from the DB
-        indicates data corruption, so the assertion is the expected outcome.
-        """
+    async def test_enqueue_same_id_different_sent_at_returns_err(self) -> None:
+        """INSERT conflicts, SELECT finds the same fingerprint with another
+        sent_at -> Err(PAYLOAD_MISMATCH)."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
         _set_resources(broker, engine=engine)
-        session = _make_conflict_session(existing_sha=None)
+        session = _make_conflict_session(
+            stored_fingerprint=_conflict_send_fingerprint(),
+            stored_sent_at=_CONFLICT_SENT_AT + timedelta(microseconds=1),
+        )
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        with pytest.raises(AssertionError, match='enqueue_sha is NULL'):
-            await broker.enqueue_async(
-                'my_task',
-                task_id='dup-id',
-                enqueue_sha='test-sha',
-            )
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+            sent_at=_CONFLICT_SENT_AT,
+        )
 
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.PAYLOAD_MISMATCH
+        assert result.err_value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_enqueue_same_id_as_a_row_without_fingerprint_returns_err(self) -> None:
+        """INSERT conflicts, the existing row carries no fingerprint (a task
+        that the workflow engine wrote) -> Err(PAYLOAD_MISMATCH)."""
+        broker = _make_broker()
+        engine, _conn = _make_enqueue_engine(inserted=False)
+        _set_resources(broker, engine=engine)
+        session = _make_conflict_session(
+            stored_fingerprint=None, stored_fingerprint_version=None,
+        )
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+            sent_at=_CONFLICT_SENT_AT,
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.PAYLOAD_MISMATCH
+        assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
     async def test_enqueue_same_id_row_deleted_returns_non_retryable_err(self) -> None:
@@ -1610,9 +1669,9 @@ def _worker_state_row(**overrides: Any) -> Any:
         'max_claim_per_worker': 4,
         'cluster_wide_cap': None,
         'queues': ['default'],
-        'queue_priorities': None,
-        'queue_max_concurrency': None,
-        'recovery_config': None,
+        'queue_priorities': {},
+        'queue_max_concurrency': {},
+        'recovery_config': {},
         'tasks_running': 2,
         'tasks_claimed': 1,
         'memory_usage_mb': 12.5,
@@ -1751,7 +1810,6 @@ class TestWorkerStateReads:
     @pytest.mark.parametrize(
         ('stored', 'expected'),
         [
-            (None, SlotHealthNotRecorded()),
             ([], AllSlotsServing()),
             (
                 [
@@ -1776,7 +1834,7 @@ class TestWorkerStateReads:
                 ),
             ),
         ],
-        ids=['not-recorded', 'all-serving', 'one-down'],
+        ids=['all-serving', 'one-down'],
     )
     async def test_the_snapshot_carries_the_slot_health(
         self,
@@ -1810,7 +1868,6 @@ class TestWorkerStateReads:
     @pytest.mark.parametrize(
         ('stored', 'expected'),
         [
-            (None, ClassCapacityNotRecorded()),
             ({}, ClassBudgets(())),
             (
                 {'ISOLATED': {'capacity': 2, 'serves': ['ISOLATED']}},
@@ -1819,7 +1876,7 @@ class TestWorkerStateReads:
                 ),
             ),
         ],
-        ids=['not-recorded', 'serves-no-class', 'one-budget'],
+        ids=['serves-no-class', 'one-budget'],
     )
     async def test_the_snapshot_carries_the_class_capacity(
         self,
@@ -3832,8 +3889,6 @@ class TestHistoryTaskInfoResultDecode:
         detail.result_payload = payload
         detail.result_digest = archive_digest(payload)
         detail.result_envelope_version = 1
-        detail.result_codec = 'json-utf8'
-        detail.result_content_type = 'application/json'
 
         with (
             patch(

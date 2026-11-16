@@ -9,6 +9,15 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
+from tests.dualrun.cells import (
+    NormalizeError,
+    RawRow,
+    RawSnapshot,
+    RawTable,
+    UnanchoredReason,
+    UnanchoredTime,
+    UnreadableTime,
+)
 from tests.dualrun.compare import (
     DIFF_REPORT_ROW_LIMIT,
     AmbiguousRows,
@@ -20,17 +29,7 @@ from tests.dualrun.compare import (
     compare_snapshots,
     render_diff,
 )
-from tests.dualrun.normalize import (
-    NormalizedSnapshot,
-    NormalizeError,
-    RawRow,
-    RawSnapshot,
-    RawTable,
-    UnanchoredReason,
-    UnanchoredTime,
-    UnreadableTime,
-    normalize_snapshot,
-)
+from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
 from tests.dualrun.rules import (
     AnchorReference,
     ColumnSpec,
@@ -487,14 +486,47 @@ def test_unreadable_clock_text_is_an_error() -> None:
 # ---- Ties ----
 
 
-def test_tied_rows_whose_new_labels_are_referenced_are_ambiguous() -> None:
+def test_tied_rows_are_ordered_by_the_rows_that_reference_them() -> None:
     reference = _raw(
         [_parent('a1', 'alpha', RUN_A), _parent('a2', 'alpha', RUN_A)],
-        [('a1', '1', 'w')],
+        [('a1', '1', 'w'), ('a1', '2', 'w'), ('a2', '1', 'w')],
+    )
+    candidate = _raw(
+        [_parent('b2', 'alpha', RUN_B), _parent('b1', 'alpha', RUN_B)],
+        [('b2', '1', 'w'), ('b1', '1', 'w'), ('b1', '2', 'w')],
+    )
+
+    reference_snapshot = _normalize(reference, RUN_A)
+    candidate_snapshot = _normalize(candidate, RUN_B)
+
+    assert reference_snapshot.ambiguities == ()
+    assert candidate_snapshot.ambiguities == ()
+    assert compare_snapshots(reference_snapshot, candidate_snapshot).entries == ()
+
+
+def test_reference_order_still_finds_a_changed_reference() -> None:
+    reference = _raw(
+        [_parent('a1', 'alpha', RUN_A), _parent('a2', 'alpha', RUN_A)],
+        [('a1', '1', 'w'), ('a1', '2', 'w'), ('a2', '1', 'w')],
     )
     candidate = _raw(
         [_parent('b1', 'alpha', RUN_B), _parent('b2', 'alpha', RUN_B)],
-        [('b2', '1', 'w')],
+        [('b1', '1', 'w'), ('b1', '3', 'w'), ('b2', '1', 'w')],
+    )
+
+    diff = _diff(reference, candidate)
+
+    assert [type(entry) for entry in diff.entries] == [MissingRow, ExtraRow]
+
+
+def test_tied_rows_with_equal_references_are_ambiguous() -> None:
+    reference = _raw(
+        [_parent('a1', 'alpha', RUN_A), _parent('a2', 'alpha', RUN_A)],
+        [('a1', '1', 'w'), ('a2', '1', 'w')],
+    )
+    candidate = _raw(
+        [_parent('b1', 'alpha', RUN_B), _parent('b2', 'alpha', RUN_B)],
+        [('b1', '1', 'w'), ('b2', '1', 'w')],
     )
 
     diff = _diff(reference, candidate)

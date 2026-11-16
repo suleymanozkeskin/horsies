@@ -178,21 +178,23 @@ pub fn render_staged_detail_function(manifest: &LookupManifest) -> String {
 /// Terminal-result reader: the result columns only, as flat output columns.
 /// Every column reference is qualified: the output column names are
 /// PL/pgSQL variables inside the body. A live row holds no result: terminal
-/// results live in history only.
+/// results live in history only. Both locations carry the task name, which a
+/// caller needs to decode a typed result.
 pub fn render_staged_result_function(manifest: &LookupManifest) -> String {
     let live_probe = format!(
-        "\n        RETURN QUERY SELECT\n            'LIVE'::text, t.status::text, NULL::text, NULL::text,\n            NULL::smallint, NULL::bytea, NULL::bytea\n        FROM {LIVE_TASKS} t WHERE t.id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
+        "\n        RETURN QUERY SELECT\n            'LIVE'::text, t.status::text, NULL::text, NULL::text,\n            NULL::smallint, NULL::bytea, NULL::bytea, t.task_name::text\n        FROM {LIVE_TASKS} t WHERE t.id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
     );
     staged_function(
         TASK_RESULT_FUNCTION,
         "TABLE (location text, status text, live_result text, failed_reason text, \
-         result_envelope_version smallint, result_payload bytea, result_digest bytea)",
+         result_envelope_version smallint, result_payload bytea, result_digest bytea, \
+         task_name text)",
         "",
         &[],
         &live_probe,
         |relation| {
             format!(
-                "\n        RETURN QUERY SELECT\n            'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason::text,\n            h.result_envelope_version, h.result_payload, h.result_digest\n        FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
+                "\n        RETURN QUERY SELECT\n            'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason::text,\n            h.result_envelope_version, h.result_payload, h.result_digest, h.task_name::text\n        FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
             )
         },
         manifest,

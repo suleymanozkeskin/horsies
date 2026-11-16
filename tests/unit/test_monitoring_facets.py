@@ -198,12 +198,35 @@ def test_the_statement_names_each_built_in_family() -> None:
 
     for category in ErrorCategory:
         assert f"'{category.value}'" in sql
-    assert 'WORKER_CRASHED' in params['category_operational_codes']
+    operational_codes = params['category_operational_codes']
+    assert isinstance(operational_codes, list)
+    assert 'WORKER_CRASHED' in operational_codes
     assert "ELSE 'DOMAIN'" in sql
 
 
 def test_the_statement_scopes_only_the_history_side_by_the_window() -> None:
     sql, _ = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
 
-    assert sql.count('retention_anchor_at') == 2
+    assert sql.count('terminal_at') == 2
     assert 'WHERE TRUE' in sql
+
+
+def test_the_live_side_has_no_error_code_facet() -> None:
+    """The live table has no error code: its side groups three columns.
+
+    ``GROUPING()`` over three columns sets the bits 3, 5 and 6 for the sets
+    of the first, second and third column; over four columns, 7, 11, 13, 14.
+    """
+    sql, _ = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
+    live, history = sql.split('UNION ALL')
+
+    assert 'error_code' not in live
+    for arm in ("WHEN 3 THEN 'worker'", "WHEN 5 THEN 'task_name'", "WHEN 6 THEN 'queue_name'"):
+        assert arm in live
+    for arm in (
+        "WHEN 7 THEN 'worker'",
+        "WHEN 11 THEN 'task_name'",
+        "WHEN 13 THEN 'queue_name'",
+        "WHEN 14 THEN 'error_code'",
+    ):
+        assert arm in history

@@ -29,9 +29,7 @@ from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
-    ClassCapacityNotRecorded,
     DownSlot,
-    SlotHealthNotRecorded,
     SlotsDown,
     WorkerPingRequest,
     WorkerPongPayload,
@@ -47,11 +45,15 @@ _INSERT_WORKER_STATE = text("""
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
         max_claim_batch, max_claim_per_worker, queues,
-        tasks_running, tasks_claimed, worker_started_at
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at,
+        slots_down, class_capacity
     ) VALUES (
         :worker_id, :snapshot_at, :hostname, :pid, :processes,
         :max_claim_batch, :max_claim_per_worker, :queues,
-        :tasks_running, :tasks_claimed, :worker_started_at
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        :tasks_running, :tasks_claimed, :worker_started_at,
+        '[]'::jsonb, '{}'::jsonb
     )
 """)
 
@@ -117,6 +119,10 @@ async def test_list_worker_states_returns_latest_per_worker(
     assert len(seeded) == 1, 'expected exactly one row per worker'
     assert seeded[0].tasks_running == 3  # newest snapshot
     assert seeded[0].queues == ['default', 'priority']
+    # Maps the worker did not set read as empty dicts, never None.
+    assert seeded[0].queue_priorities == {}
+    assert seeded[0].queue_max_concurrency == {}
+    assert seeded[0].recovery_config == {}
 
 
 @pytest.mark.integration
@@ -191,11 +197,15 @@ _INSERT_WORKER_STATE_WITH_SLOTS = text("""
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
         max_claim_batch, max_claim_per_worker, queues,
-        tasks_running, tasks_claimed, worker_started_at, slots_down
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at, slots_down,
+        class_capacity
     ) VALUES (
         :worker_id, NOW(), 'itest-host', 4242, 2,
         2, 2, ARRAY['default'],
-        0, 0, NOW(), CAST(:slots_down AS JSONB)
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        0, 0, NOW(), CAST(:slots_down AS JSONB),
+        '{}'::jsonb
     )
 """)
 
@@ -205,10 +215,9 @@ _INSERT_WORKER_STATE_WITH_SLOTS = text("""
 async def test_worker_state_reads_the_slot_health(
     broker: PostgresBroker,
     session: AsyncSession,
-    worker_state_seed: str,
 ) -> None:
     """A row with down slots reads as ``SlotsDown``, an empty list as
-    ``AllSlotsServing``, and a row with no value as ``SlotHealthNotRecorded``."""
+    ``AllSlotsServing``."""
     prefix = f'itest-{uuid.uuid4().hex}'
     down = DownSlot(
         slot=1,
@@ -229,14 +238,11 @@ async def test_worker_state_reads_the_slot_health(
     try:
         degraded = await broker.get_worker_state_async(f'{prefix}-degraded')
         serving = await broker.get_worker_state_async(f'{prefix}-serving')
-        not_recorded = await broker.get_worker_state_async(worker_state_seed)
 
         assert is_ok(degraded) and degraded.ok_value is not None
         assert degraded.ok_value.slot_health == SlotsDown((down,))
         assert is_ok(serving) and serving.ok_value is not None
         assert serving.ok_value.slot_health == AllSlotsServing()
-        assert is_ok(not_recorded) and not_recorded.ok_value is not None
-        assert not_recorded.ok_value.slot_health == SlotHealthNotRecorded()
     finally:
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),
@@ -277,11 +283,15 @@ _INSERT_WORKER_STATE_WITH_CAPACITY = text("""
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
         max_claim_batch, max_claim_per_worker, queues,
-        tasks_running, tasks_claimed, worker_started_at, class_capacity
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at, slots_down,
+        class_capacity
     ) VALUES (
         :worker_id, NOW(), 'itest-host', 4242, 2,
         2, 2, ARRAY['default'],
-        0, 0, NOW(), CAST(:class_capacity AS JSONB)
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        0, 0, NOW(), '[]'::jsonb,
+        CAST(:class_capacity AS JSONB)
     )
 """)
 
@@ -291,10 +301,8 @@ _INSERT_WORKER_STATE_WITH_CAPACITY = text("""
 async def test_worker_state_reads_the_class_capacity(
     broker: PostgresBroker,
     session: AsyncSession,
-    worker_state_seed: str,
 ) -> None:
-    """A row with budgets reads as ``ClassBudgets`` in every read, and a row
-    with no value as ``ClassCapacityNotRecorded``."""
+    """A row with budgets reads as ``ClassBudgets`` in every read."""
     worker_id = f'itest-{uuid.uuid4().hex}'
     stored = {
         'SHARED_ASYNC': {'capacity': 40, 'serves': ['SHARED_ASYNC']},
@@ -319,7 +327,6 @@ async def test_worker_state_reads_the_class_capacity(
         latest = await broker.get_worker_state_async(worker_id)
         history = await broker.get_worker_state_history_async(worker_id)
         listed = await broker.list_worker_states_async()
-        not_recorded = await broker.get_worker_state_async(worker_state_seed)
 
         assert is_ok(latest) and latest.ok_value is not None
         assert latest.ok_value.class_capacity == expected
@@ -331,8 +338,6 @@ async def test_worker_state_reads_the_class_capacity(
             for snap in listed.ok_value
             if snap.worker_id == worker_id
         ] == [expected]
-        assert is_ok(not_recorded) and not_recorded.ok_value is not None
-        assert not_recorded.ok_value.class_capacity == ClassCapacityNotRecorded()
     finally:
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),

@@ -48,22 +48,23 @@ impl std::fmt::Display for TaskSendErrorCode {
 /// Serialized envelope for idempotent retry.
 ///
 /// All value fields are pre-serialized to avoid round-trip issues.
-/// The retry methods extract this payload directly — no user args needed.
+/// The retry methods extract this payload directly — no user input needed.
+/// A replay carries the same command and `sent_at`, so the exact-id resend
+/// check accepts it.
 #[derive(Debug, Clone)]
 pub struct TaskSendPayload {
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
-    pub args_json: Option<String>,
-    pub kwargs_json: Option<String>,
+    /// The encoded task input as one JSON value.
+    pub input_json: String,
     pub sent_at: DateTime<Utc>,
     pub good_until: Option<DateTime<Utc>>,
     pub enqueue_delay_seconds: Option<i64>,
     pub task_options: Option<String>,
-    pub enqueue_sha: String,
     pub idempotency_key: Option<String>,
-    /// `None` is the explicit forever class, never an omitted choice.
-    pub retention_class_key: Option<String>,
+    /// The retention of the send: the default class, forever or a period.
+    pub retention: crate::core::config::EnqueueRetention,
 }
 
 /// Error from task send/schedule operations: one variant per
@@ -252,12 +253,16 @@ pub fn send_error_from_enqueue(
         | BrokerError::IncompleteTaskHistoryCutover
         | BrokerError::SchemaVersionMismatch { .. }
         | BrokerError::InvalidStatus(_)
+        | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
         | BrokerError::EnqueueConflictUnverifiable { .. }
         | BrokerError::ListenerClosed
+        | BrokerError::InstallLock(_)
+        | BrokerError::ClientFamilyMismatch { .. }
         | BrokerError::TerminalizationContract(_)
-        | BrokerError::HistoryReadContract(_) => TaskSendError::EnqueueFailed {
+        | BrokerError::HistoryReadContract(_)
+        | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,
@@ -293,15 +298,13 @@ mod tests {
             task_name: "my_task".to_owned(),
             queue_name: "default".to_owned(),
             priority: 100,
-            args_json: Some("sensitive data".to_owned()),
-            kwargs_json: None,
+            input_json: "\"sensitive data\"".to_owned(),
             sent_at: Utc::now(),
             good_until: None,
             enqueue_delay_seconds: None,
             task_options: None,
-            enqueue_sha: "deadbeef".to_owned(),
             idempotency_key: None,
-            retention_class_key: Some("standard_30d".to_owned()),
+            retention: crate::core::config::EnqueueRetention::Default,
         }
     }
 
@@ -314,7 +317,7 @@ mod tests {
             retryable: true,
         };
         let display = format!("{}", err);
-        // Must NOT contain the sensitive args
+        // Must NOT contain the sensitive input
         assert!(!display.contains("sensitive data"));
         assert!(display.contains("ENQUEUE_FAILED"));
         assert!(display.contains("00000000-0000-0000-0000-000000000000"));
