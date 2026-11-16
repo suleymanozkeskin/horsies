@@ -19,21 +19,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
-use serde_json::value::RawValue;
-
 use super::dispatch::{AttemptEnd, ClaimedTask, Settlement};
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
 use crate::broker::PostgresBroker;
-use crate::core::codec::check_json_text;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
-use crate::core::task::result::TaskResult;
+use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::worker::execution::{
     persist_failed_attempt, persist_ok_result, persist_undecodable_result, phase_retry_delay,
     run_phase2, unclaim_task_with_retry, FinalizeError, FinalizeOutcome, Phase2Work,
@@ -45,48 +41,6 @@ use crate::worker::retry::{admit_retry, RetryAdmission};
 /// The text of a worker failure with no detail (Python
 /// `_WORKER_FAILURE_FALLBACK`).
 const WORKER_FAILURE_FALLBACK: &str = "Worker failure";
-
-/// The wire form of the result envelope: `{"__type": "ok" | "err", "value": ...}`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EnvelopeWire<'a> {
-    #[serde(rename = "__type")]
-    kind: String,
-    #[serde(borrow)]
-    value: &'a RawValue,
-}
-
-/// What a reported result holds.
-pub(super) enum ReportedResult<'a> {
-    /// A success value, as the JSON text the child encoded.
-    Value(&'a RawValue),
-    /// A task error; the envelope text is stored as it came.
-    Error(TaskError),
-    /// The text does not read as the envelope.
-    Undecodable(String),
-}
-
-/// Read a result envelope with the strict JSON rule, then its shape. Pure.
-pub(super) fn read_envelope(envelope: &ResultEnvelopeText) -> ReportedResult<'_> {
-    let text = envelope.as_str();
-    if let Err(error) = check_json_text(text) {
-        return ReportedResult::Undecodable(error.to_string());
-    }
-    let wire = match serde_json::from_str::<EnvelopeWire<'_>>(text) {
-        Ok(wire) => wire,
-        Err(error) => return ReportedResult::Undecodable(error.to_string()),
-    };
-    match wire.kind.as_str() {
-        "ok" => ReportedResult::Value(wire.value),
-        "err" => match serde_json::from_str::<TaskError>(wire.value.get()) {
-            Ok(error) => ReportedResult::Error(error),
-            Err(error) => {
-                ReportedResult::Undecodable(format!("the task error does not read: {error}"))
-            }
-        },
-        other => ReportedResult::Undecodable(format!("unknown result kind '{other}'")),
-    }
-}
 
 /// One write of phase 1, sent again on a retryable database error.
 enum PhaseOneWrite {
@@ -317,14 +271,16 @@ impl OutcomeWriter {
             PayloadKind::Result,
             envelope.as_str().len(),
         );
-        match read_envelope(envelope) {
-            ReportedResult::Value(value) => PhaseOneWrite::Success {
+        match read_task_result_text(envelope.as_str()) {
+            Ok(TaskResultText::Ok(value)) => PhaseOneWrite::Success {
                 value: value.get().as_bytes().to_vec(),
             },
-            ReportedResult::Error(error) => {
+            Ok(TaskResultText::Err(error)) => {
                 PhaseOneWrite::Failure(task_error_write(task, &self.worker_id, &error, envelope))
             }
-            ReportedResult::Undecodable(diagnosis) => PhaseOneWrite::Undecodable { diagnosis },
+            Err(refused) => PhaseOneWrite::Undecodable {
+                diagnosis: refused.to_string(),
+            },
         }
     }
 
