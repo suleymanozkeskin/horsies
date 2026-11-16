@@ -125,7 +125,7 @@ class TestArgsFromInjection:
 
         # Then get kwargs from tasks table
         task_result = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT input FROM horsies_tasks WHERE id = :tid'),
             {'tid': row[0]},
         )
         task_row = task_result.fetchone()
@@ -474,7 +474,7 @@ class TestArgsFromInjection:
         # Fetch task row for B
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
@@ -484,10 +484,9 @@ class TestArgsFromInjection:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
@@ -499,7 +498,7 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
@@ -564,7 +563,7 @@ class TestArgsFromInjection:
 
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 2
@@ -574,10 +573,9 @@ class TestArgsFromInjection:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -588,7 +586,7 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
@@ -732,7 +730,7 @@ class TestArgsFromInjection:
         # Fetch task row for B
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
@@ -742,10 +740,9 @@ class TestArgsFromInjection:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -756,7 +753,7 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
@@ -818,7 +815,7 @@ class TestArgsFromInjection:
         # Fetch task row for C (index 2)
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 2
@@ -828,10 +825,9 @@ class TestArgsFromInjection:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -842,7 +838,7 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',

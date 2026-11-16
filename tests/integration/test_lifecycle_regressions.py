@@ -149,14 +149,16 @@ async def _link_running_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, task_id,
-                 is_subworkflow, created_at, started_at)
+                 is_subworkflow, created_at, started_at,
+                 max_retries, execution, retention_class_key)
             VALUES (:node_id, :workflow_id, 0, 'node-0',
-                    'lifecycle_regression_task', '[]', '{}', 'default', 100,
+                    'lifecycle_regression_task', '{}', 'default', 100,
                     ARRAY[]::integer[], FALSE, 'all', 'RUNNING',
-                    CAST(:task_id AS uuid), FALSE, NOW(), NOW())
+                    CAST(:task_id AS uuid), FALSE, NOW(), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'node_id': str(uuid.uuid4()),
@@ -245,15 +247,17 @@ async def _insert_retry_window_workflow_task(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies, args_from,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies, args_from,
                  workflow_ctx_from, allow_failed_deps, join_type, task_options,
-                 status, task_id, is_subworkflow, created_at, started_at)
+                 status, task_id, is_subworkflow, created_at, started_at,
+                 max_retries, execution, retention_class_key)
             VALUES
                 (:workflow_task_id, :workflow_id, 0, 'retry_node',
-                 'lifecycle_regression_task', '[]', '{}', 'default', 100,
+                 'lifecycle_regression_task', '{}', 'default', 100,
                  ARRAY[]::integer[], NULL, NULL, FALSE, 'all', NULL,
-                 'RUNNING', :task_id, FALSE, NOW(), NOW())
+                 'RUNNING', :task_id, FALSE, NOW(), NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """),
         {
             'workflow_task_id': workflow_task_id,
