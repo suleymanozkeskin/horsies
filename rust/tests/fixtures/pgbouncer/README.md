@@ -16,12 +16,12 @@ transaction-pool service intentionally sets `max_prepared_statements = 0` and
 exists only for the unsupported-PgBouncer negative test.
 
 ```bash
-docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
+docker compose -f rust/tests/fixtures/pgbouncer/compose.yaml up -d --wait
 
 HORSIES_PGBOUNCER_TEST=1 \
 cargo test -p horsies-test-worker --test pgbouncer_contract -- --test-threads=1
 
-docker compose -f tests/fixtures/pgbouncer/compose.yaml down -v
+docker compose -f rust/tests/fixtures/pgbouncer/compose.yaml down -v
 ```
 
 Keep this job in the full/manual workflow until it has run at least 10 times
