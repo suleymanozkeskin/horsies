@@ -47,8 +47,9 @@ use crate::broker::row::task::{
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::process_listener::{
-    default_payload_capacity, fixed_channel, ListenError, ProcessListener, TASK_DONE_CHANNEL,
-    WORKER_PONG_CHANNEL_PREFIX,
+    default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
+    SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
+    TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
     bounded_list_from_rows, BoundedTaskList, ListShapeError, StaleMinutes, TASK_LIST_BOUND,
@@ -56,11 +57,67 @@ use crate::broker::task_lists::{
 use crate::broker::wait_limit::WaitLimit;
 use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
 
-use crate::broker::pools::{CloseOutcome, CoreHandle, PoolProfile, SessionPool};
+use crate::broker::pools::{
+    CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
+};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
     Transaction as CoreTransaction, TypedStatement, WORKER_RESERVED_CONNECTIONS,
 };
+
+/// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
+/// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). An object input is Python's keyword input: no
+/// member name is an engine key, and each member value has no engine key at any depth and at most
+/// `MAX_VALUE_JSON_DEPTH` levels. Any other input except `null` is one value under the same rules. A text that
+/// is not strict JSON is refused.
+fn check_sent_input(input: &str) -> Result<(), BrokerError> {
+    let refused =
+        |cause: String| BrokerError::EnqueueContract(format!("task input refused: {cause}"));
+    let value: serde_json::Value =
+        crate::core::codec::from_json_str(input).map_err(|e| refused(e.to_string()))?;
+    let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let checked = match &value {
+        serde_json::Value::Object(members) => {
+            crate::core::codec::user_value::check_task_input(&[], members, &no_engine_members)
+        }
+        serde_json::Value::Null => Ok(()),
+        other => crate::core::codec::user_value::check_task_input(
+            std::slice::from_ref(other),
+            &serde_json::Map::new(),
+            &no_engine_members,
+        ),
+    };
+    checked.map_err(|refusal| refused(refusal.to_string()))
+}
+
+#[cfg(test)]
+mod sent_input_tests {
+    use super::check_sent_input;
+    use crate::broker::BrokerError;
+
+    /// Python `.send()` refuses an engine key in the input as `VALIDATION_FAILED`
+    /// (`core/task_decorator.py:2378-2387`).
+    #[test]
+    fn a_sent_input_with_an_engine_key_is_refused() {
+        for input in [
+            r#"{"x": {"__h_task_result__": true}}"#,
+            r#"{"__h_workflow_ctx__": {}}"#,
+            r#"[{"a": [{"__builtin_task_code__": "X"}]}]"#,
+            r#"{"x": NaN}"#,
+        ] {
+            assert!(
+                matches!(
+                    check_sent_input(input),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{input}"
+            );
+        }
+        assert!(check_sent_input(r#"{"x": {"y": [1, 2]}}"#).is_ok());
+        assert!(check_sent_input("[1]").is_ok());
+        assert!(check_sent_input("null").is_ok());
+    }
+}
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -674,10 +731,6 @@ static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH
 /// `SELECT 1` on the session pool in the worker boot check.
 static SESSION_CHECK: TypedStatement = TypedStatement::new("session_check", HEALTH_CHECK_SQL, &[]);
 
-/// How long the LISTEN delivery probe waits for its NOTIFY (Python's
-/// `SESSION_CAPABILITY_TIMEOUT`).
-pub const SESSION_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
 /// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
@@ -832,12 +885,6 @@ struct ReservePools {
     maintenance: PgPool,
 }
 
-fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
-    BrokerError::ConnectionFailed(format!(
-        "Postgres LISTEN delivery probe failed; session_database_url must be direct/session-capable and able to preserve LISTEN/NOTIFY session state: {err}",
-    ))
-}
-
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
     // String-sniff deliberately: PgBouncer prepared-statement tracking failures
     // do not have one stable SQLSTATE across "missing prepared statement",
@@ -933,7 +980,6 @@ pub struct PostgresBroker {
     retain_rerun_input_default: bool,
     idempotency_reservation_window_seconds: i64,
     listener: ProcessListener,
-    listener_delivery_checked: tokio::sync::OnceCell<()>,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
     /// The client family of this handle. The constructors of this type serve
@@ -1012,7 +1058,6 @@ impl PostgresBroker {
             )
             .num_seconds(),
             listener,
-            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
@@ -1139,7 +1184,6 @@ impl PostgresBroker {
             )
             .num_seconds(),
             listener: ProcessListener::on_session_url(config.effective_session_database_url()),
-            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
@@ -1281,6 +1325,25 @@ impl PostgresBroker {
         &self.reserve.maintenance
     }
 
+    /// The open core pools, for a lifecycle writer that runs on the main
+    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
+    /// write: [`PostgresBroker::close`] waits for the write while the token
+    /// lives. In a worker the main core pool is the worker profile pool. An
+    /// `Idle` handle opens its pools first.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
+    pub(crate) fn core_pools_for_write(
+        &self,
+    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
+        Ok(self.core.pools_for_write()?)
+    }
+
+    /// Whether this broker logs each core statement it runs, for the
+    /// lifecycle writers that run on the main core pool.
+    pub(crate) fn statement_log(&self) -> StatementLog {
+        self.statement_log
+    }
+
     /// Runs one statement on the main core pool and reads every row.
     ///
     /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
@@ -1377,9 +1440,11 @@ impl PostgresBroker {
     /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
     ///
     /// `input` is the encoded task input as one JSON value; it is stored as
-    /// written. Uses ON CONFLICT DO NOTHING; a taken task id is compared by the
-    /// version-1 command fingerprint and the stored `sent_at` (the exact-id
-    /// resend check).
+    /// written. The input follows the rules of a user value
+    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send maps
+    /// to `VALIDATION_FAILED`. Uses ON CONFLICT DO NOTHING; a taken task id is
+    /// compared by the version-1 command fingerprint and the stored `sent_at`
+    /// (the exact-id resend check).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
@@ -1410,6 +1475,7 @@ impl PostgresBroker {
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
             ));
         }
+        check_sent_input(input)?;
         let task_id = match predetermined_task_id {
             Some(task_id) => task_id,
             None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
@@ -2587,9 +2653,9 @@ impl PostgresBroker {
     /// Returns `Ok(())` if the database is reachable, `Err(BrokerError)` otherwise.
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
     ///
-    /// This intentionally does not probe LISTEN/NOTIFY. Workers call
-    /// `ensure_listener_delivery_checked()` once during startup when configured
-    /// for PgBouncer transaction pooling.
+    /// This does not check LISTEN/NOTIFY. Workers run
+    /// [`check_session_delivery`](Self::check_session_delivery) at every
+    /// boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
         let _row = one_row(rows, &HEALTH_CHECK)?;
@@ -2736,31 +2802,14 @@ impl PostgresBroker {
         Ok(pongs)
     }
 
-    /// Verify LISTEN/NOTIFY delivery once per broker in PgBouncer mode.
-    ///
-    /// Reconnect loops may call this repeatedly; successful probes are cached so
-    /// transient listener reconnects do not open another direct connection.
-    pub async fn ensure_listener_delivery_checked(&self) -> Result<(), BrokerError> {
-        self.listener_delivery_checked
-            .get_or_try_init(|| async {
-                self.check_worker_session().await?;
-                Ok::<(), BrokerError>(())
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// The worker boot check of the session URL, for every worker:
+    /// The pool checks of a worker boot, before the session check
+    /// ([`PostgresBroker::check_session_delivery`]):
     ///
     /// 1. `SELECT 1` on the main core pool. Its first checkout runs the
     ///    statement-pooling check: a URL that does not keep a transaction is
     ///    `StatementPooledUrl`, not retryable.
     /// 2. `SELECT 1` on the session core pool when the session URL differs
     ///    (its first checkout runs the statement-pooling check too).
-    /// 3. The LISTEN delivery probe
-    ///    ([`PostgresBroker::check_listener_delivery`]): no NOTIFY within
-    ///    [`SESSION_CAPABILITY_TIMEOUT`] is
-    ///    [`BrokerError::SessionNotCapable`], not retryable.
     ///
     /// A database that cannot be reached fails with its retryable error, so
     /// the worker's start resilience retries it.
@@ -2781,55 +2830,53 @@ impl PostgresBroker {
                 let _row = one_row(rows, &SESSION_CHECK)?;
             }
         }
-        self.check_listener_delivery().await
+        Ok(())
     }
 
-    /// Verify that the session pool can actually receive LISTEN/NOTIFY.
+    /// The session check of a worker boot: the session URL keeps session
+    /// state when a LISTEN on it receives a NOTIFY. Runs at every worker boot,
+    /// with or without PgBouncer mode (Python `validate_worker_database_paths`,
+    /// `horsies/core/brokers/postgres.py:1436-1460`).
     ///
-    /// PgBouncer transaction mode may accept `LISTEN` syntactically but drop
-    /// the session state when the transaction ends. A bounded delivery probe
-    /// catches that misconfiguration with a clear startup error.
-    pub async fn check_listener_delivery(&self) -> Result<(), BrokerError> {
-        let mut listener = sqlx::postgres::PgListener::connect_with(&self.session_pool)
+    /// Steps: subscribe a wake on `horsies_check_<32 hex>` on the broker's
+    /// listener, the connection that carries the claim wakes and the pings;
+    /// one autocommit `SELECT pg_notify($1, 'ok')` on the main pool; wait at
+    /// most [`SESSION_CAPABILITY_TIMEOUT`]. The subscription is dropped at the
+    /// end, and the listener UNLISTENs the channel.
+    ///
+    /// Outcomes: `Ok` when the NOTIFY arrives; `NotCapable` (not retryable)
+    /// when it does not arrive in time; `Subscribe`, `Notify` and
+    /// `Interrupted` carry their retry rule (a database that cannot be
+    /// reached is retryable).
+    pub async fn check_session_delivery(&self) -> Result<(), SessionCheckFailure> {
+        let listener = self
+            .listener
+            .start()
             .await
-            .map_err(listener_probe_failed)?;
-        let channel = format!("horsies_probe_{}", Uuid::new_v4().simple());
-        let payload = Uuid::new_v4().to_string();
-
-        listener
-            .listen(&channel)
+            .map_err(SessionCheckFailure::Subscribe)?;
+        let channel = fixed_channel(&format!(
+            "{SESSION_CHECK_CHANNEL_PREFIX}{}",
+            Uuid::new_v4().simple()
+        ));
+        let delivery = listener
+            .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
             .await
-            .map_err(listener_probe_failed)?;
-
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(&channel)
-            .bind(&payload)
+            .map_err(SessionCheckFailure::Subscribe)?;
+        sqlx::query("SELECT pg_notify($1, 'ok')")
+            .bind(channel.as_str())
             .execute(&self.pool)
             .await
-            .map_err(|err| {
-                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
-                    prepared_statement_tracking_error(err)
-                } else {
-                    listener_probe_failed(err)
-                }
-            })?;
-
-        let delivered = tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, async {
-            loop {
-                let notification = listener.recv().await.map_err(listener_probe_failed)?;
-                if notification.channel() == channel && notification.payload() == payload {
-                    return Ok::<(), BrokerError>(());
-                }
+            .map_err(SessionCheckFailure::Notify)?;
+        match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
+            Ok(WakeEvent::Notified) => Ok(()),
+            Ok(WakeEvent::Gap) => Err(SessionCheckFailure::Interrupted(
+                CheckInterruption::Reconnected,
+            )),
+            Ok(WakeEvent::Stopped) => {
+                Err(SessionCheckFailure::Interrupted(CheckInterruption::Stopped))
             }
-        })
-        .await;
-
-        let _ = listener.unlisten(&channel).await;
-
-        match delivered {
-            Ok(result) => result,
-            Err(_) => Err(BrokerError::SessionNotCapable {
-                masked_url: self.core.pools()?.pools().session_masked_url().clone(),
+            Err(_elapsed) => Err(SessionCheckFailure::NotCapable {
+                session_url: listener.masked_url().clone(),
                 waited: SESSION_CAPABILITY_TIMEOUT,
             }),
         }
@@ -3266,7 +3313,7 @@ fn decode_raw_result_object(
 ) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
     raw_result
         .map(|raw| {
-            serde_json::from_str(raw)
+            crate::core::codec::from_json_str::<serde_json::Value>(raw)
                 .map_err(|error| invalid_raw_result(format!("result JSON is invalid: {error}")))
                 .and_then(decode_raw_result_value)
         })

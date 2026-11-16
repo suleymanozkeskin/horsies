@@ -9,7 +9,7 @@ use serial_test::serial;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
 };
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::{ClaimedTaskRow, SetRunningRow};
@@ -33,7 +33,7 @@ async fn worker_failure_writes_worker_failure_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
 
-    let outcome = finish_failed_attempt(
+    let outcome = write_failed_attempt(
         &pool,
         &FinishFailedAttempt {
             task_id,
