@@ -106,14 +106,72 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_requeue_stale_claims',
         'horsies_stale_running_scan',
         'horsies_start_attempt',
+        # 0005_workflow_functions.sql.
+        'horsies_task_error_envelope',
+        'horsies_task_error_object',
+        'horsies_workflow_apply_recovery_limit',
+        'horsies_workflow_cancel',
+        'horsies_workflow_child_finish',
+        'horsies_workflow_child_node_result',
+        'horsies_workflow_child_start_rows',
+        'horsies_workflow_err_slot',
+        'horsies_workflow_explicit_output',
+        'horsies_workflow_fail_unbuildable',
+        'horsies_workflow_failure_error',
+        'horsies_workflow_json_or_null',
+        'horsies_workflow_move_descendants',
+        'horsies_workflow_node_apply',
+        'horsies_workflow_node_finish',
+        'horsies_workflow_node_tasks_insert',
+        'horsies_workflow_outcome_row',
+        'horsies_workflow_output_error_data',
+        'horsies_workflow_outputless_result',
+        'horsies_workflow_pause',
+        'horsies_workflow_phase2_record_raise',
+        'horsies_workflow_phase2_recover',
+        'horsies_workflow_phase2_source',
+        'horsies_workflow_policy_indices_cause',
+        'horsies_workflow_progress',
+        'horsies_workflow_promote',
+        'horsies_workflow_promote_level',
+        'horsies_workflow_record_failure',
+        'horsies_workflow_require',
+        'horsies_workflow_result_kind',
+        'horsies_workflow_resume',
+        'horsies_workflow_source_value',
+        'horsies_workflow_start',
+        'horsies_workflow_start_check',
+        'horsies_workflow_start_nodes',
+        'horsies_workflow_start_progress',
+        'horsies_workflow_start_workflows',
+        'horsies_workflow_success_cases',
+        'horsies_workflow_task_input',
+        'horsies_workflow_try_complete',
+        'horsies_workflow_unbuildable_nodes',
+        # 0006_history_functions.sql.
+        'horsies_begin_leaf_detach',
+        'horsies_drop_detached_leaf',
+        'horsies_inspect_history_leaf',
+        'horsies_move_tasks_to_history',
+        'horsies_prune_candidates',
+        'horsies_record_leaf_detached',
+        'horsies_rerun_source_read',
+        'horsies_task_absence_reason',
         # 0007_scheduler_monitoring_functions.sql.
         'horsies_fire_schedule',
         'horsies_list_expired_tasks',
         'horsies_list_stale_tasks',
         'horsies_monitoring_check_scope',
+        'horsies_monitoring_schedules',
+        'horsies_monitoring_task_breakdown',
         'horsies_monitoring_task_detail',
         'horsies_monitoring_task_facets',
         'horsies_monitoring_task_list',
+        'horsies_monitoring_task_stats',
+        'horsies_monitoring_workflow_names',
+        'horsies_monitoring_workflow_node',
+        'horsies_monitoring_workflow_run',
+        'horsies_monitoring_workflow_runs',
         'horsies_schedule_slot_task_id',
     }
 )
@@ -298,6 +356,66 @@ async def test_manifest_lower_bound_is_typed(
             case constraint:
                 with pytest.raises(psycopg.errors.CheckViolation) as raised:
                     await installed.execute(_MANIFEST_ROW_SQL, ('leaf_case', 0, kind, lower, _UPPER))
+                assert raised.value.diag.constraint_name == constraint
+
+
+_WORKFLOW_ROW_SQL: Final = """
+    INSERT INTO horsies_workflows (
+        id, name, status, on_error, depth, root_workflow_id, sent_at, created_at, updated_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000001', 'params_case', 'RUNNING', 'fail', 0,
+        '0193e5c4-0000-7000-8000-000000000001', now(), now(), now()
+    )
+"""
+
+_NODE_ROW_SQL: Final = """
+    INSERT INTO horsies_workflow_tasks (
+        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
+        allow_failed_deps, join_type, max_retries, execution, retention_class_key, status,
+        is_subworkflow, sub_workflow_params, created_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
+        'params.case', '{}', 'default', 100, '{}', FALSE, 'all', %(max_retries)s, %(execution)s,
+        %(retention_class_key)s, 'PENDING', %(is_subworkflow)s, %(sub_workflow_params)s, now()
+    )
+"""
+
+
+@pytest.mark.parametrize(
+    ('is_subworkflow', 'sub_workflow_params', 'violated'),
+    [
+        (False, None, None),
+        (True, 'NOT_GIVEN', None),
+        (True, 'GIVEN', None),
+        (True, None, 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (True, 'SOME', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (False, 'NOT_GIVEN', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (False, 'GIVEN', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_sub_workflow_params_are_set_exactly_on_sub_workflow_nodes(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    is_subworkflow: bool,
+    sub_workflow_params: str | None,
+    violated: str | None,
+) -> None:
+    # The task facts follow the node kind, so only the params CHECK decides.
+    params: dict[str, object] = {
+        'max_retries': None if is_subworkflow else 0,
+        'execution': None if is_subworkflow else 'ISOLATED',
+        'retention_class_key': None if is_subworkflow else 'forever',
+        'is_subworkflow': is_subworkflow,
+        'sub_workflow_params': sub_workflow_params,
+    }
+    async with installed.transaction(force_rollback=True):
+        await installed.execute(_WORKFLOW_ROW_SQL)
+        match violated:
+            case None:
+                await installed.execute(_NODE_ROW_SQL, params)
+            case constraint:
+                with pytest.raises(psycopg.errors.CheckViolation) as raised:
+                    await installed.execute(_NODE_ROW_SQL, params)
                 assert raised.value.diag.constraint_name == constraint
 
 

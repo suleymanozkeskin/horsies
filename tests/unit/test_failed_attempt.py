@@ -43,6 +43,7 @@ from horsies.core.worker.failed_attempt import (
     RETRY_ISOLATED,
     AttemptFailure,
     AttemptFailureKind,
+    ClaimedRowRule,
     FinishFailedAttempt,
     NoRetry,
     RetryAfter,
@@ -285,7 +286,7 @@ def _command(retry: NoRetry | RetryAfter) -> FinishFailedAttempt:
 
 class TestParameters:
     def test_no_retry_sends_no_retry_argument(self) -> None:
-        parameters = finish_parameters(_command(NoRetry()))
+        parameters = finish_parameters(_command(NoRetry()), ClaimedRowRule.REFUSE)
 
         assert parameters == {
             'task_id': TASK_ID,
@@ -301,7 +302,14 @@ class TestParameters:
             'attempt_outcome': 'WORKER_FAILURE',
             'attempt_error_message': 'message',
             'attempt_failed_reason': 'reason',
+            'claimed_row_rule': 'REFUSE',
         }
+
+    @pytest.mark.parametrize('rule', list(ClaimedRowRule))
+    def test_the_rule_sends_its_value(self, rule: ClaimedRowRule) -> None:
+        parameters = finish_parameters(_command(NoRetry()), rule)
+
+        assert parameters['claimed_row_rule'] == rule.value
 
     @pytest.mark.parametrize(
         ('placement', 'value'),
@@ -317,6 +325,7 @@ class TestParameters:
     ) -> None:
         parameters = finish_parameters(
             _command(RetryAfter(retry_count=3, delay_s=12.5, placement=placement)),
+            ClaimedRowRule.REFUSE,
         )
 
         assert (

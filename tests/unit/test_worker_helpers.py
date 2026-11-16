@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from horsies.core.types.result import Ok, Err
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.finalize import (
     _Phase1Input,
     _PersistedTaskOutcome,
@@ -46,6 +48,7 @@ from horsies.core.worker.claiming import (
     read_claim_rows,
 )
 from horsies.core.utils.db import PooledStatements
+from horsies.core.worker.release import RELEASE_CLAIMS_SQL
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -53,7 +56,6 @@ from horsies.core.worker.worker import (
     DELETE_EXPIRED_WORKFLOWS_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,
@@ -122,6 +124,10 @@ from tests.broker_resources_support import (
 )
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 
 _POOL = ResolvedPool(min_size=0, max_size=2, check=True)
 
@@ -194,6 +200,8 @@ _CLAIM_COLUMNS = [
     'is_workflow_task',
     'task_options',
     'claimed_at',
+    'retry_count',
+    'max_retries',
     'execution',
     'short_by',
 ]
@@ -210,6 +218,8 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
         True,
         None,
         CLAIMED_AT,
+        0,
+        0,
         'ISOLATED',
         None,
     )
@@ -217,7 +227,7 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
 
 def _short_row(short_by: int) -> tuple[object, ...]:
     """The 'SHORT' row of HORSIES_CLAIM_SQL."""
-    return ('SHORT', None, None, None, None, None, None, None, None, short_by)
+    return ('SHORT', None, None, None, None, None, None, None, None, None, None, short_by)
 
 
 
@@ -1148,20 +1158,36 @@ class TestClaimerHeartbeatRenewsLease:
 
 def _make_session_mock(
     *,
-    rowcount: int = 0,
+    outcome: str = 'NOT_HELD',
     execute_side_effect: Exception | None = None,
 ) -> AsyncMock:
-    """Build an AsyncMock session context for _requeue_claimed_task tests."""
+    """Build an AsyncMock session context for _requeue_claimed_task tests.
+
+    The release runs on the session's autocommit connection, and its one
+    row carries ``outcome`` for the task id it was given."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     session.commit = AsyncMock()
+    session.connection = AsyncMock(return_value=session)
 
-    result_mock = MagicMock(rowcount=rowcount)
+    def _released(statement: Any, params: dict[str, Any]) -> MagicMock:
+        return MagicMock(
+            fetchall=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        ordinality=1,
+                        task_id=params['task_ids'][0],
+                        outcome=outcome,
+                    ),
+                ],
+            ),
+        )
+
     if execute_side_effect is not None:
         session.execute = AsyncMock(side_effect=execute_side_effect)
     else:
-        session.execute = AsyncMock(return_value=result_mock)
+        session.execute = AsyncMock(side_effect=_released)
 
     return session
 
@@ -1172,41 +1198,44 @@ class TestRequeueClaimedTask:
 
     @pytest.mark.asyncio
     async def test_requeue_success_returns_requeued(self) -> None:
-        """When DB UPDATE matches a row, outcome is REQUEUED."""
+        """When the release returns RELEASED, outcome is REQUEUED."""
         worker = _make_worker()
-        session = _make_session_mock(rowcount=1)
+        session = _make_session_mock(outcome='RELEASED')
         worker.sf = MagicMock(return_value=session)
 
         outcome = await worker._requeue_claimed_task(
             'task-1',
             'test reason',
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome is _RequeueOutcome.REQUEUED
         session.execute.assert_awaited_once()
         call_args = session.execute.call_args[0]
-        assert call_args[0] is UNCLAIM_CLAIMED_TASK_SQL
-        assert call_args[1]['id'] == 'task-1'
-        assert call_args[1]['wid'] == worker.worker_instance_id
-        assert call_args[1]['claimed_at'] == CLAIMED_AT
-        session.commit.assert_awaited_once()
+        assert call_args[0] is RELEASE_CLAIMS_SQL
+        assert call_args[1] == {
+            'task_ids': ['task-1'],
+            'claimed_ats': [CLAIMED_AT],
+            'worker_id': worker.worker_instance_id,
+            'placement': 'SAME_CLASS',
+        }
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_requeue_guard_fail_returns_not_owner(self) -> None:
-        """When DB UPDATE matches zero rows, outcome is NOT_OWNER_OR_NOT_CLAIMED."""
+        """When the release returns NOT_HELD, outcome is NOT_OWNER_OR_NOT_CLAIMED."""
         worker = _make_worker()
-        session = _make_session_mock(rowcount=0)
+        session = _make_session_mock(outcome='NOT_HELD')
         worker.sf = MagicMock(return_value=session)
 
         outcome = await worker._requeue_claimed_task(
             'task-2',
             'owner mismatch',
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
-        session.commit.assert_awaited_once()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_requeue_db_error_returns_db_error(self) -> None:
@@ -1217,7 +1246,7 @@ class TestRequeueClaimedTask:
         )
         worker.sf = MagicMock(return_value=session)
 
-        outcome = await worker._requeue_claimed_task('task-3', 'db failure', CLAIMED_AT)
+        outcome = await worker._requeue_claimed_task('task-3', 'db failure', CLAIM)
 
         assert outcome is _RequeueOutcome.DB_ERROR
         # No exception escaped — the method returned cleanly
@@ -1229,7 +1258,7 @@ class TestRequeueClaimedTask:
         session = _make_session_mock(execute_side_effect=RuntimeError('boom'))
         worker.sf = MagicMock(return_value=session)
 
-        await worker._requeue_claimed_task('task-4', 'no commit expected', CLAIMED_AT)
+        await worker._requeue_claimed_task('task-4', 'no commit expected', CLAIM)
 
         session.commit.assert_not_awaited()
 
@@ -1277,7 +1306,7 @@ class TestFinalizeResultPayloadWarn:
                 handle,
                 'task-w',
                 task_name='big_result_task',
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         guard_records = [
@@ -1316,7 +1345,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(_LOST),
             'task-10',
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert isinstance(result, Err)
@@ -1338,12 +1367,12 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(_LOST),
             'task-11',
             task_name='helper_task',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
         await_args = worker._recover_worker_future_failure.await_args
         assert 'signal 9 (SIGKILL)' in await_args.args[1]
-        assert await_args.kwargs['claimed_at'] == claimed_at
+        assert await_args.kwargs['claim'] == replace(CLAIM, claimed_at=claimed_at)
 
     @pytest.mark.asyncio
     async def test_task_that_never_reached_a_child_is_requeued(self) -> None:
@@ -1359,14 +1388,14 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-12',
             task_name='helper_task',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
         assert isinstance(result, Ok)
         worker._requeue_claimed_task.assert_awaited_once_with(
             'task-12',
             NotRunCause.POOL_STOPPING.value,
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
         worker._recover_worker_future_failure.assert_not_awaited()
 
@@ -1382,7 +1411,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-13',
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert isinstance(result, Err)
@@ -1399,7 +1428,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())),
             'task-13',
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         kwargs = worker._persist_task_terminal_state.await_args.kwargs
@@ -1421,7 +1450,7 @@ class TestAwaitSlotOutcome:
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
 
         waiter = asyncio.ensure_future(
-            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIMED_AT),
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIM),
         )
         await asyncio.sleep(0.05)
 
@@ -1452,7 +1481,7 @@ class TestAwaitSlotOutcome:
             handle,
             'task-1',
             TaskTimeout(ms=1),
-            CLAIMED_AT,
+            CLAIM,
         )
 
         worker._handle_task_timeout.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
@@ -1472,7 +1501,7 @@ class TestAwaitSlotOutcome:
             'task-1',
             timeout=TaskTimeout(ms=1500),
             task_name='t',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
         match result:
@@ -1482,7 +1511,7 @@ class TestAwaitSlotOutcome:
                 assert timeout_retry_write(error.data) == (
                     1500,
                     RetryPlacement.SAME_CLASS,
-                    claimed_at,
+                    replace(CLAIM, claimed_at=claimed_at),
                 )
             case Ok():
                 raise AssertionError(result)
@@ -1505,7 +1534,7 @@ class TestAwaitSlotOutcome:
         )
 
         outcome = await asyncio.wait_for(
-            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIMED_AT),
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIM),
             5.0,
         )
 
@@ -1522,7 +1551,7 @@ class TestAwaitSlotOutcome:
             _finished_handle(done),
             'task-1',
             TaskTimeout(ms=1000),
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome == done
@@ -1549,7 +1578,7 @@ class TestAwaitSlotOutcome:
         done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
-            _finished_handle(done), 'task-1', timeout, CLAIMED_AT,
+            _finished_handle(done), 'task-1', timeout, CLAIM,
         )
 
         assert outcome == done
@@ -1576,7 +1605,7 @@ class TestRequeueDbErrorContainment:
                 _finished_handle(NotDispatched(NotRunCause.QUEUE_FULL)),
                 'task-20',
                 task_name='helper_task',
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1599,7 +1628,7 @@ class TestRequeueDbErrorContainment:
                 _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
                 'task-23',
                 task_name='helper_task',
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
@@ -1626,9 +1655,8 @@ class TestDispatchOne:
             'default',
             True,
             timeout=TaskTimeout(ms=1000),
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
             execution=Execution.ISOLATED,
-            task_options=None,
         )
 
         frame = worker._slots.submit.call_args.args[0]
@@ -1660,9 +1688,8 @@ class TestDispatchOne:
             'other',
             False,
             timeout=TaskTimeout(ms=1000),
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
             execution=Execution.ISOLATED,
-            task_options=None,
         )
 
         worker._finalize_after.assert_called_once_with(
@@ -1672,7 +1699,7 @@ class TestDispatchOne:
             False,
             timeout=TaskTimeout(ms=1000),
             task_name='app.add',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
 
@@ -2455,7 +2482,7 @@ class TestRetryFinalizeFuture:
             stage=_FINALIZE_STAGE_FUTURE,
             task_id=task_id,
             retryable=True,
-            data={'claimed_at': CLAIMED_AT},
+            data={'claim': CLAIM},
         )
 
     @pytest.mark.asyncio
@@ -2497,7 +2524,7 @@ class TestRetryFinalizeFuture:
         worker._recover_worker_future_failure.assert_awaited_once()
         recovery_args = worker._recover_worker_future_failure.await_args  # pyright: ignore[reportPrivateUsage]
         assert recovery_args is not None
-        assert recovery_args.kwargs['claimed_at'] == CLAIMED_AT
+        assert recovery_args.kwargs['claim'] == CLAIM
         assert key not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
@@ -2551,7 +2578,7 @@ class TestRetryFinalizePhase1:
         task_id: str = 'task-rf-1',
     ) -> _FinalizeError:
         data = (
-            {'outcome': outcome, 'claimed_at': CLAIMED_AT}
+            {'outcome': outcome, 'claim': CLAIM}
             if outcome is not None
             else None
         )
@@ -2649,7 +2676,7 @@ class TestRetryFinalizePhase1:
         worker._persist_task_terminal_state.assert_awaited_once()
         persist_args = worker._persist_task_terminal_state.await_args  # pyright: ignore[reportPrivateUsage]
         assert persist_args is not None
-        assert persist_args.kwargs['claimed_at'] == CLAIMED_AT
+        assert persist_args.kwargs['claim'] == CLAIM
         worker._finalize_workflow_phase.assert_awaited_once_with(
             err.task_id,
             _SENTINEL_TASK_RESULT,
@@ -2685,7 +2712,7 @@ class TestRetryFinalizePhase1:
                 'queue_name': 'critical',
                 'is_workflow_task': False,
                 'task_name': 'ctx_task',
-                'claimed_at': CLAIMED_AT,
+                'claim': CLAIM,
             },
         )
 
@@ -2727,7 +2754,7 @@ class TestRetryFinalizePhase1:
             'queue_name': 'default',
             'is_workflow_task': True,
             'task_name': '',
-            'claimed_at': CLAIMED_AT,
+            'claim': CLAIM,
         }
 
     # --- U-3f: _persist Ok(None) → clears phase1 only ---
@@ -5799,7 +5826,7 @@ class TestRecoverDatabaseErrorMapping:
         outcome = await worker._recover_worker_future_failure(
             'task-1',
             'pool broke',
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome is _RequeueOutcome.DB_ERROR
@@ -5863,7 +5890,7 @@ class TestPhase1ErrorReplay:
             queue_name='default',
             is_workflow_task=False,
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
             return_value=Ok(None),
@@ -5878,7 +5905,7 @@ class TestPhase1ErrorReplay:
         assert kwargs['ok'] is True
         assert kwargs['result_json_str'] == '{"ok": 42}'
         assert kwargs['failed_reason'] is None
-        assert kwargs['claimed_at'] == CLAIMED_AT
+        assert kwargs['claim'] == CLAIM
 
 
 # ---------------------------------------------------------------------------
@@ -5985,7 +6012,7 @@ class TestPersistTerminalStateFusedPath:
             task_name='my_task',
             queue_name='q1',
             is_workflow_task=False,
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
     @pytest.mark.asyncio
@@ -6136,7 +6163,7 @@ class TestPersistTerminalStateFusedPath:
                 task_name='my_task',
                 queue_name='q1',
                 is_workflow_task=True,
-                claimed_at=claimed_at,
+                claim=replace(CLAIM, claimed_at=claimed_at),
             )
 
         persisted = result.ok_value
@@ -6168,7 +6195,7 @@ class TestPersistTerminalStateFusedPath:
                 task_name='my_task',
                 queue_name='q1',
                 is_workflow_task=True,
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         assert result == Ok(None)
@@ -6188,7 +6215,7 @@ class TestPersistTerminalStateFusedPath:
             task_name='my_task',
             queue_name='q1',
             is_workflow_task=True,
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert result.ok_value is None

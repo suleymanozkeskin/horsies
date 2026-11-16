@@ -35,11 +35,23 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
-from horsies.core.utils.db import SingleStatement, StatementRunner, rows_or_raise
+from horsies.core.utils.db import (
+    SingleStatement,
+    StatementRunner,
+    autocommit_connection,
+    rows_or_raise,
+)
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
     budgets_json,
     routes_json,
+)
+from horsies.core.worker.dispatch_claim import DispatchClaim, dispatch_claim_of
+from horsies.core.worker.release import (
+    HeldClaim,
+    ReleaseOutcome,
+    ReleasePlacement,
+    release_claims,
 )
 from horsies.core.worker.row_class import (
     RowClassFits,
@@ -60,9 +72,7 @@ from horsies.core.worker.sql import (
     COUNT_RUNNING_FOR_WORKER_SQL,
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     HORSIES_CLAIM_SQL,
-    NOTIFY_TASK_QUEUE_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
-    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
 )
 
@@ -269,9 +279,8 @@ class ClaimMixin:
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
             *,
-            claimed_at: datetime,
+            claim: DispatchClaim,
             execution: Execution,
-            task_options: str | None,
         ) -> None: ...
 
     async def _claim_and_dispatch_all(self) -> ClaimPass:
@@ -337,9 +346,8 @@ class ClaimMixin:
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
                 timeout=read_stored_timeout(row.get('task_options')),
-                claimed_at=claim_time_of(row),
+                claim=dispatch_claim_of(row),
                 execution=parse_row_class(str(row['id']), row['execution']),
-                task_options=row.get('task_options'),
             )
         return ClaimPass(
             claimed=len(claimed_rows),
@@ -433,9 +441,10 @@ class ClaimMixin:
     ) -> list[dict[str, Any]]:
         """Return each row whose class does not fit its registered task.
 
-        Such a row goes back to PENDING as ISOLATED, fenced to its claim
-        generation (``_return_row_as_isolated``). Rows that fit, and rows of
-        a task that this worker did not register, come back in their order.
+        Such rows go back to PENDING as ISOLATED in one statement, fenced to
+        their claim generations (``_return_rows_as_isolated``). Rows that
+        fit, and rows of a task that this worker did not register, come back
+        in their order.
 
         Raises:
             Exception: DB errors propagate to the main loop. This runs after
@@ -443,6 +452,7 @@ class ClaimMixin:
                 recovered by lease expiry.
         """
         fitting: list[dict[str, Any]] = []
+        mismatched: list[tuple[dict[str, Any], RowClassMismatch]] = []
         for row in rows:
             row_class = parse_row_class(str(row['id']), row['execution'])
             check = check_row_class(
@@ -452,56 +462,57 @@ class ClaimMixin:
             )
             match check:
                 case RowClassMismatch():
-                    await self._return_row_as_isolated(row, check)
+                    mismatched.append((row, check))
                 case RowClassFits() | TaskNotRegistered():
                     fitting.append(row)
                 case _ as unreachable:
                     assert_never(unreachable)
+        await self._return_rows_as_isolated(mismatched)
         return fitting
 
-    async def _return_row_as_isolated(
+    async def _return_rows_as_isolated(
         self,
-        row: dict[str, Any],
-        mismatch: RowClassMismatch,
+        mismatched: Sequence[tuple[dict[str, Any], RowClassMismatch]],
     ) -> None:
-        """Write ISOLATED on ``row`` and return it to PENDING, then wake the
-        workers of its queue. Fenced to this worker and the row's claim
+        """Write ISOLATED on each row and return it to PENDING, in one
+        ``horsies_release_claims`` statement that also wakes each queue of a
+        returned row once. Fenced to this worker and each row's claim
         generation: a row whose claim this worker lost is not touched, and is
-        not dispatched either. Logs one warning per row.
+        not dispatched either. Logs one warning per row. No rows sends
+        nothing.
 
         Raises:
             Exception: DB errors propagate to the caller.
         """
-        queue_name = row.get('queue_name') or 'default'
+        if not mismatched:
+            return
         async with self.sf() as s:
-            res = await s.execute(
-                RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
-                {
-                    'id': row['id'],
-                    'wid': self.worker_instance_id,
-                    'claimed_at': claim_time_of(row),
-                },
+            released = await release_claims(
+                await autocommit_connection(s),
+                worker_id=self.worker_instance_id,
+                claims=tuple(
+                    HeldClaim(task_id=str(row['id']), claimed_at=claim_time_of(row))
+                    for row, _ in mismatched
+                ),
+                placement=ReleasePlacement.ISOLATED,
             )
-            returned = (getattr(res, 'rowcount', 0) or 0) > 0
-            if returned:
-                await s.execute(
-                    NOTIFY_TASK_QUEUE_SQL,
-                    {'c2': f'task_queue_{queue_name}', 'p': f'class:{row["id"]}'},
-                )
-            await s.commit()
-        logger.warning(
-            'Task %s (%s) stores execution %s, and the registered function '
-            'is %s on this worker; %s',
-            row['id'],
-            row['task_name'],
-            mismatch.row_class.value,
-            mismatch.registered_class.value,
-            (
-                'wrote ISOLATED on the row and returned it to the queue'
-                if returned
-                else 'the claim was lost, so the row was left as it is'
-            ),
-        )
+        for (row, mismatch), release in zip(mismatched, released, strict=True):
+            match release.outcome:
+                case ReleaseOutcome.RELEASED:
+                    disposition = 'wrote ISOLATED on the row and returned it to the queue'
+                case ReleaseOutcome.NOT_HELD:
+                    disposition = 'the claim was lost, so the row was left as it is'
+                case _ as unreachable:
+                    assert_never(unreachable)
+            logger.warning(
+                'Task %s (%s) stores execution %s, and the registered function '
+                'is %s on this worker; %s',
+                row['id'],
+                row['task_name'],
+                mismatch.row_class.value,
+                mismatch.registered_class.value,
+                disposition,
+            )
 
     async def _filter_nonrunnable_workflow_tasks(
         self, rows: list[dict[str, Any]]

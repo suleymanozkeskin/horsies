@@ -1,4 +1,4 @@
-use crate::broker::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::{is_retryable_sqlx_error, BrokerError, ListenError, SessionCheckFailure};
 use crate::worker::executor::placement::PlacementRefused;
 use crate::worker::executor::slots::{BaselineOverLimit, ChildrenStartFailed, PoolFailure};
 use crate::worker::executor::supervisor::SpawnerStartError;
@@ -76,6 +76,17 @@ pub enum WorkerError {
     /// first.
     #[error("{0}")]
     BaselineOverLimit(BaselineOverLimit),
+
+    /// The session check of the worker boot did not pass. A session URL that
+    /// does not keep session state is not retryable; a database that cannot
+    /// be reached is.
+    #[error("session URL check failed: {0}")]
+    SessionCheck(SessionCheckFailure),
+
+    /// The broker's listener refused a claim wake or ping subscription of the
+    /// worker. Retryable when the refusal is transient.
+    #[error("listener subscription failed: {0}")]
+    Listener(ListenError),
 }
 
 impl WorkerError {
@@ -98,6 +109,8 @@ impl WorkerError {
             | Self::ChildrenStartFailed(_)
             | Self::PoolFailed(_)
             | Self::BaselineOverLimit(_) => false,
+            Self::SessionCheck(failure) => failure.is_retryable(),
+            Self::Listener(refused) => refused.is_retryable(),
         }
     }
 }

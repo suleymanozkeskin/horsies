@@ -1,6 +1,6 @@
 """A heartbeat-horizon retune is a coverage success, not a failure.
 
-`register_heartbeat_class` performs the duration UPDATE and then returns
+`register_heartbeat_class` performs the horizon UPDATE and then returns
 `HeartbeatHorizonUpdated` — the class is correct from that moment. The
 coverage pass must treat it like any other success: proceed to leaf
 creation and report `CoverageEnsured`, so a documented retune of
@@ -32,7 +32,8 @@ async def _stored_horizon(broker: PostgresBroker) -> timedelta:
         return (
             await connection.execute(
                 text(
-                    f'SELECT duration FROM {RETENTION_CLASSES} '
+                    "SELECT make_interval(hours => heartbeat_horizon_hours) "
+                    f'FROM {RETENTION_CLASSES} '
                     'WHERE class_key = :key'
                 ),
                 {'key': HEARTBEAT_CLASS_KEY},

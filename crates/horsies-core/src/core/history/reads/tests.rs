@@ -57,6 +57,8 @@ use super::result::{
 };
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
+mod ports;
+
 const PYTHON_STAGED_FIXTURE: &str =
     include_str!("../../../../tests/fixtures/task_history/python-v052-staged-readers.json");
 
@@ -590,7 +592,7 @@ fn attempt_snapshot(anchor: DateTime<Utc>) -> StoredAttemptSnapshot {
         anchor - Duration::minutes(1),
         Some("BOOM".to_owned()),
         Some("exploded once".to_owned()),
-        Some("TASK_ERROR".to_owned()),
+        Some("TASK_EXCEPTION".to_owned()),
         Some("worker-p4".to_owned()),
         Some("host-p4".to_owned()),
         Some(42),

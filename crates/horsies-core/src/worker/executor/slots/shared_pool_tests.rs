@@ -278,7 +278,7 @@ async fn run_one(
 }
 
 fn ok_envelope() -> ResultEnvelopeText {
-    ResultEnvelopeText::new(r#"{"__type":"ok","value":7}"#.to_owned())
+    ResultEnvelopeText::new(r#"{"__h_task_result__":true,"ok":7,"err":null}"#.to_owned())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
