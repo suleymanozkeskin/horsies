@@ -71,7 +71,7 @@ A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqu
 
 ### Use the Sync Forms Only in Plain `def` Endpoints
 
-FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send without an idempotency key writes on the endpoint's thread, through the sync send pool of the broker. The first send of the broker, a send with an idempotency key, and the other sync calls, for example `TaskHandle.get()`, run on the broker's own runner loop.
+FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send, with or without an idempotency key, writes on the endpoint's thread, through the sync send pool of the broker. The first send of the broker and the other sync calls, for example `TaskHandle.get()`, run on the broker's own runner loop.
 
 ```python
 @api.post("/welcome-blocking/{address}")

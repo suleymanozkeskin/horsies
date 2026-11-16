@@ -18,7 +18,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::{
-    AnyNode, HorsiesError, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
+    AnyNode, HorsiesError, OnError, SpecBuildError, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
     WorkflowStartErrorCode,
 };
 use crate::workflow_engine::engine::{fail_workflow_node, subworkflow_load_failed_error};
@@ -267,7 +267,11 @@ async fn a_child_builder_failure_at_promotion_fails_the_node() {
             name: "broken_child_for_enqueue".to_owned(),
             definition_key: broken_key.to_owned(),
             declared_children: Vec::new(),
-            spec_builder: Arc::new(|_input| Err(HorsiesError::new("boom from build_with"))),
+            spec_builder: Arc::new(|_input| {
+                Err(SpecBuildError::Failed(HorsiesError::new(
+                    "boom from build_with",
+                )))
+            }),
         })
         .expect("register the broken child");
     let broken = WorkflowSpec {

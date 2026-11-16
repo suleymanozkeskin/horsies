@@ -22,7 +22,7 @@ from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
 
 _DB_URL = os.environ.get(
     'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}@localhost:5432/horsies',
+    f'postgresql://postgres:{os.environ.get("DB_PASSWORD", "")}@localhost:5432/horsies',
 )
 
 # The driver starts the worker with --profile=REPRO_PROFILE.

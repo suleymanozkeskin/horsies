@@ -2915,7 +2915,7 @@ class TestDatabaseFailure:
         broken = PostgresBroker(
             PostgresConfig(
                 database_url=SecretStr(
-                    'postgresql+psycopg://postgres:none@127.0.0.1:1/none'
+                    'postgresql://postgres:none@127.0.0.1:1/none'
                 )
             ),
             assume_initialized=True,

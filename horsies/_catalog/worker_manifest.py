@@ -20,6 +20,12 @@ __all__ = [
     'PoolRecycleNever',
     'PoolRecycleAfterSeconds',
     'PoolRecycle',
+    'TcpKeepalivesConfigOff',
+    'TcpKeepalivesConfigOn',
+    'TcpKeepalivesConfig',
+    'TcpUserTimeoutConfigSystemDefault',
+    'TcpUserTimeoutConfigAfter',
+    'TcpUserTimeoutConfig',
     'WorkerDatabaseManifest',
     'SendManifest',
     'TaskLimitTasks',
@@ -81,6 +87,12 @@ __all__ = [
     'MANIFEST_VERSION',
     'WHOLE_SECONDS_MIN',
     'WHOLE_SECONDS_MAX',
+    'KEEPALIVE_SECONDS_MIN',
+    'KEEPALIVE_SECONDS_MAX',
+    'KEEPALIVE_PROBES_MIN',
+    'KEEPALIVE_PROBES_MAX',
+    'TCP_USER_TIMEOUT_MS_MIN',
+    'TCP_USER_TIMEOUT_MS_MAX',
     'RESERVATION_WINDOW_MICROS_MIN',
     'RESERVATION_WINDOW_MICROS_MAX',
     'TASK_LIMIT_MIN',
@@ -122,6 +134,15 @@ MANIFEST_VERSION: Final = 1
 
 WHOLE_SECONDS_MIN: Final = 0
 WHOLE_SECONDS_MAX: Final = 4294967295
+
+KEEPALIVE_SECONDS_MIN: Final = 1
+KEEPALIVE_SECONDS_MAX: Final = 32767
+
+KEEPALIVE_PROBES_MIN: Final = 1
+KEEPALIVE_PROBES_MAX: Final = 127
+
+TCP_USER_TIMEOUT_MS_MIN: Final = 1
+TCP_USER_TIMEOUT_MS_MAX: Final = 2147483647
 
 RESERVATION_WINDOW_MICROS_MIN: Final = 1
 RESERVATION_WINDOW_MICROS_MAX: Final = 2592000000000
@@ -220,6 +241,55 @@ type PoolRecycle = PoolRecycleNever | PoolRecycleAfterSeconds
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TcpKeepalivesConfigOff:
+    kind: Literal['OFF'] = 'OFF'
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TcpKeepalivesConfigOn:
+    kind: Literal['ON'] = 'ON'
+
+    idle_seconds: int
+    """Idle time before the first probe (libpq `keepalives_idle`)."""
+
+    interval_seconds: int
+    """Time between probes (libpq `keepalives_interval`)."""
+
+    probes: int
+    """Unanswered probes before the drop (libpq `keepalives_count`)."""
+
+
+type TcpKeepalivesConfig = TcpKeepalivesConfigOff | TcpKeepalivesConfigOn
+"""TCP keepalives of every core connection. Python's
+`tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TcpUserTimeoutConfigSystemDefault:
+    """The operating system's timeout."""
+
+    kind: Literal['SYSTEM_DEFAULT'] = 'SYSTEM_DEFAULT'
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TcpUserTimeoutConfigAfter:
+    """Sent data may stay unacknowledged this long before the kernel closes
+    the connection (libpq `tcp_user_timeout`).
+    """
+
+    kind: Literal['AFTER'] = 'AFTER'
+
+    milliseconds: int
+
+
+type TcpUserTimeoutConfig = TcpUserTimeoutConfigSystemDefault | TcpUserTimeoutConfigAfter
+"""The TCP user timeout of every core connection. Python's
+`tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class WorkerDatabaseManifest:
     """The connection settings of a worker. The pool of the worker process
     holds the resolved pool of its profile with no overflow; the size and the
@@ -252,6 +322,16 @@ class WorkerDatabaseManifest:
 
     echo: bool
     """Log every statement through the log bridge."""
+
+    tcp_keepalives: TcpKeepalivesConfig
+    """TCP keepalives of every core connection (Python `tcp_keepalives` and
+    its three values).
+    """
+
+    tcp_user_timeout: TcpUserTimeoutConfig
+    """TCP user timeout of every core connection (Python
+    `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
