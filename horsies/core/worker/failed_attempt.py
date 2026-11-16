@@ -23,16 +23,12 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, assert_never
+from typing import Any, Final, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.history.terminalization.move import (
-    FINISH_FAILED_ATTEMPT_FUNCTION,
-    RETRY_IN_SAME_CLASS,
-    RETRY_ISOLATED,
-)
+from horsies.core.history.terminalization.move import FINISH_FAILED_ATTEMPT_FUNCTION
 from horsies.core.lifecycle.commands import FailLockedTask
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.outcomes import (
@@ -59,16 +55,27 @@ from horsies.core.worker.sql import READ_IN_FLIGHT_ATTEMPT_SQL
 
 logger = get_logger('lifecycle')
 
+# The claimed-row rule is REFUSE: the read before the call returns a CLAIMED
+# row to the queue itself. The last argument (wake) is TRUE: the function
+# sends the capacity wake of a plain task's queue after its terminal move.
 FINISH_FAILED_ATTEMPT_SQL = text(f"""
     SELECT * FROM {FINISH_FAILED_ATTEMPT_FUNCTION}(
         CAST(:task_id AS uuid), :worker_id, CAST(:claimed_at AS TIMESTAMPTZ),
+        :retry_kind,
         CAST(:expected_retry_count AS INTEGER),
         CAST(:retry_delay_s AS DOUBLE PRECISION),
         :retry_placement,
         :result, :error_code, :failed_reason,
-        :attempt_outcome, :attempt_error_message, :attempt_failed_reason
+        :attempt_outcome, :attempt_error_message, :attempt_failed_reason,
+        'REFUSE', TRUE
     )
 """)
+
+RETRY_IN_SAME_CLASS: Final = 'SAME_CLASS'
+"""The placement value of a retry in the row's own execution class."""
+
+RETRY_ISOLATED: Final = 'ISOLATED'
+"""The placement value of a retry that runs ISOLATED."""
 
 
 # ---------------------------------------------------------------------------
@@ -269,12 +276,14 @@ def finish_parameters(command: FinishFailedAttempt) -> dict[str, Any]:
     match command.retry:
         case NoRetry():
             retry: dict[str, Any] = {
+                'retry_kind': 'NONE',
                 'expected_retry_count': None,
                 'retry_delay_s': None,
                 'retry_placement': None,
             }
         case RetryAfter(retry_count=count, delay_s=delay_s, placement=placement):
             retry = {
+                'retry_kind': 'RETRY',
                 'expected_retry_count': count,
                 'retry_delay_s': delay_s,
                 'retry_placement': _placement_value(placement),
