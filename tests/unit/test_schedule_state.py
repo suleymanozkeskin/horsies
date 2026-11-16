@@ -157,8 +157,9 @@ class TestGetDueStates:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_query_includes_null_next_run_states(self) -> None:
-        """next_run_at IS NULL rows should be considered due."""
+    async def test_query_selects_rows_whose_next_run_is_at_or_before_now(self) -> None:
+        """A row is due when next_run_at <= now. next_run_at is NOT NULL, so
+        the read has no NULL arm."""
         manager, session = _make_manager()
         mock_result = MagicMock()
         mock_result.scalars.return_value = []
@@ -168,7 +169,8 @@ class TestGetDueStates:
 
         stmt = session.execute.await_args.args[0]
         compiled = str(stmt)
-        assert 'IS NULL' in compiled
+        assert 'horsies_schedule_state.next_run_at <= :next_run_at_1' in compiled
+        assert 'IS NULL' not in compiled
 
 
 # =============================================================================

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.logging import get_logger
@@ -111,12 +111,7 @@ class ScheduleStateManager:
             stmt = (
                 select(ScheduleStateModel)
                 .where(ScheduleStateModel.schedule_name.in_(schedule_names))
-                .where(
-                    or_(
-                        ScheduleStateModel.next_run_at.is_(None),
-                        ScheduleStateModel.next_run_at <= now,
-                    )
-                )
+                .where(ScheduleStateModel.next_run_at <= now)
                 .order_by(ScheduleStateModel.next_run_at.asc())
             )
             result = await session.execute(stmt)
