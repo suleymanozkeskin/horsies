@@ -67,8 +67,6 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
         task_id='t1',
         fence=_OWNED,
         result_json=_RESULT,
-        notify_channel='task_queue_default',
-        notify_payload='capacity:t1',
     ),
     FailLockedTask(
         task_id='t1',

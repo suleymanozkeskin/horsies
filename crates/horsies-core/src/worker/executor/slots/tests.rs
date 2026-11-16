@@ -7,7 +7,10 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
-use super::outcome::{killed_child_write, retry_request, task_error_write, worker_failure_write};
+use super::outcome::{
+    killed_child_write, retry_request, task_error_write, timeout_recovery_write, timeout_write,
+    worker_failure_write, WriteStage,
+};
 use super::pool::Answer;
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
@@ -317,6 +320,55 @@ fn a_killed_child_write_names_its_code() {
         Some("NEIGHBOUR_BLOCKED_LOOP")
     );
     assert_eq!(loop_write.retry, RetryRequest::NoRetry);
+}
+
+/// Python `_max_retries_of`: the timeout write, crash recovery and phase 1
+/// are each sent again at most 3 times.
+#[test]
+fn each_write_stage_keeps_the_retry_bound_of_python() {
+    assert_eq!(WriteStage::PhaseOne.max_retries(), 3);
+    assert_eq!(WriteStage::TimeoutWrite.max_retries(), 3);
+    assert_eq!(WriteStage::CrashRecovery.max_retries(), 3);
+}
+
+/// Python `_recover_timed_out_row`: after the last retry of a TASK_TIMEOUT
+/// write, crash recovery writes TASK_TIMEOUT with the kept placement, and
+/// the policy decides the retry on that code.
+#[test]
+fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
+    let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
+    let timeout = TaskTimeoutMs::new(1000).unwrap();
+    let first = timeout_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
+    let recovery = timeout_recovery_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
+    for write in [&first, &recovery] {
+        assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
+        assert_eq!(write.fence.claimed_at, claimed.claimed_at);
+        match write.retry {
+            RetryRequest::RetryAfter { placement, .. } => {
+                assert_eq!(placement, RetryPlacement::Isolated);
+            }
+            RetryRequest::NoRetry => panic!("the policy names TASK_TIMEOUT"),
+        }
+    }
+    assert_eq!(
+        first.attempt.error_message.as_deref(),
+        Some("task exceeded timeout_ms=1000")
+    );
+    assert_eq!(
+        recovery.attempt.error_message.as_deref(),
+        Some("Task reached timeout_ms=1000, and the TASK_TIMEOUT write failed 4 times")
+    );
+    let spent = ClaimedTask {
+        retry: RetryFacts {
+            retry_count: 2,
+            max_retries: 2,
+        },
+        ..claimed
+    };
+    assert_eq!(
+        timeout_recovery_write(&spent, "worker-1", timeout, RetryPlacement::Isolated).retry,
+        RetryRequest::NoRetry
+    );
 }
 
 #[test]

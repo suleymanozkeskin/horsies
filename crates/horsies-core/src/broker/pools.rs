@@ -268,6 +268,58 @@ pub(crate) fn pools_for_test_pool(pool: &sqlx::PgPool) -> BrokerPools {
     .expect("the URL of a test pool is accepted by the statement layer")
 }
 
+/// A main core pool on the database of a test's sqlx pool, for the free
+/// lifecycle writers that tests call with a pool of their own. The same pool
+/// as the main pool of [`pools_for_test_pool`]; connects to nothing until
+/// the first checkout.
+#[cfg(test)]
+pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
+    let config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    let plan = pool_plan(
+        &config,
+        PoolRole::Main,
+        Reserve::NoReserve,
+        runtime_protocol(&config),
+    )
+    .expect("the size of a test pool is accepted by the statement layer");
+    open_pool(
+        &config.database_url,
+        plan,
+        &ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer")
+}
+
+/// The checkout wait of [`unpinged_single_connection_core_pool`].
+#[cfg(test)]
+const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
+
+/// A core pool of one connection on the URL of `options` that never pings a
+/// pooled connection at checkout (Python's worker pre-ping off) and never
+/// replaces it for its age. Once a statement is prepared on the connection,
+/// the statement is its only round trip. Connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn unpinged_single_connection_core_pool(
+    options: &sqlx::postgres::PgConnectOptions,
+) -> CorePool {
+    let plan = PoolPlan {
+        role: PoolRole::Main,
+        sizing: PoolSizing::new(1, Reserve::NoReserve)
+            .expect("one connection with no reserve is a valid size"),
+        checkout_wait: TEST_CHECKOUT_WAIT,
+        idle_ping: IdlePing::Off,
+        max_age: ConnectionAge::Unlimited,
+        protocol: StatementProtocol::PreparedPerConnection,
+    };
+    open_pool(
+        &test_url_of(options),
+        plan,
+        &ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

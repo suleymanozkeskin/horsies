@@ -170,6 +170,11 @@ pub enum Settlement {
     NotHeld,
     /// Nothing was written: stale recovery or the lease decides the row.
     LeftToRecovery,
-    /// Every retry of the write failed; the row waits for recovery.
+    /// Every retry of the write failed with an error a retry can clear; the
+    /// row waits for recovery.
     RetriesExhausted,
+    /// The write failed with an error that no retry can clear (the database
+    /// refused the statement, or the value did not encode); the row waits
+    /// for recovery.
+    WriteFailed,
 }

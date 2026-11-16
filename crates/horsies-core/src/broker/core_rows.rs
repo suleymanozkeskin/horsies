@@ -1,13 +1,18 @@
 //! Running core statements (`crate::db`) and reading their rows: the
-//! statement log, the row helpers and the readers of the broker's row types.
-//! Each reader takes the columns by name, with the Rust type the sqlx
-//! `FromRow` of the same type reads.
+//! statement log, checkout and run helpers, the row helpers and the readers
+//! of the broker's row types. Each reader takes the columns by name, with
+//! the Rust type the sqlx `FromRow` of the same type reads.
 
+use crate::broker::error::BrokerError;
 use crate::broker::health::StoredWorkerState;
 use crate::broker::row::task::{
     ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
 };
-use crate::db::{FromSql, Row, TypedStatement};
+use crate::db::{
+    BoundStatement, CheckoutClass, CorePool, DiscardReason, FromSql, NotSentCause,
+    PooledConnection, RollbackOutcome, Row, StatementBound, StatementFailure, Transaction,
+    TypedStatement,
+};
 
 /// Whether the broker logs each core statement it runs
 /// (`PostgresConfig::echo`).
@@ -37,6 +42,84 @@ impl StatementLog {
                 "statement",
             ),
         }
+    }
+}
+
+/// Checks out a connection of `pool` for broker work whose first statement
+/// is `first`. Broker work is never reserved work, so the checkout passes the
+/// reserve gate ([`CheckoutClass::Batch`]).
+///
+/// Errors: the failed checkout as `first`'s `NotSent`.
+pub(crate) async fn checkout_batch(
+    pool: &CorePool,
+    first: &TypedStatement,
+) -> Result<PooledConnection, BrokerError> {
+    pool.checkout(CheckoutClass::Batch).await.map_err(|cause| {
+        BrokerError::Statement(StatementFailure::NotSent {
+            statement: first.name(),
+            cause: NotSentCause::Checkout(cause),
+        })
+    })
+}
+
+/// Runs one statement on a checked-out connection and reads every row,
+/// bounded by the connection's own timeouts as the sqlx path was.
+pub(crate) async fn query_on(
+    connection: &mut PooledConnection,
+    log: StatementLog,
+    statement: &BoundStatement<'_>,
+) -> Result<Vec<Row>, StatementFailure> {
+    log.log(statement.statement());
+    connection
+        .query(statement, StatementBound::ConnectionTimeouts)
+        .await
+}
+
+/// Runs one statement in a transaction and reads every row. Bound as
+/// [`query_on`].
+pub(crate) async fn query_in(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+    statement: &BoundStatement<'_>,
+) -> Result<Vec<Row>, StatementFailure> {
+    log.log(statement.statement());
+    transaction
+        .query(statement, StatementBound::ConnectionTimeouts)
+        .await
+}
+
+/// Runs one statement in a transaction and reads the count of affected
+/// rows. Bound as [`query_on`].
+pub(crate) async fn execute_in(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+    statement: &BoundStatement<'_>,
+) -> Result<u64, StatementFailure> {
+    log.log(statement.statement());
+    transaction
+        .execute(statement, StatementBound::ConnectionTimeouts)
+        .await
+}
+
+/// Rolls back a transaction whose statements all succeeded. Nothing of it
+/// commits in any outcome.
+///
+/// Errors: the failed `ROLLBACK` as [`BrokerError::Statement`] (the
+/// connection was discarded; the server rolls the transaction back when the
+/// socket closes).
+///
+/// Panics when the transaction had a failed statement: every caller returns
+/// at a failed statement, so its rollback never meets one.
+pub(crate) async fn roll_back(transaction: Transaction<'_>) -> Result<(), BrokerError> {
+    match transaction.rollback().await {
+        RollbackOutcome::RolledBack => Ok(()),
+        RollbackOutcome::ConnectionDiscarded(DiscardReason::RollbackFailed(failure)) => {
+            Err(BrokerError::Statement(failure))
+        }
+        RollbackOutcome::ConnectionDiscarded(DiscardReason::EarlierFailure) => unreachable!(
+            "a broker transaction was rolled back after a failed statement; every caller \
+             returns at the failed statement"
+        ),
     }
 }
 
