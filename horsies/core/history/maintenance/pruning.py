@@ -62,7 +62,6 @@ from ..partitions.manager import (
     inspect_leaf,
 )
 from ..partitions.publication import LoaderPublication
-from ..phase2.quarantine import QuarantineRefused
 
 __all__ = [
     'DETACH_STATEMENT_TIMEOUT_MS',
@@ -115,7 +114,7 @@ class HistoryLeafSwept:
 
     leaf_name: str
     class_key: str
-    detach: LeafInspection | LeafMaintenanceBusy | QuarantineRefused
+    detach: LeafInspection | LeafMaintenanceBusy
     drop: LeafDrop | None
 
 
@@ -256,7 +255,6 @@ async def sweep_expired_history_leaves(
                 database,
                 DetachExpiredHistoryLeaf(
                     leaf=ref,
-                    quarantine_horizon=None,
                     statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
                 ),
                 publisher,

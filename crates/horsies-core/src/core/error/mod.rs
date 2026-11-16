@@ -85,6 +85,9 @@ pub enum ErrorCode {
     ConfigInvalidClusterCap,
     ConfigInvalidPrefetch,
     BrokerInvalidUrl,
+    /// A broker config names a pool field that 0.7.0 moved to the worker
+    /// profile.
+    ConfigInvalidBrokerPool,
     ConfigInvalidRecovery,
     ConfigInvalidSchedule,
     CliInvalidArgs,
@@ -139,6 +142,7 @@ impl ErrorCode {
             Self::ConfigInvalidClusterCap => "HRS-201",
             Self::ConfigInvalidPrefetch => "HRS-202",
             Self::BrokerInvalidUrl => "HRS-203",
+            Self::ConfigInvalidBrokerPool => "HRS-213",
             Self::ConfigInvalidRecovery => "HRS-204",
             Self::ConfigInvalidSchedule => "HRS-205",
             Self::CliInvalidArgs => "HRS-206",
@@ -198,6 +202,7 @@ impl ErrorCode {
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
             | Self::BrokerInvalidUrl
+            | Self::ConfigInvalidBrokerPool
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
@@ -266,6 +271,7 @@ impl ErrorCode {
                 | Self::ConfigInvalidClusterCap
                 | Self::ConfigInvalidPrefetch
                 | Self::BrokerInvalidUrl
+                | Self::ConfigInvalidBrokerPool
                 | Self::ConfigInvalidRecovery
                 | Self::ConfigInvalidSchedule
                 | Self::CliInvalidArgs

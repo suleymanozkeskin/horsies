@@ -6,6 +6,7 @@ to exercise defensive branches that integration tests don't reach.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -169,8 +170,8 @@ class TestEnqueueWorkflowTask:
         defaults = dict(
             id='wt-1',
             task_name='my_task',
-            task_args='[]',
-            task_kwargs=None,
+            input='{}',
+            workflow_sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             queue_name='default',
             priority=100,
             args_from=None,
@@ -210,7 +211,7 @@ class TestEnqueueWorkflowTask:
 
     @pytest.mark.asyncio
     async def test_corrupt_kwargs_json_fails_task(self) -> None:
-        row = self._base_row(task_kwargs='broken{json')
+        row = self._base_row(input='broken{json')
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_WORKFLOW_TASK_SQL:
@@ -304,7 +305,7 @@ class TestEnqueueWorkflowTask:
     @pytest.mark.asyncio
     async def test_args_from_key_conflicts_static_kwarg(self) -> None:
         row = self._base_row(
-            task_kwargs='{"x": 1}',
+            input='{"x": 1}',
             args_from={'x': 0},
         )
 
@@ -379,8 +380,7 @@ class TestEnqueueSubworkflowTask:
         defaults = dict(
             id='wt-1',
             sub_workflow_name='child_wf',
-            task_args='[]',
-            task_kwargs=None,
+            input='{}',
             args_from=None,
             node_id='node-0',
             sub_definition_key='test.child.v1',
@@ -462,7 +462,7 @@ class TestEnqueueSubworkflowTask:
 
     @pytest.mark.asyncio
     async def test_corrupt_kwargs_json_fails(self) -> None:
-        row = self._base_row(task_kwargs='broken{json')
+        row = self._base_row(input='broken{json')
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
@@ -557,7 +557,7 @@ class TestEnqueueSubworkflowTask:
     @pytest.mark.asyncio
     async def test_args_from_key_conflicts_static_kwarg(self) -> None:
         row = self._base_row(
-            task_kwargs='{"x": 1}',
+            input='{"x": 1}',
             args_from={'x': 0},
         )
 
@@ -618,45 +618,6 @@ class TestEnqueueSubworkflowTask:
         ):
             result = await enqueue_subworkflow_task(
                 session, broker, 'wf-1', 0, {0: TaskResult(ok='val')},
-                parent_depth=0, root_workflow_id='root-wf',
-            )
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_build_with_not_overridden_with_args_raises(self) -> None:
-        row = self._base_row(task_args='["positional"]', task_kwargs='{}')
-
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
-                return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        broker = MagicMock()
-        broker.app = MagicMock()
-
-        # Create a mock workflow_def that uses the default build_with
-        from horsies.core.models.workflow import WorkflowDefinition
-
-        mock_wf_def = MagicMock(spec=type)
-        mock_wf_def.build_with = WorkflowDefinition.build_with
-        mock_wf_def.name = 'TestWF'
-
-        with patch(
-            'horsies.core.workflows.registry.get_subworkflow_node',
-            return_value=None,
-        ), patch(
-            'horsies.core.workflows.engine._load_workflow_def_from_key',
-            return_value=mock_wf_def,
-        ), patch(
-            'horsies.core.workflows.engine._fail_enqueued_task',
-            new=AsyncMock(),
-        ):
-            result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {},
                 parent_depth=0, root_workflow_id='root-wf',
             )
         assert result is None
