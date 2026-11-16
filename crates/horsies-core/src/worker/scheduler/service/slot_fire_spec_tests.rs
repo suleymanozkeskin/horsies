@@ -87,7 +87,8 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
         .expect("a whole second is a valid time");
     let first_due = check_time - chrono::Duration::seconds(1);
     let next_run = first_due + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS));
-    let slot_task_id = schedule_slot_task_id(&schedule_name, first_due);
+    let slot_task_id =
+        schedule_slot_task_id(&schedule_name, first_due).expect("the slot time has a slot id");
     seed_earlier_slot_row(&pool, slot_task_id, &task_name, first_due).await;
     state::seed_state(&pool, &schedule_name, first_due)
         .await
@@ -138,14 +139,13 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
 /// bits are the slot time in milliseconds, so the history reads can prune by
 /// birth time.
 #[test]
-#[ignore = "waits on #721: the slot task id is UUIDv5"]
 fn the_slot_task_id_has_the_uuid7_layout_of_its_slot_time() {
     let slot = Utc::now()
         .with_nanosecond(0)
         .expect("a whole second is a valid time");
-    let id = schedule_slot_task_id("nightly-reindex", slot);
+    let id = schedule_slot_task_id("nightly-reindex", slot).expect("the slot time has a slot id");
 
-    assert_eq!(id, schedule_slot_task_id("nightly-reindex", slot));
+    assert_eq!(Ok(id), schedule_slot_task_id("nightly-reindex", slot));
     assert_eq!(id.get_version_num(), 7);
     assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
     let bytes = id.as_bytes();
@@ -153,5 +153,5 @@ fn the_slot_task_id_has_the_uuid7_layout_of_its_slot_time() {
         .iter()
         .fold(0_i64, |millis, byte| (millis << 8) | i64::from(*byte));
     assert_eq!(birth_ms, slot.timestamp_millis());
-    assert_ne!(id, schedule_slot_task_id("other-schedule", slot));
+    assert_ne!(Ok(id), schedule_slot_task_id("other-schedule", slot));
 }
