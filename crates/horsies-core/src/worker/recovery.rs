@@ -12,6 +12,9 @@ use crate::broker::listener::notify_task_queue;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::history::identity::reservations::{
+    cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
+};
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, CoverageOutcome,
 };
@@ -627,6 +630,7 @@ mod p7_maintenance_tests {
             .unwrap()
             .contains(history_leaves[0].leaf_name()));
         assert_eq!(pruning["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(pruning["key_reservations"]["state"], "complete");
         let phase2 = snapshot.phase2_recovery.unwrap();
         assert_eq!(phase2["considered"], 0);
         assert_eq!(phase2["applied"], 0);
@@ -1303,12 +1307,33 @@ async fn run_reaper_pass(
         // Coverage and pruning are independently contained: either half runs
         // and publishes health even when the other refuses.
         let prune = prune_expired_partitions(maintenance_pool, &StagedLoaderPublisher).await;
+        // Expired key reservations are removed after pruning, in bounded
+        // batches; the rest waits for the next pass.
+        let key_reservations = match cleanup_expired_reservations_pass(
+            maintenance_pool,
+            i32::try_from(retention.retention_delete_batch_size).unwrap_or(i32::MAX),
+            RESERVATION_CLEANUP_BATCHES_PER_PASS,
+        )
+        .await
+        {
+            Ok(ReservationCleanupPass::Complete { deleted }) => {
+                serde_json::json!({"state": "complete", "deleted": deleted})
+            }
+            Ok(ReservationCleanupPass::Truncated { deleted }) => {
+                serde_json::json!({"state": "truncated", "deleted": deleted})
+            }
+            Err(error) => {
+                tracing::error!(%error, "expired key reservation cleanup failed");
+                serde_json::json!({"state": "error", "error": error.to_string()})
+            }
+        };
         health.write().await.partition_pruning = Some(serde_json::json!({
             "finalized": prune.finalized_leaves.len(),
             "detached": prune.detached_count(),
             "dropped": prune.dropped_count(),
             "refusals": prune.refusals,
             "errors": prune.errors,
+            "key_reservations": key_reservations,
         }));
         *next_partition_maintenance = tokio::time::Instant::now()
             + Duration::from_secs(retention.partition_maintenance_interval_s);

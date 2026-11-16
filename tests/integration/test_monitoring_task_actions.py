@@ -38,9 +38,7 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import apply_async
-from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.tasks import TaskResult
-from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
@@ -55,8 +53,20 @@ from horsies.monitoring import (
     TaskActionWorkflowTask,
     cancel_task,
 )
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows, stored_history_status
+from tests.integration.conftest import DB_URL
+from tests.integration.history_seeding import stored_history_status
+from tests.integration.monitoring_seeding import (
+    FIXTURE_WORKER_PID,
+    FIXTURE_WORKER_PROCESS_NAME,
+    AttemptRow,
+    NodeRow,
+    SeedRow,
+    TaskNode,
+    TaskRow,
+    WorkflowRow,
+    insert_rows,
+    task_row,
+)
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -111,24 +121,6 @@ def ahead(seconds: int) -> datetime:
     return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
-def _terminal_instant(
-    status: TaskStatus,
-    completed_at: datetime | None,
-    failed_at: datetime | None,
-) -> datetime | None:
-    """The instant a terminal row is dated by, mirroring what production writes.
-
-    Terminal exactly when dated is a database constraint, so a fixture that
-    sets a terminal status without one is not a lighter fixture — it is a row
-    that cannot exist. The instant is taken from whichever end timestamp the
-    row carries, which keeps aged fixtures aged: a row completed sixty days ago
-    is terminal sixty days ago, not now.
-    """
-    if not status.is_terminal:
-        return None
-    return completed_at or failed_at or datetime.now(timezone.utc)
-
-
 def make_task(
     *,
     task_name: str = 'action_task',
@@ -143,44 +135,40 @@ def make_task(
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
     failed_at: datetime | None = None,
-    result: str | None = None,
     error_code: str | None = None,
     failed_reason: str | None = None,
-) -> TaskModel:
-    """Build a task row in an arbitrary lifecycle state."""
-    sent_at, enqueue_sha = compute_test_enqueue_sha(
+) -> TaskRow:
+    """Build a task row in an arbitrary lifecycle state.
+
+    A claimed row holds its lease for another minute; a terminal row is
+    dated by whichever end timestamp it carries, else now.
+    """
+    return task_row(
+        task_id=str(uuid.uuid4()),
         task_name=task_name,
         queue_name=queue_name,
-    )
-    return TaskModel(
-        id=str(uuid.uuid4()),
-        task_name=task_name,
-        queue_name=queue_name,
-        priority=100,
-        args='[]',
-        kwargs='{}',
         status=status,
-        sent_at=sent_at,
-        enqueued_at=ago(120),
-        claimed=worker_id is not None,
-        claimed_at=claimed_at,
-        claimed_by_worker_id=worker_id,
-        claim_expires_at=ahead(60) if worker_id is not None else None,
-        started_at=started_at,
-        completed_at=completed_at,
-        failed_at=failed_at,
-        terminal_at=_terminal_instant(status, completed_at, failed_at),
-        result=result,
-        error_code=error_code,
-        failed_reason=failed_reason,
-        good_until=good_until,
+        priority=100,
         retry_count=retry_count,
         max_retries=max_retries,
         is_workflow_task=is_workflow_task,
-        worker_pid=4242 if worker_id is not None else None,
+        enqueued_at=ago(120),
+        claimed_at=claimed_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        failed_at=failed_at,
+        good_until=good_until,
+        error_code=error_code,
+        failed_reason=failed_reason,
+        worker_id=worker_id,
         worker_hostname='host-a' if worker_id is not None else None,
+        worker_pid=4242 if worker_id is not None else None,
         worker_process_name='proc-a' if worker_id is not None else None,
-        enqueue_sha=enqueue_sha,
+        claim_expires_at=(
+            ahead(60)
+            if status is TaskStatus.CLAIMED and worker_id is not None
+            else None
+        ),
     )
 
 
@@ -190,48 +178,62 @@ def make_attempt(
     attempt: int,
     outcome: str = 'FAILED',
     error_message: str | None = None,
-) -> TaskAttemptModel:
+) -> AttemptRow:
     """Build a recorded attempt for a task."""
-    return TaskAttemptModel(
+    return AttemptRow(
         task_id=task_id,
         attempt=attempt,
         outcome=outcome,
         will_retry=False,
         started_at=ago(100 - attempt),
         finished_at=ago(90 - attempt),
+        error_code=None,
         error_message=error_message,
+        failed_reason=None,
+        worker_id=WORKER_ID,
         worker_hostname='host-a',
+        worker_pid=FIXTURE_WORKER_PID,
+        worker_process_name=FIXTURE_WORKER_PROCESS_NAME,
     )
 
 
-async def persist(session: AsyncSession, *rows: Any) -> None:
+async def persist(session: AsyncSession, *rows: SeedRow) -> None:
     """Persist rows on their lifecycle side and commit.
 
-    Terminal-status tasks are seeded as history rows and live fixture
-    rows are stamped with the enqueue-time facts the move requires.
+    Terminal-status tasks are seeded as history rows
+    (``tests/integration/monitoring_seeding.py``).
     """
-    await route_rows(session, rows)
+    await insert_rows(session, *rows)
 
 
 async def read_task(session: AsyncSession, task_id: str) -> Any:
     """Re-read a task's action-relevant columns, bypassing identity map.
 
-    A terminal task lives in history — the move deleted its live row —
-    so the read falls through to the history row, presented with the
-    live column names the assertions use (the terminal instant lands in
-    ``completed_at`` for COMPLETED and ``failed_at`` otherwise; claim
-    and finalize columns are structurally absent on a history row).
+    A live row has no terminal columns: its error, failed reason, end
+    times, result and kind read NULL, and ``claimed`` reads FALSE. A
+    terminal task lives in history — the move deleted its live row — so
+    the read falls through to the history row, presented with the live
+    column names the assertions use (the terminal instant lands in
+    ``completed_at`` for COMPLETED and ``failed_at`` otherwise; claim and
+    finalize columns are structurally absent on a history row).
     """
     row = (
         await session.execute(
             text("""
-                SELECT status, error_code, failed_reason, failed_at, completed_at,
-                       started_at, result, claimed, claimed_at,
+                SELECT status,
+                       NULL::text AS error_code,
+                       NULL::text AS failed_reason,
+                       NULL::timestamptz AS failed_at,
+                       NULL::timestamptz AS completed_at,
+                       started_at,
+                       NULL::text AS result,
+                       FALSE AS claimed,
+                       claimed_at,
                        claimed_by_worker_id, claim_expires_at, finalizing_at,
                        finalizing_by_worker_id, retry_count, max_retries,
                        good_until, enqueued_at, next_retry_at, worker_pid,
                        worker_hostname, worker_process_name, queue_name,
-                       terminalization_kind
+                       NULL::text AS terminalization_kind
                 FROM horsies_tasks WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
@@ -565,7 +567,7 @@ class TestCancelTaskRefuses:
         task = make_task(status=TaskStatus.FAILED)
         await persist(session, task)
 
-        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
             result = await cancel_task(broker, task.id)
 
         assert is_err(result)
@@ -574,7 +576,7 @@ class TestCancelTaskRefuses:
         assert isinstance(error.exception, HistoryContractError)
         assert error.task_id == task.id
         assert error.retryable is False
-        assert "'NOT_A_STATUS'" in error.message
+        assert "'NOT_KNOWN'" in error.message
         assert (await read_task(session, task.id)).status == 'FAILED'
 
 
@@ -712,36 +714,36 @@ class TestWorkflowBoundRowsAreUntouched:
     async def test_cancel_does_not_mutate_a_real_workflow_node_task(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        workflow = WorkflowModel(
+        workflow = WorkflowRow(
             id=str(uuid.uuid4()),
             name='alpha_flow',
             status='RUNNING',
             on_error='fail',
-            depth=0,
-            sent_at=datetime.now(UTC),
+            definition_key=None,
+            parent=None,
+            sent_at=ago(120),
+            created_at=ago(120),
+            completed_at=None,
         )
         await persist(session, workflow)
         task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
         await persist(session, task)
         await persist(
             session,
-            WorkflowTaskModel(
+            NodeRow(
                 id=str(uuid.uuid4()),
                 workflow_id=workflow.id,
                 task_index=0,
+                node_id=None,
                 task_name='action_task',
-                input='{}',
-                max_retries=0,
-                execution='ISOLATED',
-                retention_class_key='standard_30d',
-                queue_name='default',
-                priority=100,
-                dependencies=[],
-                allow_failed_deps=False,
-                join_type='all',
                 status='FAILED',
-                task_id=task.id,
-                is_subworkflow=False,
+                dependencies=(),
+                allow_failed_deps=False,
+                kind=TaskNode(task_id=task.id),
+                error=None,
+                created_at=ago(120),
+                started_at=None,
+                completed_at=None,
             ),
         )
 

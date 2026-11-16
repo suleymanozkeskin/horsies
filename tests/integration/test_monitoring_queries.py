@@ -40,13 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.task_pg import (
-    ScheduleStateModel,
-    TaskAttemptModel,
-    TaskModel,
-)
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
-from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
@@ -73,8 +67,23 @@ from horsies.monitoring import (
     task_facets,
     task_stats,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows, stored_history_status
+from tests.integration.history_seeding import stored_history_status
+from tests.integration.monitoring_seeding import (
+    FIXTURE_WORKER_PID,
+    FIXTURE_WORKER_PROCESS_NAME,
+    AttemptRow,
+    LastRun,
+    NodeRow,
+    ScheduleRow,
+    SeedRow,
+    SubworkflowNode,
+    TaskNode,
+    TaskRow,
+    WorkflowParent,
+    WorkflowRow,
+    task_row,
+)
+from tests.integration.monitoring_seeding import insert_rows as seed_rows
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -118,40 +127,21 @@ async def clean_monitoring_tables(
     yield
 
 
-async def insert_rows(session: AsyncSession, *rows: Any) -> None:
+async def insert_rows(session: AsyncSession, *rows: SeedRow) -> None:
     """Persist fixture rows on their lifecycle side and commit.
 
     Terminal-status tasks land in ``horsies_task_history`` — the live
-    table's status domain admits only live rows, exactly as production
-    writes them post-terminalization — and any attempt rows passed in
-    the same call for such a task fold into its attempt snapshot.
-    Workflow linkage comes from a same-call ``WorkflowTaskModel`` naming
-    the task. Everything else persists through the ORM unchanged.
+    table holds only live rows, exactly as production writes them after
+    the move — and any attempt rows passed in the same call for such a
+    task fold into its attempt snapshot. Workflow linkage comes from a
+    same-call node naming the task (``tests/integration/monitoring_seeding.py``).
     """
-    await route_rows(session, rows)
+    await seed_rows(session, *rows)
 
 
 def ago(seconds: int) -> datetime:
     """A timestamp ``seconds`` in the past, aware UTC."""
     return datetime.now(UTC) - timedelta(seconds=seconds)
-
-
-def _terminal_instant(
-    status: TaskStatus,
-    completed_at: datetime | None,
-    failed_at: datetime | None,
-) -> datetime | None:
-    """The instant a terminal row is dated by, mirroring what production writes.
-
-    Terminal exactly when dated is a database constraint, so a fixture that
-    sets a terminal status without one is not a lighter fixture — it is a row
-    that cannot exist. The instant is taken from whichever end timestamp the
-    row carries, which keeps aged fixtures aged: a row completed sixty days ago
-    is terminal sixty days ago, not now.
-    """
-    if not status.is_terminal:
-        return None
-    return completed_at or failed_at or datetime.now(timezone.utc)
 
 
 def make_task(
@@ -173,37 +163,35 @@ def make_task(
     completed_at: datetime | None = None,
     failed_at: datetime | None = None,
     good_until: datetime | None = None,
-) -> TaskModel:
-    """Build a task row. Every timestamp defaults to unset, not to now."""
-    sent_at, enqueue_sha = compute_test_enqueue_sha(
+) -> TaskRow:
+    """Build a task row. Every timestamp defaults to unset, not to now.
+
+    A terminal status is dated by whichever end timestamp the row carries,
+    else now, which keeps aged fixtures aged: a row completed sixty days ago
+    is terminal sixty days ago.
+    """
+    return task_row(
+        task_id=task_id or str(uuid.uuid4()),
         task_name=task_name,
         queue_name=queue_name,
-        priority=priority,
-    )
-    return TaskModel(
-        id=task_id or str(uuid.uuid4()),
-        task_name=task_name,
-        queue_name=queue_name,
-        priority=priority,
-        args='[]',
-        kwargs='{}',
         status=status,
-        sent_at=sent_at,
-        enqueued_at=enqueued_at or ago(60),
-        started_at=started_at,
-        completed_at=completed_at,
-        failed_at=failed_at,
-        terminal_at=_terminal_instant(status, completed_at, failed_at),
-        good_until=good_until,
-        error_code=error_code,
-        failed_reason=failed_reason,
-        claimed=worker_id is not None,
-        claimed_by_worker_id=worker_id,
-        worker_hostname=worker_hostname,
+        priority=priority,
         retry_count=retry_count,
         max_retries=max_retries,
         is_workflow_task=is_workflow_task,
-        enqueue_sha=enqueue_sha,
+        enqueued_at=enqueued_at or ago(60),
+        claimed_at=None,
+        started_at=started_at,
+        completed_at=completed_at,
+        failed_at=failed_at,
+        good_until=good_until,
+        error_code=error_code,
+        failed_reason=failed_reason,
+        worker_id=worker_id,
+        worker_hostname=worker_hostname,
+        worker_pid=None,
+        worker_process_name=None,
+        claim_expires_at=None,
     )
 
 
@@ -216,10 +204,10 @@ def make_attempt(
     error_code: str | None = None,
     error_message: str | None = None,
     failed_reason: str | None = None,
-    worker_hostname: str | None = 'host-1',
-) -> TaskAttemptModel:
+    worker_hostname: str = 'host-1',
+) -> AttemptRow:
     """Build an attempt row for a task."""
-    return TaskAttemptModel(
+    return AttemptRow(
         task_id=task_id,
         attempt=attempt,
         outcome=outcome,
@@ -229,7 +217,10 @@ def make_attempt(
         error_code=error_code,
         error_message=error_message,
         failed_reason=failed_reason,
+        worker_id='worker-1',
         worker_hostname=worker_hostname,
+        worker_pid=FIXTURE_WORKER_PID,
+        worker_process_name=FIXTURE_WORKER_PROCESS_NAME,
     )
 
 
@@ -240,21 +231,26 @@ def make_workflow(
     status: str = 'RUNNING',
     definition_key: str | None = 'tests.alpha.v1',
     parent_workflow_id: str | None = None,
-    parent_task_index: int | None = None,
     created_at: datetime | None = None,
     completed_at: datetime | None = None,
-) -> WorkflowModel:
-    """Build a workflow run row; a child run names its parent node index."""
+) -> WorkflowRow:
+    """Build a workflow run row. A child run hangs off node 0 of its parent."""
     created = created_at or ago(120)
-    return WorkflowModel(
+    return WorkflowRow(
         id=workflow_id or str(uuid.uuid4()),
         name=name,
         status=status,
         on_error='fail',
         definition_key=definition_key,
-        parent_workflow_id=parent_workflow_id,
-        parent_task_index=parent_task_index,
-        depth=0 if parent_workflow_id is None else 1,
+        parent=(
+            None
+            if parent_workflow_id is None
+            else WorkflowParent(
+                workflow_id=parent_workflow_id,
+                task_index=0,
+                root_workflow_id=parent_workflow_id,
+            )
+        ),
         sent_at=created,
         created_at=created,
         completed_at=completed_at,
@@ -276,28 +272,27 @@ def make_node(
     error: str | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
-) -> WorkflowTaskModel:
-    """Build a workflow node row; a task node carries the task facts."""
-    return WorkflowTaskModel(
+) -> NodeRow:
+    """Build a workflow node row."""
+    assert not (is_subworkflow and task_id is not None), (
+        'a sub-workflow node backs no task'
+    )
+    return NodeRow(
         id=str(uuid.uuid4()),
         workflow_id=workflow_id,
         task_index=task_index,
         node_id=node_id,
         task_name=task_name,
-        input='{}',
-        max_retries=None if is_subworkflow else 0,
-        execution=None if is_subworkflow else 'ISOLATED',
-        retention_class_key=None if is_subworkflow else 'standard_30d',
-        queue_name='default',
-        priority=100,
-        dependencies=dependencies if dependencies is not None else [],
-        allow_failed_deps=allow_failed_deps,
-        join_type='all',
         status=status,
-        task_id=task_id,
-        is_subworkflow=is_subworkflow,
-        sub_workflow_id=sub_workflow_id,
+        dependencies=tuple(dependencies) if dependencies is not None else (),
+        allow_failed_deps=allow_failed_deps,
+        kind=(
+            SubworkflowNode(sub_workflow_id=sub_workflow_id)
+            if is_subworkflow
+            else TaskNode(task_id=task_id)
+        ),
         error=error,
+        created_at=ago(120),
         started_at=started_at,
         completed_at=completed_at,
     )
@@ -306,18 +301,14 @@ def make_node(
 def make_schedule(
     *,
     schedule_name: str,
-    next_run_at: datetime | None,
-    last_run_at: datetime | None = None,
-    last_task_id: str | None = None,
-    run_count: int = 0,
-) -> ScheduleStateModel:
-    """Build a schedule state row."""
-    return ScheduleStateModel(
+    next_run_at: datetime,
+    last_run: LastRun | None = None,
+) -> ScheduleRow:
+    """Build a schedule state row. A schedule that never fired has no last run."""
+    return ScheduleRow(
         schedule_name=schedule_name,
-        last_run_at=last_run_at,
         next_run_at=next_run_at,
-        last_task_id=last_task_id,
-        run_count=run_count,
+        last_run=last_run,
     )
 
 
@@ -402,6 +393,7 @@ class TestTaskStats:
             make_task(
                 task_name='beta_task',
                 queue_name='slow',
+                status=TaskStatus.FAILED,
                 error_code='BOOM',
                 retry_count=2,
             ),
@@ -484,7 +476,14 @@ class TestTaskFacets:
         names = ['b_task', 'B_task', 'a_task', 'A_task', '_task', 'Z_task']
         await insert_rows(
             session,
-            *[make_task(task_name=name, error_code=f'DOMAIN_{name}') for name in names],
+            *[
+                make_task(
+                    task_name=name,
+                    status=TaskStatus.FAILED,
+                    error_code=f'DOMAIN_{name}',
+                )
+                for name in names
+            ],
         )
         expected = (
             await session.execute(
@@ -1259,7 +1258,9 @@ class TestListTasks:
     async def test_empty_error_code_is_reported_as_absent(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        await insert_rows(session, make_task(error_code=''))
+        await insert_rows(
+            session, make_task(status=TaskStatus.FAILED, error_code='')
+        )
 
         result = await list_tasks(
             broker,
@@ -1421,9 +1422,9 @@ class TestListTasks:
         ]
         assert len(list_statements) == 1
         statement = list_statements[0]
-        for excluded in ('args', 'kwargs', 'result', 'task_options'):
+        for excluded in ('input', 'task_options'):
             assert f'horsies_tasks.{excluded}' not in statement
-        for included in ('task_name', 'enqueued_at', 'error_code'):
+        for included in ('task_name', 'enqueued_at', 'worker_hostname'):
             assert f'horsies_tasks.{included}' in statement
 
 
@@ -1752,14 +1753,14 @@ class TestGetTaskDetail:
         task = make_task(status=TaskStatus.FAILED)
         await insert_rows(session, task)
 
-        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
             result = await get_task_detail(broker, task.id)
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
         assert isinstance(error.exception, HistoryContractError)
-        assert "'NOT_A_STATUS'" in error.message
+        assert "'NOT_KNOWN'" in error.message
 
     async def test_standalone_task_has_no_workflow_linkage(
         self, broker: PostgresBroker, session: AsyncSession
@@ -2045,9 +2046,7 @@ class TestWorkflowNames:
         )
         await insert_rows(
             session,
-            make_workflow(
-                name='child_flow', parent_workflow_id=root.id, parent_task_index=0,
-            ),
+            make_workflow(name='child_flow', parent_workflow_id=root.id),
         )
 
         result = await list_workflow_names(broker)
@@ -2080,8 +2079,7 @@ class TestListWorkflowRuns:
         await insert_rows(
             session,
             make_workflow(
-                name='child_flow', parent_workflow_id=root.id,
-                parent_task_index=0, created_at=ago(10),
+                name='child_flow', parent_workflow_id=root.id, created_at=ago(10)
             ),
         )
 
@@ -2233,12 +2231,8 @@ class TestGetWorkflowRun:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         run = make_workflow()
-        child = make_workflow(
-            name='child_flow', parent_workflow_id=run.id, parent_task_index=0,
-        )
-        empty_child = make_workflow(
-            name='empty_child', parent_workflow_id=run.id, parent_task_index=1,
-        )
+        child = make_workflow(name='child_flow', parent_workflow_id=run.id)
+        empty_child = make_workflow(name='empty_child', parent_workflow_id=run.id)
         await insert_rows(session, run)
         await insert_rows(session, child, empty_child)
         await insert_rows(
@@ -2274,9 +2268,7 @@ class TestGetWorkflowRun:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         run = make_workflow()
-        child = make_workflow(
-            name='child_flow', parent_workflow_id=run.id, parent_task_index=0,
-        )
+        child = make_workflow(name='child_flow', parent_workflow_id=run.id)
         await insert_rows(session, run)
         await insert_rows(session, child)
         await insert_rows(session, make_node(workflow_id=child.id, task_index=0))
@@ -2405,22 +2397,20 @@ class TestGetWorkflowNode:
             ),
         )
 
-        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
             result = await get_workflow_node(broker, run.id, 0)
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
         assert isinstance(error.exception, HistoryContractError)
-        assert "'NOT_A_STATUS'" in error.message
+        assert "'NOT_KNOWN'" in error.message
 
     async def test_subworkflow_node_has_no_leaf_or_attempts(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         run = make_workflow()
-        child = make_workflow(
-            name='child_flow', parent_workflow_id=run.id, parent_task_index=0,
-        )
+        child = make_workflow(name='child_flow', parent_workflow_id=run.id)
         await insert_rows(session, run)
         await insert_rows(session, child)
         await insert_rows(
@@ -2487,7 +2477,7 @@ class TestGetWorkflowNode:
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestListSchedules:
-    """Soonest next-run first, with unscheduled entries last."""
+    """Soonest next-run first. Every schedule state has a next run."""
 
     async def test_empty_state_yields_empty_list(self, broker: PostgresBroker) -> None:
         result = await list_schedules(broker)
@@ -2495,16 +2485,19 @@ class TestListSchedules:
         assert is_ok(result)
         assert result.ok_value == []
 
-    async def test_ordered_by_next_run_with_nulls_last(
+    async def test_ordered_by_next_run(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         soon = datetime.now(UTC) + timedelta(minutes=5)
         later = datetime.now(UTC) + timedelta(hours=3)
         await insert_rows(
             session,
-            make_schedule(schedule_name='unscheduled', next_run_at=None),
             make_schedule(schedule_name='later', next_run_at=later),
-            make_schedule(schedule_name='soon', next_run_at=soon, run_count=4),
+            make_schedule(
+                schedule_name='soon',
+                next_run_at=soon,
+                last_run=LastRun(at=ago(60), task_id=str(uuid.uuid4()), run_count=4),
+            ),
         )
 
         result = await list_schedules(broker)
@@ -2513,7 +2506,6 @@ class TestListSchedules:
         assert [row.schedule_name for row in result.ok_value] == [
             'soon',
             'later',
-            'unscheduled',
         ]
         assert result.ok_value[0].run_count == 4
 
