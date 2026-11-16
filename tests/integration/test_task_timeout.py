@@ -133,7 +133,7 @@ async def _insert_task(
                 INSERT INTO horsies_workflows
                     (id, name, status, on_error, depth, root_workflow_id,
                      sent_at, created_at, started_at, updated_at)
-                VALUES (:wf, 'timeout_wf', 'RUNNING', 'FAIL', 0, :wf,
+                VALUES (:wf, 'timeout_wf', 'RUNNING', 'fail', 0, :wf,
                         NOW(), NOW(), NOW(), NOW())
             """),
             {'wf': workflow_id},
@@ -142,12 +142,14 @@ async def _insert_task(
             text("""
                 INSERT INTO horsies_workflow_tasks
                     (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, task_id, created_at)
-                VALUES (:id, :wf, 0, 'node-0', 'timeout_test', '[]', '{}',
+                     is_subworkflow, status, task_id, created_at,
+                     max_retries, execution, retention_class_key)
+                VALUES (:id, :wf, 0, 'node-0', 'timeout_test', '{}',
                         'default', 100, '{}', FALSE, 'all', FALSE,
-                        'RUNNING', CAST(:task_id AS uuid), NOW())
+                        'RUNNING', CAST(:task_id AS uuid), NOW(),
+                        0, 'ISOLATED', 'standard_30d')
             """),
             {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
         )
