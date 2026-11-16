@@ -10,8 +10,7 @@ export interface DownSlot {
   failed_boots: number;
 }
 
-/** `not_recorded`: a worker version that did not record its slot health. */
-export type SlotHealthKind = 'all_serving' | 'slots_down' | 'not_recorded';
+export type SlotHealthKind = 'all_serving' | 'slots_down';
 
 /** Latest state snapshot for one worker. */
 export interface WorkerState {

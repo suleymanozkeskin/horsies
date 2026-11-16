@@ -26,8 +26,6 @@ from horsies.core.models.class_coverage import (
 )
 from horsies.core.worker.class_coverage_log import (
     CheckFailedKey,
-    NotRecordedKey,
-    describe_not_recorded,
     describe_uncovered,
 )
 from horsies.core.worker.runtime import (
@@ -37,7 +35,6 @@ from horsies.core.worker.runtime import (
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
-    DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
@@ -442,13 +439,6 @@ class ReaperMixin:
                         batch_size,
                         drained_when='empty_batch',
                     )
-                    await self._delete_expired_in_batches(
-                        resources.session_factory,
-                        DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
-                        {},
-                        deadline,
-                        batch_size,
-                    )
 
                 if deleted_worker_states > 0 or deleted_workflows > 0:
                     logger.info(
@@ -645,9 +635,8 @@ class ReaperMixin:
         """Log each pending (queue, class) that no live worker can run.
 
         An unserved stream logs an error, a stream whose serving workers
-        have no capacity in service a warning, the live workers that the
-        check left out a warning (``describe_not_recorded``), and a failed
-        check a warning. ``state.coverage_log`` bounds each to one line per
+        have no capacity in service a warning, and a failed check a
+        warning. ``state.coverage_log`` bounds each to one line per
         ``CLASS_COVERAGE_LOG_INTERVAL_S``. Before
         ``state.class_coverage_checks_from`` it reads nothing. Reads only.
         """
@@ -660,11 +649,6 @@ class ReaperMixin:
                 if state.coverage_log.take(CheckFailedKey(), time.monotonic()):
                     logger.warning(f'Class coverage check failed: {err.message}')
                 return
-        if coverage.not_recorded and state.coverage_log.take(
-            NotRecordedKey(),
-            time.monotonic(),
-        ):
-            logger.warning(describe_not_recorded(coverage.not_recorded))
         for stream in state.coverage_log.take_uncovered(
             coverage.streams,
             time.monotonic(),
