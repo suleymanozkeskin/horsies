@@ -88,6 +88,7 @@ async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
             0,
             subworkflow_load_failed_error(
                 "subworkflow_terminal_guard_workflow",
+                0,
                 Some("tests.unregistered_child.v1"),
             ),
             &WorkflowSpecRegistry::new(),
