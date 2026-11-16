@@ -13,11 +13,14 @@ use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 use super::calculator::{next_run_at, should_run_now};
 use super::state;
 
-/// Fixed namespace UUID for schedule-derived deterministic task IDs.
-/// Matches Python's `_SCHEDULE_NAMESPACE`. Never change this value.
-const SCHEDULE_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x3c, 0x01, 0xf3, 0xf5, 0xaf, 0xd6, 0x43, 0x63, 0xb7, 0x26, 0xa5, 0xda, 0xb5, 0x1a, 0x81, 0xc7,
-]);
+/// The prefix of the hash input of a slot task id. It names the layout, so
+/// a later layout cannot give the same id. Equal to the prefix of the SQL
+/// function `horsies_schedule_slot_task_id`. Never change this value.
+const SLOT_ID_HASH_PREFIX: &[u8] = b"horsies.schedule_slot.v1";
+
+/// The end (exclusive) of the slot times that a slot task id can hold, in
+/// Unix microseconds: the UUIDv7 time field holds 48 bits of milliseconds.
+const SLOT_ID_END_MICROSECONDS: i64 = (1_i64 << 48) * 1_000;
 
 /// Wall-clock target between missing-row existence checks while every state
 /// row is present and initialized. The check guards rare conditions (startup
@@ -131,6 +134,21 @@ enum ScheduleFireError {
         #[source]
         source: crate::broker::BrokerError,
     },
+    /// The slot time has no task id; slot not enqueued.
+    #[error("slot of schedule '{schedule}' has no task id: {source}")]
+    SlotOutsideIdRange {
+        schedule: String,
+        #[source]
+        source: SlotTimeOutsideIdRange,
+    },
+}
+
+/// A slot time that the UUIDv7 time field cannot hold: before the Unix
+/// epoch, or at or after 2^48 milliseconds (year 10889).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("slot time {slot_time} is outside the UUIDv7 time range")]
+struct SlotTimeOutsideIdRange {
+    slot_time: DateTime<Utc>,
 }
 
 /// What one slot's enqueue did, as the fire rules read it.
@@ -151,11 +169,14 @@ enum SlotOutcome {
 
 impl ScheduleFireError {
     /// True when the failure may clear on a later try: only a retryable
-    /// broker error. Payload and encoding refusals repeat on every try.
+    /// broker error. Payload, encoding and slot-time refusals repeat on
+    /// every try.
     fn is_retryable(&self) -> bool {
         match self {
             Self::Broker { source, .. } => source.is_retryable(),
-            Self::PayloadTooLarge { .. } | Self::InputEncoding { .. } => false,
+            Self::PayloadTooLarge { .. }
+            | Self::InputEncoding { .. }
+            | Self::SlotOutsideIdRange { .. } => false,
         }
     }
 }
@@ -880,19 +901,45 @@ fn calculate_missed_runs(
     due_runs
 }
 
-/// Canonical UTC datetime string for fingerprint hashing.
-/// Matches Python's `_canon_dt()`.
-fn canon_dt(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
-}
+/// The task id of one schedule slot: a pure function of the schedule name
+/// and the slot time, with the UUIDv7 layout, so the birth of the id is the
+/// slot time and the history reads prune their probes by it.
+///
+/// - bytes 0-5: the slot time in Unix milliseconds, big endian;
+/// - 4 bits: version 7; 2 bits: variant `10`;
+/// - the other 74 bits: the first bits of SHA-256 of
+///   [`SLOT_ID_HASH_PREFIX`], one zero byte, the slot time in Unix
+///   microseconds as a big-endian `i64`, and the schedule name as UTF-8.
+///
+/// The layout and the bytes equal the SQL function
+/// `horsies_schedule_slot_task_id`. Two slots get one id only when they
+/// share the millisecond and all 74 hash bits.
+///
+/// Errors: `SlotTimeOutsideIdRange` for a slot time before the Unix epoch
+/// or at or after 2^48 milliseconds. Pure.
+fn schedule_slot_task_id(
+    schedule_name: &str,
+    slot_time: DateTime<Utc>,
+) -> Result<Uuid, SlotTimeOutsideIdRange> {
+    use sha2::{Digest, Sha256};
 
-/// Deterministic task_id for a schedule name + slot time.
-/// Same schedule + same slot -> same UUID5 -> idempotent on conflict.
-fn schedule_slot_task_id(schedule_name: &str, slot_time: DateTime<Utc>) -> Uuid {
-    Uuid::new_v5(
-        &SCHEDULE_NAMESPACE,
-        format!("{}:{}", schedule_name, canon_dt(slot_time)).as_bytes(),
-    )
+    let slot_microseconds = slot_time.timestamp_micros();
+    if !(0..SLOT_ID_END_MICROSECONDS).contains(&slot_microseconds) {
+        return Err(SlotTimeOutsideIdRange { slot_time });
+    }
+    let digest = Sha256::new()
+        .chain_update(SLOT_ID_HASH_PREFIX)
+        .chain_update([0_u8])
+        .chain_update(slot_microseconds.to_be_bytes())
+        .chain_update(schedule_name.as_bytes())
+        .finalize();
+    let slot_milliseconds = (slot_microseconds / 1_000).to_be_bytes();
+    let mut bytes = [0_u8; 16];
+    bytes[..6].copy_from_slice(&slot_milliseconds[2..]);
+    bytes[6..].copy_from_slice(&digest[..10]);
+    bytes[6] = 0x70 | (bytes[6] & 0x0F);
+    bytes[8] = 0x80 | (bytes[8] & 0x3F);
+    Ok(Uuid::from_bytes(bytes))
 }
 
 /// Enqueue one slot of a schedule. The row stores the slot's input, the
@@ -937,7 +984,12 @@ async fn enqueue_scheduled_task(
     let retention = app_config.retention.resolve_queue_retention(queue);
 
     // Deterministic task_id from schedule + slot (idempotent on retry).
-    let task_id = schedule_slot_task_id(&schedule.name, slot_time);
+    let task_id = schedule_slot_task_id(&schedule.name, slot_time).map_err(|source| {
+        ScheduleFireError::SlotOutsideIdRange {
+            schedule: schedule.name.clone(),
+            source,
+        }
+    })?;
 
     // sent_at is the logical slot time, not wall clock: a second fire of the
     // same slot carries the same command and sent_at, so the exact-id resend
@@ -1016,7 +1068,7 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -1376,6 +1428,7 @@ mod tests {
         let first = schedule_slot_task_id("nightly-reindex", slot);
         let second = schedule_slot_task_id("nightly-reindex", slot);
 
+        assert!(first.is_ok());
         assert_eq!(first, second);
     }
 
@@ -1384,10 +1437,102 @@ mod tests {
         let first_slot = Utc.with_ymd_and_hms(2025, 3, 29, 12, 0, 0).unwrap();
         let second_slot = Utc.with_ymd_and_hms(2025, 3, 29, 12, 1, 0).unwrap();
 
-        let first = schedule_slot_task_id("nightly-reindex", first_slot);
-        let second = schedule_slot_task_id("nightly-reindex", second_slot);
+        let first = schedule_slot_task_id("nightly-reindex", first_slot).expect("slot id");
+        let second = schedule_slot_task_id("nightly-reindex", second_slot).expect("slot id");
 
         assert_ne!(first, second);
+    }
+
+    /// The slot id has the UUIDv7 layout: version 7, variant `10`, and the
+    /// slot time in milliseconds as its birth (decision: deterministic slot
+    /// id with the UUIDv7 layout).
+    #[test]
+    fn schedule_slot_task_id_has_the_uuid7_layout_of_its_slot_time() {
+        let slot = Utc.with_ymd_and_hms(2025, 3, 29, 12, 0, 0).unwrap()
+            + chrono::Duration::microseconds(123_456);
+
+        let id = schedule_slot_task_id("nightly-reindex", slot).expect("slot id");
+
+        assert_eq!(id.get_version_num(), 7);
+        assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+        assert_eq!(
+            crate::core::history::identity::uuid7::uuid7_birth_at(id),
+            DateTime::from_timestamp_millis(slot.timestamp_millis())
+        );
+        assert_ne!(
+            id,
+            schedule_slot_task_id("other-schedule", slot).expect("slot id")
+        );
+    }
+
+    /// The bytes equal those of the SQL function
+    /// `horsies_schedule_slot_task_id` (its pinned vector, and vectors
+    /// computed with Python `hashlib` from the same layout): a whole second,
+    /// a slot with microseconds inside one millisecond, a name that is not
+    /// ASCII, and the Unix epoch.
+    #[test]
+    fn schedule_slot_task_id_matches_the_sql_function_vectors() {
+        let slot = Utc.with_ymd_and_hms(2026, 11, 16, 10, 0, 0).unwrap();
+        let vectors = [
+            ("daily", slot, "01a1e3cc-9d00-7a2c-be43-740ce1fde7de"),
+            (
+                "daily",
+                slot + chrono::Duration::microseconds(123_456),
+                "01a1e3cc-9d7b-7ebb-a478-d6dd16388216",
+            ),
+            (
+                "n\u{e4}chtlich-\u{5e8f}",
+                slot,
+                "01a1e3cc-9d00-7f4b-ba15-2858ace729b9",
+            ),
+            (
+                "daily",
+                DateTime::<Utc>::UNIX_EPOCH,
+                "00000000-0000-7c74-b585-66f6ef335d1e",
+            ),
+        ];
+        for (name, slot_time, expected) in vectors {
+            assert_eq!(
+                schedule_slot_task_id(name, slot_time).expect("slot id"),
+                Uuid::parse_str(expected).expect("vector is a UUID"),
+                "{name} at {slot_time}"
+            );
+        }
+    }
+
+    /// A slot time before the Unix epoch, or at or after 2^48 ms, has no
+    /// slot id; the last microsecond below the bound has one.
+    #[test]
+    fn schedule_slot_task_id_refuses_a_slot_time_outside_the_uuid7_range() {
+        let end = DateTime::from_timestamp_millis(1_i64 << 48).expect("2^48 ms is a valid time");
+        let before_epoch = DateTime::<Utc>::UNIX_EPOCH - chrono::Duration::microseconds(1);
+
+        for slot_time in [before_epoch, end] {
+            assert_eq!(
+                schedule_slot_task_id("daily", slot_time),
+                Err(SlotTimeOutsideIdRange { slot_time }),
+                "{slot_time}"
+            );
+        }
+        let last = schedule_slot_task_id("daily", end - chrono::Duration::microseconds(1))
+            .expect("the last microsecond below 2^48 ms has a slot id");
+        assert_eq!(last.as_bytes()[..6], [0xff; 6]);
+    }
+
+    /// A slot time with no id is a permanent refusal: the schedule moves
+    /// past the slot and records no run.
+    #[test]
+    fn a_slot_time_outside_the_id_range_is_a_permanent_refusal() {
+        let slot_time = DateTime::<Utc>::UNIX_EPOCH - chrono::Duration::seconds(1);
+        let outcome = SlotOutcome::from_result(Err(ScheduleFireError::SlotOutsideIdRange {
+            schedule: "daily".to_owned(),
+            source: SlotTimeOutsideIdRange { slot_time },
+        }));
+
+        assert!(matches!(
+            outcome,
+            SlotOutcome::Permanent(ScheduleFireError::SlotOutsideIdRange { .. })
+        ));
     }
 
     #[test]
