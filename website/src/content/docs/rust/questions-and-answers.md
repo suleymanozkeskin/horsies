@@ -160,7 +160,7 @@ See [syce](../monitoring/syce-overview).
 
 Yes. In source checkouts, horsies includes markdown skill files under:
 
-`horsies/.agents/skills/`
+`crates/horsies/.agents/skills/`
 
 These cover:
 

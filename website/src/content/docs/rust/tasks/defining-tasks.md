@@ -115,7 +115,7 @@ async fn some_api_call() -> Result<String, TaskError> {
 }
 ```
 
-For backoff strategies, jitter, and auto-retry triggers, see [Retry Policy](./retry-policy).
+For backoff strategies, jitter, and auto-retry triggers, see [Retry Policy](../retry-policy).
 
 ### Assign to Queue (Custom Mode)
 
@@ -209,7 +209,7 @@ impl MyStruct {
 | `auto_retry_for` | array of string literals | No | Error codes that trigger retry |
 | `retry_policy` | expression | No | `RetryPolicy` for timing and backoff |
 
-`good_until` is intentionally not accepted on `#[task]`: it would be evaluated when the task is registered, not each time the task is sent. For ad-hoc sends, use `TaskSendOptions` from [Sending Tasks](./sending-tasks). For workflow tasks, set `.good_until(deadline)` on the workflow node.
+`good_until` is intentionally not accepted on `#[task]`: it would be evaluated when the task is registered, not each time the task is sent. For ad-hoc sends, use `TaskSendOptions` from [Sending Tasks](../sending-tasks). For workflow tasks, set `.good_until(deadline)` on the workflow node.
 
 ### Generated module
 

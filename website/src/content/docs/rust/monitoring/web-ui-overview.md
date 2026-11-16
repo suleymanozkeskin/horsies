@@ -97,7 +97,7 @@ Every action requires authorization and `X-Horsies-Intent: action`. Every
 action also requires an exact schema match. Reads can remain available when
 the schema version does not match.
 
-See [Action Semantics](./action-semantics/) for state rules and response codes.
+See [Action Semantics](../action-semantics/) for state rules and response codes.
 
 ## Query bounds
 
@@ -135,4 +135,4 @@ Use `horsies web` for a standalone server. Mount
 `create_monitoring_router` in an existing axum service when the host must own
 authentication or task registration.
 
-See [Deployment and Authentication](./web-ui-deployment/) for both forms.
+See [Deployment and Authentication](../web-ui-deployment/) for both forms.

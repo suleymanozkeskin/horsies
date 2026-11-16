@@ -219,7 +219,7 @@ horsies web \
   --pgbouncer-transaction-mode
 ```
 
-See [Deployment and Authentication](./monitoring/web-ui-deployment/) for the
+See [Deployment and Authentication](../monitoring/web-ui-deployment/) for the
 router factory, auth policies, custom CSS, and schema states.
 
 ### horsies get-docs
@@ -256,7 +256,7 @@ Uses git sparse checkout when git is available, falls back to tarball download o
 If you are using an AI coding agent from a source checkout, Horsies also ships
 guidance-oriented skill files in:
 
-`horsies/.agents/skills/`
+`crates/horsies/.agents/skills/`
 
 Available files:
 

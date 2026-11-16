@@ -143,5 +143,5 @@ match validate_order_task.send(order.clone()).await {
 ```
 
 :::note[Too verbose?]
-Set `resend_on_transient_err` on `AppConfig` to automatically retry transient enqueue failures with exponential backoff — no manual `retry_send` needed. See more in detail <a href="/horsies-rust/configuration/app-config/#fields" target="_blank">here</a>.
+Set `resend_on_transient_err` on `AppConfig` to automatically retry transient enqueue failures with exponential backoff — no manual `retry_send` needed. See more in detail <a href="/horsies/rust/configuration/app-config/#fields" target="_blank">here</a>.
 :::

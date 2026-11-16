@@ -1,13 +1,13 @@
-Hi agent! If you need to work with horsies-rust, consider using the docs locally.
+Hi agent! If you need to work with the horsies Rust crates, consider using the docs locally.
 
 # Horsies (Rust)
 > PostgreSQL-backed background task queue and workflow engine for Rust.
-> Docs: https://suleymanozkeskin.github.io/horsies-rust
-> Source: https://github.com/suleymanozkeskin/horsies-rust
+> Docs: https://suleymanozkeskin.github.io/horsies/rust/
+> Source: https://github.com/suleymanozkeskin/horsies/tree/main/crates/horsies
 > Crates: horsies, horsies-macros
 
 ## Agent Skills (Repository Guidance)
-- In source checkouts, skills live under: `horsies/.agents/skills/`
+- In source checkouts, skills live under: `crates/horsies/.agents/skills/`
 - `SKILL.md` -> quick orientation and routing
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
 - `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-031 validation
@@ -247,38 +247,38 @@ Hi agent! If you need to work with horsies-rust, consider using the docs locally
 - init_tracing(level: LogLevel) (respects RUST_LOG env var)
 
 ## Sitemap
-- /horsies-rust/ (home)
-- /horsies-rust/quick-start/getting-started/
-- /horsies-rust/quick-start/01-configuring-horsies/
-- /horsies-rust/quick-start/02-producing-tasks/
-- /horsies-rust/quick-start/03-defining-workflows/
-- /horsies-rust/quick-start/04-scheduling/
-- /horsies-rust/quick-start/05-workflow-patterns/
-- /horsies-rust/questions-and-answers/
-- /horsies-rust/concepts/architecture/
-- /horsies-rust/concepts/task-lifecycle/
-- /horsies-rust/concepts/result-handling/
-- /horsies-rust/concepts/queue-modes/
-- /horsies-rust/concepts/workflows/workflow-semantics/
-- /horsies-rust/concepts/workflows/workflow-api/
-- /horsies-rust/concepts/workflows/subworkflows/
-- /horsies-rust/tasks/defining-tasks/
-- /horsies-rust/tasks/sending-tasks/
-- /horsies-rust/tasks/error-handling/
-- /horsies-rust/tasks/errors/
-- /horsies-rust/tasks/retrieving-results/
-- /horsies-rust/tasks/retry-policy/
-- /horsies-rust/configuration/app-config/
-- /horsies-rust/configuration/broker-config/
-- /horsies-rust/configuration/recovery-config/
-- /horsies-rust/workers/worker-architecture/
-- /horsies-rust/workers/concurrency/
-- /horsies-rust/workers/heartbeats-recovery/
-- /horsies-rust/monitoring/syce-overview/
-- /horsies-rust/monitoring/broker-methods/
-- /horsies-rust/scheduling/scheduler-overview/
-- /horsies-rust/scheduling/schedule-patterns/
-- /horsies-rust/scheduling/schedule-config/
-- /horsies-rust/cli/
-- /horsies-rust/internals/database-schema/
-- /horsies-rust/internals/serialization/
+- /horsies/rust/ (home)
+- /horsies/rust/quick-start/getting-started/
+- /horsies/rust/quick-start/01-configuring-horsies/
+- /horsies/rust/quick-start/02-producing-tasks/
+- /horsies/rust/quick-start/03-defining-workflows/
+- /horsies/rust/quick-start/04-scheduling/
+- /horsies/rust/quick-start/05-workflow-patterns/
+- /horsies/rust/questions-and-answers/
+- /horsies/rust/concepts/architecture/
+- /horsies/rust/concepts/task-lifecycle/
+- /horsies/rust/concepts/result-handling/
+- /horsies/rust/concepts/queue-modes/
+- /horsies/rust/concepts/workflows/workflow-semantics/
+- /horsies/rust/concepts/workflows/workflow-api/
+- /horsies/rust/concepts/workflows/subworkflows/
+- /horsies/rust/tasks/defining-tasks/
+- /horsies/rust/tasks/sending-tasks/
+- /horsies/rust/tasks/error-handling/
+- /horsies/rust/tasks/errors/
+- /horsies/rust/tasks/retrieving-results/
+- /horsies/rust/tasks/retry-policy/
+- /horsies/rust/configuration/app-config/
+- /horsies/rust/configuration/broker-config/
+- /horsies/rust/configuration/recovery-config/
+- /horsies/rust/workers/worker-architecture/
+- /horsies/rust/workers/concurrency/
+- /horsies/rust/workers/heartbeats-recovery/
+- /horsies/rust/monitoring/syce-overview/
+- /horsies/rust/monitoring/broker-methods/
+- /horsies/rust/scheduling/scheduler-overview/
+- /horsies/rust/scheduling/schedule-patterns/
+- /horsies/rust/scheduling/schedule-config/
+- /horsies/rust/cli/
+- /horsies/rust/internals/database-schema/
+- /horsies/rust/internals/serialization/

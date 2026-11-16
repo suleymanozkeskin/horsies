@@ -7,40 +7,40 @@ head:
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
-import FeatureCard from '../../components/FeatureCard.astro';
+import FeatureCard from '../../../components/FeatureCard.astro';
 
 <div class="hero-video">
   <video autoplay loop muted playsinline>
-    <source src="/horsies-rust/galloping-horsie.mp4" type="video/mp4" />
+    <source src="/horsies/galloping-horsie.mp4" type="video/mp4" />
   </video>
 </div>
 
 **PostgreSQL-backed background task queue and workflow engine for Rust.**
 
 
-> **AI agents:** see [`llms.txt`](/horsies-rust/llms.txt) for a complete sitemap and keyword index of these docs.
-> If you are working from source, agent guidance skills are in `horsies/.agents/skills/` (`SKILL.md`, `tasks.md`, `workflows.md`, `configs.md`, `practical-summary.md`).
+> **AI agents:** see [`llms.txt`](/horsies/rust/llms.txt) for a complete sitemap and keyword index of these docs.
+> If you are working from source, agent guidance skills are in `crates/horsies/.agents/skills/` (`SKILL.md`, `tasks.md`, `workflows.md`, `configs.md`, `practical-summary.md`).
 
-> NOTE: There is a <a href="https://suleymanozkeskin.github.io/horsies/" target="_blank">python version</a> of this library, even though rust and python versions have almost the same api and mental model, they are not interoperable!
+> NOTE: There is a <a href="/horsies/">python version</a> of this library, even though rust and python versions have almost the same api and mental model, they are not interoperable!
 
 
 <CardGrid>
-  <LinkCard title="Get Started" href="/horsies-rust/quick-start/getting-started/" description="Install Horsies and run your first task" />
-  <LinkCard title="Workflow API" href="/horsies-rust/concepts/workflows/workflow-api/" description="WorkflowSpec and WorkflowHandle signatures" />
-  <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies-rust" description="Source code and contributions" />
-  <LinkCard title="Questions & Answers" href="/horsies-rust/questions-and-answers/" description="Design trade-offs, scaling, and common questions" />
+  <LinkCard title="Get Started" href="/horsies/rust/quick-start/getting-started/" description="Install Horsies and run your first task" />
+  <LinkCard title="Workflow API" href="/horsies/rust/concepts/workflows/workflow-api/" description="WorkflowSpec and WorkflowHandle signatures" />
+  <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies/tree/main/crates/horsies" description="Source code and contributions" />
+  <LinkCard title="Questions & Answers" href="/horsies/rust/questions-and-answers/" description="Design trade-offs, scaling, and common questions" />
 </CardGrid>
 
 ## Features
 
 <CardGrid stagger>
-  <FeatureCard title="Postgres Based" icon="/horsies-rust/icons/postgresql.svg" description="Postgres based." />
-  <FeatureCard title="Type-safe Tasks" icon="/horsies-rust/icons/shield-check.svg" description="Tasks return typed TaskResult<T> — errors as values, not panics." />
-  <FeatureCard title="Real-time Dispatch" icon="/horsies-rust/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
-  <FeatureCard title="Workflow Engine" icon="/horsies-rust/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
-  <FeatureCard title="Scheduled Tasks" icon="/horsies-rust/icons/clock.svg" description="Type-safe, human-readable schedule patterns — no cron strings." />
-  <FeatureCard title="Multi-queue Support" icon="/horsies-rust/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
-  <FeatureCard title="TUI Monitoring" icon="/horsies-rust/icons/terminal.svg" description="Syce TUI dashboard for monitoring workers, tasks, and workflows." />
+  <FeatureCard title="Postgres Based" icon="/horsies/icons/postgresql.svg" description="Postgres based." />
+  <FeatureCard title="Type-safe Tasks" icon="/horsies/icons/shield-check.svg" description="Tasks return typed TaskResult<T> — errors as values, not panics." />
+  <FeatureCard title="Real-time Dispatch" icon="/horsies/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
+  <FeatureCard title="Workflow Engine" icon="/horsies/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
+  <FeatureCard title="Scheduled Tasks" icon="/horsies/icons/clock.svg" description="Type-safe, human-readable schedule patterns — no cron strings." />
+  <FeatureCard title="Multi-queue Support" icon="/horsies/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
+  <FeatureCard title="TUI Monitoring" icon="/horsies/icons/terminal.svg" description="Syce TUI dashboard for monitoring workers, tasks, and workflows." />
 </CardGrid>
 
 ## Quick Example

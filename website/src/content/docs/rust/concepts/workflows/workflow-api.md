@@ -10,9 +10,9 @@ This page is a reference map of the current Rust workflow surface.
 
 For teaching-oriented examples, see:
 
-- [Typed Node Builder](./typed-node-builder)
-- [Workflows and Subworkflows](./subworkflows)
-- [Workflow Semantics](./workflow-semantics)
+- [Typed Node Builder](../typed-node-builder)
+- [Workflows and Subworkflows](../subworkflows)
+- [Workflow Semantics](../workflow-semantics)
 
 ## `WorkflowSpec`
 

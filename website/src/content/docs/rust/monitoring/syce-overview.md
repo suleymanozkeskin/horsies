@@ -64,7 +64,7 @@ Syce organizes monitoring into five tabs, accessible via number keys `1`-`5`.
 
 Cluster-level overview:
 
-![Syce Dashboard](/horsies-rust/images/syce/dashboard.png)
+![Syce Dashboard](/horsies/images/syce/dashboard.png)
 
 - **Cluster Capacity** -- Active workers, total capacity, utilization percentage, running tasks
 - **Task Status Distribution** -- Breakdown by status (Pending, Claimed, Running, Completed, Failed)
@@ -76,7 +76,7 @@ Cluster-level overview:
 
 Per-worker monitoring:
 
-![Syce Workers Tab](/horsies-rust/images/syce/workers.png)
+![Syce Workers Tab](/horsies/images/syce/workers.png)
 
 - Worker list with hostname, PID, process count, running/claimed tasks, CPU/memory usage, uptime
 - Select a worker to see detailed metrics and load charts
@@ -86,7 +86,7 @@ Per-worker monitoring:
 
 Task distribution and inspection:
 
-![Syce Tasks Tab](/horsies-rust/images/syce/tasks.png)
+![Syce Tasks Tab](/horsies/images/syce/tasks.png)
 
 - Aggregated task breakdown by worker
 - Status filters (Pending, Claimed, Running, Completed, Failed)
@@ -98,14 +98,14 @@ Task distribution and inspection:
 
 Workflow tracking:
 
-![Syce Workflows Tab](/horsies-rust/images/syce/workflows.png)
+![Syce Workflows Tab](/horsies/images/syce/workflows.png)
 
 - Workflow list with ID, name, status, task count, progress
 - Status filters (Pending, Running, Completed, Failed, Paused, Cancelled)
 - Workflow detail modal showing constituent tasks and their states
 - Copy workflow data to clipboard
 
-![Syce Workflow Detail](/horsies-rust/images/syce/workflow-detail.png)
+![Syce Workflow Detail](/horsies/images/syce/workflow-detail.png)
 
 ### 5 - Maintenance
 

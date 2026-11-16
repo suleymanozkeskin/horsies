@@ -9,7 +9,7 @@ tags: [tasks, errors, TaskResult, patterns]
 
 Handle errors explicitly through pattern matching and explicit returns. Avoid panicking for flow control — panics break control flow and obscure error paths.
 
-For exhaustive error code reference, see [errors](errors.md).
+For exhaustive error code reference, see [errors](../errors).
 
 This document means to be a pattern guide rather than definitive way to handle your errors.
 Adjust to your needs.
@@ -60,7 +60,7 @@ async fn fetch_api_data(input: ApiInput) -> Result<ApiResponse, TaskError> {
 }
 ```
 
-See [retry-policy](./retry-policy) for configuration details.
+See [retry-policy](../retry-policy) for configuration details.
 
 ### Handling Upstream Failures in Chained Tasks
 
