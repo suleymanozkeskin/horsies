@@ -14,12 +14,14 @@ kinds archive NULL terminal summaries per the M8-E ruling.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.integration.task_history_harness import (
@@ -35,6 +37,9 @@ pytestmark = [pytest.mark.integration]
 
 CLASS_KEY = 'standard_30d'
 WORKER = 'worker-node-1'
+HELD_GENERATION = datetime(2026, 1, 1, tzinfo=timezone.utc)
+"""A claim generation that the caller held for a row whose stored claim is
+not this one (requeued, or absent): the functions refuse a NULL generation."""
 
 terminalization_schema = terminalization_schema_fixture(
     'task_history_it_wfnode'
@@ -91,7 +96,9 @@ class TestPauseAbandonSingle:
                 await connection.execute(
                     text(
                         'SELECT * FROM horsies_abandon_owned_node('
-                        'CAST(:task_id AS uuid), :worker, NULL)'
+                        'CAST(:task_id AS uuid), :worker, '
+                        '(SELECT claimed_at FROM horsies_tasks '
+                        'WHERE id = CAST(:task_id AS uuid)))'
                     ),
                     {'task_id': task_id, 'worker': WORKER},
                 )
@@ -125,9 +132,9 @@ class TestWorkflowCancelSingle:
                 await connection.execute(
                     text(
                         'SELECT * FROM horsies_cancel_owned_node('
-                        'CAST(:task_id AS uuid), :worker, NULL, FALSE)'
+                        'CAST(:task_id AS uuid), :worker, :held, FALSE)'
                     ),
-                    {'task_id': task_id, 'worker': WORKER},
+                    {'task_id': task_id, 'worker': WORKER, 'held': HELD_GENERATION},
                 )
             ).one()
             # Without the carve-out the ownership fence misses, and the
@@ -139,9 +146,9 @@ class TestWorkflowCancelSingle:
                 await connection.execute(
                     text(
                         'SELECT * FROM horsies_cancel_owned_node('
-                        'CAST(:task_id AS uuid), :worker, NULL, TRUE)'
+                        'CAST(:task_id AS uuid), :worker, :held, TRUE)'
                     ),
-                    {'task_id': task_id, 'worker': WORKER},
+                    {'task_id': task_id, 'worker': WORKER, 'held': HELD_GENERATION},
                 )
             ).one()
             assert accepted.outcome == 'APPLIED'
@@ -149,6 +156,31 @@ class TestWorkflowCancelSingle:
             assert row.status == 'CANCELLED'
             assert row.error_code is None
             assert row.final_failed_reason is None
+
+
+    @pytest.mark.asyncio
+    async def test_the_database_refuses_a_cancelled_node_status(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """A node has no CANCELLED status: the CHECK
+        horsies_workflow_tasks_status_known refuses it. The node of a
+        requeued PENDING task in a cancelled workflow is ENQUEUED, as the
+        carve-out test seeds it."""
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            with pytest.raises(IntegrityError) as raised:
+                await seeded_workflow_task(
+                    connection,
+                    workflow_status='CANCELLED',
+                    node_status='CANCELLED',
+                    task_status='PENDING',
+                    worker=None,
+                )
+            assert isinstance(raised.value.orig, psycopg.errors.CheckViolation)
+            assert (
+                raised.value.orig.diag.constraint_name
+                == 'horsies_workflow_tasks_status_known'
+            )
 
 
 class TestIdKeyedBatch:
@@ -175,7 +207,11 @@ class TestIdKeyedBatch:
                             'SELECT * FROM horsies_abandon_owned_nodes('
                             'ARRAY[CAST(:a AS uuid), CAST(:b AS uuid), '
                             'CAST(:c AS uuid)], '
-                            'ARRAY[NULL, NULL, NULL]::timestamptz[], '
+                            'ARRAY[(SELECT claimed_at FROM horsies_tasks '
+                            'WHERE id = CAST(:a AS uuid)), '
+                            '(SELECT claimed_at FROM horsies_tasks '
+                            'WHERE id = CAST(:b AS uuid)), '
+                            ':held]::timestamptz[], '
                             ':worker)'
                         ),
                         {
@@ -183,6 +219,7 @@ class TestIdKeyedBatch:
                             'b': foreign_id,
                             'c': absent_id,
                             'worker': WORKER,
+                            'held': HELD_GENERATION,
                         },
                     )
                 ).all()
@@ -220,9 +257,9 @@ class TestIdKeyedBatch:
                     text(
                         'SELECT * FROM horsies_cancel_owned_nodes('
                         'ARRAY[CAST(:a AS uuid), CAST(:a AS uuid)], '
-                        'ARRAY[NULL, NULL]::timestamptz[], :worker)'
+                        'ARRAY[:held, :held]::timestamptz[], :worker)'
                     ),
-                    {'a': duplicate, 'worker': WORKER},
+                    {'a': duplicate, 'worker': WORKER, 'held': HELD_GENERATION},
                 )
 
 

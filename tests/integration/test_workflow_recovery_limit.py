@@ -5,7 +5,8 @@ rows. No test patches the function under test. Three stored rows raise on
 every pass:
 
 - ``BAD_GOOD_UNTIL`` on a node: the INSERT of the task refuses it (DataError).
-- ``BAD_POLICY`` on a workflow: the success evaluation raises AttributeError.
+- ``BAD_POLICY`` on a workflow: the success evaluation raises
+  StoredSuccessPolicyError (the stored success policy does not parse).
 - An output index with no node row: the final result raises AssertionError.
 
 Each test has its own database, because a global pass reads every workflow.
@@ -96,16 +97,18 @@ INSERT_WORKFLOW_SQL = text("""
 """)
 
 INSERT_NODE_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (
-        id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
+        id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps, join_type,
         task_options, status, is_subworkflow, sub_workflow_id,
-        sub_definition_key, task_id, created_at
-    ) VALUES (
-        :id, :workflow_id, :index, :node_id, :task_name, '[]', '{}',
+        sub_definition_key, task_id, created_at,
+        max_retries, execution, retention_class_key, sub_workflow_params
+    ) VALUES ('NONE',
+        :id, :workflow_id, :index, :node_id, :task_name, '{}',
         'default', 100, :dependencies, FALSE, 'all',
         :options, :status, :is_subworkflow, :sub_workflow_id,
-        :sub_definition_key, :task_id, NOW()
+        :sub_definition_key, :task_id, NOW(),
+        :max_retries, :execution, :retention_class_key, :sub_workflow_params
     )
 """)
 
@@ -199,6 +202,7 @@ async def _seed_node(
     is_subworkflow: bool = False,
     task_id: str | None = None,
 ) -> None:
+    subworkflow_node = is_subworkflow or sub_workflow_id is not None
     async with harness.sessions() as session:
         await session.execute(
             INSERT_NODE_SQL,
@@ -211,10 +215,16 @@ async def _seed_node(
                 'dependencies': list(dependencies),
                 'options': options,
                 'status': status,
-                'is_subworkflow': is_subworkflow or sub_workflow_id is not None,
+                'is_subworkflow': subworkflow_node,
                 'sub_workflow_id': sub_workflow_id,
                 'sub_definition_key': sub_definition_key,
                 'task_id': task_id,
+                # A task node carries its typed facts; a sub-workflow node has
+                # none and carries the params choice instead.
+                'max_retries': None if subworkflow_node else 0,
+                'execution': None if subworkflow_node else 'ISOLATED',
+                'retention_class_key': None if subworkflow_node else 'standard_30d',
+                'sub_workflow_params': 'NOT_GIVEN' if subworkflow_node else None,
             },
         )
         await session.commit()
@@ -942,6 +952,30 @@ class TestGlobalCompletion:
 
         assert await _failed_passes(harness, workflow_id) == 1
         assert await _workflow_status(harness, workflow_id) == 'RUNNING'
+
+    @pytest.mark.parametrize(
+        'policy',
+        ['[1,2,3]', '"text"', '{"cases":"not a list"}', '{"cases":[{}]}'],
+        ids=['array', 'string', 'cases-not-array', 'case-without-required'],
+    )
+    async def test_a_policy_that_does_not_parse_fails_the_workflow_closed(
+        self, harness: Harness, policy: str,
+    ) -> None:
+        """Each completion step fails, and the recovery limit fails the
+        workflow. A policy that was not an object used to read as no policy,
+        so this workflow completed."""
+        workflow_id = await _seed_workflow(harness, policy=policy)
+        await _seed_node(harness, workflow_id, 0, status='COMPLETED')
+
+        reports = await _run_passes(harness, LIMIT)
+
+        assert [r.metrics['case_2_3'].errors for r in reports] == [1, 1, 1]
+        assert await _workflow_status(harness, workflow_id) == 'FAILED'
+        error = await _workflow_error(harness, workflow_id)
+        assert error is not None
+        assert 'WORKFLOW_RECOVERY_LIMIT_REACHED' in error
+        assert 'StoredSuccessPolicyError' in error
+        assert 'does not parse' in error
 
 
 class TestCountWrite:

@@ -14,6 +14,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -47,6 +48,8 @@ from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.utils.loop_runner import LoopRunnerError
 
 PAYLOAD_MARKER = 'kwargs-marker-41c2'
+TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
+OWNER_TASK_ID = UUID('0198c0de-0000-7000-8000-000000000002')
 MESSAGE_MARKER = 'message-marker-41c2'
 CAUSE_MARKER = 'cause-marker-41c2'
 
@@ -72,26 +75,26 @@ def _every_variant() -> list[TaskSendError]:
     cause = RuntimeError(CAUSE_MARKER)
     return [
         TaskSendSuppressed(message=message),
-        TaskSendAsyncContext(task_id='t-1', payload=payload, message=message),
+        TaskSendAsyncContext(task_id=TASK_ID, payload=payload, message=message),
         TaskSendValidationFailed(message=message, exception=cause),
         TaskSendEnqueueFailed(
-            task_id='t-1',
+            task_id=TASK_ID,
             payload=payload,
             message=message,
             retryable=True,
             exception=cause,
         ),
-        TaskSendPayloadMismatch(task_id='t-1', payload=payload, message=message),
+        TaskSendPayloadMismatch(task_id=TASK_ID, payload=payload, message=message),
         TaskSendPayloadTooLarge(message=message, size_bytes=2048, limit_bytes=1024),
         TaskSendIdempotencyKeyConflict(
-            task_id='t-1',
+            task_id=TASK_ID,
             payload=payload,
             message=message,
-            owner_task_id='owner-1',
+            owner_task_id=OWNER_TASK_ID,
         ),
         TaskSendEventLoopLimit(message=message),
         TaskSendLoopRunnerFailed(
-            task_id='t-1',
+            task_id=TASK_ID,
             payload=payload,
             message=message,
             exception=cause,

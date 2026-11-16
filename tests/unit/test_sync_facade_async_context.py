@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import SecretStr
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerAsyncContext, BrokerErrorCode, BrokerLoopRunnerFailed
@@ -110,7 +111,8 @@ BROKER_CALLS: dict[str, tuple[Callable[[PostgresBroker], Any], str]] = {
     ),
     'enqueue': (
         lambda broker: broker.enqueue(
-            'echo', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
+            'echo', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
         ),
         'enqueue_async',
     ),
@@ -514,7 +516,8 @@ def _workflow_handle(broker: PostgresBroker) -> WorkflowHandle[Any]:
 RUN_SYNC_SITES: dict[str, Callable[[Horsies, PostgresBroker], Any]] = {
     'broker.get_raw_result_record': lambda app, broker: broker.get_raw_result_record(TASK_ID, 0),
     'broker.enqueue': lambda app, broker: broker.enqueue(
-        'echo', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
+        'echo', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
     ),
     'broker.get_task_info': lambda app, broker: broker.get_task_info(TASK_ID),
     'broker.close': lambda app, broker: broker.close(),
@@ -664,7 +667,10 @@ ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
         'broker.get_raw_result_record_async(',
     ),
     'PostgresBroker.enqueue': (
-        lambda app: app.get_broker().enqueue('echo', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc)),
+        lambda app: app.get_broker().enqueue(
+            'echo', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+        ),
         'broker.enqueue_async(',
     ),
     'PostgresBroker.get_task_info': (

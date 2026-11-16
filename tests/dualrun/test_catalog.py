@@ -108,10 +108,10 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_256_columns_in_20_tables() -> None:
-    # 254 table columns of migration 1000, plus tableoid of the two partitioned parents.
+def test_baseline_catalog_has_a_rule_for_each_of_258_columns_in_20_tables() -> None:
+    # 256 table columns of migration 1000, plus tableoid of the two partitioned parents.
     assert len(BASELINE_CATALOG.tables) == 20
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 256
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 258
 
 
 def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
@@ -128,6 +128,7 @@ def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
         ('horsies_worker_states', 'memory_percent'),
         ('horsies_worker_states', 'cpu_percent'),
         ('horsies_worker_states', 'children_memory_mb'),
+        ('horsies_workflow_phase2_pending', 'result_digest'),
     }
     assert all(len(reason) > 20 for reason in ignored.values())
 

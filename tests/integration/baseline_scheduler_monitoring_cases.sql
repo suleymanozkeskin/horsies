@@ -739,12 +739,13 @@ INSERT INTO horsies_workflows (
 INSERT INTO horsies_workflow_tasks (
     id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
     workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-    good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-    sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
+    good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+    sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at,
+    started_at, completed_at
 ) VALUES (
     gen_random_uuid(), '00000000-0000-4000-8000-0000000000f1', 3, 'node_3', 'app.live', '{}', 'default', 50, '{}',
-    NULL, NULL, FALSE, 'all', NULL, NULL, 3, 'SHARED_ASYNC', NULL, 'forever', 'RUNNING',
-    '00000000-0000-4000-8000-0000000000c1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, now(), now(), NULL
+    NULL, NULL, FALSE, 'all', NULL, NULL, 3, 'SHARED_ASYNC', NULL, 'forever', 'NONE', 'RUNNING',
+    '00000000-0000-4000-8000-0000000000c1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL, now(), now(), NULL
 );
 
 SELECT test_check(
@@ -1060,30 +1061,56 @@ FROM test_list('{}', '{}', '{}', TRUE, 'enqueued_at', 'DESC', 0, 50)
     AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
          history_estimate_plan text, location text, task_id uuid, status text, error_code text);
 
+-- completed_at: only e1 has a value; the NULL keys of d1..d3 (live) and e2..e4 (history, not COMPLETED) tie.
 SELECT test_check(
-    'list: completed_at sorts live rows last in both directions, ties by side then id',
+    'list: completed_at sorts NULL keys last in both directions, ties LIVE before HISTORY then by id',
     (SELECT array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
      FROM test_list('{}', '{}', '{}', FALSE, 'completed_at', 'ASC', 0, 50)
          AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
               history_estimate_plan text, location text, task_id uuid, status text, error_code text))
-        = ARRAY['e1', 'e2', 'e3', 'e4', 'd1', 'd2', 'd3']
+        = ARRAY['e1', 'd1', 'd2', 'd3', 'e2', 'e3', 'e4']
     AND (SELECT array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
          FROM test_list('{}', '{}', '{}', FALSE, 'completed_at', 'DESC', 0, 50)
              AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
                   history_estimate_plan text, location text, task_id uuid, status text, error_code text))
-        = ARRAY['e1', 'e2', 'e3', 'e4', 'd1', 'd2', 'd3'],
+        = ARRAY['e1', 'd1', 'd2', 'd3', 'e2', 'e3', 'e4'],
     'completed_at order differs'
 );
 
+-- task_name: app.a holds d1, d3 (live) and e1; app.b holds d2 (live) and e2; app.c holds e3 and e4.
 SELECT test_check(
-    'list: a text key ties break by side (HISTORY first) then id',
+    'list: a text key ascending ties LIVE before HISTORY, then by id',
     array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
-        = ARRAY['e1', 'd1', 'd3', 'e2', 'd2', 'e3', 'e4'],
+        = ARRAY['d1', 'd3', 'e1', 'd2', 'e2', 'e3', 'e4'],
     array_agg(right(l.task_id::text, 2) ORDER BY l.row_position)::text
 )
 FROM test_list('{}', '{}', '{}', FALSE, 'task_name', 'ASC', 0, 50)
     AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
          history_estimate_plan text, location text, task_id uuid, status text, error_code text);
+
+SELECT test_check(
+    'list: a text key descending keeps LIVE before HISTORY and the id ascending on ties',
+    array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
+        = ARRAY['e3', 'e4', 'd2', 'e2', 'd1', 'd3', 'e1'],
+    array_agg(right(l.task_id::text, 2) ORDER BY l.row_position)::text
+)
+FROM test_list('{}', '{}', '{}', FALSE, 'task_name', 'DESC', 0, 50)
+    AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
+         history_estimate_plan text, location text, task_id uuid, status text, error_code text);
+
+SELECT test_check(
+    'list: a page cut inside a tie keeps the tie order across pages',
+    (SELECT array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
+     FROM test_list('{}', '{}', '{}', FALSE, 'task_name', 'ASC', 0, 2)
+         AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
+              history_estimate_plan text, location text, task_id uuid, status text, error_code text))
+    || (SELECT array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
+        FROM test_list('{}', '{}', '{}', FALSE, 'task_name', 'ASC', 2, 2)
+            AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
+                 history_estimate_plan text, location text, task_id uuid, status text, error_code text))
+    = ARRAY['d1', 'd3', 'e1', 'd2'],
+    'pages do not join'
+);
 
 SELECT test_raises('list refuses limit 0',
     $q$SELECT * FROM test_list('{}', '{}', '{}', FALSE, 'enqueued_at', 'DESC', 0, 0)
@@ -1112,6 +1139,31 @@ SELECT test_raises('list refuses a taxonomy whose arrays differ in length',
 SELECT test_raises('list refuses an empty window',
     $q$SELECT * FROM horsies_monitoring_task_list(now(), now(), '{}', '{}', '{}', '{}', '{}', '{}',
         FALSE, '{}', '{}', 'enqueued_at', 'DESC', 0, 10)$q$, '22023');
+
+-- The text keys sort in the collation of their column, which is the database collation: the merge adds no
+-- COLLATE of its own. The test server's collation sorts by code point, so the case gives task_name a collation
+-- that does not (ICU en-US puts lowercase before uppercase) inside a rolled-back transaction.
+COMMIT;
+BEGIN;
+ALTER TABLE horsies_tasks ALTER COLUMN task_name TYPE character varying(255) COLLATE "en-US-x-icu";
+ALTER TABLE horsies_task_history ALTER COLUMN task_name TYPE character varying(255) COLLATE "en-US-x-icu";
+SELECT test_live_task('00000000-0000-4000-8000-0000000000f1', 'PENDING', 'b_task', 'q1', 'w1',
+                      now() - interval '5 minutes', NULL, 0, NULL);
+SELECT test_history_task('00000000-0000-4000-8000-0000000000f2', 'COMPLETED', 'B_task', 'q1', 'w1',
+                         now() - interval '5 minutes', now() - interval '4 minutes', now() - interval '3 minutes', 0, NULL);
+SELECT test_live_task('00000000-0000-4000-8000-0000000000f3', 'PENDING', 'c_task', 'q1', 'w1',
+                      now() - interval '5 minutes', NULL, 0, NULL);
+SELECT test_check(
+    'list: text keys merge in the collation of the column, not in code-point order',
+    array_agg(l.task_name ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
+        = ARRAY['b_task', 'B_task', 'c_task']::character varying[],
+    array_agg(l.task_name ORDER BY l.row_position)::text
+)
+FROM horsies_monitoring_task_list(
+    now() - interval '1 day', now(), '{}', '{b_task,B_task,c_task}', '{}', '{}', '{}', '{}', FALSE,
+    '{}', '{}', 'task_name', 'ASC', 0, 50
+) AS l;
+ROLLBACK;
 
 COMMIT;
 BEGIN;

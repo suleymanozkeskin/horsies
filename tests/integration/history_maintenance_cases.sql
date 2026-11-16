@@ -930,5 +930,5 @@ SELECT fixture_expect_error('miss: a kind outside the 15 kinds is refused',
 SELECT fixture_check(
     'miss: the kind overload and the interim array overload are two functions',
     to_regprocedure('horsies_terminalization_miss(uuid, text, text, timestamp with time zone)') IS NOT NULL
-    AND to_regprocedure('horsies_terminalization_miss(uuid, text[], text, timestamp with time zone)') IS NOT NULL
+    AND to_regprocedure('horsies_terminalization_miss(uuid, text[], text, text, timestamp with time zone)') IS NOT NULL
 );

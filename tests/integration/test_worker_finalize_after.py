@@ -57,6 +57,7 @@ from horsies.core.worker.worker import (
     _initialize_worker_pool,
     _run_task_entry,
 )
+from tests.dispatch_claim_support import claim_at
 from tests.integration.conftest import (
     compute_test_command_fingerprint,
     get_task_status as get_workflow_task_status,
@@ -150,7 +151,7 @@ async def _link_workflow_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'finalize_after_wf', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'finalize_after_wf', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},
@@ -158,13 +159,15 @@ async def _link_workflow_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
-            VALUES (:id, :wf, 0, 'node-0', :task_name, '[]', '{}', 'default',
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES ('NONE', :id, :wf, 0, 'node-0', :task_name, '{}', 'default',
                     100, '{}', FALSE, 'all', FALSE, 'RUNNING',
-                    CAST(:task_id AS uuid), NOW())
+                    CAST(:task_id AS uuid), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'id': str(uuid.uuid4()),
@@ -324,7 +327,7 @@ async def test_happy_path_success_completes_and_clears(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -356,7 +359,7 @@ async def test_phase1_skip_returns_ok_none(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -394,7 +397,7 @@ async def test_phase1_err_propagated_with_finalize_context(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(result)
@@ -405,7 +408,7 @@ async def test_phase1_err_propagated_with_finalize_context(
         'queue_name': 'default',
         'is_workflow_task': True,
         'task_name': 'finalize_after_test',
-        'claimed_at': HANDLE_CLAIMED_AT,
+        'claim': claim_at(HANDLE_CLAIMED_AT),
     }
     worker._finalize_workflow_phase.assert_not_awaited()
 
@@ -435,7 +438,7 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(result)
@@ -464,7 +467,7 @@ async def test_child_lost_returns_err(
 
     result = await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(result)
@@ -490,7 +493,7 @@ async def test_child_lost_with_recovery_db_error_stays_retryable(
 
     result = await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(result)
@@ -509,7 +512,7 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 
     await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_owned_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     row = (
@@ -565,7 +568,7 @@ async def test_a_child_lost_after_the_return_writes_what_the_body_returned(
         task_id,
         timeout=TaskTimeout(ms=1_000),
         task_name='finalize_after_owned_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert result == Ok(None)
@@ -596,7 +599,8 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'CLAIMED', started_at = NULL
+            SET status = 'CLAIMED', started_at = NULL,
+                claim_expires_at = NOW() + INTERVAL '1 hour'
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -607,7 +611,7 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
         finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
         task_id,
         task_name='finalize_after_owned_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert result == Ok(None)
@@ -638,7 +642,7 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -681,7 +685,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     task_row = (
         await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 0
@@ -690,7 +694,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         )
     ).fetchone()
     assert task_row is not None
-    task_id, task_name, args_json, kwargs_json = task_row
+    task_id, task_name, input_json = task_row
 
     # Claim node 0's backing task with a good_until about to pass.
     await session.execute(
@@ -699,7 +703,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
             SET status = 'CLAIMED',
                 claimed_at = NOW(),
                 claimed_by_worker_id = :wid,
-                claim_expires_at = NULL,
+                claim_expires_at = NOW() + interval '1 hour',
                 good_until = NOW() + interval '1 second'
             WHERE id = :tid
         """),
@@ -722,8 +726,8 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     wire = wire_of(
         _run_task_entry(
             task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            args_json=None,
+            kwargs_json=input_json,
             task_id=task_id,
             master_worker_id=TEST_WORKER_ID,
             claimed_at=claimed_at,
@@ -744,7 +748,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         task_id,
         is_workflow_task=True,
         task_name=task_name,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
     assert is_ok(result)
@@ -788,7 +792,7 @@ async def test_task_expired_plain_task_skips_finalization(
         task_id,
         is_workflow_task=False,
         task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -824,7 +828,7 @@ async def test_task_expired_workflow_task_loader_error_propagates(
         task_id,
         is_workflow_task=True,
         task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(result)
@@ -856,7 +860,7 @@ async def test_full_success_clears_both_retry_stages(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_ok(result)
