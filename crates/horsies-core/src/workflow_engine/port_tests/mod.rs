@@ -5,6 +5,7 @@
 
 mod support;
 
+mod claim_filter;
 mod completion_edges;
 mod completion_path;
 mod dataflow;
@@ -13,6 +14,7 @@ mod handle_reads;
 mod joins_and_patterns;
 mod node_finalize;
 mod output_skipped;
+mod parent_propagation;
 mod pause_resume_cancel;
 mod promotion_rows;
 mod recovery_cases;
