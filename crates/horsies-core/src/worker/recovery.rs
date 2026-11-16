@@ -185,7 +185,7 @@ mod p7_maintenance_tests {
                  retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                  updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
              ) VALUES (
-                 $1, 'p7_retention_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                 $1, 'p7_retention_task', 'default', 100, 'null', NULL, 'ISOLATED',
                  'forever', NOW(), NOW(),
                  NULL, NULL, NULL,
                  'RUNNING', NOW(), NOW(), 'p7-retention-worker', NULL,
@@ -2390,7 +2390,7 @@ mod tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'ret_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'ret_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
@@ -2922,3 +2922,6 @@ mod tests {
             .expect("delete attempts");
     }
 }
+
+#[cfg(test)]
+mod reaper_loop_tests;
