@@ -227,6 +227,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('sub_workflow_id', WORKFLOW_ID),
         ('sub_workflow_name', EXACT),
         ('sub_definition_key', EXACT),
+        ('sub_workflow_params', EXACT),
         ('sub_workflow_summary', EXACT),
         ('result', EXACT),
         ('error', EXACT),

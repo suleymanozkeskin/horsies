@@ -764,7 +764,8 @@ class TestWorkflowHandleSubWorkflowFields:
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE, sub_workflow_id = :child_id,
                     task_id = NULL, max_retries = NULL, execution = NULL,
-                    good_until = NULL, retention_class_key = NULL
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
@@ -820,7 +821,8 @@ class TestWorkflowHandleSubWorkflowFields:
                     sub_workflow_id = :child_id,
                     sub_workflow_summary = :summary,
                     task_id = NULL, max_retries = NULL, execution = NULL,
-                    good_until = NULL, retention_class_key = NULL
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -880,7 +882,8 @@ class TestWorkflowHandleSubWorkflowFields:
                     sub_workflow_id = :child_id,
                     sub_workflow_summary = :summary,
                     task_id = NULL, max_retries = NULL, execution = NULL,
-                    good_until = NULL, retention_class_key = NULL
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -939,7 +942,8 @@ class TestWorkflowHandleSubWorkflowFields:
                     sub_workflow_id = :child_id,
                     sub_workflow_summary = :summary,
                     task_id = NULL, max_retries = NULL, execution = NULL,
-                    good_until = NULL, retention_class_key = NULL
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
