@@ -287,14 +287,15 @@ class TestOwnershipGateBehavioral:
     """Behavioral tests for _confirm_ownership_and_set_running.
 
     Exercises three code paths by mocking _get_worker_pool:
-    1. Ownership confirmed (UPDATE returns a row)
-    2. Ownership lost (UPDATE returns None, no workflow status)
+    1. Ownership confirmed (horsies_start_attempt answers STARTED)
+    2. Ownership lost (it answers MISSED with NOT_HELD)
     3. Exception path (pool raises)
     """
 
     def test_ownership_confirmed_returns_none_and_commits(self) -> None:
-        """When UPDATE RETURNING returns a row, ownership is confirmed."""
-        cursor = _FakeCursor(fetchone_return=('task-1',))
+        """When the start answers STARTED, ownership is confirmed; the
+        statement committed alone in autocommit."""
+        cursor = _FakeCursor(fetchone_return=('STARTED', None))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -314,22 +315,13 @@ class TestOwnershipGateBehavioral:
             )
 
         assert result is None, 'Ownership confirmed should return None'
-        assert conn.commits == 1, 'Should commit on ownership confirmation'
-        assert conn.rollbacks == 0, 'No rollback on success'
+        assert len(cursor.queries) == 1
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_ownership_lost_returns_claim_lost_and_rollbacks(self) -> None:
-        """When UPDATE RETURNING returns None and no workflow status, returns CLAIM_LOST."""
-        # First fetchone (UPDATE RETURNING) → None (ownership lost)
-        # Second fetchone (workflow status check) → None (not a workflow task)
-        call_count = 0
-
-        class _MultiReturnCursor(_FakeCursor):
-            def fetchone(self) -> Any:
-                nonlocal call_count
-                call_count += 1
-                return None  # Both UPDATE and workflow check return None
-
-        cursor = _MultiReturnCursor()
+        """When the start answers NOT_HELD, returns CLAIM_LOST with no other
+        statement."""
+        cursor = _FakeCursor(fetchone_return=('MISSED', 'NOT_HELD'))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -354,9 +346,8 @@ class TestOwnershipGateBehavioral:
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'CLAIM_LOST'
-        assert conn.rollbacks == 2, 'The start that missed, then the miss path'
-        assert conn.commits == 0, 'No commit on ownership loss'
-        assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
+        assert len(cursor.queries) == 1
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_exception_returns_ownership_unconfirmed(self) -> None:
         """When pool raises an exception, returns OWNERSHIP_UNCONFIRMED."""
@@ -410,7 +401,7 @@ class TestOwnershipGateBehavioral:
         assert conn.commits == 0
 
     def test_an_allowed_start_runs_the_update(self) -> None:
-        cursor = _FakeCursor(fetchone_return=('task-1',))
+        cursor = _FakeCursor(fetchone_return=('STARTED', None))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -428,7 +419,7 @@ class TestOwnershipGateBehavioral:
 
         assert result is None
         assert len(cursor.queries) == 1
-        assert conn.commits == 1
+        assert conn.commits == 0
 
 
 # ---------------------------------------------------------------------------
