@@ -793,9 +793,10 @@ async fn persist_workflow_success(
         fence,
         result_json,
     };
-    let outcome = finish_workflow_success(broker.pool(), &command)
-        .await
-        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+    let outcome =
+        finish_workflow_success(broker.core_main_pool(), broker.statement_log(), &command)
+            .await
+            .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { .. } => Ok(FinalizeOutcome::Terminal {
             is_success: true,
@@ -855,7 +856,7 @@ async fn persist_failed_attempt(
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let outcome = finish_failed_attempt(broker.pool(), command)
+    let outcome = finish_failed_attempt(broker.core_main_pool(), broker.statement_log(), command)
         .await
         .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
     match outcome {
