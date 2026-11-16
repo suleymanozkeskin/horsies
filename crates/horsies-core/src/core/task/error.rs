@@ -120,12 +120,15 @@ pub enum OutcomeCode {
     UpstreamSkipped,
     SubworkflowFailed,
     WorkflowSuccessCaseNotMet,
+    /// A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
+    /// SKIPPED.
+    WorkflowOutputSkipped,
     WorkflowStopped,
     SendSuppressed,
 }
 
 impl OutcomeCode {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::TaskCancelled,
         Self::TaskExpired,
         Self::TaskTimeout,
@@ -136,6 +139,7 @@ impl OutcomeCode {
         Self::UpstreamSkipped,
         Self::SubworkflowFailed,
         Self::WorkflowSuccessCaseNotMet,
+        Self::WorkflowOutputSkipped,
         Self::WorkflowStopped,
         Self::SendSuppressed,
     ];
@@ -585,6 +589,7 @@ mod tests {
             OutcomeCode::UpstreamSkipped,
             OutcomeCode::SubworkflowFailed,
             OutcomeCode::WorkflowSuccessCaseNotMet,
+            OutcomeCode::WorkflowOutputSkipped,
             OutcomeCode::WorkflowStopped,
             OutcomeCode::SendSuppressed,
         ];

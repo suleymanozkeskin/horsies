@@ -252,12 +252,12 @@ WHERE workflow_id = $1
 ORDER BY task_index";
 
 const GET_WORKFLOW_META_SQL: &str = "\
-SELECT status, output_task_index, success_policy, on_error
+SELECT status, output_task_index, success_policy, on_error, error IS NOT NULL AS has_stored_error
 FROM horsies_workflows
 WHERE id = $1";
 
-const GET_TASK_RESULT_BY_INDEX_SQL: &str = "\
-SELECT result
+const GET_OUTPUT_NODE_SQL: &str = "\
+SELECT node_id, result, status, task_index, task_name
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = $2";
 
@@ -273,7 +273,7 @@ WHERE workflow_id = $1";
 
 /// Fetch the terminal tasks' results by index (companion to `ALL_EDGES_SQL`).
 const TERMINAL_RESULTS_BY_INDEX_SQL: &str = "\
-SELECT node_id, result
+SELECT node_id, result, status, task_index, task_name
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = ANY($2)";
 
@@ -456,6 +456,7 @@ struct WorkflowMeta {
     output_task_index: Option<i32>,
     success_policy: Option<serde_json::Value>,
     on_error: String,
+    has_stored_error: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -463,10 +464,14 @@ struct TaskResultOnly {
     result: Option<String>,
 }
 
+/// A terminal node read for the workflow result.
 #[derive(Debug, sqlx::FromRow)]
 struct NodeResult {
     node_id: Option<String>,
     result: Option<String>,
+    status: String,
+    task_index: i32,
+    task_name: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -570,17 +575,17 @@ pub(crate) async fn apply_phase2_progression_in_tx(
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     if node_status == "FAILED" {
-        let error_json = if on_error == Some("pause") {
+        let error_json: Option<String> = if on_error == Some("pause") {
             match node_row_id {
-                Some(node_row_id) => {
+                Some(node_row_id) => Some(
                     recovered_phase2_failure_error(
                         transaction.as_mut(),
                         workflow_id,
                         node_row_id,
                         terminal_status,
                     )
-                    .await?
-                }
+                    .await?,
+                ),
                 None => {
                     get_workflow_failure_error(
                         transaction.as_mut(),
@@ -612,11 +617,14 @@ pub(crate) async fn apply_phase2_progression_in_tx(
                 return Ok(());
             }
             _ => {
-                sqlx::query(SET_WORKFLOW_ERROR_SQL)
-                    .bind(workflow_id)
-                    .bind(&error_json)
-                    .execute(transaction.as_mut())
-                    .await?;
+                // No selectable error keeps the stored one (Python: `COALESCE`).
+                if let Some(error_json) = &error_json {
+                    sqlx::query(SET_WORKFLOW_ERROR_SQL)
+                        .bind(workflow_id)
+                        .bind(error_json)
+                        .execute(transaction.as_mut())
+                        .await?;
+                }
             }
         }
     }
@@ -1042,6 +1050,7 @@ async fn complete_phase2_workflow_in_tx(
         .await?;
     let success = evaluate_workflow_success(
         &meta.success_policy,
+        meta.has_stored_error,
         statuses.iter().any(|status| status.status == "FAILED"),
         &statuses,
     )?;
@@ -2611,7 +2620,10 @@ async fn handle_workflow_task_failure(
             // workflow, recomputed under the lock so a later lower-index failure
             // replaces a higher-index one. The current task is already FAILED, so
             // this always resolves to a real error.
-            let first_error = get_workflow_failure_error(&mut tx, workflow_id, &None, None).await?;
+            // Python: `first_failure_payload or error_payload`.
+            let first_error = get_workflow_failure_error(&mut tx, workflow_id, &None, None)
+                .await?
+                .unwrap_or_else(|| error_json.to_owned());
             sqlx::query(SET_WORKFLOW_ERROR_SQL)
                 .bind(workflow_id)
                 .bind(&first_error)
@@ -2665,7 +2677,10 @@ async fn handle_workflow_task_failure(
                 "unknown on_error policy, treating as fail",
             );
             // Store error even for unknown policy (same as fail).
-            let first_error = get_workflow_failure_error(&mut tx, workflow_id, &None, None).await?;
+            // Python: `first_failure_payload or error_payload`.
+            let first_error = get_workflow_failure_error(&mut tx, workflow_id, &None, None)
+                .await?
+                .unwrap_or_else(|| error_json.to_owned());
             sqlx::query(SET_WORKFLOW_ERROR_SQL)
                 .bind(workflow_id)
                 .bind(&first_error)
@@ -2819,7 +2834,12 @@ fn check_workflow_completion_inner<'a>(
 
         let has_failure = statuses.iter().any(|s| s.status == "FAILED");
 
-        let is_success = evaluate_workflow_success(&meta.success_policy, has_failure, &statuses)?;
+        let is_success = evaluate_workflow_success(
+            &meta.success_policy,
+            meta.has_stored_error,
+            has_failure,
+            &statuses,
+        )?;
 
         let result_json = match is_success {
             true => {
@@ -2844,12 +2864,12 @@ fn check_workflow_completion_inner<'a>(
         } else {
             // Compute error for the FAILED workflow deterministically from the
             // terminal task results (first failed task by index). Recovery uses
-            // the same selection as normal completion — no stale error is
-            // preserved. Matches Python PR #27.
-            let error_json = Some(
+            // the same selection as normal completion. When no error can be
+            // selected, the stored error stays (COALESCE in the statement), as
+            // in Python.
+            let error_json =
                 get_workflow_failure_error(&mut *tx, workflow_id, &meta.success_policy, None)
-                    .await?,
-            );
+                    .await?;
 
             let row: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_FAILED_SQL)
                 .bind(workflow_id)
@@ -2902,16 +2922,21 @@ fn check_workflow_completion_inner<'a>(
 }
 
 /// Evaluate whether the workflow should be considered successful.
+///
+/// Python: `evaluate_workflow_success` (`core/workflows/engine.py:3466-3520`).
+/// - No policy: success only with no FAILED node and no stored workflow error.
+/// - A policy: success when one case with at least one required node has every required node COMPLETED.
+/// - A stored policy that does not parse is an error: the step fails, and the recovery failure bound then
+///   fails the workflow closed. Python treats it as no policy; the core does not turn stored data that does
+///   not parse into a success decision (decided rule).
 fn evaluate_workflow_success(
     success_policy_json: &Option<serde_json::Value>,
+    has_stored_error: bool,
     has_failure: bool,
     statuses: &[TaskStatusRow],
 ) -> Result<bool, WorkflowError> {
     match success_policy_json {
-        None => {
-            // Default: no failures means success.
-            Ok(!has_failure)
-        }
+        None => Ok(!has_stored_error && !has_failure),
         Some(policy_json) => {
             // Parse policy and evaluate.
             let policy: SuccessPolicy = serde_json::from_value(policy_json.clone())?;
@@ -2928,26 +2953,22 @@ fn evaluate_workflow_success(
 
 /// Get the workflow's final result JSON.
 ///
-/// If `output_task_index` is set, return that task's result.
-/// Otherwise, return a `TaskResult` containing a JSON object of terminal task results
-/// (tasks that are not dependencies of any other task) keyed by node_id.
+/// - An output node (`output_task_index`): the outcome of [`explicit_output_result`].
+/// - No output node: a `TaskResult` holding a JSON object of the terminal nodes (nodes that no other node
+///   depends on), keyed by node id; a SKIPPED terminal node holds a `WORKFLOW_OUTPUT_SKIPPED` error envelope,
+///   any other node its parsed stored result or `null` (Python `_terminal_entry`).
 async fn get_workflow_final_result(
     conn: &mut sqlx::PgConnection,
     workflow_id: Uuid,
     output_task_index: Option<i32>,
 ) -> Result<String, WorkflowError> {
     if let Some(idx) = output_task_index {
-        let row: TaskResultOnly = sqlx::query_as(GET_TASK_RESULT_BY_INDEX_SQL)
+        let row: Option<NodeResult> = sqlx::query_as(GET_OUTPUT_NODE_SQL)
             .bind(workflow_id)
             .bind(idx)
-            .fetch_one(&mut *conn)
+            .fetch_optional(&mut *conn)
             .await?;
-
-        let result_json = row.result.unwrap_or_else(|| {
-            let wrapped = TaskResult::Ok(serde_json::Value::Null);
-            serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned())
-        });
-        return Ok(result_json);
+        return explicit_output_result(workflow_id, idx, row);
     }
 
     // Terminal output tasks = those no other task depends on. Read edges
@@ -2967,31 +2988,115 @@ async fn get_workflow_final_result(
         .await?;
 
     let mut result_map = serde_json::Map::new();
-    for row in rows {
-        if let Some(node_id) = row.node_id {
-            let value = match &row.result {
-                Some(json) => serde_json::from_str(json).unwrap_or(serde_json::Value::Null),
-                None => serde_json::Value::Null,
+    for row in &rows {
+        if let Some(node_id) = &row.node_id {
+            let value = match (row.status.as_str(), &row.result) {
+                ("SKIPPED", _) => serde_json::to_value(TaskResult::<serde_json::Value>::Err(
+                    output_error(
+                        OutcomeCode::WorkflowOutputSkipped.into(),
+                        format!(
+                            "Workflow {workflow_id} is COMPLETED and its terminal node {node_id:?} is SKIPPED"
+                        ),
+                        workflow_id,
+                        row,
+                    ),
+                ))?,
+                (_, Some(json)) => serde_json::from_str(json).unwrap_or(serde_json::Value::Null),
+                (_, None) => serde_json::Value::Null,
             };
-            result_map.insert(node_id, value);
+            result_map.insert(node_id.clone(), value);
         }
     }
     let wrapped = TaskResult::Ok(serde_json::Value::Object(result_map));
     Ok(serde_json::to_string(&wrapped)?)
 }
 
+/// The result text of a COMPLETED workflow with an explicit output node. Python: `_explicit_output_result` and
+/// `_stored_output_result` (`core/workflows/engine.py:3772-3907`).
+///
+/// - SKIPPED: an error envelope with `WORKFLOW_OUTPUT_SKIPPED`; the workflow succeeded and has no output.
+/// - COMPLETED or FAILED with a stored result: that text, unchanged.
+/// - COMPLETED or FAILED with no stored result: an error envelope with `RESULT_DESERIALIZATION_ERROR`.
+/// - No node at the index, or a node that is not terminal: an error naming the workflow and the node. The
+///   completion check counted no live node under the workflow lock, so either is a broken invariant.
+fn explicit_output_result(
+    workflow_id: Uuid,
+    output_task_index: i32,
+    row: Option<NodeResult>,
+) -> Result<String, WorkflowError> {
+    let Some(row) = row else {
+        return Err(WorkflowError::Validation(format!(
+            "workflow {workflow_id} has output_task_index {output_task_index} and no node row at that index"
+        )));
+    };
+    let node_id = row.node_id.clone().unwrap_or_default();
+    let error = match (row.status.as_str(), row.result.as_deref()) {
+        ("SKIPPED", _) => output_error(
+            OutcomeCode::WorkflowOutputSkipped.into(),
+            format!(
+                "Workflow {workflow_id} is COMPLETED and has no output: its output node {node_id:?} is SKIPPED"
+            ),
+            workflow_id,
+            &row,
+        ),
+        ("COMPLETED" | "FAILED", Some(stored)) if !stored.is_empty() => {
+            return Ok(stored.to_owned());
+        }
+        (status @ ("COMPLETED" | "FAILED"), _) => output_error(
+            OperationalErrorCode::ResultDeserializationError.into(),
+            format!(
+                "Workflow {workflow_id} is COMPLETED and its output node {node_id:?} is {status} with no stored result"
+            ),
+            workflow_id,
+            &row,
+        ),
+        (status, _) => {
+            return Err(WorkflowError::Validation(format!(
+                "workflow {workflow_id} output node {node_id:?} is {status} at workflow completion; \
+                 the completion check counted no live node under the workflow lock"
+            )));
+        }
+    };
+    Ok(serde_json::to_string(
+        &TaskResult::<serde_json::Value>::Err(error),
+    )?)
+}
+
+/// The error of a COMPLETED workflow output that has no result: the explicit output node, or a terminal node
+/// of an outputless workflow. `data` names the workflow and the node (Python `_output_error_envelope`).
+fn output_error(
+    error_code: crate::core::TaskErrorCode,
+    message: String,
+    workflow_id: Uuid,
+    row: &NodeResult,
+) -> TaskError {
+    TaskError {
+        error_code: Some(error_code),
+        message: Some(message),
+        cause: None,
+        data: Some(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "output_node_id": row.node_id,
+            "output_task_index": row.task_index,
+            "output_task_name": row.task_name,
+        })),
+    }
+}
+
 /// Get a specific error for a failed workflow.
 ///
-/// Matches Python's `_get_workflow_failure_error()`:
-/// - Without success_policy: returns the first failed task's error (by index).
-/// - With success_policy: returns the first failed required task's error,
-///   or a WORKFLOW_SUCCESS_CASE_NOT_MET sentinel if no required task failed.
+/// Matches Python's `get_workflow_failure_error()` (`core/workflows/engine.py:3523-3620`):
+/// - Without success_policy: the first failed task's error (by index). With no such error, `None`: the
+///   caller keeps the stored workflow error. A phase-2 recovery that knows the task's terminal status
+///   (`recovered_terminal_status`) gets an error named from that status instead.
+/// - With success_policy: the first failed required task's error, or WORKFLOW_SUCCESS_CASE_NOT_MET when no
+///   required task failed.
 async fn get_workflow_failure_error(
     conn: &mut sqlx::PgConnection,
     workflow_id: Uuid,
     success_policy_json: &Option<serde_json::Value>,
     recovered_terminal_status: Option<&str>,
-) -> Result<String, WorkflowError> {
+) -> Result<Option<String>, WorkflowError> {
     match success_policy_json {
         None => {
             // Default: get first failed task's error by index.
@@ -3006,7 +3111,7 @@ async fn get_workflow_failure_error(
                     if let Ok(TaskResult::<serde_json::Value>::Err(task_error)) =
                         serde_json::from_str::<TaskResult<serde_json::Value>>(result_json)
                     {
-                        return Ok(serde_json::to_string(&task_error)?);
+                        return Ok(Some(serde_json::to_string(&task_error)?));
                     }
                 }
             }
@@ -3030,12 +3135,9 @@ async fn get_workflow_failure_error(
                         "Worker crashed during task execution (task_status={status}, no result stored)"
                     ),
                 ),
-                None => TaskError::builtin(
-                    OutcomeCode::WorkflowSuccessCaseNotMet,
-                    "one or more tasks failed",
-                ),
+                None => return Ok(None),
             };
-            Ok(serde_json::to_string(&fallback)?)
+            Ok(Some(serde_json::to_string(&fallback)?))
         }
         Some(policy_json) => {
             // With success_policy: find first failed required task.
@@ -3066,17 +3168,17 @@ async fn get_workflow_failure_error(
                         if let Ok(TaskResult::<serde_json::Value>::Err(task_error)) =
                             serde_json::from_str::<TaskResult<serde_json::Value>>(result_json)
                         {
-                            return Ok(serde_json::to_string(&task_error)?);
+                            return Ok(Some(serde_json::to_string(&task_error)?));
                         }
                     }
                 }
             }
 
             // No required task failed but no case satisfied (all SKIPPED?).
-            Ok(serde_json::to_string(&TaskError::builtin(
+            Ok(Some(serde_json::to_string(&TaskError::builtin(
                 OutcomeCode::WorkflowSuccessCaseNotMet,
-                "no success case was satisfied",
-            ))?)
+                "No success case was satisfied",
+            ))?))
         }
     }
 }
@@ -5361,5 +5463,182 @@ mod child_outcome_tests {
         );
         assert_eq!(child_error_summary(Some("")), None);
         assert_eq!(child_error_summary(None), None);
+    }
+}
+
+#[cfg(test)]
+mod completion_rule_tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn statuses(values: &[&str]) -> Vec<TaskStatusRow> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, status)| TaskStatusRow {
+                task_index: index as i32,
+                status: (*status).to_owned(),
+            })
+            .collect()
+    }
+
+    fn output_row(status: &str, result: Option<&str>) -> NodeResult {
+        NodeResult {
+            node_id: Some("out".to_owned()),
+            result: result.map(str::to_owned),
+            status: status.to_owned(),
+            task_index: 2,
+            task_name: "produce".to_owned(),
+        }
+    }
+
+    fn stored_error(text: &str) -> TaskError {
+        let stored: TaskResult<serde_json::Value> = serde_json::from_str(text).unwrap();
+        match stored {
+            TaskResult::Err(error) => error,
+            TaskResult::Ok(value) => panic!("expected an error envelope, got ok {value}"),
+        }
+    }
+
+    #[test]
+    fn the_default_rule_needs_no_failed_node_and_no_stored_error() {
+        let all_completed = statuses(&["COMPLETED", "COMPLETED"]);
+        assert!(evaluate_workflow_success(&None, false, false, &all_completed).unwrap());
+        // A stored workflow error fails the workflow even with no FAILED node.
+        assert!(!evaluate_workflow_success(&None, true, false, &all_completed).unwrap());
+        assert!(!evaluate_workflow_success(&None, false, true, &all_completed).unwrap());
+    }
+
+    #[test]
+    fn a_stored_success_policy_that_does_not_parse_fails_the_step() {
+        let error = evaluate_workflow_success(
+            &Some(serde_json::json!({"cases": "not a list"})),
+            false,
+            false,
+            &statuses(&["COMPLETED"]),
+        )
+        .unwrap_err();
+        assert!(matches!(error, WorkflowError::Serialization(_)));
+    }
+
+    #[test]
+    fn a_skipped_output_node_gives_workflow_output_skipped() {
+        let workflow_id = Uuid::new_v4();
+        let text =
+            explicit_output_result(workflow_id, 2, Some(output_row("SKIPPED", None))).unwrap();
+        let error = stored_error(&text);
+        assert_eq!(
+            error
+                .error_code
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("WORKFLOW_OUTPUT_SKIPPED")
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "output_node_id": "out",
+                "output_task_index": 2,
+                "output_task_name": "produce",
+            }))
+        );
+    }
+
+    #[test]
+    fn an_output_node_with_no_stored_result_gives_result_deserialization_error() {
+        for status in ["COMPLETED", "FAILED"] {
+            for result in [None, Some("")] {
+                let text =
+                    explicit_output_result(Uuid::new_v4(), 2, Some(output_row(status, result)))
+                        .unwrap();
+                assert_eq!(
+                    stored_error(&text)
+                        .error_code
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .as_deref(),
+                    Some("RESULT_DESERIALIZATION_ERROR")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stored_output_result_is_copied_unchanged() {
+        let stored = serde_json::to_string(&TaskResult::Ok(serde_json::json!([1, 2]))).unwrap();
+        for status in ["COMPLETED", "FAILED"] {
+            assert_eq!(
+                explicit_output_result(Uuid::new_v4(), 2, Some(output_row(status, Some(&stored))))
+                    .unwrap(),
+                stored
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_live_output_node_is_an_error() {
+        assert!(explicit_output_result(Uuid::new_v4(), 2, None).is_err());
+        assert!(
+            explicit_output_result(Uuid::new_v4(), 2, Some(output_row("RUNNING", None))).is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn completion_with_a_stored_error_and_no_failed_node_keeps_that_error() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let workflow_id = Uuid::new_v4();
+        let first_error = serde_json::to_string(&TaskError::new("FIRST", "first failure")).unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'stored_error', 'RUNNING', 'fail', $2, $3, 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(&first_error)
+        .bind(format!("test.stored-error.{workflow_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ok = serde_json::to_string(&TaskResult::Ok(serde_json::json!(1))).unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                 id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies, allow_failed_deps, join_type,
+                 max_retries, execution, retention_class_key, status, result,
+                 is_subworkflow, created_at, completed_at
+             ) VALUES ($1, $2, 0, 'only', 'only_task', '{}', 'default', 100, '{}',
+                       FALSE, 'all', 0, 'ISOLATED', 'forever', 'COMPLETED', $3,
+                       FALSE, NOW(), NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .bind(&ok)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        check_workflow_completion(
+            &pool,
+            workflow_id,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "FAILED");
+        assert_eq!(error, Some(first_error));
     }
 }
