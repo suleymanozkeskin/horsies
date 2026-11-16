@@ -281,12 +281,15 @@ pub struct WorkerHistoryPoint {
     pub memory_percent: Option<f64>,
 }
 
+/// One row of `horsies_schedule_state`. `last_task_id` is the `uuid` column
+/// as a task id (a task id is a UUID in the public API); it serializes as the
+/// hyphenated lowercase text, as Python's `str` of the id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ScheduleStateInfo {
     pub schedule_name: String,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
-    pub last_task_id: Option<String>,
+    pub last_task_id: Option<Uuid>,
     pub run_count: i32,
     pub updated_at: DateTime<Utc>,
 }
