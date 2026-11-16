@@ -13,30 +13,16 @@ on data, not on exceptions.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
+from horsies._catalog.monitoring import (
+    MonitoringQueryErrorCode as MonitoringQueryErrorCode,
+)
 from horsies.core.types.result import Result
 
 
 if TYPE_CHECKING:
     from horsies.core.brokers.resources import EventLoopLimit
-
-
-class MonitoringQueryErrorCode(str, Enum):
-    """Failure category for a monitoring read.
-
-    Each member names one variant of ``MonitoringQueryError``.
-    """
-
-    DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-    # The broker already holds resource sets for its limit of open event
-    # loops, and this call ran on a new one. Nothing ran. It clears when one
-    # of those loops closes.
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    # Stored history data does not decode. A repeat gives the same result
-    # until the stored row or the server changes.
-    HISTORY_CONTRACT_VIOLATION = 'HISTORY_CONTRACT_VIOLATION'
 
 
 @dataclass(slots=True, frozen=True)
