@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::FromRow;
+use sqlx::{FromRow, PgPool};
 
 use crate::broker::class_coverage::{
     class_coverage, class_report, live_worker, refused, ClassCoverage, ClassReadRefused,
@@ -234,14 +234,7 @@ impl PostgresBroker {
     ///   [`PENDING_STREAM_LIMIT`]); not retryable, since the same rows give
     ///   the same answer.
     pub async fn get_class_coverage(&self) -> BrokerResult<ClassCoverage> {
-        let row: CoverageRow = sqlx::query_as(CLASS_COVERAGE_SQL)
-            .bind(LIVE_WINDOW_SECONDS)
-            .bind(LIVE_SNAPSHOT_READ_LIMIT)
-            .bind(PENDING_STREAM_READ_LIMIT)
-            .fetch_one(self.pool())
-            .await
-            .map_err(|error| class_read_failed("get_class_coverage", &error))?;
-        coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
+        read_class_coverage(self.pool()).await
     }
 
     /// The class report: pending streams with the wait of their oldest due
@@ -266,6 +259,20 @@ impl PostgresBroker {
             .map_err(|error| class_read_failed("get_class_report", &error))?;
         report_from_row(row).map_err(|cause| class_read_refused("get_class_report", &cause))
     }
+}
+
+/// The fleet check of [`PostgresBroker::get_class_coverage`], read on
+/// `pool`. The reaper reads it on its own pool after each pass. Same
+/// statement, same answers and errors; reads only.
+pub(crate) async fn read_class_coverage(pool: &PgPool) -> BrokerResult<ClassCoverage> {
+    let row: CoverageRow = sqlx::query_as(CLASS_COVERAGE_SQL)
+        .bind(LIVE_WINDOW_SECONDS)
+        .bind(LIVE_SNAPSHOT_READ_LIMIT)
+        .bind(PENDING_STREAM_READ_LIMIT)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| class_read_failed("get_class_coverage", &error))?;
+    coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
 }
 
 /// A class read that the database did not answer. `retryable` is the driver

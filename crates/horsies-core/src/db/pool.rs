@@ -428,6 +428,11 @@ impl CorePool {
         self.plan.role
     }
 
+    /// The size of the pool and its reserve.
+    pub fn sizing(&self) -> PoolSizing {
+        self.plan.sizing
+    }
+
     /// Checks out a connection.
     ///
     /// Waits at most `checkout_wait` (gate and pool together). Until the

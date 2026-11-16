@@ -17,14 +17,13 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
-    FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
+    finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement,
+    RetryRequest,
 };
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, TerminalizationKind,
-    WorkflowSuccessOutcome,
 };
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 use crate::workflow_engine::lifecycle::pause_workflow;
 
@@ -32,8 +31,14 @@ const QUEUE: &str = "lifecycle_regressions";
 const CHANNEL: &str = "task_queue_lifecycle_regressions";
 const CRASH_RESULT: &str = r#"{"err": "worker crashed"}"#;
 const STALE_SCAN_LIMIT: i64 = 1_000;
-/// Bound of a reaper pass that must not wait on a held row.
+/// Bound of a reaper pass after the rows it waits on are released.
 const REAPER_WAIT: StdDuration = StdDuration::from_secs(5);
+/// The task lock that every lifecycle function takes first.
+const TASK_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))";
+/// Bound of the polls for a backend that waits on a lock.
+const LOCK_WAIT_POLLS: u32 = 400;
+/// The wait between two polls for a lock wait.
+const LOCK_WAIT_POLL: StdDuration = StdDuration::from_millis(25);
 
 fn crash_policy(auto_retry_for: &str) -> String {
     format!(
@@ -311,9 +316,11 @@ async fn plain_worker_failure_wakes_the_queue_in_its_write() {
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
-/// Python `test_finalizer_row_lock_wins_reaper_race`: the stale scan steps
-/// around a row that a finalizer holds, without waiting; the finalizer then
-/// completes the task.
+/// Python `test_finalizer_row_lock_wins_reaper_race`: a finalizer that holds
+/// the task lock and the row lock makes the stale recovery wait in
+/// `horsies_finish_stale_attempt`. The finalizer completes the task under
+/// its locks and commits; the recovery then finds the row moved and writes
+/// nothing for it.
 #[tokio::test]
 #[serial]
 async fn finalizer_row_lock_wins_reaper_race() {
@@ -323,37 +330,43 @@ async fn finalizer_row_lock_wins_reaper_race() {
     set_started(&pool, task_id, Since::SecondsAgo(120.0)).await;
 
     let mut finalizer = pool.begin().await.expect("begin the finalizer");
+    sqlx::query(TASK_LOCK_SQL)
+        .bind(task_id)
+        .execute(&mut *finalizer)
+        .await
+        .expect("hold the task lock");
     sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .execute(&mut *finalizer)
         .await
         .expect("hold the row lock");
-    let processed = tokio::time::timeout(
-        REAPER_WAIT,
-        mark_stale_running_as_failed(&pool, 1.0, 300.0, STALE_SCAN_LIMIT),
-    )
-    .await
-    .expect("the reaper does not wait on the held row")
-    .expect("stale recovery");
-    finalizer.rollback().await.expect("release the row lock");
+    let reaper_pool = pool.clone();
+    let reaper = tokio::spawn(async move {
+        mark_stale_running_as_failed(&reaper_pool, 1.0, 300.0, STALE_SCAN_LIMIT).await
+    });
+    until_a_backend_waits_on_a_lock(&pool, "horsies_finish_stale_attempt").await;
+
+    // The success takes the task lock again in the finalizer's session and
+    // reads the row the finalizer holds.
+    let outcome: String =
+        sqlx::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
+            .bind(task_id)
+            .bind(WORKER)
+            .bind(generation())
+            .bind(r#"{"ok": 1}"#)
+            .fetch_one(&mut *finalizer)
+            .await
+            .expect("workflow success");
+    assert_eq!(outcome, "APPLIED");
+    finalizer.commit().await.expect("commit the finalizer");
+
+    let processed = tokio::time::timeout(REAPER_WAIT, reaper)
+        .await
+        .expect("the reaper ends after the finalizer commits")
+        .expect("reaper join")
+        .expect("stale recovery");
     // Other stale rows of the shared database may be processed; this one is not.
     let _other_rows: u64 = processed;
-    assert_eq!(status_of(&pool, task_id).await, "RUNNING");
-
-    let outcome = finish_workflow_success(
-        &pool,
-        &FinishWorkflowSuccess {
-            task_id,
-            fence: owned_claim(),
-            result_json: r#"{"ok": 1}"#.to_owned(),
-        },
-    )
-    .await
-    .expect("workflow success");
-    assert!(
-        matches!(outcome, WorkflowSuccessOutcome::SuccessApplied { .. }),
-        "{outcome:?}"
-    );
     assert_eq!(
         history_row(&pool, task_id)
             .await
@@ -363,6 +376,30 @@ async fn finalizer_row_lock_wins_reaper_race() {
     );
     cleanup_tasks(&pool, &[task_id]).await;
     cleanup_workflows(&pool, &[workflow_id]).await;
+}
+
+/// Return once a backend whose query names `function` waits on a lock.
+async fn until_a_backend_waits_on_a_lock(pool: &sqlx::PgPool, function: &str) {
+    for _ in 0..LOCK_WAIT_POLLS {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%' || $1 || '%'
+                   AND pid <> pg_backend_pid()
+             )",
+        )
+        .bind(function)
+        .fetch_one(pool)
+        .await
+        .expect("read the lock waits");
+        match waiting {
+            true => return,
+            false => tokio::time::sleep(LOCK_WAIT_POLL).await,
+        }
+    }
+    panic!("no backend waited on a lock in {function}");
 }
 
 /// Python `test_pause_resets_retry_window_claimed_workflow_task`: a pause

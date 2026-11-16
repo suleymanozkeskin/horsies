@@ -118,8 +118,25 @@ impl PrunePass {
     }
 }
 
-const EXPIRED_HISTORY_FILTER: &str = "c.class_key <> $1 AND r.class_kind = 'PERIOD'";
-const EXPIRED_FINITE_FILTER: &str = "r.class_kind IN ('PERIOD', 'HEARTBEAT')";
+/// Which expired leaves a candidate read of a pruning pass selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateScope {
+    /// Period-class leaves, for the history sweep. Python
+    /// `EXPIRED_HISTORY_LEAVES_SQL` (`horsies/core/history/maintenance/pruning.py:77-87`).
+    History,
+    /// Period and heartbeat leaves, for the finalize pre-phase, which must see
+    /// every parent. Python `EXPIRED_FINITE_LEAVES_SQL` (`pruning.py:92-106`).
+    Finite,
+}
+
+impl CandidateScope {
+    fn filter(self) -> &'static str {
+        match self {
+            Self::History => "c.class_key <> $1 AND r.class_kind = 'PERIOD'",
+            Self::Finite => "r.class_kind IN ('PERIOD', 'HEARTBEAT')",
+        }
+    }
+}
 
 /// How long a leaf of the joined class `r` stays after its upper bound. NULL
 /// for `forever`, so a forever leaf never expires.
@@ -128,30 +145,41 @@ const CLASS_RETENTION_SQL: &str = "CASE r.class_kind
              WHEN 'HEARTBEAT' THEN make_interval(hours => r.heartbeat_horizon_hours)
          END";
 
-/// The oldest expired leaves that `filter` selects, at most
-/// `MAX_PRUNE_CANDIDATES_PER_PASS`, and whether more remain.
-async fn expired_candidates(
-    pool: &PgPool,
-    filter: &str,
-    bind_heartbeat: bool,
-) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
-    let sql = format!(
+/// The candidate read that a pruning pass sends for `scope`: leaves whose
+/// class period has passed and that the catalog has not recorded as dropped,
+/// oldest first, at most `MAX_PRUNE_CANDIDATES_PER_PASS + 1` rows (one more
+/// than the bound shows that the pass is truncated). `History` takes `$1`, the
+/// heartbeat class key. The `dropped_at IS NULL` predicate lets the read use
+/// the partial index `horsies_task_history_leaf_catalog_active`.
+pub(crate) fn expired_candidates_sql(scope: CandidateScope) -> String {
+    format!(
         "SELECT c.leaf_name, c.class_key, c.lower_anchor, c.upper_anchor
          FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
            ON r.class_key = c.class_key
-         WHERE {filter} AND c.dropped_at IS NULL
+         WHERE {} AND c.dropped_at IS NULL
            AND c.upper_anchor + {CLASS_RETENTION_SQL} <= statement_timestamp()
          ORDER BY c.lower_anchor
          LIMIT {}",
+        scope.filter(),
         MAX_PRUNE_CANDIDATES_PER_PASS + 1
-    );
-    let rows: Vec<(String, String, DateTime<Utc>, DateTime<Utc>)> = if bind_heartbeat {
-        sqlx::query_as(&sql)
-            .bind(HEARTBEAT_CLASS_KEY)
-            .fetch_all(pool)
-            .await?
-    } else {
-        sqlx::query_as(&sql).fetch_all(pool).await?
+    )
+}
+
+/// The oldest expired leaves of `scope`, at most
+/// `MAX_PRUNE_CANDIDATES_PER_PASS`, and whether more remain.
+async fn expired_candidates(
+    pool: &PgPool,
+    scope: CandidateScope,
+) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
+    let sql = expired_candidates_sql(scope);
+    let rows: Vec<(String, String, DateTime<Utc>, DateTime<Utc>)> = match scope {
+        CandidateScope::History => {
+            sqlx::query_as(&sql)
+                .bind(HEARTBEAT_CLASS_KEY)
+                .fetch_all(pool)
+                .await?
+        }
+        CandidateScope::Finite => sqlx::query_as(&sql).fetch_all(pool).await?,
     };
     let reach = match rows.len() > MAX_PRUNE_CANDIDATES_PER_PASS {
         true => PruneReach::Truncated,
@@ -174,7 +202,7 @@ async fn finalize_interrupted_detaches<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
 ) -> (Vec<String>, Vec<String>, Vec<String>, PruneReach) {
-    let (candidates, reach) = match expired_candidates(pool, EXPIRED_FINITE_FILTER, false).await {
+    let (candidates, reach) = match expired_candidates(pool, CandidateScope::Finite).await {
         Ok(candidates) => candidates,
         Err(error) => {
             return (
@@ -287,7 +315,7 @@ pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
     max_acted_leaves: usize,
 ) -> LeafSweep<HistoryLeafSwept> {
     let (candidates, candidate_reach) =
-        match expired_candidates(pool, EXPIRED_HISTORY_FILTER, true).await {
+        match expired_candidates(pool, CandidateScope::History).await {
             Ok(candidates) => candidates,
             Err(error) => {
                 return LeafSweep {
@@ -390,5 +418,161 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
         refusals,
         errors,
         reach,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Python specification: `tests/integration/test_history_catalog_active_index.py`.
+
+    use std::collections::BTreeSet;
+
+    use serde_json::Value;
+    use serial_test::serial;
+
+    use super::{expired_candidates_sql, CandidateScope};
+    use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
+
+    const ACTIVE_INDEX: &str = "horsies_task_history_leaf_catalog_active";
+    const CLASS_KEY: &str = "standard_30d";
+    const DROPPED_RECORDS: i32 = 6_000;
+    const ACTIVE_RECORDS: i32 = 20;
+    /// Upper bound of the plan nodes the walk reads; a larger plan fails the
+    /// test.
+    const MAX_PLAN_NODES: usize = 256;
+
+    /// Every node of the plan tree under `root`.
+    fn plan_nodes(root: &Value) -> Vec<&Value> {
+        let mut nodes = Vec::new();
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            assert!(
+                nodes.len() < MAX_PLAN_NODES,
+                "plan has more than {MAX_PLAN_NODES} nodes"
+            );
+            nodes.push(node);
+            if let Some(children) = node.get("Plans").and_then(Value::as_array) {
+                pending.extend(children.iter());
+            }
+        }
+        nodes
+    }
+
+    /// For each catalog scan of the plan, the indexes it reads through. A scan
+    /// that reads the table without an index (a Seq Scan) reads through none.
+    fn catalog_scan_indexes(root: &Value) -> Vec<BTreeSet<String>> {
+        plan_nodes(root)
+            .into_iter()
+            .filter(|node| node.get("Relation Name").and_then(Value::as_str) == Some(LEAF_CATALOG))
+            .map(|node| match node.get("Node Type").and_then(Value::as_str) {
+                Some("Index Scan" | "Index Only Scan") => node
+                    .get("Index Name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                Some("Bitmap Heap Scan") => plan_nodes(node)
+                    .into_iter()
+                    .filter_map(|inner| inner.get("Index Name").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect(),
+                _ => BTreeSet::new(),
+            })
+            .collect()
+    }
+
+    /// `test_expired_leaf_scan_examines_only_active_records`: with 6,000
+    /// dropped catalog records and 20 active ones of one class, analyzed,
+    /// every catalog scan of each candidate read that a pruning pass sends
+    /// reads through the active-record index, so the read examines no dropped
+    /// record. Rows are not counted: EXPLAIN gives a scan's rows as a rounded
+    /// mean per loop.
+    #[tokio::test]
+    #[serial]
+    async fn the_candidate_reads_scan_only_active_catalog_records() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut transaction = pool.begin().await.expect("begin");
+        sqlx::query(&format!(
+            "INSERT INTO {RETENTION_CLASSES} (
+                class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
+             ) VALUES ($1, 'PERIOD', 30, NULL, statement_timestamp())
+             ON CONFLICT (class_key) DO NOTHING"
+        ))
+        .bind(CLASS_KEY)
+        .execute(transaction.as_mut())
+        .await
+        .expect("register the class");
+        sqlx::query(&format!(
+            "INSERT INTO {LEAF_CATALOG} (
+                leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+                index_schema_version, created_at, detached_at, dropped_at
+             )
+             SELECT 'catalog_probe_leaf_' || day, $1, 'AT',
+                    TIMESTAMPTZ '2000-01-01 00:00:00+00' + day * interval '1 day',
+                    TIMESTAMPTZ '2000-01-02 00:00:00+00' + day * interval '1 day',
+                    1, NOW(),
+                    CASE WHEN day < $2 THEN NOW() END,
+                    CASE WHEN day < $2 THEN NOW() END
+             FROM generate_series(0, $3 - 1) AS day"
+        ))
+        .bind(CLASS_KEY)
+        .bind(DROPPED_RECORDS)
+        .bind(DROPPED_RECORDS + ACTIVE_RECORDS)
+        .execute(transaction.as_mut())
+        .await
+        .expect("seed the catalog");
+        sqlx::query(&format!("ANALYZE {LEAF_CATALOG}"))
+            .execute(transaction.as_mut())
+            .await
+            .expect("analyze the catalog");
+        let definition: Option<String> =
+            sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
+                .bind(ACTIVE_INDEX)
+                .fetch_one(transaction.as_mut())
+                .await
+                .expect("read the index definition");
+
+        // The index holds only records whose leaf is not dropped.
+        assert!(
+            definition
+                .as_deref()
+                .is_some_and(|text| text.ends_with(" WHERE (dropped_at IS NULL)")),
+            "{definition:?}"
+        );
+        for scope in [CandidateScope::History, CandidateScope::Finite] {
+            let explain = format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+                expired_candidates_sql(scope)
+            );
+            let plan: Value = match scope {
+                CandidateScope::History => {
+                    sqlx::query_scalar(&explain)
+                        .bind(HEARTBEAT_CLASS_KEY)
+                        .fetch_one(transaction.as_mut())
+                        .await
+                }
+                CandidateScope::Finite => {
+                    sqlx::query_scalar(&explain)
+                        .fetch_one(transaction.as_mut())
+                        .await
+                }
+            }
+            .expect("explain the candidate read");
+            let root = &plan[0]["Plan"];
+            let scans = catalog_scan_indexes(root);
+            assert!(!scans.is_empty(), "{scope:?}: {plan}");
+            assert!(
+                scans
+                    .iter()
+                    .all(|scan| scan.len() == 1 && scan.contains(ACTIVE_INDEX)),
+                "{scope:?}: {plan}"
+            );
+            // The seeded active records are expired, so the read returns them.
+            assert!(
+                root["Actual Rows"].as_f64().expect("actual rows") >= f64::from(ACTIVE_RECORDS),
+                "{scope:?}: {plan}"
+            );
+        }
+        transaction.rollback().await.expect("rollback");
     }
 }

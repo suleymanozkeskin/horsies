@@ -30,7 +30,12 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(pool, workflow_spec, &WorkflowSpecRegistry::new()).await
+    start(
+        pool,
+        workflow_spec,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await
 }
 
 async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
@@ -39,7 +44,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
         workflow_id,
         index,
         &ok(value),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 }
@@ -50,7 +55,7 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str, me
         workflow_id,
         index,
         &err(error_code, message),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 }
@@ -383,7 +388,8 @@ async fn a_sub_workflow_node_and_its_children_store_their_container_input() {
     let pool = shared_pool().await;
     let child_key = "tests.port.container_child.v1";
     let grandchild_key = "tests.port.container_grandchild.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(container_grandchild(grandchild_key))
         .expect("register the grandchild");

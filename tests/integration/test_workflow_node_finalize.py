@@ -42,6 +42,7 @@ from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     finish_workflow_success,
 )
+from tests.dispatch_claim_support import claim_at
 from tests.integration.autocommit_support import (
     WORKER_ID,
     ProxiedWorker,
@@ -169,7 +170,7 @@ async def _finalize(
         queue_name=node.queue_name,
         is_workflow_task=True,
         task_name=node.task_name,
-        claimed_at=node.claimed_at if claimed_at is None else claimed_at,
+        claim=claim_at(node.claimed_at if claimed_at is None else claimed_at),
     )
 
 

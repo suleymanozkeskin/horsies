@@ -16,7 +16,7 @@ use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
     RetryRequest,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
     AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationCommand,
     TerminalizationKind, TerminalizationOutcome, WorkflowSuccessOutcome,
