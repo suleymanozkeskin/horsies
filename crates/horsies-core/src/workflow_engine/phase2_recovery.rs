@@ -8,7 +8,9 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::phase2::consumption::{
     consume_phase2, Phase2Disposition, Phase2DispositionKind,
 };
-use crate::core::history::phase2::quarantine::{quarantine_one, QuarantineVerdict};
+use crate::core::history::phase2::quarantine::{
+    quarantine_one, QuarantineOutcome, QuarantineVerdict,
+};
 use crate::core::lifecycle::TerminalizationKind;
 use crate::core::types::status::TaskStatus;
 use crate::workflow_engine::engine::apply_phase2_progression_in_tx;
@@ -55,6 +57,51 @@ pub struct Phase2RecoverySummary {
     pub over_attempt_bound: i64,
     pub retained_details: Vec<String>,
     pub quarantine_refusals: Vec<String>,
+}
+
+/// What the quarantine step did for one row of a recovery pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QuarantineStep {
+    /// The row is under the attempt bound, or its disposition is durable.
+    NotDue,
+    /// The pending row points at a verified copy, or was already drained.
+    Quarantined { reason: String },
+    /// The quarantine function refused; the pending row keeps its locator.
+    Refused { refusal: String },
+}
+
+/// Classifies one quarantine verdict as Python's `_quarantine_exhausted_row`
+/// does (`horsies/core/workflows/phase2_recovery.py:701-725`): a repoint or a
+/// drained verdict is quarantined; every other verdict is a refusal.
+fn quarantine_step(
+    task_id: Uuid,
+    attempt_count: i32,
+    disposition: Phase2DispositionKind,
+    outcome: &QuarantineOutcome,
+) -> QuarantineStep {
+    match outcome.verdict {
+        QuarantineVerdict::Repointed
+        | QuarantineVerdict::PendingGone
+        | QuarantineVerdict::AlreadyQuarantined => QuarantineStep::Quarantined {
+            reason: format!(
+                "attempt bound {attempt_count} reached; last disposition {}",
+                disposition.as_str()
+            ),
+        },
+        QuarantineVerdict::NodeRowAbsent
+        | QuarantineVerdict::SourceAbsent
+        | QuarantineVerdict::CopyVerificationFailed => QuarantineStep::Refused {
+            refusal: format!(
+                "{task_id}: quarantine refused with {}{}",
+                outcome.verdict.as_str(),
+                outcome
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default()
+            ),
+        },
+    }
 }
 
 fn node_status_for_terminal_task(status: &str) -> Result<&'static str, WorkflowError> {
@@ -225,7 +272,7 @@ pub async fn drive_phase2_recovery(
                 continue;
             }
         };
-        let row_result: Result<(Phase2Disposition, bool, Option<String>), WorkflowError> = async {
+        let row_result: Result<(Phase2Disposition, QuarantineStep), WorkflowError> = async {
             let disposition = consume_phase2(&mut transaction, candidate.task_id, node_status)
                 .await
                 .map_err(|error| WorkflowError::Validation(error.to_string()))?;
@@ -233,8 +280,7 @@ pub async fn drive_phase2_recovery(
                 apply_progression(&mut transaction, &disposition, registry, payload, retention)
                     .await?;
             }
-            let mut quarantined = false;
-            let mut refusal = None;
+            let mut quarantine = QuarantineStep::NotDue;
             if !disposition.disposition.is_durable() {
                 let attempt_count: i32 = sqlx::query_scalar(RECORD_RETAINING_ATTEMPT_SQL)
                     .bind(candidate.task_id)
@@ -242,34 +288,22 @@ pub async fn drive_phase2_recovery(
                     .fetch_one(transaction.as_mut())
                     .await?;
                 if attempt_count >= quarantine_after_attempts as i32 {
-                    let reason = format!(
-                        "attempt bound {attempt_count} reached; last disposition {}",
-                        disposition.disposition.as_str()
-                    );
-                    let outcome = quarantine_one(&mut transaction, candidate.task_id, &reason)
+                    let outcome = quarantine_one(&mut transaction, candidate.task_id)
                         .await
                         .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-                    quarantined = outcome.verdict == QuarantineVerdict::Repointed
-                        || outcome.verdict.is_drained();
-                    if !quarantined {
-                        refusal = Some(format!(
-                            "{}: quarantine refused with {}{}",
-                            candidate.task_id,
-                            outcome.verdict.as_str(),
-                            outcome
-                                .detail
-                                .as_deref()
-                                .map(|detail| format!(": {detail}"))
-                                .unwrap_or_default()
-                        ));
-                    }
+                    quarantine = quarantine_step(
+                        candidate.task_id,
+                        attempt_count,
+                        disposition.disposition,
+                        &outcome,
+                    );
                 }
             }
             transaction.commit().await?;
-            Ok((disposition, quarantined, refusal))
+            Ok((disposition, quarantine))
         }
         .await;
-        let (disposition, quarantined, refusal) = match row_result {
+        let (disposition, quarantine) = match row_result {
             Ok(result) => result,
             Err(error) => {
                 summary.failed += 1;
@@ -277,6 +311,17 @@ pub async fn drive_phase2_recovery(
                 continue;
             }
         };
+        // Logged after the commit, so a failed commit logs no quarantine.
+        // Python logs both at error level (`phase2_recovery.py:716-724`).
+        match &quarantine {
+            QuarantineStep::NotDue => {}
+            QuarantineStep::Quarantined { reason } => {
+                tracing::error!(task_id = %candidate.task_id, %reason, "phase-2 recovery quarantined the task");
+            }
+            QuarantineStep::Refused { refusal } => {
+                tracing::error!(%refusal, "phase-2 recovery quarantine refused");
+            }
+        }
         match disposition.disposition {
             Phase2DispositionKind::AppliedToNode => summary.applied += 1,
             Phase2DispositionKind::AlreadyApplied => summary.already_applied += 1,
@@ -293,11 +338,12 @@ pub async fn drive_phase2_recovery(
                         .map(|detail| format!(": {detail}"))
                         .unwrap_or_default()
                 ));
-                if quarantined {
-                    summary.quarantined += 1;
-                }
-                if let Some(refusal) = refusal {
-                    summary.quarantine_refusals.push(refusal);
+                match quarantine {
+                    QuarantineStep::NotDue => {}
+                    QuarantineStep::Quarantined { .. } => summary.quarantined += 1,
+                    QuarantineStep::Refused { refusal } => {
+                        summary.quarantine_refusals.push(refusal);
+                    }
                 }
             }
         }
@@ -520,14 +566,14 @@ mod tests {
         }
     }
 
+    /// Python `tests/unit/test_phase2_recovery_policy.py::TestDurableDispositions::test_only_the_three_durable_ones_are_listed`.
+    /// The discovery order, the attempt bound and the cap are behaviour:
+    /// `discovery_is_oldest_first_strictly_graced_and_capped`.
     #[test]
     fn durable_vocabulary_is_exact() {
         assert_eq!(Phase2DispositionKind::DURABLE.len(), 3);
         assert!(Phase2DispositionKind::AppliedToNode.is_durable());
         assert!(!Phase2DispositionKind::SourceAbsent.is_durable());
-        assert!(DISCOVER_PENDING_SQL.contains("ORDER BY created_at, task_id"));
-        assert!(DISCOVER_PENDING_SQL.contains("attempt_count <"));
-        assert!(DISCOVER_PENDING_SQL.contains("LIMIT"));
     }
 
     #[tokio::test]
@@ -604,9 +650,11 @@ mod tests {
         assert_eq!(statuses[1].1, "ENQUEUED");
         assert_eq!(statuses[1].2.expect("dependent task").get_version_num(), 7);
         assert!(statuses[0].4.is_some(), "source completion must be stamped");
-        assert!(
-            statuses[1].3.is_none(),
-            "ENQUEUED is not a workflow-node start",
+        // A promoted node starts at its enqueue: the time of the phase-2
+        // transaction that completed its dependency.
+        assert_eq!(
+            statuses[1].3, statuses[0].4,
+            "the dependent's started_at is the source's completed_at",
         );
 
         let replay = finalize_phase2(
@@ -746,12 +794,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // A transient failure (lock_not_available): it rolls the row back
+        // and adds no attempt. A persistent raise adds one (#819).
         sqlx::query(&format!(
             "CREATE OR REPLACE FUNCTION p7_phase2_inject_row_failure() RETURNS trigger
              LANGUAGE plpgsql AS $body$
              BEGIN
                  IF NEW.workflow_id = '{bad_workflow}'::uuid THEN
-                     RAISE EXCEPTION 'injected phase-2 row failure';
+                     RAISE EXCEPTION 'injected phase-2 row failure' USING ERRCODE = '55P03';
                  END IF;
                  RETURN NEW;
              END
@@ -936,6 +986,9 @@ mod tests {
             .ok();
     }
 
+    /// Python `tests/integration/test_task_history_phase2_consumption.py::TestDurableDispositions::test_terminal_workflow_supersedes_without_touching_the_node`:
+    /// the consume function supersedes the record of an ended workflow and
+    /// leaves the node. The worker's phase 2 writes such a node (#998).
     #[tokio::test]
     #[serial]
     async fn terminal_workflow_supersedes_pending_evidence_without_touching_the_node() {
@@ -956,16 +1009,11 @@ mod tests {
             .await
             .unwrap();
 
-            let disposition = finalize_phase2(
-                &pool,
-                task_id,
-                "COMPLETED",
-                &crate::core::WorkflowSpecRegistry::new(),
-                &PayloadPolicy::default(),
-                &RetentionConfig::default(),
-            )
-            .await
-            .unwrap();
+            let mut transaction = pool.begin().await.unwrap();
+            let disposition = consume_phase2(&mut transaction, task_id, "COMPLETED")
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
             assert_eq!(
                 disposition.disposition,
                 Phase2DispositionKind::SupersededByWorkflowTerminal,
@@ -1241,6 +1289,79 @@ mod tests {
         }
     }
 
+    /// The quarantine step of the recovery loop on the baseline function
+    /// (#861): a row whose consumption keeps retaining is quarantined at the
+    /// attempt bound, and its pending row points at the verified copy.
+    /// Python: `horsies/core/workflows/phase2_recovery.py:681-725`
+    /// (`_quarantine_exhausted_row`). The history row and the pending row
+    /// agree on schema version 2: the consumer refuses it
+    /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it.
+    #[tokio::test]
+    #[serial]
+    async fn the_recovery_loop_quarantines_a_retaining_row_at_the_attempt_bound() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
+        let workflow_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        seed_workflow_task(&pool, workflow_id, task_id, false).await;
+        terminalize_workflow_task(&pool, task_id).await;
+        sqlx::query(
+            "UPDATE horsies_task_history SET history_schema_version = 2 WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("set the history schema version");
+        sqlx::query(
+            "UPDATE horsies_workflow_phase2_pending
+             SET history_schema_version = 2,
+                 created_at = NOW() - INTERVAL '1 hour'
+             WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("age the pending row");
+
+        let summary = drive_phase2_recovery(
+            &pool,
+            &crate::core::WorkflowSpecRegistry::new(),
+            0,
+            1,
+            1,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("recovery pass");
+
+        assert_eq!(summary.considered, 1, "{summary:?}");
+        assert_eq!(summary.failed, 0, "{summary:?}");
+        assert_eq!(summary.retained, 1, "{summary:?}");
+        assert_eq!(summary.quarantined, 1, "{summary:?}");
+        assert!(summary.quarantine_refusals.is_empty(), "{summary:?}");
+        let (source, attempts, failure_class, copies): (String, i32, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT p.recovery_source, p.attempt_count, p.last_failure_class,
+                        (SELECT count(*) FROM horsies_workflow_phase2_quarantine AS q
+                         WHERE q.task_id = p.task_id)
+                 FROM horsies_workflow_phase2_pending AS p
+                 WHERE p.task_id = $1",
+            )
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the pending row");
+        assert_eq!(source, "QUARANTINE");
+        assert_eq!(attempts, 1);
+        assert_eq!(failure_class.as_deref(), Some("SOURCE_VERSION_CONFLICT"));
+        assert_eq!(copies, 1);
+        cleanup_case(&pool, workflow_id, task_id).await;
+    }
+
     #[tokio::test]
     #[serial]
     async fn quarantine_repoints_verified_evidence_and_consumer_drains_it() {
@@ -1251,9 +1372,7 @@ mod tests {
         terminalize_workflow_task(&pool, task_id).await;
 
         let mut transaction = pool.begin().await.unwrap();
-        let quarantined = quarantine_one(&mut transaction, task_id, "direct contract pin")
-            .await
-            .unwrap();
+        let quarantined = quarantine_one(&mut transaction, task_id).await.unwrap();
         assert_eq!(quarantined.verdict, QuarantineVerdict::Repointed);
         transaction.commit().await.unwrap();
 
