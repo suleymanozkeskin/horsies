@@ -423,10 +423,9 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::new(
-                "CUSTOM_ERR".to_owned(),
-                "something broke".to_owned(),
-            )),
+            TaskResult::Err(
+                TaskError::new("CUSTOM_ERR".to_owned(), "something broke".to_owned()).unwrap(),
+            ),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         assert!(ctx.has_result("failed:0"));
@@ -437,7 +436,7 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned())),
+            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned()).unwrap()),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         let key: NodeKey<String> = NodeKey::new("failed:0".to_owned());
@@ -454,7 +453,7 @@ mod tests {
             "task_index": 3,
             "task_name": "parse",
             "results_by_id": {
-                "fetch:0": {"__type": "ok", "value": 99}
+                "fetch:0": {"__h_task_result__": true, "ok": 99, "err": null}
             }
         }"#;
         let ctx: WorkflowContext = serde_json::from_str(json).unwrap();

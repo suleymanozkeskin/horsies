@@ -274,8 +274,12 @@ impl StartArguments {
         retention: &RetentionConfig,
     ) -> Result<(), WorkflowError> {
         let (queue, priority) = stored_queue_and_priority(node)?;
-        let merged_task_options =
-            merge_good_until_into_options(node.good_until, node.task_options_json.as_deref());
+        let merged_task_options = merge_good_until_into_options(
+            node.index,
+            &node.task_name,
+            node.good_until,
+            node.task_options_json.as_deref(),
+        )?;
         let task_facts = match node.is_subworkflow {
             true => None,
             false => Some(node_task_facts(

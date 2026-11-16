@@ -8,6 +8,13 @@ use uuid::Uuid;
 use crate::core::TaskStatus;
 
 /// Categorized broker operation failure codes.
+///
+/// The members are Python's, in Python's order
+/// (`horsies/core/brokers/result_types.py`). The nine operation codes from
+/// `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
+/// Python, `BrokerOperationFailed`. A client produces `NO_BROKER` and
+/// `NO_TYPE_AVAILABLE`; only the Python client produces `EVENT_LOOP_LIMIT`,
+/// `ASYNC_CONTEXT` and `LOOP_RUNNER_FAILED`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
 )]
@@ -17,6 +24,9 @@ pub enum BrokerErrorCode {
     SchemaInitFailed,
     EnqueueFailed,
     PayloadMismatch,
+    /// The idempotency key is reserved by another task with a different
+    /// command. Nothing was written.
+    IdempotencyKeyConflict,
     TaskInfoQueryFailed,
     MonitoringQueryFailed,
     DbPingFailed,
@@ -25,11 +35,36 @@ pub enum BrokerErrorCode {
     CloseFailed,
     ListenerStartFailed,
     ListenerSubscribeFailed,
+    /// The task handle has no broker, so it cannot read task info. Nothing
+    /// ran. A client produces it.
     NoBroker,
+    /// A typed result was requested, but the process has no registered type
+    /// for the task. The stored result is unchanged. A client produces it.
+    NoTypeAvailable,
+    /// Stored or wire JSON failed strict validation.
     InvalidJsonPayload,
+    /// The task options passed to enqueue are not valid JSON, or carry a
+    /// retry limit that cannot be stored; nothing was written.
+    InvalidTaskOptions,
+    /// The broker already holds resource sets for its limit of open event
+    /// loops, and this call ran on a new one. Nothing ran. Python client
+    /// only; removed before 0.8.0.
+    EventLoopLimit,
+    /// A sync facade was called on a thread that runs an event loop. Its wait
+    /// would stall that loop, so nothing ran. Python client only.
+    AsyncContext,
+    /// A sync facade could not run the call on the broker's sync runner.
+    /// Nothing ran. Python client only; removed before 0.8.0.
+    LoopRunnerFailed,
     /// An argument of the call was refused before anything ran. Nothing was
     /// written, and the same arguments are refused again.
     InvalidInput,
+    /// The broker has no listener, so an operation that needs one cannot run.
+    /// Nothing ran. It does not clear for this broker.
+    ListenerDisabled,
+    /// A result wait was called in a process that runs task bodies. A wait
+    /// there can hold the slot that the awaited task needs, so nothing ran.
+    WaitInsideTask,
 }
 
 impl std::fmt::Display for BrokerErrorCode {
@@ -118,11 +153,20 @@ mod tests {
     }
 
     #[test]
+    fn listener_disabled_has_python_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&BrokerErrorCode::ListenerDisabled).unwrap(),
+            "\"LISTENER_DISABLED\""
+        );
+    }
+
+    #[test]
     fn all_codes_round_trip() {
         let codes = [
             BrokerErrorCode::SchemaInitFailed,
             BrokerErrorCode::EnqueueFailed,
             BrokerErrorCode::PayloadMismatch,
+            BrokerErrorCode::IdempotencyKeyConflict,
             BrokerErrorCode::TaskInfoQueryFailed,
             BrokerErrorCode::MonitoringQueryFailed,
             BrokerErrorCode::DbPingFailed,
@@ -132,8 +176,15 @@ mod tests {
             BrokerErrorCode::ListenerStartFailed,
             BrokerErrorCode::ListenerSubscribeFailed,
             BrokerErrorCode::NoBroker,
+            BrokerErrorCode::NoTypeAvailable,
             BrokerErrorCode::InvalidJsonPayload,
+            BrokerErrorCode::InvalidTaskOptions,
+            BrokerErrorCode::EventLoopLimit,
+            BrokerErrorCode::AsyncContext,
+            BrokerErrorCode::LoopRunnerFailed,
             BrokerErrorCode::InvalidInput,
+            BrokerErrorCode::ListenerDisabled,
+            BrokerErrorCode::WaitInsideTask,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).unwrap();

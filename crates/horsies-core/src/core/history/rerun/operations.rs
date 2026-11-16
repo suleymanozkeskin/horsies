@@ -18,6 +18,7 @@ use crate::core::history::reads::detail::{read_task_detail, TaskAbsenceReason, T
 use crate::core::history::rerun::input_envelope::{
     decode_framed_rerun_input, InputEnvelopeDecodeError,
 };
+use crate::core::types::status::TaskStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunTask {
@@ -120,6 +121,14 @@ pub enum RerunOutcome {
         task_id: Uuid,
         reason: TaskAbsenceReason,
     },
+    /// The source history row does not decode: a stored status that is not a
+    /// task status, an attempt snapshot that fails its check, or a location
+    /// the staged read does not define. Nothing is written; a repeat gives the
+    /// same outcome until the stored row or the server changes.
+    SourceCorrupt {
+        task_id: Uuid,
+        detail: String,
+    },
     NotEligible {
         task_id: Uuid,
         reason: NotEligibleReason,
@@ -161,6 +170,30 @@ pub enum RerunError {
     Identity(#[from] Uuid7Error),
     #[error("rerun JSON serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// The database records another client family, or none. Nothing was
+    /// read or written. Not retryable: the database stays of its family.
+    #[error(
+        "rerun refused: this database was installed by {stored}; this is the {} client",
+        own.as_str()
+    )]
+    ClientFamilyMismatch {
+        stored: crate::broker::client_family::RecordedFamily,
+        own: crate::broker::client_family::ClientFamily,
+    },
+    /// The client family read failed on the core statement layer. Nothing
+    /// was written. Retryable when the cause may clear
+    /// (`crate::broker::error::is_retryable_statement_failure`); the next
+    /// rerun checks again.
+    #[error("rerun client family check failed: {0}")]
+    FamilyCheckStatement(crate::db::StatementFailure),
+    /// A closed broker handle could not open its core pools again for the
+    /// client family read. Nothing was written. Not retryable.
+    #[error("rerun client family check refused the connection settings: {0}")]
+    FamilyCheckPoolSettings(crate::broker::pools::PoolSettingsError),
+    /// The family row does not have the shape of its reader. Nothing was
+    /// written. Not retryable.
+    #[error("rerun client family check read an unreadable row: {0}")]
+    FamilyCheckRowDecode(crate::broker::core_rows::RowDecodeError),
 }
 
 pub async fn rerun_task_in_tx(
@@ -180,12 +213,24 @@ pub async fn rerun_task_in_tx(
         ));
     }
 
-    let detail = match read_task_detail(connection, command.source_task_id).await? {
-        TaskDetailResult::Live { task_id } => return Ok(RerunOutcome::SourceLive { task_id }),
-        TaskDetailResult::Absent { task_id, reason } => {
+    let detail = match read_task_detail(connection, command.source_task_id).await {
+        Ok(TaskDetailResult::Live { task_id }) => return Ok(RerunOutcome::SourceLive { task_id }),
+        Ok(TaskDetailResult::Absent { task_id, reason }) => {
             return Ok(RerunOutcome::SourceAbsent { task_id, reason });
         }
-        TaskDetailResult::History(detail) => detail,
+        Ok(TaskDetailResult::History(detail)) => detail,
+        Err(error @ (HistoryError::Contract(_) | HistoryError::ArchiveDecode(_))) => {
+            return Ok(RerunOutcome::SourceCorrupt {
+                task_id: command.source_task_id,
+                detail: error.to_string(),
+            });
+        }
+        Err(
+            error @ (HistoryError::Database(_)
+            | HistoryError::LeafLockNotHeld
+            | HistoryError::LeafLockBusy { .. }
+            | HistoryError::HistoryParentAbsent(_)),
+        ) => return Err(error.into()),
     };
 
     if detail.is_workflow_task {
@@ -194,7 +239,7 @@ pub async fn rerun_task_in_tx(
             reason: NotEligibleReason::WorkflowTask,
         });
     }
-    if detail.status == "COMPLETED" {
+    if detail.status == TaskStatus::Completed {
         return Ok(RerunOutcome::NotEligible {
             task_id: command.source_task_id,
             reason: NotEligibleReason::CompletedSource,
@@ -234,7 +279,9 @@ pub async fn rerun_task_in_tx(
 
     let new_task_id = mint_task_id()?;
     let root_task_id = detail.rerun_root_task_id.unwrap_or(detail.task_id);
-    let facts = prepare_enqueue_facts_with_lineage(
+    // The rerun runs with the execution class of the stored request; a stored
+    // class that does not parse is corrupt input.
+    let facts = match prepare_enqueue_facts_with_lineage(
         &detail.task_name,
         &detail.queue_name,
         detail.priority,
@@ -247,7 +294,16 @@ pub async fn rerun_task_in_tx(
         command.caller_key(),
         Some(detail.task_id),
         Some(root_task_id),
-    )?;
+    ) {
+        Ok(facts) => facts,
+        Err(EnqueuePreparationError::InvalidExecution(invalid)) => {
+            return Ok(RerunOutcome::InputCorrupt {
+                task_id: command.source_task_id,
+                detail: format!("stored task options: {}", invalid.detail),
+            });
+        }
+        Err(other) => return Err(other.into()),
+    };
 
     if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
         match claim_key_reservation(

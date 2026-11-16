@@ -16,6 +16,7 @@ import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import TextClause, text
@@ -65,21 +66,24 @@ async def _seed_task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-              (id, task_name, queue_name, priority, status, enqueued_at,
-               claimed, claimed_by_worker_id, claimed_at, claim_expires_at,
-               is_workflow_task, enqueue_sha, created_at, updated_at,
-               retry_count, max_retries,
-               retention_class_key, command_fingerprint_version,
-               command_fingerprint, retain_rerun_input,
-               prepared_rerun_input_disposition)
-            VALUES
-              (:id, 'bounds', :q, :p, :status,
-               now() - (:age * interval '1 second'),
-               :claimed, :owner, :claimed_at, :expires_at,
-               :is_wf, :sha, now(), now(), 0, 0,
-               'standard_30d', 1,
-               sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-               false, 'DECLINED_BY_POLICY')
+              (
+                  id, task_name, queue_name, priority, input, status, enqueued_at,
+                  claimed_by_worker_id, claimed_at, claim_expires_at, is_workflow_task,
+                  created_at, updated_at, retry_count, max_retries,
+                  retention_class_key, command_fingerprint_version,
+                  command_fingerprint, retain_rerun_input, execution, sent_at,
+                  worker_pid, worker_hostname, worker_process_name
+              ) VALUES (
+                  :id, 'bounds', :q, :p, '{}', :status,
+                  now() - (:age * interval '1 second'), :owner, :claimed_at,
+                  :expires_at, :is_wf, now(), now(), 0, 0, 'standard_30d',
+                  CASE WHEN CAST(:is_wf AS boolean) THEN NULL ELSE 1 END,
+                  CASE WHEN CAST(:is_wf AS boolean) THEN NULL ELSE sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')) END,
+                  false, 'ISOLATED', NOW(),
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+              )
         """),
         {
             'id': task_id,
@@ -87,12 +91,15 @@ async def _seed_task(
             'p': priority,
             'age': age_secs,
             'status': 'CLAIMED' if expired_claim else 'PENDING',
-            'claimed': expired_claim,
             'owner': 'lapsed-worker' if expired_claim else None,
             'claimed_at': None,
-            'expires_at': None,
+            # A CLAIMED row always holds a lease; the update below lapses it.
+            'expires_at': (
+                datetime.now(timezone.utc) + timedelta(minutes=5)
+                if expired_claim
+                else None
+            ),
             'is_wf': is_workflow_task,
-            'sha': '0' * 64,
         },
     )
     if expired_claim:
@@ -293,7 +300,7 @@ async def _seed_workflow_task(session: AsyncSession, workflow_status: str) -> st
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'bounds_wf', :status, 'FAIL', 0, :id,
+            VALUES (:id, 'bounds_wf', :status, 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id, 'status': workflow_status},
@@ -301,13 +308,15 @@ async def _seed_workflow_task(session: AsyncSession, workflow_status: str) -> st
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
-            VALUES (:id, :workflow_id, 0, 'node_0', 'bounds', '[]', '{}',
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES (:id, :workflow_id, 0, 'node_0', 'bounds', '{}',
                     :q, 100, '{}', FALSE, 'all', FALSE, 'ENQUEUED',
-                    :task_id, NOW())
+                    :task_id, NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'id': str(uuid.uuid4()),
