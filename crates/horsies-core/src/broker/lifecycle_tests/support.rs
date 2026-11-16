@@ -150,6 +150,7 @@ pub(super) struct TaskSeed {
     pub(super) queue_name: &'static str,
     pub(super) execution: &'static str,
     pub(super) input: &'static str,
+    pub(super) retention_class_key: &'static str,
     pub(super) task_options: Option<String>,
     pub(super) retry_count: i32,
     pub(super) max_retries: i32,
@@ -167,6 +168,7 @@ impl TaskSeed {
             queue_name: "default",
             execution: "ISOLATED",
             input: "{}",
+            retention_class_key: "forever",
             task_options: None,
             retry_count: 0,
             max_retries: 0,
@@ -214,7 +216,7 @@ pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
             $1, 'lifecycle.test', $2, 100, $14, $3, $13,
-            'forever', NOW(), NOW(),
+            $15, NOW(), NOW(),
             $4, $5, NULL,
             $6, NOW(), $7, $8,
             CASE WHEN $6 = 'CLAIMED' THEN NOW() + interval '5 minutes' END,
@@ -240,6 +242,7 @@ pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
     .bind(seed.retain_rerun_input)
     .bind(seed.execution)
     .bind(seed.input)
+    .bind(seed.retention_class_key)
     .execute(pool)
     .await
     .expect("seed live task row");

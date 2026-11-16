@@ -15,6 +15,7 @@ mod task_history_terminalization_cancellation;
 mod task_history_terminalization_expiry;
 mod task_history_terminalization_failure;
 mod task_history_terminalization_move;
+mod task_history_terminalization_prototypes;
 mod task_history_terminalization_workflow_nodes;
 mod terminal_writer_characterization;
 mod terminalization_claim_fence;
