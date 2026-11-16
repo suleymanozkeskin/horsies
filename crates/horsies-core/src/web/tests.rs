@@ -11,7 +11,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
