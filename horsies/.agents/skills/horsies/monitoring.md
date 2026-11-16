@@ -119,6 +119,10 @@ get_workflow_node(broker, workflow_id, task_index)
 list_schedules(broker)
 ```
 
+- `task_breakdown` groups: each `GroupRow.group` is `BreakdownValueGroup(value)`
+  or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (tasks no worker
+  claimed). A worker whose id is `'unknown'` is a value group of its own.
+  `Breakdown.total` is a `BreakdownCounts` over every group.
 - Filter lists: OR within a dimension, AND across dimensions; empty = no filter.
 - `error_categories` (`ErrorCategory`: OPERATIONAL / CONTRACT / RETRIEVAL /
   OUTCOME / DOMAIN) expands server-side from the library's own code registry —
@@ -281,6 +285,7 @@ from horsies.monitoring import (
     # Response models (unstable pre-1.0)
     TaskSummary, TaskListPage, TaskDetail, LeafTaskInfo, TaskAttemptInfo,
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
+    BreakdownCounts, BreakdownGroup, BreakdownValueGroup, BreakdownUnclaimedGroup,
     WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
     WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
     ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
