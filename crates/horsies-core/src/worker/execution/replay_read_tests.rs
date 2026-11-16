@@ -39,10 +39,10 @@ async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
     .expect("seed workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, task_id, is_subworkflow, created_at, started_at
-         ) VALUES ($1, $2, 0, 'only', 'replay_read_task', '{}', 'default', 100,
+         ) VALUES ('NONE', $1, $2, 0, 'only', 'replay_read_task', '{}', 'default', 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    'forever', 'RUNNING', $3, FALSE, NOW(), NOW())",
     )

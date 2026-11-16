@@ -37,8 +37,6 @@ fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
         task_id,
         fence,
         result_json: r#"{"ok": 1}"#.to_owned(),
-        notify_channel: CHANNEL.to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -80,10 +78,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
         matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
         "{first:?}"
     );
-    assert_eq!(
-        wakes.payloads(&pool).await,
-        vec![format!("capacity:{task_id}")]
-    );
+    assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
     let replay = terminalize(&pool, &command).await.expect("replay");
 

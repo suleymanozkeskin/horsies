@@ -173,10 +173,10 @@ async fn seed_workflow_for(pool: &PgPool, task_id: Uuid, queue: &str) -> Uuid {
     .expect("seed workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, task_id, is_subworkflow, created_at, started_at
-         ) VALUES ($1, $2, 0, 'only', $3, '{}', $4, 100,
+         ) VALUES ('NONE', $1, $2, 0, 'only', $3, '{}', $4, 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    'forever', 'RUNNING', $5, FALSE, NOW(), NOW())",
     )

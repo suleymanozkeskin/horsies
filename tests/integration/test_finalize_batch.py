@@ -96,7 +96,9 @@ WAIT_POLL_S: Final = 0.05
 REPLY_DROP_WAIT_S: Final = 5.0
 OUTER_BOUND_S: Final = 30.0
 TASK_LOCK_SEED: Final = 731
-UNREGISTERED_CLASS: Final = 'batch_no_partition'
+UNREGISTERED_CLASS: Final = 'standard_1777d'
+"""A class of the baseline key form that no test registers: no history leaf
+covers it, so the move of its row raises."""
 QUEUE_ROOM: Final = 4 * BATCH_ROWS
 """The batch queue bound of the test workers. A worker's bound is twice its
 claim budget, which is 2 for the one-slot test worker; these tests finalize
