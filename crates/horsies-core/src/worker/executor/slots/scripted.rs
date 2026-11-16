@@ -24,13 +24,15 @@ use super::pool::{
 use super::route::IsolatedDeadline;
 use super::shared::{SharedPool, SharedPoolConfig};
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, AsyncSeats, BootDetail, BootErrorName,
-    BootFailedFrame, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
-    DispatchNumber, ExecutorThreads, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
-    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ReportedBootCause,
-    ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, RunRef, SeatEnd,
-    SharedAsyncChild, SharedResultFrame, SharedRunFrame, SharedThreadChild, SharedWork,
-    ShortageErrno, TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
+    encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, BodyEnd, BootDetail,
+    BootErrorName, BootFailedFrame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
+    ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads, InitFrame, IsolatedChild,
+    IsolatedWork, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame,
+    LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame,
+    ReportedBootCause, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, RunRef,
+    RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame, SharedThreadChild,
+    SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats,
+    HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner};
 use crate::worker::retry::read_stored_options;
@@ -196,11 +198,89 @@ pub(super) fn reported(value: u32) -> AttemptEnd {
 
 /// The result frame of a shared run that finished.
 pub(super) fn shared_result(run: RunRef, value: u32) -> ChildFrame {
+    shared_result_with_rss(run, value, RssReading::Unreadable)
+}
+
+pub(super) fn shared_result_with_rss(run: RunRef, value: u32, rss: RssReading) -> ChildFrame {
     ChildFrame::SharedResult(SharedResultFrame {
         run,
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope(value))),
+        rss,
+    })
+}
+
+/// The run ended at its deadline in its child.
+pub(super) fn shared_timed_out(run: RunRef) -> ChildFrame {
+    ChildFrame::SharedResult(SharedResultFrame {
+        run,
+        end: SeatEnd::TimedOut,
         rss: RssReading::Unreadable,
     })
+}
+
+fn stuck_work() -> StuckWork {
+    StuckWork::new(1, 0, vec![LeftoverName::cut("app.tasks.scripted")]).unwrap()
+}
+
+pub(super) fn run_stuck(run: RunRef) -> ChildFrame {
+    ChildFrame::RunStuck(RunStuckFrame {
+        run,
+        work: stuck_work(),
+    })
+}
+
+/// The body of the run returned `value`; work it left is cancelled in
+/// rounds.
+pub(super) fn leftover_cancel(run: RunRef, value: u32) -> ChildFrame {
+    ChildFrame::LeftoverCancel(LeftoverCancelFrame {
+        run,
+        returned: BodyEnd::Result(ok_envelope(value)),
+    })
+}
+
+pub(super) fn leftover_stuck(run: RunRef, value: u32) -> ChildFrame {
+    ChildFrame::LeftoverStuck(LeftoverStuckFrame {
+        run,
+        work: stuck_work(),
+        returned: BodyEnd::Result(ok_envelope(value)),
+    })
+}
+
+/// The loop of the child did not turn; `culprit` held it.
+pub(super) fn loop_blocked(culprit: LoopCulprit) -> ChildFrame {
+    ChildFrame::LoopBlocked(LoopBlockedFrame {
+        culprit,
+        blocked_ms: 5_100,
+        location: BlockedWhere::cut("app/tasks.py:12"),
+    })
+}
+
+pub(super) fn async_work(timeout: u64, grace: u64) -> SharedWork {
+    SharedWork::AsyncTask {
+        timeout_ms: timeout_ms(timeout),
+        cancel_grace_ms: CancelGraceMs::new(grace).unwrap(),
+    }
+}
+
+pub(super) fn thread_work(timeout: u64) -> SharedWork {
+    SharedWork::ThreadTask {
+        timeout_ms: timeout_ms(timeout),
+    }
+}
+
+/// Queue `task` on a shared pool.
+pub(super) fn submit_shared(
+    pool: &SharedPool,
+    task: &ClaimedTask,
+    work: SharedWork,
+) -> oneshot::Receiver<AttemptEnd> {
+    queued(pool.submit(task, input(), work))
+}
+
+/// Write `frames` to the parent from a background shell after `seconds`,
+/// so the child reads its next frame meanwhile.
+pub(super) fn send_later(seconds: &str, frames: &[ChildFrame]) -> String {
+    format!("( sleep {seconds}; {}) & ", send(frames))
 }
 
 // ---------------------------------------------------------------------------
