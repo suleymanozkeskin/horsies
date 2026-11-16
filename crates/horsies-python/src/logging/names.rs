@@ -85,9 +85,9 @@ impl LoggerName {
 /// Target prefixes and their loggers. A prefix matches a target that equals
 /// it or continues with `::`. The first match wins, so a longer prefix comes
 /// before a shorter one of the same module.
-const TARGET_ROUTES: [(&str, LoggerName); 21] = [
+const TARGET_ROUTES: [(&str, LoggerName); 22] = [
     (
-        "horsies_core::broker::shared_listener",
+        "horsies_core::broker::process_listener",
         LoggerName::Listener,
     ),
     ("horsies_core::broker::listener", LoggerName::Listener),
@@ -125,8 +125,10 @@ const TARGET_ROUTES: [(&str, LoggerName); 21] = [
         LoggerName::WorkflowHandle,
     ),
     ("horsies_core::workflow_engine", LoggerName::WorkflowEngine),
-    // The one explicit target of the core: the claim pass of the worker.
+    // The explicit targets of the core: the claim pass of the worker, and
+    // the listener of the statement layer (`horsies_core::db`).
     ("horsies::claim", LoggerName::Worker),
+    ("horsies.listener", LoggerName::Listener),
     ("_core", LoggerName::Bridge),
     ("horsies_core", LoggerName::Core),
 ];
@@ -176,9 +178,10 @@ mod tests {
         let cases = [
             ("horsies_core::broker::postgres", LoggerName::Broker),
             (
-                "horsies_core::broker::shared_listener",
+                "horsies_core::broker::process_listener",
                 LoggerName::Listener,
             ),
+            ("horsies.listener", LoggerName::Listener),
             (
                 "horsies_core::worker::scheduler::service",
                 LoggerName::Scheduler,
