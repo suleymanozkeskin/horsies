@@ -1,7 +1,7 @@
 Upstream source
 ===============
 
-Repository: /Users/suleyman/Desktop/Personal-Projects/task-lib
+Repository: this repository (suleymanozkeskin/horsies)
 Commit: a43b7780
 Tree: webui/
 
@@ -9,13 +9,13 @@ Sync recipe
 ===========
 
 1. Create or use a clean worktree at the pinned source commit.
-2. Copy its complete webui/ directory into this repository.
-3. Verify the copy with `diff -qr <worktree>/webui webui` before applying the
+2. Copy its complete webui/ directory to rust/webui/.
+3. Verify the copy with `diff -qr <worktree>/webui rust/webui` before applying the
    differences listed below.
 4. Apply WV-8 and WV-9 only when the replacement upstream tree still has the
    corresponding contract gaps.
 5. Restore the Rust build integration changes.
-6. Run the frontend gates and rebuild horsies/webui-dist.
+6. Run the frontend gates and rebuild crates/horsies/webui-dist.
 
 The next conforming upstream sync supersedes WV-8 and WV-9. Do not preserve a
 patch after upstream supplies the matching behavior.
@@ -71,7 +71,7 @@ source and API contract are unchanged.
 Files:
 
 - package.json: adds the committed-dist staleness command
-- vite.config.ts: writes the production build to ../horsies/webui-dist
+- vite.config.ts: writes the production build to ../../crates/horsies/webui-dist
 
 The staleness implementation lives at ../scripts/check-webui-dist.sh and is
 not part of the upstream webui tree.

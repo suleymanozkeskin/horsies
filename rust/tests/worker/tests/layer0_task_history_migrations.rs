@@ -182,7 +182,7 @@ async fn assert_monitoring_trigger_parity(pool: &PgPool) {
 }
 
 async fn apply_through_v26(pool: &PgPool) {
-    let migrator = sqlx::migrate!("../../horsies/migrations");
+    let migrator = sqlx::migrate!("../../../crates/horsies/migrations");
     sqlx::query(
         "CREATE TABLE horsies_migrations (
             version BIGINT PRIMARY KEY,

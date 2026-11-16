@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-horsies = { path = "../horsies" }
+horsies = { path = "../../crates/horsies" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }

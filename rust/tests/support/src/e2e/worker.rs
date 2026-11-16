@@ -28,10 +28,11 @@ fn test_worker_binary() -> String {
     }
 
     // Default: look in target/debug (assumes `cargo build` was run).
-    // CARGO_MANIFEST_DIR = <workspace>/tests/support, so go up twice.
+    // CARGO_MANIFEST_DIR = <workspace>/rust/tests/<crate>, so go up three times.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
     let workspace_root = std::path::Path::new(&manifest_dir)
         .parent()
+        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .unwrap_or(std::path::Path::new("."));
 

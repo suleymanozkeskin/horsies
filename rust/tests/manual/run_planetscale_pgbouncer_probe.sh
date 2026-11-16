@@ -5,8 +5,8 @@ env_file="${1:-}"
 if [[ -z "${env_file}" ]]; then
   if [[ -f ".env.planetscale" ]]; then
     env_file=".env.planetscale"
-  elif [[ -f "../task-lib/ignored-content/.env.planetscale" ]]; then
-    env_file="../task-lib/ignored-content/.env.planetscale"
+  elif [[ -f "ignored-content/.env.planetscale" ]]; then
+    env_file="ignored-content/.env.planetscale"
   fi
 fi
 

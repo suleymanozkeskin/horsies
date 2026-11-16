@@ -140,8 +140,10 @@ fn database_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         return url;
     }
+    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
+        .ancestors()
+        .nth(2)
         .expect("workspace root");
     let contents = fs::read_to_string(root.join(".env")).expect("read workspace .env");
     let password = contents

@@ -2,16 +2,16 @@
 set -euo pipefail
 
 # Publish all public horsies packages to crates.io in dependency order.
-# Usage: ./scripts/publish.sh
+# Usage: ./rust/scripts/publish.sh
 #
-# Reads CRATES_IO_TOKEN from .env in the project root.
+# Reads CRATES_IO_TOKEN from .env in the repository root.
 #
 # horsies-macros has a circular dev-dep on horsies (for compile tests).
 # The script temporarily removes it during packaging, then restores it.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-MACROS_TOML="$ROOT_DIR/macros/Cargo.toml"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MACROS_TOML="$ROOT_DIR/crates/horsies-macros/Cargo.toml"
 
 # Load token from .env
 TOKEN=$(grep CRATES_IO_TOKEN "$ROOT_DIR/.env" | cut -d= -f2 | tr -d ' "')

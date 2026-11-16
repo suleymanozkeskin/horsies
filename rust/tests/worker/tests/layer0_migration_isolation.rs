@@ -212,7 +212,7 @@ async fn horsies_migrate_backfills_from_legacy_sqlx_migrations() {
     .await
     .unwrap();
 
-    let legacy_migrator = sqlx::migrate!("../../horsies/migrations");
+    let legacy_migrator = sqlx::migrate!("../../../crates/horsies/migrations");
     for migration in legacy_migrator.iter() {
         if migration.migration_type.is_down_migration() {
             continue;

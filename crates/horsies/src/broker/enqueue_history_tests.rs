@@ -701,24 +701,24 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
             include_str!("../workflow_engine/start.rs"),
         ),
         (
-            "tests/support/src/e2e/worker.rs",
-            include_str!("../../../tests/support/src/e2e/worker.rs"),
+            "rust/tests/support/src/e2e/worker.rs",
+            include_str!("../../../../rust/tests/support/src/e2e/worker.rs"),
         ),
         (
-            "tests/support/src/workflow_helpers.rs",
-            include_str!("../../../tests/support/src/workflow_helpers.rs"),
+            "rust/tests/support/src/workflow_helpers.rs",
+            include_str!("../../../../rust/tests/support/src/workflow_helpers.rs"),
         ),
         (
-            "tests/support/tests/smoke.rs",
-            include_str!("../../../tests/support/tests/smoke.rs"),
+            "rust/tests/support/tests/smoke.rs",
+            include_str!("../../../../rust/tests/support/tests/smoke.rs"),
         ),
         (
-            "tests/worker/tests/layer0_task_history_migrations.rs",
-            include_str!("../../../tests/worker/tests/layer0_task_history_migrations.rs"),
+            "rust/tests/worker/tests/layer0_task_history_migrations.rs",
+            include_str!("../../../../rust/tests/worker/tests/layer0_task_history_migrations.rs"),
         ),
         (
-            "tests/worker/tests/layer1_tasks.rs",
-            include_str!("../../../tests/worker/tests/layer1_tasks.rs"),
+            "rust/tests/worker/tests/layer1_tasks.rs",
+            include_str!("../../../../rust/tests/worker/tests/layer1_tasks.rs"),
         ),
     ];
     const REQUIRED: &[&str] = &[
@@ -753,7 +753,7 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
             if missing.is_empty() {
                 continue;
             }
-            if *path == "tests/worker/tests/layer0_task_history_migrations.rs"
+            if *path == "rust/tests/worker/tests/layer0_task_history_migrations.rs"
                 && suffix.contains("'seeded-v26'")
             {
                 transitional_v26_count += 1;

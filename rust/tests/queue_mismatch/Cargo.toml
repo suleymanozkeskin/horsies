@@ -6,7 +6,7 @@ description = "Queue/task mismatch guard verification — 6 scenarios matching P
 publish = false
 
 [dependencies]
-horsies = { path = "../../horsies" }
+horsies = { path = "../../../crates/horsies" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

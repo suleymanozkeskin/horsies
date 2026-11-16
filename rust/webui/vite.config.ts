@@ -21,7 +21,7 @@ export default defineConfig({
   build: {
     // The crate embeds this committed directory. It lives outside the Vite
     // root, hence the explicit empty.
-    outDir: '../horsies/webui-dist',
+    outDir: '../../crates/horsies/webui-dist',
     emptyOutDir: true,
   },
   server: {
