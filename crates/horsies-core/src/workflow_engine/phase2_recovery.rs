@@ -276,28 +276,29 @@ mod tests {
         .expect("seed workflow");
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, enqueued_at, started_at, claimed, claimed_at,
-                claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition, created_at, updated_at
-             ) VALUES ($1, 'p7_phase2_root', 'default', 100, '[]', '{}', 'RUNNING',
-                       NOW(), NOW(), NOW(), TRUE, NOW(), 'p7-worker', TRUE, 0, 0,
-                       $1::text, 1, $2, 'forever', FALSE, 'NEVER_ELIGIBLE', NOW(), NOW())",
+                id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+                started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
+                max_retries, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, created_at, updated_at, execution
+            ) VALUES (
+                $1, 'p7_phase2_root', 'default', 100, 'null', 'RUNNING', NOW(), NOW(), NOW(),
+                NOW(), 'p7-worker', TRUE, 0, 0, NULL, NULL, 'forever', FALSE, NOW(), NOW(),
+                'ISOLATED'
+            )",
         )
         .bind(task_id)
-        .bind(vec![17_u8; 32])
         .execute(pool)
         .await
         .expect("seed task");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args,
-                task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-                join_type, status, is_subworkflow, task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p7_phase2_root', '[]', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE, $3, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'p7_phase2_root', 'null', 'default', 100, '{}', FALSE,
+                'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -308,11 +309,14 @@ mod tests {
         if with_dependent {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, task_args,
-                    task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-                    join_type, status, is_subworkflow, created_at
-                 ) VALUES ($1, $2, 1, 'dependent', 'p7_phase2_dependent', '[]', '{}',
-                           'default', 100, '{0}', FALSE, 'all', 'PENDING', FALSE, NOW())",
+                    id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                    priority, dependencies, allow_failed_deps, join_type, status,
+                    is_subworkflow, created_at, max_retries, execution, retention_class_key
+                ) VALUES (
+                    $1, $2, 1, 'dependent', 'p7_phase2_dependent', 'null', 'default', 100,
+                    '{0}', FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED',
+                    'standard_30d'
+                )",
             )
             .bind(Uuid::new_v4())
             .bind(workflow_id)
@@ -731,28 +735,29 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                 id, task_name, queue_name, priority, args, kwargs, status,
-                 sent_at, enqueued_at, started_at, claimed, claimed_at,
-                 claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
-                 enqueue_sha, command_fingerprint_version, command_fingerprint,
-                 retention_class_key, retain_rerun_input,
-                 prepared_rerun_input_disposition, created_at, updated_at
-             ) VALUES ($1, 'p7_phase2_current', 'default', 100, '[]', '{}', 'RUNNING',
-                       NOW(), NOW(), NOW(), TRUE, NOW(), 'p7-worker', TRUE, 0, 0,
-                       $1::text, 1, $2, 'forever', FALSE, 'NEVER_ELIGIBLE', NOW(), NOW())",
+                id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+                started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
+                max_retries, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, created_at, updated_at, execution
+            ) VALUES (
+                $1, 'p7_phase2_current', 'default', 100, 'null', 'RUNNING', NOW(), NOW(),
+                NOW(), NOW(), 'p7-worker', TRUE, 0, 0, NULL, NULL, 'forever', FALSE, NOW(),
+                NOW(), 'ISOLATED'
+            )",
         )
         .bind(current_task)
-        .bind(vec![37_u8; 32])
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-                 join_type, status, is_subworkflow, task_id, created_at
-             ) VALUES ($1, $2, 1, 'current', 'p7_phase2_current', '[]', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE, $3, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 1, 'current', 'p7_phase2_current', 'null', 'default', 100, '{}', FALSE,
+                'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)

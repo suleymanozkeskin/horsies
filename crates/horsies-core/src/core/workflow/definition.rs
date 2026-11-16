@@ -289,7 +289,7 @@ mod tests {
             let node = builder.task(
                 TaskNode::<String>::raw("fetch")
                     .node_id("fetch")
-                    .args_json(serde_json::to_string(&params).unwrap()),
+                    .input_json(serde_json::to_string(&params).unwrap()),
             );
             builder.output(node);
             builder.build()
@@ -301,7 +301,7 @@ mod tests {
         let spec = ParamWorkflow::build_with("eu".to_owned()).unwrap();
         assert_eq!(spec.name, "param_pipeline_eu");
         assert_eq!(spec.definition_key.as_deref(), Some("param_pipeline_eu"));
-        assert_eq!(spec.tasks[0].args_json.as_deref(), Some("\"eu\""));
+        assert_eq!(spec.tasks[0].input_json.as_deref(), Some("\"eu\""));
     }
 
     struct CustomErrorWorkflow;

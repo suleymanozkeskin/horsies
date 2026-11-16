@@ -59,7 +59,8 @@ pub enum BrokerError {
     PayloadMismatch { task_id: Uuid },
 
     /// Enqueue observed a conflict, but the conflicting row disappeared before
-    /// its `enqueue_sha` could be compared — payload identity cannot be proven.
+    /// its fingerprint and `sent_at` could be compared — payload identity cannot
+    /// be proven.
     #[error(
         "task_id {task_id} conflict detected but row disappeared before verification \
          for {task_name}; cannot verify payload identity"

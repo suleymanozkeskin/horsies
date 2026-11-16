@@ -6,9 +6,7 @@ rerun), and absence classifies against the published birth floor.
 Eligibility precedes input, mirroring the ratified ladder: workflow
 backing tasks and completed sources refuse before any envelope is
 touched. Input reconstruction is content v1 with the digest verified
-before parse; every non-INLINE disposition is typed unavailable and
-CARRIES the reference locator the caller wrote at enqueue — the input
-is unavailable to the library, not unreachable to the caller.
+before parse; every non-INLINE disposition is typed unavailable.
 
 The new row is written strictly by the provenance table: replayed
 fields from the source row or its carried envelope, the deadline as the
@@ -167,13 +165,12 @@ class RerunNotEligible:
 
 @dataclass(frozen=True, slots=True)
 class RerunInputUnavailable:
-    """The library cannot reconstruct input. The locator is the
-    caller's own data, surfaced so an external fetch and a fresh
-    enqueue remain possible: unavailable, not unreachable."""
+    """The library cannot reconstruct input: the source row stores no
+    envelope. ``disposition`` is the stored reason, for example
+    ``DECLINED_BY_POLICY`` or ``OVER_BOUND``."""
 
     task_id: str
     disposition: str
-    reference_locator: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +273,6 @@ async def rerun_task(
         return RerunInputUnavailable(
             task_id=command.source_task_id,
             disposition=detail.rerun_input_disposition,
-            reference_locator=detail.rerun_input_reference,
         )
     if (
         detail.rerun_input_version is None
