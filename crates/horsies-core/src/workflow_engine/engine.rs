@@ -5232,11 +5232,11 @@ mod promotion_batch_tests {
         insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
         sqlx::query(
             r#"INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
                 sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
             ) VALUES (
-                $1, $2::uuid, 1, 'child', 'args_from_conflict_child', '{"x": 5}', 'default',
+                'NONE', $1, $2::uuid, 1, 'child', 'args_from_conflict_child', '{"x": 5}', 'default',
                 100, '{0}', '{"x": 0}'::jsonb, FALSE, 'all', 'PENDING', TRUE, 'GIVEN',
                 'args_from_conflict_child', $3, NOW()
             )"#,
