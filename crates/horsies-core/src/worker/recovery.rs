@@ -931,21 +931,23 @@ async fn run_reaper_pass(
     // The stale CLAIMED requeue runs on the main core pool with the reserve.
     if config.auto_requeue_stale_claimed {
         match ThresholdMs::from_millis(config.claimed_stale_threshold_ms) {
-            Ok(threshold) => match requeue_stale_claimed(
-                broker.core_main_pool(),
-                broker.statement_log(),
-                threshold,
-            )
-            .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(count, "reaper requeued stale CLAIMED tasks");
+            Ok(threshold) => {
+                let requeued = match broker.core_pools_for_write() {
+                    Ok((open, _write)) => {
+                        requeue_stale_claimed(open.main(), broker.statement_log(), threshold).await
+                    }
+                    Err(error) => Err(error),
+                };
+                match requeued {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(count, "reaper requeued stale CLAIMED tasks");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
-                }
-                _ => {}
-            },
+            }
             Err(error) => {
                 tracing::error!(%error, "reaper: the stale CLAIMED threshold is out of range");
             }
