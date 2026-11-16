@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod attempt_writes;
 pub mod bound_handle;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
@@ -16,6 +17,7 @@ pub mod shared_listener;
 pub mod terminalization;
 #[cfg(test)]
 pub(crate) mod terminalization_matrix;
+pub mod wait_limit;
 
 pub use bound_handle::TaskHandle;
 pub use error::{is_retryable_sqlx_error, BrokerError};

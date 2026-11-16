@@ -43,7 +43,8 @@ use crate::broker::row::task::{
     TaskInfoRow, TaskResultRow, TaskRunningContextRow,
 };
 
-use crate::broker::shared_listener::SharedNotifyListener;
+use crate::broker::shared_listener::{SharedNotifyListener, Subscription};
+use crate::broker::wait_limit::WaitLimit;
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -1544,9 +1545,13 @@ impl PostgresBroker {
 
     /// Fetch a typed task result, optionally waiting for completion.
     ///
-    /// 1. Quick-checks the database for a terminal status.
-    /// 2. If not done, subscribes to the shared `task_done` listener and waits.
-    /// 3. On timeout, returns `TaskResult::Err(TaskError(WaitTimeout))`.
+    /// 1. Parses `timeout` into a [`WaitLimit`]. A limit above
+    ///    [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS)
+    ///    returns `RetrievalCode::InvalidInput` before any read.
+    /// 2. Quick-checks the database for a terminal status.
+    /// 3. If not done, subscribes to the shared `task_done` listener, reads
+    ///    again, and waits. A listener that cannot start makes the wait poll.
+    /// 4. On timeout, returns `TaskResult::Err(TaskError(WaitTimeout))`.
     ///
     /// All concurrent callers share a single `PgListener` connection via
     /// [`SharedNotifyListener`], avoiding pool exhaustion under load.
@@ -1556,16 +1561,22 @@ impl PostgresBroker {
         timeout: Option<Duration>,
     ) -> Result<TaskResult<T>, BrokerError> {
         let start = Instant::now();
+        let limit = match WaitLimit::parse(timeout) {
+            Ok(limit) => limit,
+            Err(refused) => {
+                return Ok(TaskResult::Err(TaskError::builtin(
+                    RetrievalCode::InvalidInput,
+                    refused.to_string(),
+                )));
+            }
+        };
 
         // Quick check — task may already be done, or may not exist.
         if let Some(outcome) = self.poll_result(task_id).await? {
             return Ok(outcome);
         }
 
-        // Subscribe to the shared task_done listener.
-        let shared = self.task_done_listener().await?;
-        let task_id_text = task_id.to_string();
-        let mut subscription = shared.subscribe(&task_id_text);
+        let mut wait_mode = self.result_wait_mode(task_id).await;
 
         // Re-check after subscribing to avoid a race where the task completes
         // between our first check and the subscribe.
@@ -1573,7 +1584,7 @@ impl PostgresBroker {
             return Ok(outcome);
         }
 
-        let deadline = timeout.map(|t| Instant::now() + t);
+        let deadline = limit.deadline_from(start);
 
         loop {
             // For a timed wait, stop once the deadline has passed (terminal /
@@ -1586,26 +1597,16 @@ impl PostgresBroker {
                 }
             }
 
-            // Cap each wait at the re-poll interval so a lost NOTIFY (listener
-            // reconnect) is recovered by a fresh poll rather than hanging — this
-            // is what makes the no-timeout wait safe (C3). Never wait past the
-            // deadline for a timed wait.
+            // Cap each wait at the repoll interval of the mode, so a lost
+            // NOTIFY costs at most one interval. Never wait past the deadline.
+            let interval = wait_mode.repoll_interval();
             let wait = match deadline {
-                Some(d) => d
-                    .saturating_duration_since(Instant::now())
-                    .min(RESULT_WAIT_REPOLL),
-                None => RESULT_WAIT_REPOLL,
+                Some(d) => d.saturating_duration_since(Instant::now()).min(interval),
+                None => interval,
             };
-
-            match tokio::time::timeout(wait, subscription.recv()).await {
-                // NOTIFY delivered, or the re-poll interval elapsed — re-check.
-                Ok(Ok(())) | Err(_) => {
-                    if let Some(outcome) = self.poll_result(task_id).await? {
-                        return Ok(outcome);
-                    }
-                }
-                // Listener error propagates.
-                Ok(Err(e)) => return Err(e),
+            wait_mode.pause(wait).await;
+            if let Some(outcome) = self.poll_result(task_id).await? {
+                return Ok(outcome);
             }
         }
     }
@@ -1615,24 +1616,25 @@ impl PostgresBroker {
     /// A terminal history row is resolved through the staged detail reader.
     /// When `timeout` expires for a live non-terminal task, the latest status is
     /// returned with no result. A task absent from both live and retained
-    /// history returns `Ok(None)`.
+    /// history returns `Ok(None)`. A limit above
+    /// [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS) is
+    /// `INVALID_INPUT` before any read. A listener that cannot start makes the
+    /// wait poll.
     pub async fn get_raw_result_record(
         &self,
         task_id: Uuid,
         timeout: Option<Duration>,
     ) -> BrokerResult<Option<RawResultRecord>> {
+        let start = Instant::now();
+        let limit =
+            WaitLimit::parse(timeout).map_err(|refused| invalid_input(refused.to_string()))?;
         match self.raw_result_probe(task_id).await? {
             RawResultProbe::Record(record) => return Ok(Some(record)),
             RawResultProbe::Absent => return Ok(None),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
-        let shared = self
-            .task_done_listener()
-            .await
-            .map_err(raw_result_operation_error)?;
-        let task_id_text = task_id.to_string();
-        let mut subscription = shared.subscribe(&task_id_text);
+        let mut wait_mode = self.result_wait_mode(task_id).await;
 
         match self.raw_result_probe(task_id).await? {
             RawResultProbe::Record(record) => return Ok(Some(record)),
@@ -1640,7 +1642,7 @@ impl PostgresBroker {
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
-        let deadline = timeout.map(|duration| Instant::now() + duration);
+        let deadline = limit.deadline_from(start);
         loop {
             if deadline.is_some_and(|at| Instant::now() >= at) {
                 return match self.raw_result_probe(task_id).await? {
@@ -1654,19 +1656,32 @@ impl PostgresBroker {
                     }
                 };
             }
+            let interval = wait_mode.repoll_interval();
             let wait = deadline
-                .map(|at| {
-                    at.saturating_duration_since(Instant::now())
-                        .min(RESULT_WAIT_REPOLL)
-                })
-                .unwrap_or(RESULT_WAIT_REPOLL);
-            match tokio::time::timeout(wait, subscription.recv()).await {
-                Ok(Ok(())) | Err(_) => match self.raw_result_probe(task_id).await? {
-                    RawResultProbe::Record(record) => return Ok(Some(record)),
-                    RawResultProbe::Absent => return Ok(None),
-                    RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
-                },
-                Ok(Err(error)) => return Err(raw_result_operation_error(error)),
+                .map(|at| at.saturating_duration_since(Instant::now()).min(interval))
+                .unwrap_or(interval);
+            wait_mode.pause(wait).await;
+            match self.raw_result_probe(task_id).await? {
+                RawResultProbe::Record(record) => return Ok(Some(record)),
+                RawResultProbe::Absent => return Ok(None),
+                RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
+            }
+        }
+    }
+
+    /// Subscribe a result wait to the shared `task_done` listener. A listener
+    /// that cannot start is logged and the wait polls instead, as Python
+    /// (`horsies/core/brokers/postgres.py:3276-3281`).
+    async fn result_wait_mode(&self, task_id: Uuid) -> ResultWaitMode {
+        match self.task_done_listener().await {
+            Ok(shared) => ResultWaitMode::Subscribed(shared.subscribe(&task_id.to_string())),
+            Err(error) => {
+                tracing::warn!(
+                    %task_id,
+                    error = %error,
+                    "task_done listener cannot start; the result wait polls instead",
+                );
+                ResultWaitMode::Polling
             }
         }
     }
@@ -3030,11 +3045,59 @@ use crate::core::task::retry_utils::parse_max_retries;
 // Result wait
 // ---------------------------------------------------------------------------
 
-/// Re-poll interval for a result wait, bounding each `subscription.recv()` so a
-/// NOTIFY lost during a listener reconnect is recovered by a fresh terminal
-/// -status poll instead of hanging the caller forever (C3). Shared by the task
-/// (`get_result`) and workflow (`get_workflow_result`) wait loops.
+/// Re-poll interval of the workflow result wait (`get_workflow_result`),
+/// bounding each `subscription.recv()` so a NOTIFY lost during a listener
+/// reconnect is recovered by a fresh terminal-status poll instead of hanging
+/// the caller forever.
 pub(crate) const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
+
+/// Repoll interval of a task result wait whose listener works: a lost
+/// notification costs at most this long (Python's 5 s,
+/// `horsies/core/brokers/postgres.py:3285`).
+pub(crate) const TASK_RESULT_REPOLL_SUBSCRIBED: Duration = Duration::from_secs(5);
+
+/// Repoll interval of a task result wait with no listener (Python's 0.2 s,
+/// `horsies/core/brokers/postgres.py:3285`).
+pub(crate) const TASK_RESULT_REPOLL_POLLING: Duration = Duration::from_millis(200);
+
+/// How a task result wait learns that the task may have ended.
+enum ResultWaitMode {
+    /// A wake on the shared `task_done` listener. The listener also wakes
+    /// every subscriber after it reconnects, because notifications sent while
+    /// it was down are lost.
+    Subscribed(Subscription),
+    /// No listener: the wait reads again at [`TASK_RESULT_REPOLL_POLLING`].
+    Polling,
+}
+
+impl ResultWaitMode {
+    /// The longest pause between two reads in this mode.
+    fn repoll_interval(&self) -> Duration {
+        match self {
+            Self::Subscribed(_) => TASK_RESULT_REPOLL_SUBSCRIBED,
+            Self::Polling => TASK_RESULT_REPOLL_POLLING,
+        }
+    }
+
+    /// Pause until a wake for the task or until `wait` passes. A listener
+    /// that has stopped turns the wait into polling, so a closed
+    /// subscription never makes the loop spin.
+    async fn pause(&mut self, wait: Duration) {
+        match self {
+            Self::Subscribed(subscription) => {
+                let woken = tokio::time::timeout(wait, subscription.recv()).await;
+                if let Ok(Err(stopped)) = woken {
+                    tracing::warn!(
+                        error = %stopped,
+                        "task_done listener stopped; the result wait polls instead",
+                    );
+                    *self = Self::Polling;
+                }
+            }
+            Self::Polling => tokio::time::sleep(wait).await,
+        }
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
@@ -5521,5 +5584,95 @@ mod broker_operation_error_tests {
         assert!(!monitoring_query_error("read", sqlx::Error::RowNotFound).retryable);
         assert!(worker_ping_error("notify", sqlx::Error::PoolTimedOut).retryable);
         assert!(!worker_ping_error("notify", sqlx::Error::PoolClosed).retryable);
+    }
+}
+
+#[cfg(test)]
+mod result_wait_tests {
+    //! The result wait: Python's limit bound (`horsies/core/utils/wait_timeout.py`)
+    //! before any read, Python's repoll intervals, and polling when the
+    //! listener stops (`horsies/core/brokers/postgres.py:3265-3285`).
+    use super::*;
+    use crate::broker::wait_limit::MAX_WAIT_LIMIT_MS;
+
+    /// No server listens on port 1, so a call that reached the pool would
+    /// fail with a pool timeout instead of the refusal under test.
+    fn unreachable_broker() -> PostgresBroker {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        PostgresBroker::from_pool(pool)
+    }
+
+    fn refused_limits() -> [Duration; 2] {
+        [Duration::from_millis(MAX_WAIT_LIMIT_MS + 1), Duration::MAX]
+    }
+
+    /// Python `test_wait_timeout.py::TestTaskHandle::test_get_refuses_before_any_read`.
+    /// `Duration::MAX` used to panic on `Instant + Duration`.
+    #[tokio::test]
+    async fn get_result_refuses_a_limit_above_the_bound_before_any_read() {
+        let broker = unreachable_broker();
+        let expected = TaskError::builtin(RetrievalCode::InvalidInput, "").error_code;
+
+        for limit in refused_limits() {
+            let outcome = broker
+                .get_result::<i32>(Uuid::new_v4(), Some(limit))
+                .await
+                .expect("a refused limit is an outcome, not a broker error");
+            let error = outcome.unwrap_err();
+            assert_eq!(error.error_code, expected, "{limit:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_raw_result_record_refuses_a_limit_above_the_bound_before_any_read() {
+        let broker = unreachable_broker();
+
+        for limit in refused_limits() {
+            let Err(refused) = broker
+                .get_raw_result_record(Uuid::new_v4(), Some(limit))
+                .await
+            else {
+                panic!("limit {limit:?} must be refused");
+            };
+            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{limit:?}");
+            assert!(!refused.retryable);
+        }
+    }
+
+    #[test]
+    fn the_repoll_intervals_are_python_s() {
+        assert_eq!(TASK_RESULT_REPOLL_SUBSCRIBED, Duration::from_secs(5));
+        assert_eq!(TASK_RESULT_REPOLL_POLLING, Duration::from_millis(200));
+        assert_eq!(
+            ResultWaitMode::Polling.repoll_interval(),
+            TASK_RESULT_REPOLL_POLLING
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pause_without_a_wake_keeps_the_subscription() {
+        let listener = SharedNotifyListener::new_for_test();
+        let mut mode = ResultWaitMode::Subscribed(listener.subscribe("task"));
+        assert_eq!(mode.repoll_interval(), TASK_RESULT_REPOLL_SUBSCRIBED);
+
+        mode.pause(Duration::from_millis(10)).await;
+
+        assert!(matches!(mode, ResultWaitMode::Subscribed(_)));
+    }
+
+    /// A stopped listener turns the wait into polling, so the loop does not
+    /// spin on a closed subscription and the waiter still sees the result.
+    #[tokio::test]
+    async fn a_stopped_listener_turns_the_wait_into_polling() {
+        let listener = SharedNotifyListener::stopped_for_test().await;
+        let mut mode = ResultWaitMode::Subscribed(listener.subscribe("task"));
+
+        mode.pause(Duration::from_secs(1)).await;
+
+        assert!(matches!(mode, ResultWaitMode::Polling));
     }
 }
