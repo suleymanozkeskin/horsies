@@ -221,7 +221,6 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
         &WorkflowSpecRegistry::new(),
         Phase2Work {
             task_id: child_task,
-            is_success: true,
             queue_name: "default".to_owned(),
             is_workflow_task: true,
             capacity_notified: false,
