@@ -419,7 +419,6 @@ class TestHistoryPruning:
                     ),
                     DetachExpiredHistoryLeaf(
                         leaf=expired,
-                        quarantine_horizon=None,
                         statement_timeout_ms=100,
                     ),
                     UnpublishedLoader(),
