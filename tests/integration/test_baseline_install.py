@@ -26,6 +26,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFa
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
@@ -108,7 +109,7 @@ async def _missing_readers(connection: Connection) -> object:
 
 async def _publication_is_current(url: str) -> bool:
     """The publisher's own check: the manifest equals the catalog and every reader is stamped."""
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
             return await StagedLoaderPublisher().is_current(connection)

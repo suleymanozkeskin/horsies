@@ -49,8 +49,8 @@ from horsies.core.models.broker import PostgresConfig
 
 pytestmark = [pytest.mark.unit]
 
-MAIN_URL: Final = 'postgresql+psycopg://user:secret@pooler:6432/app'
-SESSION_URL: Final = 'postgresql+psycopg://user:secret@direct:5432/app'
+MAIN_URL: Final = 'postgresql://user:secret@pooler:6432/app'
+SESSION_URL: Final = 'postgresql://user:secret@direct:5432/app'
 
 # PostgresConfig field -> the manifest path it fills.
 MAPPED_FIELDS: Final[dict[str, str]] = {
@@ -278,9 +278,17 @@ def test_a_pool_recycle_without_meaning_is_refused(seconds: int) -> None:
 
 def test_a_url_with_another_scheme_is_a_defect_named_without_its_password() -> None:
     with pytest.raises(AssertionError) as raised:
-        core_database_url('postgres://user:secret@host/app')
-    assert 'postgres://' in str(raised.value)
+        core_database_url('postgresql+psycopg://user:secret@host/app')
+    assert 'postgresql+psycopg' in str(raised.value)
     assert 'secret' not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    'url',
+    ['postgresql://user:secret@host/app', 'postgres://user:secret@host/app'],
+)
+def test_the_core_reads_the_postgresql_scheme(url: str) -> None:
+    assert core_database_url(url) == 'postgresql://user:secret@host/app'
 
 
 @pytest.mark.parametrize(
