@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection};
+use uuid::Uuid;
 
 use super::*;
 use crate::broker::client_family::ClientFamily;

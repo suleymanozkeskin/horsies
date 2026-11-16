@@ -24,8 +24,8 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::SuccessPolicy;
 use crate::core::{
-    AnyNode, HorsiesError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
-    WorkflowStatus, WorkflowTaskStatus,
+    AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskResult, WorkflowSpec,
+    WorkflowSpecRegistry, WorkflowStatus, WorkflowTaskStatus,
 };
 
 /// How long `get()` waits; every workflow here is terminal or PAUSED before the call.
@@ -122,11 +122,14 @@ fn failed_input_definition() -> RegisteredWorkflowDefinition {
         definition_key: FAILED_INPUT_KEY.to_owned(),
         declared_children: Vec::new(),
         spec_builder: Arc::new(|input| {
-            let params: serde_json::Value = serde_json::from_str(input)
-                .map_err(|error| HorsiesError::new(format!("params do not decode: {error}")))?;
+            let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+                SpecBuildError::Failed(HorsiesError::new(format!("params do not decode: {error}")))
+            })?;
             let received: TaskResult<serde_json::Value> =
                 serde_json::from_value(params["value"]["inner"].clone()).map_err(|error| {
-                    HorsiesError::new(format!("no result envelope under 'value': {error}"))
+                    SpecBuildError::Failed(HorsiesError::new(format!(
+                        "no result envelope under 'value': {error}"
+                    )))
                 })?;
             let report = match &received {
                 TaskResult::Ok(value) => serde_json::json!({

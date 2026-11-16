@@ -32,7 +32,7 @@ pub struct SchemaInstallNotRun {}
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct SchemaStatusRecord {
-    /// `MATCH`, `MISMATCH`, `ABSENT` or `UNKNOWN`.
+    /// `MATCH`, `MISMATCH`, `ABSENT`, `ZERO_X` or `UNKNOWN`.
     pub state: String,
     /// The stored version, when the database has one.
     pub version: Option<i64>,
@@ -46,6 +46,7 @@ impl From<SchemaStatus> for SchemaStatusRecord {
             SchemaState::Match => "MATCH",
             SchemaState::Mismatch => "MISMATCH",
             SchemaState::Absent => "ABSENT",
+            SchemaState::ZeroX => "ZERO_X",
             SchemaState::Unknown => "UNKNOWN",
         };
         Self {
