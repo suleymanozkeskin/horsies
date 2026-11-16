@@ -66,7 +66,7 @@ async def _insert_workflow(
                 (id, name, status, on_error, depth, root_workflow_id,
                  parent_workflow_id, parent_task_index, result,
                  sent_at, created_at, started_at, updated_at, completed_at)
-            VALUES (:id, 'denest_wf', :status, 'FAIL', 0, :id,
+            VALUES (:id, 'denest_wf', :status, 'fail', :depth, :id,
                     :pwf, :pidx, :result,
                     NOW(), NOW(), NOW(), NOW(),
                     CASE WHEN :is_completed THEN NOW() END)
@@ -74,6 +74,7 @@ async def _insert_workflow(
         {
             'id': wf_id,
             'status': status,
+            'depth': 0 if parent_workflow_id is None else 1,
             'pwf': parent_workflow_id,
             'pidx': parent_task_index,
             'result': result,
@@ -94,12 +95,13 @@ async def _insert_subworkflow_node(
         text("""
             INSERT INTO horsies_workflow_tasks
                 (id, workflow_id, task_index, node_id, task_name,
-                 task_args, task_kwargs, queue_name, priority,
+                 input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
-                 is_subworkflow, sub_workflow_id, status, created_at)
-            VALUES (:id, :wf, :idx, :node, 'denest_sub', '[]', '{}',
+                 is_subworkflow, sub_workflow_id, sub_workflow_params,
+                 status, created_at)
+            VALUES (:id, :wf, :idx, :node, 'denest_sub', '{}',
                     'default', 100, '{}', FALSE, 'all',
-                    TRUE, :sub_id, 'RUNNING', NOW())
+                    TRUE, :sub_id, 'NOT_GIVEN', 'RUNNING', NOW())
         """),
         {
             'id': str(uuid.uuid4()),

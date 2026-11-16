@@ -44,16 +44,16 @@ pub use crate::core::{
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
     RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure,
     SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
-    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions,
-    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendResult, TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule,
-    WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta,
-    WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
-    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
-    WORKFLOW_TERMINAL_STATES,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
+    TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
+    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -66,6 +66,7 @@ pub use crate::broker::{
     TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
     WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
+pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
 // worker re-exports
 pub use crate::worker::{
@@ -74,6 +75,18 @@ pub use crate::worker::{
     scheduler::service::{spawn_scheduler, SchedulerStartError},
     worker::Worker,
     WorkerError,
+};
+
+// worker state snapshot values
+pub use crate::broker::{
+    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+
+// fleet check and class report
+pub use crate::broker::{
+    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
+    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
 pub use crate::broker::client_family::ClientFamily;

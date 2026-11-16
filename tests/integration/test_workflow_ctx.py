@@ -132,7 +132,7 @@ class TestWorkflowCtx:
             return {}
 
         task_result = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT input FROM horsies_tasks WHERE id = :tid'),
             {'tid': row[0]},
         )
         task_row = task_result.fetchone()
@@ -512,7 +512,7 @@ class TestWorkflowCtx:
 
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
@@ -522,10 +522,9 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
@@ -537,7 +536,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
@@ -584,7 +583,7 @@ class TestWorkflowCtx:
 
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
@@ -594,10 +593,9 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
@@ -609,7 +607,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
@@ -659,7 +657,7 @@ class TestWorkflowCtx:
 
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
@@ -669,10 +667,9 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
@@ -684,7 +681,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
@@ -939,7 +936,7 @@ class TestWorkflowCtx:
         # Fetch task B's row and manually inject __h_workflow_ctx__ into kwargs
         task_row_result = await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
@@ -949,10 +946,9 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, args_json, kwargs_json = task_row
+        task_id, task_name, kwargs_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
         # Inject ctx data into kwargs to simulate the engine path
@@ -974,7 +970,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=args_json,
+                args_json=None,
                 kwargs_json=modified_kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',

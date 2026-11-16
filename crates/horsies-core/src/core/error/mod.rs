@@ -93,6 +93,8 @@ pub enum ErrorCode {
     CliInvalidArgs,
     WorkerInvalidLocator,
     ConfigInvalidResilience,
+    /// A worker profile that AppConfig validation refuses.
+    ConfigInvalidWorkerProfile,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -148,6 +150,7 @@ impl ErrorCode {
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
             Self::ConfigInvalidResilience => "HRS-208",
+            Self::ConfigInvalidWorkerProfile => "HRS-218",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -208,6 +211,7 @@ impl ErrorCode {
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
+            | Self::ConfigInvalidWorkerProfile
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -277,6 +281,7 @@ impl ErrorCode {
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
                 | Self::ConfigInvalidResilience
+                | Self::ConfigInvalidWorkerProfile
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
