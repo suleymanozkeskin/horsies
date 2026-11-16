@@ -123,7 +123,7 @@ fn node_task_facts(
     retention: &RetentionConfig,
 ) -> Result<NodeTaskFacts, WorkflowError> {
     let facts = prepare_workflow_task_facts(
-        node.stored_input(),
+        &node.input_json,
         merged_task_options,
         retention.resolve_queue_class(queue).as_deref(),
     )
@@ -706,7 +706,7 @@ fn insert_workflow_tasks<'a>(
                 .push_bind(p.node.index as i32)
                 .push_bind(p.node.node_id.clone())
                 .push_bind(p.node.task_name.clone())
-                .push_bind(p.node.stored_input().to_owned())
+                .push_bind(p.node.input_json.clone())
                 .push_bind(p.queue.clone())
                 .push_bind(p.priority)
                 .push_bind(deps)
@@ -766,7 +766,7 @@ fn insert_workflow_tasks<'a>(
                     .push_bind(p.node.task_name.clone())
                     .push_bind(p.queue.clone())
                     .push_bind(p.priority)
-                    .push_bind(p.node.stored_input().to_owned())
+                    .push_bind(p.node.input_json.clone())
                     .push_bind(p.merged_task_options.clone())
                     .push_bind(task_facts.facts.execution.as_str())
                     .push_bind(task_facts.facts.retention_class_key.clone());
@@ -850,7 +850,7 @@ async fn enqueue_root_task(
         .bind(&node.task_name)
         .bind(queue)
         .bind(priority)
-        .bind(node.stored_input())
+        .bind(node.input_json.as_str())
         .bind(merged_task_options)
         .bind(task_facts.facts.execution.as_str())
         .bind(&task_facts.facts.retention_class_key)
@@ -1010,7 +1010,10 @@ pub(crate) fn build_child_spec(
     parent_task: &AnyNode,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowSpec, WorkflowError> {
-    let has_child_inputs = parent_task.input_json.is_some() || !parent_task.args_from.is_empty();
+    let has_child_inputs = crate::core::workflow::node::passes_child_params(
+        &parent_task.input_json,
+        !parent_task.args_from.is_empty(),
+    )?;
     let resolved = definition_key
         .and_then(|key| registry.resolve_child_registration(key))
         .ok_or_else(|| {
@@ -1023,14 +1026,14 @@ pub(crate) fn build_child_spec(
     materialize_child_spec(
         resolved,
         has_child_inputs,
-        parent_task.stored_input(),
+        &parent_task.input_json,
         registry,
     )
 }
 
-/// Build the child spec from the parent node's encoded input
-/// (`input_json`, `{}` when the node sets none). `has_child_inputs` is true
-/// when the node sets a static input or takes `args_from` members.
+/// Build the child spec from the parent node's encoded input (`input_json`,
+/// as the client encoded it). `has_child_inputs` is true when the node passes
+/// params (`passes_child_params`).
 pub(crate) fn materialize_child_spec(
     resolved: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
     has_child_inputs: bool,
@@ -1094,7 +1097,7 @@ mod tests {
     fn child_registered_static() -> RegisteredWorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new("child_static");
         builder.definition_key("tests.child_static.v1");
-        let node = builder.task(TaskNode::<String>::raw("hello_task").queue("default"));
+        let node = builder.task(TaskNode::<String>::raw("hello_task", "null").queue("default"));
         builder.output(node);
         RegisteredWorkflowSpec {
             spec: builder.build().unwrap(),
@@ -1105,7 +1108,7 @@ mod tests {
     fn node_with(is_subworkflow: bool, priority: Option<i32>) -> AnyNode {
         AnyNode {
             task_name: "t".to_owned(),
-            input_json: None,
+            input_json: "null".to_owned(),
             dependencies: vec![],
             args_from: std::collections::HashMap::new(),
             workflow_ctx_from: None,
@@ -1299,7 +1302,7 @@ mod tests {
         let mut root = node_with(false, Some(17));
         root.task_name = task_name.to_owned();
         root.queue = Some("bulk".to_owned());
-        root.input_json = Some("[1]".to_owned());
+        root.input_json = "[1]".to_owned();
         let spec = WorkflowSpec {
             name: workflow_name.to_owned(),
             definition_key: Some("p6.workflow.facts.v1".to_owned()),
@@ -1364,7 +1367,7 @@ mod tests {
 
                 let mut builder = WorkflowSpecBuilder::new("child_dynamic");
                 let node = builder.task(
-                    TaskNode::<String>::raw("hello_task")
+                    TaskNode::<String>::raw("hello_task", "null")
                         .queue("default")
                         .input_json(serde_json::to_string(&region).unwrap()),
                 );
@@ -1373,7 +1376,7 @@ mod tests {
             }),
         };
 
-        let parent = SubWorkflowNode::<serde_json::Value, String>::typed("child_dynamic")
+        let parent = SubWorkflowNode::<serde_json::Value, String>::typed("child_dynamic", "null")
             .definition_key("tests.child_dynamic.v1")
             .input_json(r#"{"region":"eu"}"#)
             .into_any_node(0);
@@ -1387,13 +1390,35 @@ mod tests {
             &registry,
         )
         .unwrap();
-        assert_eq!(child.tasks[0].input_json.as_deref(), Some("\"eu\""));
+        assert_eq!(child.tasks[0].input_json, "\"eu\"");
+    }
+
+    #[test]
+    fn build_child_spec_takes_empty_params_without_builder() {
+        // `null` (a Rust `()` params input) and `{}` (Python's empty keyword
+        // input) pass no params; the static child spec is used as registered.
+        for empty_params in ["null", "{}"] {
+            let parent = SubWorkflowNode::<(), String>::typed("child_static", empty_params)
+                .definition_key("tests.child_static.v1")
+                .into_any_node(0);
+
+            let mut registry = WorkflowSpecRegistry::new();
+            registry.register(child_registered_static()).unwrap();
+            let child = build_child_spec(
+                "child_static",
+                parent.sub_definition_key.as_deref(),
+                &parent,
+                &registry,
+            )
+            .unwrap();
+            assert_eq!(child.name, "child_static");
+        }
     }
 
     #[test]
     fn build_child_spec_rejects_explicit_input_without_builder() {
         let registered = child_registered_static();
-        let parent = SubWorkflowNode::<String, String>::typed("child_static")
+        let parent = SubWorkflowNode::<String, String>::typed("child_static", "null")
             .definition_key("tests.child_static.v1")
             .set_input("eu".to_owned())
             .unwrap()

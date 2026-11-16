@@ -5,7 +5,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::workflow::node::NO_NODE_INPUT;
+use crate::core::workflow::node::passes_child_params;
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1110,7 +1110,7 @@ async fn enqueue_subworkflow_on_resume(
     };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
-    let has_child_inputs = task.input != NO_NODE_INPUT || task.args_from.is_some();
+    let has_child_inputs = passes_child_params(&task.input, task.args_from.is_some())?;
 
     let merged_input = merge_args_from_for_ready(
         pool,

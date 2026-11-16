@@ -2,7 +2,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
-use crate::core::workflow::node::NO_NODE_INPUT;
+use crate::core::workflow::node::passes_child_params;
 use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
 use std::time::Instant;
@@ -1673,7 +1673,7 @@ async fn start_stuck_subworkflow(
         &row.dependencies,
     )
     .await?;
-    let has_child_inputs = row.input != NO_NODE_INPUT || row.args_from.is_some();
+    let has_child_inputs = passes_child_params(&row.input, row.args_from.is_some())?;
     let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);

@@ -8,7 +8,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::NO_NODE_INPUT;
+use crate::core::workflow::node::passes_child_params;
 use crate::core::{
     JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowSummary, SuccessPolicy,
     TaskError, TaskResult, WorkflowSpecRegistry, WorkflowTaskStatus,
@@ -412,7 +412,7 @@ struct DependentRow {
     join_type: String,
     min_success: Option<i32>,
     task_name: String,
-    /// The node's stored input (one JSON value; `null` for no static input).
+    /// The node's stored input: one JSON value, as the client encoded it.
     input: String,
     queue_name: String,
     priority: i32,
@@ -898,7 +898,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .await;
     };
     let merged_input = merge_args_from(&node.input, &node.args_from, dep_results)?;
-    let has_inputs = node.input != NO_NODE_INPUT || node.args_from.is_some();
+    let has_inputs = passes_child_params(&node.input, node.args_from.is_some())?;
     let child_spec = materialize_child_spec(registered, has_inputs, &merged_input, registry)?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
     let child_id = start_child_workflow_in_tx(
@@ -2035,7 +2035,7 @@ async fn enqueue_subworkflow_task(
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
     // otherwise use the static registered spec.
-    let has_child_inputs = task.input != NO_NODE_INPUT || task.args_from.is_some();
+    let has_child_inputs = passes_child_params(&task.input, task.args_from.is_some())?;
 
     let merged_input = merge_args_from(&task.input, &task.args_from, dep_results)?;
     let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;

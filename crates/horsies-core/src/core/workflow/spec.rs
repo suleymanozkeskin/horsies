@@ -515,71 +515,69 @@ impl WorkflowSpecBuilder {
             // JSON object: the injected members merge into it.
             let has_args_from = !task.args_from.is_empty();
             let has_ctx_from = task.workflow_ctx_from.is_some();
-            if let Some(ref input_json) = task.input_json {
-                let checked = crate::core::codec::check_json_text(input_json)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| {
-                        serde_json::from_str::<serde_json::Value>(input_json)
-                            .map_err(|e| e.to_string())
-                    });
-                match checked {
-                    Ok(serde_json::Value::Object(map)) => {
-                        // Reserved key must not be provided explicitly.
-                        if map.contains_key(WORKFLOW_CTX_KWARG) {
-                            report.add(
-                                HorsiesError::new(format!(
-                                    "input contains reserved key '{}'",
-                                    WORKFLOW_CTX_KWARG
-                                ))
-                                .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                .with_help("remove the reserved workflow context key"),
-                            );
-                        }
-
-                        // Detect collisions between input fields and args_from keys.
-                        let mut collisions: Vec<String> = task
-                            .args_from
-                            .keys()
-                            .filter(|k| map.contains_key(*k))
-                            .cloned()
-                            .collect();
-                        collisions.sort();
-                        if !collisions.is_empty() {
-                            report.add(
-                                HorsiesError::new("input and args_from contain overlapping keys")
-                                    .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                    .with_note(format!("overlapping keys: {:?}", collisions))
-                                    .with_help(
-                                        "use distinct keys; args_from values override input fields",
-                                    ),
-                            );
-                        }
-                    }
-                    Ok(_) if has_args_from || has_ctx_from => {
-                        let mut err = HorsiesError::new(
-                            "a non-object input is not allowed when using args_from or workflow_ctx_from",
-                        )
-                        .with_code(ErrorCode::WorkflowArgsWithInjection)
-                        .with_help(
-                            "use an object input when using args_from/workflow_ctx_from",
-                        );
-                        if has_args_from {
-                            err = err.with_note("a non-object input is set alongside args_from");
-                        }
-                        if has_ctx_from {
-                            err = err
-                                .with_note("a non-object input is set alongside workflow_ctx_from");
-                        }
-                        report.add(err);
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
+            let input_json = &task.input_json;
+            let checked = crate::core::codec::check_json_text(input_json)
+                .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    serde_json::from_str::<serde_json::Value>(input_json).map_err(|e| e.to_string())
+                });
+            match checked {
+                Ok(serde_json::Value::Object(map)) => {
+                    // Reserved key must not be provided explicitly.
+                    if map.contains_key(WORKFLOW_CTX_KWARG) {
                         report.add(
-                            HorsiesError::new(format!("input_json is not valid JSON: {}", e))
-                                .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                .with_help("ensure input_json is one valid JSON value"),
+                            HorsiesError::new(format!(
+                                "input contains reserved key '{}'",
+                                WORKFLOW_CTX_KWARG
+                            ))
+                            .with_code(ErrorCode::WorkflowInvalidKwargKey)
+                            .with_help("remove the reserved workflow context key"),
                         );
                     }
+
+                    // Detect collisions between input fields and args_from keys.
+                    let mut collisions: Vec<String> = task
+                        .args_from
+                        .keys()
+                        .filter(|k| map.contains_key(*k))
+                        .cloned()
+                        .collect();
+                    collisions.sort();
+                    if !collisions.is_empty() {
+                        report.add(
+                            HorsiesError::new("input and args_from contain overlapping keys")
+                                .with_code(ErrorCode::WorkflowInvalidKwargKey)
+                                .with_note(format!("overlapping keys: {:?}", collisions))
+                                .with_help(
+                                    "use distinct keys; args_from values override input fields",
+                                ),
+                        );
+                    }
+                }
+                Ok(_) if has_args_from || has_ctx_from => {
+                    let mut err = HorsiesError::new(
+                        "a non-object input is not allowed when using args_from or workflow_ctx_from",
+                    )
+                    .with_code(ErrorCode::WorkflowArgsWithInjection)
+                    .with_help(
+                        "use an object input when using args_from/workflow_ctx_from",
+                    );
+                    if has_args_from {
+                        err = err.with_note("a non-object input is set alongside args_from");
+                    }
+                    if has_ctx_from {
+                        err =
+                            err.with_note("a non-object input is set alongside workflow_ctx_from");
+                    }
+                    report.add(err);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    report.add(
+                        HorsiesError::new(format!("input_json is not valid JSON: {}", e))
+                            .with_code(ErrorCode::WorkflowInvalidKwargKey)
+                            .with_help("ensure input_json is one valid JSON value"),
+                    );
                 }
             }
 
@@ -736,11 +734,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn simple_node(name: &str) -> TaskNode<()> {
-        TaskNode::raw(name)
+        TaskNode::raw(name, "null")
     }
 
     fn node_with_id(name: &str, id: &str) -> TaskNode<()> {
-        TaskNode::raw(name).node_id(id)
+        TaskNode::raw(name, "null").node_id(id)
     }
 
     // -----------------------------------------------------------------------
@@ -865,7 +863,7 @@ mod tests {
         // Phase 2 collects both errors, so we get a combined error.
         let mut b = WorkflowSpecBuilder::new("wf");
         let a_ref = b.task(simple_node("a"));
-        let _b_ref = b.task(TaskNode::<()>::raw("b").waits_for(a_ref));
+        let _b_ref = b.task(TaskNode::<()>::raw("b", "null").waits_for(a_ref));
         // Make a depend on b to remove all roots
         b.tasks[0].dependencies.push(1);
         let err = b.build().unwrap_err();
@@ -913,8 +911,8 @@ mod tests {
         // root -> a -> b -> (back to a) creates a cycle, but root is still a root.
         let mut b = WorkflowSpecBuilder::new("wf");
         let root = b.task(simple_node("root"));
-        let a_ref = b.task(TaskNode::<()>::raw("a").waits_for(root));
-        let b_ref = b.task(TaskNode::<()>::raw("b").waits_for(a_ref));
+        let a_ref = b.task(TaskNode::<()>::raw("a", "null").waits_for(root));
+        let b_ref = b.task(TaskNode::<()>::raw("b", "null").waits_for(a_ref));
         // Create cycle: a also depends on b
         b.tasks[1].dependencies.push(b_ref.index);
         let err = b.build().unwrap_err();
@@ -928,7 +926,7 @@ mod tests {
         // (waits_for / waits_for_all), so the spec builds cleanly.
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        let _bb = b.task(TaskNode::<()>::raw("b").waits_for(a).waits_for(a));
+        let _bb = b.task(TaskNode::<()>::raw("b", "null").waits_for(a).waits_for(a));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].dependencies, vec![0]);
     }
@@ -940,7 +938,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         let bb = b.task(simple_node("b"));
-        let c = b.task(TaskNode::<()>::raw("c").waits_for_all(&[a, bb, a]));
+        let c = b.task(TaskNode::<()>::raw("c", "null").waits_for_all(&[a, bb, a]));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[c.index].dependencies, vec![a.index, bb.index]);
     }
@@ -954,7 +952,7 @@ mod tests {
         // increments and decrements stay balanced (no false cycle).
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b", "null").waits_for(a));
         b.tasks[1].dependencies.push(a.index);
         b.tasks[1].dependencies.push(a.index);
         assert_eq!(b.tasks[1].dependencies, vec![0, 0, 0]);
@@ -966,8 +964,8 @@ mod tests {
     fn linear_chain_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        let bb = b.task(TaskNode::<()>::raw("b").waits_for(a));
-        b.task(TaskNode::<()>::raw("c").waits_for(bb));
+        let bb = b.task(TaskNode::<()>::raw("b", "null").waits_for(a));
+        b.task(TaskNode::<()>::raw("c", "null").waits_for(bb));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks.len(), 3);
     }
@@ -976,9 +974,9 @@ mod tests {
     fn diamond_dag_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        let bb = b.task(TaskNode::<()>::raw("b").waits_for(a));
-        let c = b.task(TaskNode::<()>::raw("c").waits_for(a));
-        b.task(TaskNode::<()>::raw("d").waits_for_all(&[bb, c]));
+        let bb = b.task(TaskNode::<()>::raw("b", "null").waits_for(a));
+        let c = b.task(TaskNode::<()>::raw("c", "null").waits_for(a));
+        b.task(TaskNode::<()>::raw("d", "null").waits_for_all(&[bb, c]));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks.len(), 4);
     }
@@ -991,7 +989,7 @@ mod tests {
     fn e008_args_from_not_in_deps() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(simple_node("b"));
+        b.task(TaskNode::<()>::raw("b", "{}"));
         // b has args_from referencing a, but a is not in b's deps
         b.tasks[1].args_from.insert("data".to_owned(), a.index);
         let err = b.build().unwrap_err();
@@ -1001,7 +999,7 @@ mod tests {
     #[test]
     fn e008_args_from_out_of_range() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(simple_node("a"));
+        b.task(TaskNode::<()>::raw("a", "{}"));
         b.tasks[0].args_from.insert("data".to_owned(), 99);
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidArgsFrom));
@@ -1011,7 +1009,7 @@ mod tests {
     fn args_from_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").raw_arg_from("data", a.into()));
+        b.task(TaskNode::<()>::raw("b", "{}").raw_arg_from("data", a.into()));
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].args_from.get("data"), Some(&0));
     }
@@ -1020,7 +1018,7 @@ mod tests {
     fn e009_ctx_from_not_in_deps() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(node_with_id("a", "step_a"));
-        b.task(TaskNode::<()>::raw("b").workflow_ctx_from([a]));
+        b.task(TaskNode::<()>::raw("b", "{}").workflow_ctx_from([a]));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidCtxFrom));
     }
@@ -1029,7 +1027,11 @@ mod tests {
     fn ctx_from_valid() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(node_with_id("a", "step_a"));
-        b.task(TaskNode::<()>::raw("b").waits_for(a).workflow_ctx_from([a]));
+        b.task(
+            TaskNode::<()>::raw("b", "{}")
+                .waits_for(a)
+                .workflow_ctx_from([a]),
+        );
         let spec = b.build().unwrap();
         assert_eq!(
             spec.tasks[1].workflow_ctx_from,
@@ -1043,7 +1045,7 @@ mod tests {
         // not panic during phase-1 builder finalization (C12).
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").workflow_ctx_from([NodeRef { index: 99 }]));
+        b.task(TaskNode::<()>::raw("b", "{}").workflow_ctx_from([NodeRef { index: 99 }]));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidCtxFrom));
     }
@@ -1053,7 +1055,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.task(
-            TaskNode::<()>::raw("b")
+            TaskNode::<()>::raw("b", "{}")
                 .input_json(r#"[1]"#)
                 .raw_arg_from("input", a.into()),
         );
@@ -1066,7 +1068,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(node_with_id("a", "step_a"));
         b.task(
-            TaskNode::<()>::raw("b")
+            TaskNode::<()>::raw("b", "{}")
                 .input_json(r#"[1]"#)
                 .waits_for(a)
                 .workflow_ctx_from([a]),
@@ -1076,9 +1078,19 @@ mod tests {
     }
 
     #[test]
+    fn a_null_input_with_args_from_is_rejected() {
+        // `null` is not read as `{}`: members merge only into an object input.
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let a = b.task(simple_node("a"));
+        b.task(TaskNode::<()>::raw("b", "null").raw_arg_from("data", a.into()));
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowArgsWithInjection));
+    }
+
+    #[test]
     fn e019_input_must_be_one_json_value() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(TaskNode::<()>::raw("a").input_json("[1, 2"));
+        b.task(TaskNode::<()>::raw("a", "null").input_json("[1, 2"));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidKwargKey));
     }
@@ -1086,9 +1098,9 @@ mod tests {
     #[test]
     fn a_non_object_input_without_injected_members_is_accepted() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(TaskNode::<()>::raw("a").input_json("[1, 2, 3]"));
+        b.task(TaskNode::<()>::raw("a", "null").input_json("[1, 2, 3]"));
         let spec = b.build().unwrap();
-        assert_eq!(spec.tasks[0].input_json.as_deref(), Some("[1, 2, 3]"));
+        assert_eq!(spec.tasks[0].input_json, "[1, 2, 3]");
     }
 
     #[test]
@@ -1096,7 +1108,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.task(
-            TaskNode::<()>::raw("b")
+            TaskNode::<()>::raw("b", "{}")
                 .input_json(r#"{"data": 1}"#)
                 .raw_arg_from("data", a.into()),
         );
@@ -1175,7 +1187,7 @@ mod tests {
     fn e013_min_success_zero() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b", "null").waits_for(a));
         b.tasks[1].join = JoinType::Quorum;
         b.tasks[1].min_success = Some(0);
         let err = b.build().unwrap_err();
@@ -1186,7 +1198,7 @@ mod tests {
     fn e013_min_success_exceeds_deps() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").waits_for(a).join_quorum(5));
+        b.task(TaskNode::<()>::raw("b", "null").waits_for(a).join_quorum(5));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidJoin));
     }
@@ -1195,7 +1207,7 @@ mod tests {
     fn e013_all_with_min_success() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b", "null").waits_for(a));
         b.tasks[1].join = JoinType::All;
         b.tasks[1].min_success = Some(1);
         let err = b.build().unwrap_err();
@@ -1206,7 +1218,7 @@ mod tests {
     fn e013_any_with_min_success() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").waits_for(a));
+        b.task(TaskNode::<()>::raw("b", "null").waits_for(a));
         b.tasks[1].join = JoinType::Any;
         b.tasks[1].min_success = Some(1);
         let err = b.build().unwrap_err();
@@ -1220,7 +1232,7 @@ mod tests {
         let bb = b.task(simple_node("b"));
         let c = b.task(simple_node("c"));
         b.task(
-            TaskNode::<()>::raw("d")
+            TaskNode::<()>::raw("d", "null")
                 .waits_for_all(&[a, bb, c])
                 .join_quorum(2),
         );
@@ -1235,7 +1247,7 @@ mod tests {
         // be rejected, not silently run as a root with its quorum dropped (C13).
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(simple_node("a"));
-        b.task(TaskNode::<()>::raw("b").join_quorum(5));
+        b.task(TaskNode::<()>::raw("b", "null").join_quorum(5));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidJoin));
     }
@@ -1303,12 +1315,12 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("data_pipeline");
         let fetch = b.task(node_with_id("fetch", "fetch"));
         let parse = b.task(
-            TaskNode::<String>::raw("parse")
+            TaskNode::<String>::raw("parse", "{}")
                 .raw_arg_from("raw", fetch.into())
                 .node_id("parse"),
         );
         let persist = b.task(
-            TaskNode::<()>::raw("persist")
+            TaskNode::<()>::raw("persist", "{}")
                 .raw_arg_from("data", parse.into())
                 .node_id("persist"),
         );
@@ -1344,7 +1356,7 @@ mod tests {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.sub_workflow(
-            SubWorkflowNode::new("child_wf")
+            SubWorkflowNode::new("child_wf", "null")
                 .waits_for(a)
                 .node_id("child"),
         );
@@ -1364,15 +1376,14 @@ mod tests {
 
         let mut b = WorkflowSpecBuilder::new("wf");
         b.sub_workflow(
-            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf")
+            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf", "{}")
                 .set(ChildWorkflowParams::field_limit(), 10)
                 .unwrap()
                 .node_id("child"),
         );
         let spec = b.build().unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(spec.tasks[0].input_json.as_deref().unwrap())
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(&spec.tasks[0].input_json).unwrap(),
             serde_json::json!({"limit":10})
         );
     }
@@ -1382,9 +1393,9 @@ mod tests {
         use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
         let mut b = WorkflowSpecBuilder::new("wf");
-        let producer = b.task(TaskNode::<String>::raw("producer").node_id("producer"));
+        let producer = b.task(TaskNode::<String>::raw("producer", "null").node_id("producer"));
         b.sub_workflow(
-            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf")
+            SubWorkflowNode::<ChildWorkflowParams, ()>::typed("child_wf", "{}")
                 .set(ChildWorkflowParams::field_limit(), 25)
                 .unwrap()
                 .arg_from(ChildWorkflowParams::field_source(), producer)
@@ -1394,8 +1405,7 @@ mod tests {
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].args_from.get("source"), Some(&0));
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(spec.tasks[1].input_json.as_deref().unwrap())
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(&spec.tasks[1].input_json).unwrap(),
             serde_json::json!({"limit":25})
         );
         assert_eq!(spec.tasks[1].dependencies, vec![0]);
@@ -1408,11 +1418,11 @@ mod tests {
         // Building two specs from fresh TaskNodes with the same name produces
         // independent node_ids (auto-assigned from task_name:index).
         let mut b1 = WorkflowSpecBuilder::new("alpha");
-        b1.task(TaskNode::<()>::raw("task_a"));
+        b1.task(TaskNode::<()>::raw("task_a", "null"));
         let spec1 = b1.build().unwrap();
 
         let mut b2 = WorkflowSpecBuilder::new("beta");
-        b2.task(TaskNode::<()>::raw("task_a"));
+        b2.task(TaskNode::<()>::raw("task_a", "null"));
         let spec2 = b2.build().unwrap();
 
         assert_eq!(spec1.tasks[0].node_id.as_deref(), Some("task_a:0"));
@@ -1422,11 +1432,11 @@ mod tests {
     #[test]
     fn explicit_node_id_preserved_on_reuse() {
         let mut b1 = WorkflowSpecBuilder::new("alpha");
-        b1.task(TaskNode::<()>::raw("task_a").node_id("custom-stable-id"));
+        b1.task(TaskNode::<()>::raw("task_a", "null").node_id("custom-stable-id"));
         let spec1 = b1.build().unwrap();
 
         let mut b2 = WorkflowSpecBuilder::new("beta");
-        b2.task(TaskNode::<()>::raw("task_a").node_id("custom-stable-id"));
+        b2.task(TaskNode::<()>::raw("task_a", "null").node_id("custom-stable-id"));
         let spec2 = b2.build().unwrap();
 
         assert_eq!(spec1.tasks[0].node_id.as_deref(), Some("custom-stable-id"));
@@ -1437,15 +1447,12 @@ mod tests {
     fn input_json_preserved_after_build() {
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(
-            TaskNode::<()>::raw("task_a")
+            TaskNode::<()>::raw("task_a", "null")
                 .input_json(r#"{"url":"https://example.com"}"#)
                 .node_id("a"),
         );
         let spec = b.build().unwrap();
-        assert_eq!(
-            spec.tasks[0].input_json.as_deref(),
-            Some(r#"{"url":"https://example.com"}"#),
-        );
+        assert_eq!(spec.tasks[0].input_json, r#"{"url":"https://example.com"}"#);
     }
 
     #[test]
@@ -1458,7 +1465,7 @@ mod tests {
         let cloned = spec1.tasks[0].clone();
 
         let mut b2 = WorkflowSpecBuilder::new("second");
-        b2.task(TaskNode::<()>::raw("a").node_id("a"));
+        b2.task(TaskNode::<()>::raw("a", "null").node_id("a"));
         let spec2 = b2.build().unwrap();
 
         assert_eq!(spec1.tasks[0].task_name, spec2.tasks[0].task_name);

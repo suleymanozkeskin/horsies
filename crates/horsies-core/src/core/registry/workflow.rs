@@ -8,8 +8,8 @@ use crate::core::workflow::spec::WorkflowSpec;
 /// Callback type for dynamically building a child WorkflowSpec at runtime.
 ///
 /// Receives the parent sub-workflow node's encoded input as one JSON value
-/// (after `args_from` merging; `{}` when the node sets no params) and
-/// returns a new `WorkflowSpec`.
+/// (after `args_from` merging; as the client encoded it) and returns a new
+/// `WorkflowSpec`.
 /// This enables sub-workflows to be parameterized by upstream results.
 ///
 /// The default behavior (when `spec_builder` is `None`) is to use the
@@ -598,7 +598,8 @@ impl WorkflowSpecRegistry {
     /// Performs:
     /// 1. Queue/priority resolution from task defaults
     /// 2. Queue validation (unresolved and invalid)
-    /// 3. Missing-input validation (task expects input but node has none)
+    /// 3. Child params validation: a sub-workflow node that passes params to a
+    ///    child registered without a `spec_builder` is refused
     pub fn resolve_and_validate_spec(
         &self,
         spec: &mut crate::core::workflow::spec::WorkflowSpec,
@@ -615,7 +616,20 @@ impl WorkflowSpecRegistry {
                     .task_name
                     .strip_prefix("__sub_workflow:")
                     .unwrap_or(&node.task_name);
-                let has_input = node.input_json.is_some() || !node.args_from.is_empty();
+                let passes_params = crate::core::workflow::node::passes_child_params(
+                    &node.input_json,
+                    !node.args_from.is_empty(),
+                )
+                .map_err(|e| {
+                    HorsiesError::new(format!(
+                        "workflow '{}' node '{}' params of child workflow '{}' are not valid JSON: {}",
+                        spec.name,
+                        node.node_id.as_deref().unwrap_or("?"),
+                        spec_name,
+                        e,
+                    ))
+                    .with_code(ErrorCode::WorkflowInvalidKwargKey)
+                })?;
 
                 let Some(child_key) = node.sub_definition_key.as_deref() else {
                     return Err(HorsiesError::new(format!(
@@ -645,7 +659,7 @@ impl WorkflowSpecRegistry {
                         ));
                     }
                     Some(ResolvedChildWorkflow::Static(registered))
-                        if has_input && registered.spec_builder.is_none() =>
+                        if passes_params && registered.spec_builder.is_none() =>
                     {
                         return Err(HorsiesError::new(format!(
                             "workflow '{}' node '{}' supplies params to child workflow '{}' \
@@ -697,29 +711,6 @@ impl WorkflowSpecRegistry {
                 }
                 _ => {}
             }
-
-            // Validate input: task expects input but node has none.
-            if let Some(defaults) = self.task_defaults_map.get(&node.task_name) {
-                if defaults.expects_input {
-                    let has_input = node.input_json.is_some() || !node.args_from.is_empty();
-                    if !has_input {
-                        let type_name = defaults.input_type_name.unwrap_or("non-unit type");
-                        return Err(HorsiesError::new(format!(
-                            "workflow '{}' node '{}' (task '{}') requires input `{}` \
-                             but has no input or args_from",
-                            spec.name,
-                            node.node_id.as_deref().unwrap_or("?"),
-                            node.task_name,
-                            type_name,
-                        ))
-                        .with_code(ErrorCode::WorkflowMissingRequiredParams)
-                        .with_help(
-                            "use task_name::node()?.set_input(input) for whole inputs, \
-                             or use typed .set(...) / .arg_from(...) on the node",
-                        ));
-                    }
-                }
-            }
         }
 
         Ok(())
@@ -757,7 +748,7 @@ mod tests {
 
     fn make_spec(name: &str) -> WorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new(name);
-        builder.task(TaskNode::<()>::raw("my_task"));
+        builder.task(TaskNode::<()>::raw("my_task", "null"));
         builder.build().unwrap()
     }
 
@@ -819,9 +810,9 @@ mod tests {
         use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
         let mut builder = WorkflowSpecBuilder::new(name);
-        let root = builder.task(TaskNode::<()>::raw("root_task"));
+        let root = builder.task(TaskNode::<()>::raw("root_task", "null"));
         builder.sub_workflow(
-            SubWorkflowNode::new(child_spec_name)
+            SubWorkflowNode::new(child_spec_name, "null")
                 .waits_for(root)
                 .node_id(format!("sub_{}", child_spec_name)),
         );
@@ -908,14 +899,14 @@ mod tests {
             use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
             let mut builder = WorkflowSpecBuilder::new("wf_a");
-            let root = builder.task(TaskNode::<()>::raw("root_task"));
+            let root = builder.task(TaskNode::<()>::raw("root_task", "null"));
             builder.sub_workflow(
-                SubWorkflowNode::new("wf_b")
+                SubWorkflowNode::new("wf_b", "null")
                     .waits_for(root)
                     .node_id("sub_b"),
             );
             builder.sub_workflow(
-                SubWorkflowNode::new("wf_c")
+                SubWorkflowNode::new("wf_c", "null")
                     .waits_for(root)
                     .node_id("sub_c"),
             );
@@ -942,7 +933,7 @@ mod tests {
     fn make_keyed_registered(name: &str, definition_key: &str) -> RegisteredWorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new(name);
         builder.definition_key(definition_key);
-        builder.task(TaskNode::<()>::raw("my_task"));
+        builder.task(TaskNode::<()>::raw("my_task", "null"));
         RegisteredWorkflowSpec {
             spec: builder.build().unwrap(),
             spec_builder: None,
@@ -968,7 +959,7 @@ mod tests {
         registry.register(make_registered("child")).unwrap();
 
         let mut builder = WorkflowSpecBuilder::new("parent");
-        builder.sub_workflow(SubWorkflowNode::new("child").node_id("child_node"));
+        builder.sub_workflow(SubWorkflowNode::new("child", "null").node_id("child_node"));
         let mut spec = builder.build().unwrap();
 
         let err = registry.resolve_and_validate_spec(&mut spec).unwrap_err();
@@ -984,7 +975,7 @@ mod tests {
 
         let mut builder = WorkflowSpecBuilder::new("parent");
         builder.sub_workflow(
-            SubWorkflowNode::<ChildParams, ()>::typed("child")
+            SubWorkflowNode::<ChildParams, ()>::typed("child", "null")
                 .definition_key("tests.child.v1")
                 .set_input(ChildParams {
                     region: "eu".to_owned(),
@@ -999,6 +990,28 @@ mod tests {
             .to_string()
             .contains("supplies params to child workflow 'child'"));
         assert!(err.to_string().contains("has no runtime spec_builder"));
+    }
+
+    #[test]
+    fn subworkflow_empty_params_need_no_spec_builder() {
+        // `null` (a Rust `()` params input) and `{}` (Python's empty keyword
+        // input) pass no params, so a child without a spec_builder takes them.
+        for empty_params in ["null", "{}"] {
+            let mut registry = WorkflowSpecRegistry::new();
+            registry
+                .register(make_keyed_registered("child", "tests.child.v1"))
+                .unwrap();
+
+            let mut builder = WorkflowSpecBuilder::new("parent");
+            builder.sub_workflow(
+                SubWorkflowNode::new("child", empty_params)
+                    .definition_key("tests.child.v1")
+                    .node_id("child_node"),
+            );
+            let mut spec = builder.build().unwrap();
+
+            registry.resolve_and_validate_spec(&mut spec).unwrap();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1130,7 +1143,7 @@ mod tests {
             definition_key: def_key.to_owned(),
             spec_builder: Arc::new(|_| {
                 let mut b = WorkflowSpecBuilder::new("dummy");
-                b.task(TaskNode::<()>::raw("dummy_task"));
+                b.task(TaskNode::<()>::raw("dummy_task", "null"));
                 b.build()
             }),
             declared_children: declared_children.iter().map(|s| s.to_string()).collect(),
@@ -1145,9 +1158,9 @@ mod tests {
         child_def_key: &str,
     ) -> WorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new(name);
-        let root = builder.task(TaskNode::<()>::raw("root_task"));
+        let root = builder.task(TaskNode::<()>::raw("root_task", "null"));
         builder.sub_workflow(
-            SubWorkflowNode::new(child_name)
+            SubWorkflowNode::new(child_name, "null")
                 .definition_key(child_def_key)
                 .waits_for(root)
                 .node_id(format!("sub_{}", child_name)),
