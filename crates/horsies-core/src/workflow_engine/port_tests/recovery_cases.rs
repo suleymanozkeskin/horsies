@@ -13,7 +13,7 @@ use super::support::{
 };
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::{WorkflowSpec, WorkflowSpecRegistry};
+use crate::core::{TaskError, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::recovery::{recover_stuck_workflows, RecoveryReport};
 
 /// `workflow_recovery_failure_limit` of each pass.
@@ -253,10 +253,23 @@ async fn seed_parent_of_an_ended_child(
         .status(child_status)
         .output(0);
     child_seed.result = child_result;
+    let child_node = match child_status {
+        "FAILED" => {
+            child_seed.error = Some(
+                serde_json::to_string(&TaskError::new("CHILD_CRASH", "child task crashed"))
+                    .expect("encode the child error"),
+            );
+            NodeSeed::task(Uuid::nil(), 0, "FAILED").result(err_text("CHILD_CRASH"))
+        }
+        _ => NodeSeed::task(Uuid::nil(), 0, "COMPLETED").result(ok_text(serde_json::json!(42))),
+    };
     let child = seed_workflow(pool, &child_seed).await;
     seed_node(
         pool,
-        &NodeSeed::task(child, 0, "COMPLETED").result(ok_text(serde_json::json!(42))),
+        &NodeSeed {
+            workflow_id: child,
+            ..child_node
+        },
     )
     .await;
     seed_node(
@@ -290,18 +303,29 @@ async fn a_completed_child_advances_its_parent_node() {
     db.drop().await;
 }
 
-/// `test_recover_child_cancelled_parent_not_updated` (case 1.6): a child that
-/// did not complete fails its parent node.
+/// `test_recover_child_cancelled_parent_not_updated` (case 1.6) and
+/// `test_workflow_subworkflow.py::TestSubworkflowIntegration.test_recovery_child_failed_parent_still_running`:
+/// a child that did not complete fails its parent node.
 #[tokio::test]
 #[serial]
-async fn a_cancelled_child_fails_its_parent_node() {
+async fn a_cancelled_or_failed_child_fails_its_parent_node() {
     let db = IsolatedDatabase::create().await;
-    let (parent, _child) = seed_parent_of_an_ended_child(&db.pool, "CANCELLED", None).await;
+    let mut parents = Vec::new();
+    for child_status in ["CANCELLED", "FAILED"] {
+        let (parent, _child) = seed_parent_of_an_ended_child(&db.pool, child_status, None).await;
+        parents.push((parent, child_status));
+    }
 
     let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
 
-    assert!(report.total() >= 1, "{report:?}");
-    assert_eq!(node_status(&db.pool, parent, 0).await, "FAILED");
+    assert!(report.total() >= 2, "{report:?}");
+    for (parent, child_status) in parents {
+        assert_eq!(
+            node_status(&db.pool, parent, 0).await,
+            "FAILED",
+            "{child_status}"
+        );
+    }
     db.drop().await;
 }
 

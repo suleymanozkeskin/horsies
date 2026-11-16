@@ -35,6 +35,7 @@ use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, Workflo
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::on_workflow_task_complete;
 use crate::workflow_engine::start::start_workflow;
+use crate::workflow_engine::WorkflowError;
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -828,6 +829,18 @@ pub(super) async fn finish_task(
     outcome: &TaskResult<serde_json::Value>,
     registry: &WorkflowSpecRegistry,
 ) {
+    try_finish_task(pool, task_id, outcome, registry)
+        .await
+        .expect("phase 2 of the workflow task");
+}
+
+/// [`finish_task`] that returns the outcome of phase 2. Phase 1 must apply.
+pub(super) async fn try_finish_task(
+    pool: &PgPool,
+    task_id: Uuid,
+    outcome: &TaskResult<serde_json::Value>,
+    registry: &WorkflowSpecRegistry,
+) -> Result<(), WorkflowError> {
     hold_running(pool, task_id).await;
     let result_json = serde_json::to_string(outcome).expect("encode the task outcome");
     let fence = PriorLockedRead {
@@ -867,7 +880,6 @@ pub(super) async fn finish_task(
         &RetentionConfig::default(),
     )
     .await
-    .expect("phase 2 of the workflow task");
 }
 
 /// Finishes the task of node `task_index` of `workflow_id` (see [`finish_task`])
