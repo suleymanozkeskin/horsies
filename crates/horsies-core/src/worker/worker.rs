@@ -102,6 +102,15 @@ fn effective_claim_lease_ms(app_config: &AppConfig) -> u32 {
         .unwrap_or(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS)
 }
 
+/// The lease of a claim pass. The config refuses a zero `claim_lease_ms` when
+/// it is loaded, and the default is positive, so zero here is a defect.
+fn claim_lease(app_config: &AppConfig) -> std::num::NonZeroU32 {
+    match std::num::NonZeroU32::new(effective_claim_lease_ms(app_config)) {
+        Some(lease) => lease,
+        None => unreachable!("claim_lease_ms of 0 is refused when the config is loaded"),
+    }
+}
+
 /// Bound of one attempt of the database start steps (Python
 /// `_start_with_resilience_config`: `asyncio.wait_for(self.start(), 30.0)`).
 const START_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -935,7 +944,7 @@ impl Worker {
             max_claim_per_worker: self.worker_config.max_claim_per_worker,
             max_claim_batch: self.worker_config.max_claim_batch,
             cluster_wide_cap: self.app_config.cluster_wide_cap,
-            claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),
+            claim_lease_ms: claim_lease(&self.app_config),
         };
         let mut claimed_rows = self.broker.claim_batch(&params).await?;
 
@@ -1682,8 +1691,7 @@ mod tests {
             .expect("claimer heartbeat startup")..];
         let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
         assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
-        assert!(production
-            .contains("claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),"));
+        assert!(production.contains("claim_lease_ms: claim_lease(&self.app_config),"));
         assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
     }
 
