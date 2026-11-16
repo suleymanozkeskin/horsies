@@ -4,7 +4,7 @@ version = "0.1.0-alpha.36"
 edition = "2021"
 description = "Proc macros for the horsies task queue and workflow engine"
 license = "MIT"
-repository = "https://github.com/suleymanozkeskin/horsies-rust"
+repository = "https://github.com/suleymanozkeskin/horsies"
 readme = "README.md"
 
 [lib]
