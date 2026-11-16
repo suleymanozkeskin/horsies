@@ -86,6 +86,18 @@ pub enum BrokerError {
     #[error("invalid idempotency reservation window: {0}")]
     InvalidIdempotencyReservationWindow(String),
 
+    /// The database records another client family, or none. Nothing was
+    /// written. Not retryable: the database stays of its family.
+    #[error(
+        "this database was installed by {stored}; this is the {} client, which writes only \
+         into a database of its own family",
+        own.as_str()
+    )]
+    ClientFamilyMismatch {
+        stored: crate::broker::client_family::RecordedFamily,
+        own: crate::broker::client_family::ClientFamily,
+    },
+
     /// The schema install lock could not be used.
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
@@ -138,6 +150,7 @@ impl BrokerError {
             | Self::IncompleteTaskHistoryCutover
             | Self::SchemaVersionMismatch { .. }
             | Self::InvalidConnectionSettings(_)
+            | Self::ClientFamilyMismatch { .. }
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
             | Self::InvalidExecutionClass(_)
