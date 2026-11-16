@@ -18,6 +18,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at
 from tests.fixtures.slots.handles import HANDLE_CLAIMED_AT, task_finished_handle
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -163,7 +164,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
         handle,
         task_id,
         task_name='two_phase_finalize_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
     assert is_err(finalize_r)
 
@@ -249,7 +250,7 @@ async def test_phase2_deletes_the_outbox_row_of_the_node(
         task_finished_handle(True, wire.ok_value, None),
         task_id,
         task_name='two_phase_finalize_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert not is_err(finalize_r)
@@ -277,7 +278,7 @@ async def test_a_failed_phase2_keeps_the_outbox_row(
         task_finished_handle(True, wire.ok_value, None),
         task_id,
         task_name='two_phase_finalize_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(finalize_r)

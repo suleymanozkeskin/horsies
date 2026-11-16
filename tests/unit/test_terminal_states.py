@@ -11,7 +11,7 @@ from horsies.core.models.workflow import (
     WORKFLOW_TERMINAL_STATES,
     WORKFLOW_TASK_TERMINAL_STATES,
 )
-from horsies.core.schemas.triggers import CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL
+from tests.baseline_sql import baseline_function
 
 
 @pytest.mark.unit
@@ -73,7 +73,7 @@ class TestWorkflowStatusTerminal:
         assert WorkflowStatus.EXPIRED.is_terminal is True
 
     def test_expired_status_notifies_result_waiters(self) -> None:
-        sql = str(CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL)
+        sql = baseline_function('horsies_notify_workflow_status_change')
         assert "'COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED', 'EXPIRED'" in sql
 
     def test_non_terminal_members(self) -> None:

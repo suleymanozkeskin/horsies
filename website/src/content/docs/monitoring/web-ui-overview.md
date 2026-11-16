@@ -93,6 +93,12 @@ monitoring NOTIFY channels (`horsies_task_status`, `horsies_workflow_status`,
 `GET /api/events`. Payloads are ids, never data: an event says which surface
 changed, and the browser refetches through the normal endpoints.
 
+Each stream queues at most 256 events (`SUBSCRIBER_QUEUE_CAPACITY`). When a
+browser reads slower than events arrive and its queue is full, the queued
+events are dropped and the stream sends one event with no ids per topic
+(`tasks`, `workflows`, `workers`): the browser re-reads every surface. A slow
+browser therefore cannot grow the memory of the web process.
+
 A task sends a `horsies_task_status` event when it is created, when its status
 changes, and when it ends. Its start (RUNNING) sends none: the start commit is
 one transaction per task, and a NOTIFY would make Postgres commit those one at

@@ -57,6 +57,8 @@ use super::result::{
 };
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
+mod ports;
+
 const PYTHON_STAGED_FIXTURE: &str =
     include_str!("../../../../tests/fixtures/task_history/python-v052-staged-readers.json");
 
@@ -97,6 +99,19 @@ fn without_birth_floor(body: &str) -> String {
             .expect("birth-floor check ends")
         + end_marker.len();
     format!("{}{}", &body[..start], &body[end..])
+}
+
+/// The fixture predates Python's `SET enable_seqscan = off` in every rendered
+/// reader (Python commit 2d1fc080; `horsies/core/history/reads/lookup_generation.py:491`).
+/// Puts the setting where Python renders it: the line after `STABLE`.
+fn with_sequential_scans_off(body: &str) -> String {
+    let stable = "\n    STABLE\n";
+    assert_eq!(
+        body.matches(stable).count(),
+        1,
+        "fixture body carries one STABLE line"
+    );
+    body.replacen(stable, "\n    STABLE\n    SET enable_seqscan = off\n", 1)
 }
 
 fn fixture_manifest() -> (LookupManifest, Value) {
@@ -147,27 +162,27 @@ fn staged_renderer_is_byte_identical_to_the_python_fixture() {
     );
     assert_eq!(
         render_staged_lookup_function(&manifest),
-        without_birth_floor(
+        with_sequential_scans_off(&without_birth_floor(
             fixture["functions"]["lookup"]
                 .as_str()
                 .expect("lookup body")
-        )
+        ))
     );
     assert_eq!(
         render_staged_provenance_function(&manifest),
-        without_birth_floor(
+        with_sequential_scans_off(&without_birth_floor(
             fixture["functions"]["provenance"]
                 .as_str()
                 .expect("provenance body")
-        )
+        ))
     );
     assert_eq!(
         render_staged_detail_function(&manifest),
-        without_birth_floor(
+        with_sequential_scans_off(&without_birth_floor(
             fixture["functions"]["detail"]
                 .as_str()
                 .expect("detail body")
-        )
+        ))
     );
 }
 
@@ -590,7 +605,7 @@ fn attempt_snapshot(anchor: DateTime<Utc>) -> StoredAttemptSnapshot {
         anchor - Duration::minutes(1),
         Some("BOOM".to_owned()),
         Some("exploded once".to_owned()),
-        Some("TASK_ERROR".to_owned()),
+        Some("TASK_EXCEPTION".to_owned()),
         Some("worker-p4".to_owned()),
         Some("host-p4".to_owned()),
         Some(42),
@@ -803,7 +818,10 @@ async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identit
         panic!("retained task did not decode as history detail");
     };
     assert_eq!(detail.task_id, normal_id);
-    assert_eq!(detail.status, "FAILED");
+    assert_eq!(
+        detail.status,
+        crate::core::types::status::TaskStatus::Failed
+    );
     assert_eq!(detail.attempts.len(), 1);
     assert_eq!(detail.attempts[0].outcome(), "FAILED");
     assert!(StagedLoaderPublisher
@@ -997,6 +1015,49 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
     .expect("read missing leaf catalog evidence");
     assert!(catalog_still_attached);
     drop(connection);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let mut transaction = database.pool.begin().await.expect("begin status setup");
+    let today = utc_day(database_now(&mut transaction).await.expect("database now"));
+    let parent = register_test_class(&mut transaction, class_key, 30).await;
+    let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let task_id = v7_with_birth(today + Duration::hours(1));
+    let _snapshot = seed_history_row(
+        &mut transaction,
+        task_id,
+        class_key,
+        today + Duration::hours(2),
+        "FAILED",
+        "FAIL_RUNNING",
+    )
+    .await;
+    StagedLoaderPublisher
+        .republish(&mut transaction)
+        .await
+        .expect("publish status setup");
+    sqlx::query(&format!(
+        "UPDATE {TASK_HISTORY_PARENT} SET status = 'BOGUS' WHERE task_id = $1"
+    ))
+    .bind(task_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("store a status that is not a task status");
+    assert!(matches!(
+        read_task_detail(&mut transaction, task_id)
+            .await
+            .expect_err("an unknown status must refuse detail"),
+        HistoryError::Contract(ref detail) if detail.contains("\"BOGUS\"")
+    ));
+    transaction
+        .rollback()
+        .await
+        .expect("roll back status setup");
     database.drop().await;
 }
 

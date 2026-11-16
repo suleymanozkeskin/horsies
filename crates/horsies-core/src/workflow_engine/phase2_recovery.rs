@@ -16,7 +16,9 @@ use uuid::Uuid;
 use crate::broker::core_rows::{column, first_row, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::lifecycle::TerminalizationKind;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::recovery_limit::{
     recovery_limit_error, recovery_limit_payloads, run_catching_panic, CandidateFailure,
@@ -138,6 +140,86 @@ enum QuarantineResult {
     Refused,
     /// A verdict outside the six of `horsies_phase2_quarantine_one`.
     OutsideContract,
+}
+
+/// A phase-2 record names a kind whose terminal move writes no phase-2
+/// record. The pending CHECK admits five kinds, so this is a value that the
+/// table refuses or that a later schema added.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("phase-2 record names terminalization kind {kind:?}, which writes no phase-2 record")]
+pub(crate) struct PendingKindWithoutPhase2 {
+    pub kind: String,
+}
+
+/// The task status that the terminal move wrote with the kind of a phase-2
+/// record (Python `terminal_status_of_pending_kind`).
+///
+/// The move pairs each kind with one terminal status and refuses any other
+/// pair, and only five kinds write a phase-2 record: `COMPLETE_LOCKED` is
+/// COMPLETED; `FAIL_RUNNING` and `FAIL_STALE` are FAILED; `EXPIRE_CLAIMED`
+/// and `EXPIRE_PENDING` are EXPIRED. No cancel kind writes a record, so a
+/// record never stands for a CANCELLED task. Every other value, known kind
+/// or not, is `PendingKindWithoutPhase2`. Pure.
+pub(crate) fn terminal_status_of_pending_kind(
+    kind: &str,
+) -> Result<TaskStatus, PendingKindWithoutPhase2> {
+    match TerminalizationKind::parse(kind) {
+        Some(TerminalizationKind::CompleteLocked) => Ok(TaskStatus::Completed),
+        Some(TerminalizationKind::FailRunning | TerminalizationKind::FailStale) => {
+            Ok(TaskStatus::Failed)
+        }
+        Some(TerminalizationKind::ExpireClaimed | TerminalizationKind::ExpirePending) => {
+            Ok(TaskStatus::Expired)
+        }
+        Some(
+            TerminalizationKind::CompleteFused
+            | TerminalizationKind::CancelAdmin
+            | TerminalizationKind::CancelOrphan
+            | TerminalizationKind::CancelOrphanSweep
+            | TerminalizationKind::PauseAbandonClaim
+            | TerminalizationKind::PauseAbandonClaimBatch
+            | TerminalizationKind::PauseAbandonWorkflow
+            | TerminalizationKind::WorkflowCancelClaim
+            | TerminalizationKind::WorkflowCancelClaimBatch
+            | TerminalizationKind::WorkflowCancelWorkflow,
+        )
+        | None => Err(PendingKindWithoutPhase2 {
+            kind: kind.to_owned(),
+        }),
+    }
+}
+
+/// The statement of a phase-2 wake.
+const SEND_WAKE_SQL: &str = "SELECT pg_notify($1, $2)";
+
+/// The capacity wake that phase 2 sends (Python `QueueWake | NoQueueWake`,
+/// `core/workflows/engine.py:1766-1780`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase2Wake {
+    /// `pg_notify(channel, payload)`. Inside a transaction, PostgreSQL
+    /// delivers it at COMMIT and drops it at rollback.
+    Queue { channel: String, payload: String },
+    /// The caller sends no wake.
+    NoWake,
+}
+
+/// Send `wake` as one statement on `executor`. Writes nothing else.
+///
+/// Errors: the database error of the statement, for example a dead
+/// connection or a channel name that the server refuses.
+pub(crate) async fn send_phase2_wake(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    wake: &Phase2Wake,
+) -> Result<(), sqlx::Error> {
+    match wake {
+        Phase2Wake::Queue { channel, payload } => sqlx::query(SEND_WAKE_SQL)
+            .bind(channel.as_str())
+            .bind(payload.as_str())
+            .execute(executor)
+            .await
+            .map(|_notified| ()),
+        Phase2Wake::NoWake => Ok(()),
+    }
 }
 
 /// One bounded pass over the phase-2 records.
@@ -617,13 +699,69 @@ mod tests {
     }
 
     #[test]
+    fn a_complete_locked_record_stands_for_a_completed_task() {
+        assert_eq!(
+            terminal_status_of_pending_kind("COMPLETE_LOCKED"),
+            Ok(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn a_running_or_stale_failure_record_stands_for_a_failed_task() {
+        for kind in ["FAIL_RUNNING", "FAIL_STALE"] {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Ok(TaskStatus::Failed),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expiry_record_stands_for_an_expired_task() {
+        for kind in ["EXPIRE_CLAIMED", "EXPIRE_PENDING"] {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Ok(TaskStatus::Expired),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Every kind that writes no phase-2 record, and a value that is no kind,
+    /// is refused with the value named.
+    #[test]
+    fn every_other_kind_writes_no_phase_two_record() {
+        let record_kinds = [
+            TerminalizationKind::CompleteLocked,
+            TerminalizationKind::FailRunning,
+            TerminalizationKind::FailStale,
+            TerminalizationKind::ExpireClaimed,
+            TerminalizationKind::ExpirePending,
+        ];
+        let other_kinds = TerminalizationKind::ALL
+            .into_iter()
+            .filter(|kind| !record_kinds.contains(kind))
+            .map(TerminalizationKind::as_str);
+        for kind in other_kinds.chain(["KIND_FROM_THE_FUTURE", ""]) {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Err(PendingKindWithoutPhase2 {
+                    kind: kind.to_owned()
+                }),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Python `tests/unit/test_phase2_recovery_policy.py::TestDurableDispositions::test_only_the_three_durable_ones_are_listed`.
+    /// The discovery order, the attempt bound and the cap are behaviour:
+    /// `discovery_is_oldest_first_strictly_graced_and_capped`.
+    #[test]
     fn durable_vocabulary_is_exact() {
         assert_eq!(Phase2DispositionKind::DURABLE.len(), 3);
         assert!(Phase2DispositionKind::AppliedToNode.is_durable());
         assert!(!Phase2DispositionKind::SourceAbsent.is_durable());
-        assert!(DISCOVER_PENDING_SQL.contains("ORDER BY created_at, task_id"));
-        assert!(DISCOVER_PENDING_SQL.contains("attempt_count <"));
-        assert!(DISCOVER_PENDING_SQL.contains("LIMIT"));
     }
 
     #[tokio::test]
@@ -745,12 +883,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // A transient failure (lock_not_available): it rolls the row back
+        // and adds no attempt. A persistent raise adds one (#819).
         sqlx::query(&format!(
             "CREATE OR REPLACE FUNCTION p7_phase2_inject_row_failure() RETURNS trigger
              LANGUAGE plpgsql AS $body$
              BEGIN
                  IF NEW.workflow_id = '{bad_workflow}'::uuid THEN
-                     RAISE EXCEPTION 'injected phase-2 row failure';
+                     RAISE EXCEPTION 'injected phase-2 row failure' USING ERRCODE = '55P03';
                  END IF;
                  RETURN NEW;
              END
@@ -820,7 +960,8 @@ mod tests {
         cleanup_case(&pool, good_workflow, good_task).await;
     }
 
-    /// The supersede rule of `horsies_phase2_consume`, the function that
+    /// Python `tests/integration/test_task_history_phase2_consumption.py::TestDurableDispositions::test_terminal_workflow_supersedes_without_touching_the_node`:
+    /// the supersede rule of `horsies_phase2_consume`, the function that
     /// Python's phase 2 calls: the record of a node of an ended workflow is
     /// deleted and the node is not written. The core's phase 2 writes the
     /// node instead (`horsies_workflow_node_finish`;
@@ -986,6 +1127,88 @@ mod tests {
         cleanup_case(&pool, state_workflow, state_task).await;
     }
 
+    /// The recovery reads the record's kind (the baseline record has no
+    /// status column) and recovers a `FAIL_RUNNING` record with the FAILED
+    /// node status (Python `core/workflows/phase2_recovery.py`, discovery and
+    /// `terminal_status_of_pending_kind`).
+    #[tokio::test]
+    #[serial]
+    async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
+        let workflow_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        seed_workflow_task(&pool, workflow_id, task_id, false).await;
+        let failure = serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(
+            crate::core::TaskError::new("NODE_FAILURE", "the node failed"),
+        ))
+        .expect("encode the failure result");
+        let outcomes = terminalize(
+            &pool,
+            &TerminalizationCommand::FailLockedTask {
+                task_id,
+                fence: PriorLockedRead {
+                    worker_id: "p7-worker".to_owned(),
+                },
+                result_json: failure,
+                error_code: Some("NODE_FAILURE".to_owned()),
+                failed_reason: Some("the node failed".to_owned()),
+            },
+        )
+        .await
+        .expect("fail the workflow task");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ));
+        let kind: String = sqlx::query_scalar(
+            "UPDATE horsies_workflow_phase2_pending
+             SET created_at = NOW() - INTERVAL '1 hour'
+             WHERE task_id = $1
+             RETURNING terminalization_kind",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("age the phase-2 record");
+        assert_eq!(kind, "FAIL_RUNNING");
+
+        let summary = drive_phase2_recovery(
+            &pool,
+            &PostgresBroker::from_pool(pool.clone()),
+            &crate::core::WorkflowSpecRegistry::new(),
+            0,
+            1,
+            25,
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("recovery pass");
+
+        let node_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the node");
+        let records: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count the phase-2 records");
+        cleanup_case(&pool, workflow_id, task_id).await;
+        assert_eq!(summary.considered, 1, "{summary:?}");
+        assert_eq!(summary.applied, 1, "{summary:?}");
+        assert_eq!(summary.failed, 0, "{summary:?}");
+        assert_eq!(node_status, "FAILED");
+        assert_eq!(records, 0);
+    }
+
     #[tokio::test]
     #[serial]
     async fn discovery_is_oldest_first_strictly_graced_and_capped() {
@@ -1033,6 +1256,79 @@ mod tests {
         for (workflow_id, task_id) in cases {
             cleanup_case(&pool, workflow_id, task_id).await;
         }
+    }
+
+    /// The quarantine step of the recovery loop on the baseline function
+    /// (#861): a row whose consumption keeps retaining is quarantined at the
+    /// attempt bound, and its pending row points at the verified copy.
+    /// Python: `horsies/core/workflows/phase2_recovery.py:681-725`
+    /// (`_quarantine_exhausted_row`). The history row and the pending row
+    /// agree on schema version 2: the consumer refuses it
+    /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it.
+    #[tokio::test]
+    #[serial]
+    async fn the_recovery_loop_quarantines_a_retaining_row_at_the_attempt_bound() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
+        let workflow_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        seed_workflow_task(&pool, workflow_id, task_id, false).await;
+        terminalize_workflow_task(&pool, task_id).await;
+        sqlx::query(
+            "UPDATE horsies_task_history SET history_schema_version = 2 WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("set the history schema version");
+        sqlx::query(
+            "UPDATE horsies_workflow_phase2_pending
+             SET history_schema_version = 2,
+                 created_at = NOW() - INTERVAL '1 hour'
+             WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("age the pending row");
+
+        let summary = drive_phase2_recovery(
+            &pool,
+            &PostgresBroker::from_pool(pool.clone()),
+            &crate::core::WorkflowSpecRegistry::new(),
+            0,
+            1,
+            1,
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("recovery pass");
+
+        assert_eq!(summary.considered, 1, "{summary:?}");
+        assert_eq!(summary.failed, 0, "{summary:?}");
+        assert_eq!(summary.retained, 1, "{summary:?}");
+        assert_eq!(summary.quarantined, 1, "{summary:?}");
+        assert!(summary.quarantine_refusals.is_empty(), "{summary:?}");
+        let (source, attempts, failure_class, copies): (String, i32, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT p.recovery_source, p.attempt_count, p.last_failure_class,
+                        (SELECT count(*) FROM horsies_workflow_phase2_quarantine AS q
+                         WHERE q.task_id = p.task_id)
+                 FROM horsies_workflow_phase2_pending AS p
+                 WHERE p.task_id = $1",
+            )
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the pending row");
+        assert_eq!(source, "QUARANTINE");
+        assert_eq!(attempts, 1);
+        assert_eq!(failure_class.as_deref(), Some("SOURCE_VERSION_CONFLICT"));
+        assert_eq!(copies, 1);
+        cleanup_case(&pool, workflow_id, task_id).await;
     }
 
     // -----------------------------------------------------------------------

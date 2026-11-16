@@ -164,7 +164,6 @@ class FinalizeNoOpReason(Enum):
     """
 
     CLAIM_LOST = 'CLAIM_LOST'
-    OWNERSHIP_UNCONFIRMED = 'OWNERSHIP_UNCONFIRMED'
     WORKFLOW_STOPPED = 'WORKFLOW_STOPPED'
     EXPIRED_PLAIN_TASK = 'EXPIRED_PLAIN_TASK'
     ORPHAN_SELF_HEAL_DISABLED = 'ORPHAN_SELF_HEAL_DISABLED'
@@ -204,11 +203,28 @@ class ApplyTerminalization:
     command: TerminalizationCommand
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseUnconfirmedClaim:
+    """The child did not confirm the start, and no task code ran.
+
+    The RUNNING write raised (a database error, or its bound cancelled it),
+    or a resume refused the abandon on each start attempt. The parent
+    releases the claim at once with the fenced release: the row goes back to
+    the queue only while it is CLAIMED by this worker at ``claimed_at``. A
+    row outside that fence, for example a start that committed before its
+    reply was lost, is left to recovery.
+    """
+
+    task_id: str
+    claimed_at: datetime
+
+
 type FinalizeDecision = (
     NoTerminalAction
     | ScheduleAutomaticRetry
     | ReplayWorkflowPhase2
     | ApplyTerminalization
+    | ReleaseUnconfirmedClaim
 )
 
 
@@ -265,8 +281,9 @@ def _classify_abort(
         case AbortReason.CLAIM_LOST:
             return NoTerminalAction(reason=FinalizeNoOpReason.CLAIM_LOST)
         case AbortReason.OWNERSHIP_UNCONFIRMED:
-            return NoTerminalAction(
-                reason=FinalizeNoOpReason.OWNERSHIP_UNCONFIRMED,
+            return ReleaseUnconfirmedClaim(
+                task_id=context.task_id,
+                claimed_at=context.claimed_at,
             )
         case AbortReason.WORKFLOW_STOPPED:
             return NoTerminalAction(reason=FinalizeNoOpReason.WORKFLOW_STOPPED)
@@ -312,15 +329,12 @@ def _success_command(context: FinalizeContext) -> TerminalizationCommand:
             fence=PriorLockedRead(worker_id=context.worker_id),
             result_json=context.result_json,
         )
-    queue_name = context.queue_name or 'default'
     return CompleteTaskFused(
         task_id=context.task_id,
         fence=OwnedClaim(
             worker_id=context.worker_id, claimed_at=context.claimed_at,
         ),
         result_json=context.result_json,
-        notify_channel=f'task_queue_{queue_name}',
-        notify_payload=f'capacity:{context.task_id}',
     )
 
 
