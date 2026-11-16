@@ -816,3 +816,6 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod beat_writer_tests;
