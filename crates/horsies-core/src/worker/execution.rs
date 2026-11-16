@@ -910,10 +910,12 @@ pub(crate) async fn persist_unreported_attempt(
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
 ) -> Result<UnreportedAttemptWrite, FinalizeError> {
-    let outcome =
-        finish_unreported_attempt(broker.core_main_pool(), broker.statement_log(), command)
-            .await
-            .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+    let outcome = finish_unreported_attempt(open.main(), broker.statement_log(), command)
+        .await
+        .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
     match outcome {
         UnreportedAttemptOutcome::Released(_) => Ok(UnreportedAttemptWrite::ClaimReleased),
         UnreportedAttemptOutcome::Failed(failed) => {
