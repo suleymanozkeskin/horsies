@@ -1,6 +1,8 @@
--- Calls every interim function of the baseline on a fresh install. The caller runs the script in one transaction
--- and rolls it back. PL/pgSQL checks a statement against the tables only when the statement runs, so each function
--- is called on a path that runs its statements that name columns. Each call checks its outcome.
+-- Calls every interim function of the baseline on a fresh install, and the functions of 0004_lifecycle_functions.sql
+-- that replace interim ones by name, with their new arguments (baseline_lifecycle_functions.sql tests that file in
+-- full). The caller runs the script in one transaction and rolls it back. PL/pgSQL checks a statement against the
+-- tables only when the statement runs, so each function is called on a path that runs its statements that name
+-- columns. Each call checks its outcome.
 
 -- The published provenance reader is rendered at run time; this stand-in answers "not found".
 CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
@@ -104,16 +106,16 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_complete_task_fused(
         '00000000-0000-7000-8000-000000000001', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000001'),
-        '{"ok":1}', 'task_queue_default', 'capacity')),
+        '{"ok":1}', TRUE)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000002', 'RUNNING', 'w1', FALSE);
 SELECT expect_value(
     'complete_tasks_fused',
     (SELECT string_agg(outcome, ',') FROM horsies_complete_tasks_fused(
-        ARRAY['00000000-0000-7000-8000-000000000002'::uuid], ARRAY['w1'],
+        ARRAY['00000000-0000-7000-8000-000000000002'::uuid],
         ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000002')],
-        ARRAY['{"ok":2}'], ARRAY['task_queue_default'], ARRAY['capacity'])),
+        ARRAY['{"ok":2}'], 'w1', TRUE)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000003', 'RUNNING', 'w1', FALSE);
@@ -130,7 +132,7 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000000004', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000004'),
-        0, 1.0, 'same_class', '{"err":1}', 'E1', 'reason', 'FAILED', 'message', 'reason')),
+        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE)),
     'RETRY_SCHEDULED'
 );
 UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'w1', started_at = now(),
@@ -141,7 +143,7 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000000004', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000004'),
-        NULL, NULL, NULL, '{"err":2}', 'E1', 'reason', 'FAILED', 'message', 'reason')),
+        'NONE', NULL, NULL, NULL, '{"err":2}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE)),
     'APPLIED'
 );
 SELECT expect_value(
