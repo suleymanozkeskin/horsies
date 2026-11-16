@@ -1,15 +1,14 @@
 """The direct live-to-history move and the completion-family operations.
 
-One shared move function performs the reconciled transaction: archive
-availability probe, task-ID advisory lock, one strict locked live-row
-snapshot, liveness and identity-uniqueness guards, eligibility-before-
-policy classification with envelope carriage in its own block, the
-canonical attempt snapshot in its own block, exactly one asserted history
-insert, variant-derived phase-2 pending, the keyed-reservation window
-start, asserted live deletes, and the transactional raw-ID notification.
-Every family extends the projection-agreement CASE; the completion family
-is implemented here and any other kind raises as unsupported until its
-family lands.
+One shared move function performs the reconciled transaction: task-ID
+advisory lock, one strict locked live-row snapshot, liveness and
+identity-uniqueness guards, eligibility-before-policy classification
+with envelope carriage in its own block, the canonical attempt snapshot
+in its own block, exactly one asserted history insert, variant-derived
+phase-2 pending, the keyed-reservation window start, asserted live
+deletes, and the transactional raw-ID notification. Every family extends
+the projection-agreement CASE; the completion family is implemented here
+and any other kind raises as unsupported until its family lands.
 
 The attempt encoder concatenates per-element `to_jsonb` renderings with
 explicit separators — never a jsonb array's own text form, which inserts
@@ -51,7 +50,6 @@ def _equivalence_class_sql(kind: TerminalizationKind) -> str:
         )
     )
     return f'ARRAY[{members}]::text[]'
-from ..maintenance.gate import ARCHIVE_AVAILABILITY_FUNCTION
 from ..names import (
     LIVE_TASKS,
     TASK_DUPLICATE_GUARD_FUNCTION,
@@ -220,8 +218,8 @@ HISTORY_PROJECTION_COLUMNS: Final[tuple[str, ...]] = (
     'rerun_input_inline', 'rerun_input_reference',
 )
 """The history-insert projection, once. Every writer of a history row —
-the single-row move, the batch families, and the cutover relocation —
-renders its INSERT from this list, so a column can never be added to
+the single-row move and the batch families — renders its INSERT from
+this list, so a column can never be added to
 one writer and silently dropped from another."""
 
 
@@ -458,8 +456,6 @@ DECLARE
     v_rerun_inline bytea;
     v_rerun_reference varchar(2048);
 BEGIN
-    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
-
     CASE p_terminalization_kind
 {_projection_case()}
         ELSE
@@ -1462,26 +1458,6 @@ $function$
 """
 
 
-def history_projection_sql(
-    values: dict[str, str],
-    *,
-    select_tail: str,
-) -> str:
-    """The history projection as a SELECT whose columns carry the history
-    column names, over the same expressions `history_insert_sql` writes."""
-    missing = [c for c in HISTORY_PROJECTION_COLUMNS if c not in values]
-    extra = [c for c in values if c not in HISTORY_PROJECTION_COLUMNS]
-    if missing or extra:
-        raise ValueError(
-            f'history projection mismatch: missing={missing} extra={extra}'
-        )
-    expressions = ',\n        '.join(
-        f'{values[column]} AS {column}'
-        for column in HISTORY_PROJECTION_COLUMNS
-    )
-    return f'SELECT\n        {expressions}\n    {select_tail}'
-
-
 def rerun_carriage_expression(column: str) -> str:
     """One envelope-carriage column, gated on the shared ladder's verdict."""
     return (
@@ -1820,9 +1796,7 @@ DECLARE
     v_result_payload bytea;
     v_result_digest bytea;
 BEGIN
-{size_stage}    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
-
-    -- Discovery under the batch locking rule: SKIP LOCKED never waits on
+{size_stage}    -- Discovery under the batch locking rule: SKIP LOCKED never waits on
     -- a row lock, so this batch cannot join any deadlock cycle; rows held
     -- by advisory-first singles are skipped and caught next sweep.
     SELECT array_agg(s.id) INTO v_ids
@@ -1934,7 +1908,6 @@ BEGIN
             'p_batch_size must be a positive integer, got %', p_batch_size
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
 
     SELECT c.last_created_at, c.last_id,
            c.cycle_upper_created_at, c.cycle_upper_id
@@ -2331,7 +2304,6 @@ BEGIN
         RAISE EXCEPTION 'batch task ids must be distinct'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
 
 {workflow_lock_sql}    -- Waits-in-global-order: lock every present input row in sorted id
     -- order before anything is judged.
@@ -2724,8 +2696,8 @@ def failed_attempt_program_ddl() -> tuple[str, ...]:
 
 
 def locking_read_replacement_ddl() -> tuple[str, ...]:
-    """The completion and failure functions that the cutover program
-    installs once, as CREATE OR REPLACE. Schema v60 installs their locking
+    """The completion and failure functions of the move program, as
+    CREATE OR REPLACE. Schema v60 installs their locking
     read by id alone on a uuid database. Signatures and return types are
     unchanged. The failed-attempt finish and the success of a workflow task
     are dropped and created on every apply, so they need no entry here."""
