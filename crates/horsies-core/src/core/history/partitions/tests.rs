@@ -306,6 +306,8 @@ impl TestDatabase {
     }
 }
 
+mod pruning_ports;
+
 fn database_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         return url;

@@ -3,7 +3,7 @@
 //! Each reader takes the columns by name, with the Rust type the sqlx
 //! `FromRow` of the same type reads.
 
-use crate::broker::health::WorkerStateSnapshot;
+use crate::broker::health::StoredWorkerState;
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskResultRow};
 use crate::db::{FromSql, Row, TypedStatement};
 
@@ -148,12 +148,13 @@ pub(crate) fn task_result_row(
     })
 }
 
-/// Reads a [`WorkerStateSnapshot`].
-pub(crate) fn worker_state_snapshot(
+/// Reads a [`StoredWorkerState`]: the stored row, before
+/// [`StoredWorkerState::into_snapshot`] reads its JSON columns.
+pub(crate) fn stored_worker_state(
     row: &Row,
     statement: &TypedStatement,
-) -> Result<WorkerStateSnapshot, RowDecodeError> {
-    Ok(WorkerStateSnapshot {
+) -> Result<StoredWorkerState, RowDecodeError> {
+    Ok(StoredWorkerState {
         worker_id: column(row, statement, "worker_id")?,
         snapshot_at: column(row, statement, "snapshot_at")?,
         hostname: column(row, statement, "hostname")?,
@@ -171,7 +172,10 @@ pub(crate) fn worker_state_snapshot(
         memory_usage_mb: column(row, statement, "memory_usage_mb")?,
         memory_percent: column(row, statement, "memory_percent")?,
         cpu_percent: column(row, statement, "cpu_percent")?,
+        children_memory_mb: column(row, statement, "children_memory_mb")?,
         worker_started_at: column(row, statement, "worker_started_at")?,
+        slots_down: column(row, statement, "slots_down")?,
+        class_capacity: column(row, statement, "class_capacity")?,
     })
 }
 
