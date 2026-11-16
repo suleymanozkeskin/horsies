@@ -8,20 +8,56 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::config::app::AppConfig;
+use crate::core::task::execution::Execution;
 
 use crate::worker::config::WorkerConfig;
 use crate::worker::recovery::ReaperHealth;
 
+/// One worker snapshot. Every NOT NULL column of the baseline table is named
+/// (the baseline has no column defaults); `children_memory_mb` is left NULL:
+/// this worker runs no children.
 const INSERT_WORKER_STATE_SQL: &str = "\
 INSERT INTO horsies_worker_states (
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch, max_claim_per_worker,
     cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
     recovery_config, tasks_running, tasks_claimed, memory_usage_mb,
-    memory_percent, cpu_percent, worker_started_at
+    memory_percent, cpu_percent, worker_started_at, slots_down, class_capacity
 ) VALUES (
     $1, NOW(), $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb,
-    $11::jsonb, $12, $13, $14, $15, $16, $17
+    $11::jsonb, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb
 )";
+
+/// The slot health of a worker that runs task bodies in its own process. It
+/// has no child slots, so no slot is down: Python stores `[]` for a worker
+/// with no slot down (`core/models/health.py`, `slots_down_json`). Pure.
+fn in_process_slots_down() -> serde_json::Value {
+    serde_json::Value::Array(Vec::new())
+}
+
+/// The class capacity of a worker that runs task bodies in its own process.
+///
+/// Its claim has one budget of `concurrency` and takes rows of every
+/// execution class. The stored form of that plan is one `ISOLATED` budget
+/// that serves every class, as Python stores it for a worker that runs only
+/// isolated children (`core/worker/claim_plan.py`, `isolated_children_plan`
+/// and `class_capacity_json`): `{"ISOLATED": {"capacity": concurrency,
+/// "serves": ["ISOLATED", "SHARED_ASYNC", "SHARED_THREAD"]}}`. Pure.
+fn in_process_class_capacity(concurrency: u32) -> serde_json::Value {
+    let serves: Vec<&str> = [
+        Execution::Isolated,
+        Execution::SharedAsync,
+        Execution::SharedThread,
+    ]
+    .into_iter()
+    .map(Execution::as_str)
+    .collect();
+    let mut capacity = serde_json::Map::new();
+    capacity.insert(
+        Execution::Isolated.as_str().to_owned(),
+        serde_json::json!({ "capacity": concurrency, "serves": serves }),
+    );
+    serde_json::Value::Object(capacity)
+}
 
 /// Resource metrics collected from sysinfo.
 struct ResourceMetrics {
@@ -104,18 +140,12 @@ pub fn spawn_worker_state_loop(
         let snapshot_interval =
             std::time::Duration::from_millis(app_config.recovery.worker_state_snapshot_interval_ms);
 
-        // Serialize configuration to JSONB.
-        let queue_priorities_json = if worker_config.queue_priorities.is_empty() {
-            None
-        } else {
-            serde_json::to_string(&worker_config.queue_priorities).ok()
-        };
-
-        let queue_max_concurrency_json = if worker_config.queue_max_concurrency.is_empty() {
-            None
-        } else {
-            serde_json::to_string(&worker_config.queue_max_concurrency).ok()
-        };
+        // The queue maps are stored as they are: an empty map is `{}`, never
+        // NULL (both columns are NOT NULL on the baseline).
+        let queue_priorities = sqlx::types::Json(&worker_config.queue_priorities);
+        let queue_max_concurrency = sqlx::types::Json(&worker_config.queue_max_concurrency);
+        let slots_down = in_process_slots_down();
+        let class_capacity = in_process_class_capacity(worker_config.concurrency);
 
         // Initialize sysinfo System for resource metrics.
         let sys_pid = Pid::from(pid as usize);
@@ -173,7 +203,6 @@ pub fn spawn_worker_state_loop(
                     health.phase2_recovery.unwrap_or(serde_json::Value::Null),
                 );
             }
-            let recovery_config_json = serde_json::to_string(&recovery_value).ok();
 
             if let Err(e) = sqlx::query(INSERT_WORKER_STATE_SQL)
                 .bind(&worker_id)
@@ -184,15 +213,17 @@ pub fn spawn_worker_state_loop(
                 .bind(worker_config.max_claim_per_worker as i32)
                 .bind(app_config.cluster_wide_cap.map(|c| c as i32))
                 .bind(&worker_config.queues)
-                .bind(&queue_priorities_json)
-                .bind(&queue_max_concurrency_json)
-                .bind(&recovery_config_json)
+                .bind(queue_priorities)
+                .bind(queue_max_concurrency)
+                .bind(&recovery_value)
                 .bind(tasks_running)
                 .bind(tasks_claimed)
                 .bind(metrics.memory_usage_mb)
                 .bind(metrics.memory_percent)
                 .bind(metrics.cpu_percent)
                 .bind(worker_started_at)
+                .bind(&slots_down)
+                .bind(&class_capacity)
                 .execute(&pool)
                 .await
             {
@@ -292,9 +323,101 @@ mod tests {
     #[test]
     fn insert_sql_has_expected_placeholders() {
         assert!(INSERT_WORKER_STATE_SQL.contains("$1"));
-        assert!(INSERT_WORKER_STATE_SQL.contains("$17"));
+        assert!(INSERT_WORKER_STATE_SQL.contains("$19"));
         assert!(INSERT_WORKER_STATE_SQL.contains("INSERT INTO"));
         assert!(!INSERT_WORKER_STATE_SQL.contains("ON CONFLICT"));
+    }
+
+    #[test]
+    fn an_in_process_worker_has_no_slot_down() {
+        assert_eq!(in_process_slots_down(), serde_json::json!([]));
+    }
+
+    #[test]
+    fn an_in_process_worker_has_one_budget_that_serves_every_class() {
+        assert_eq!(
+            in_process_class_capacity(3),
+            serde_json::json!({
+                "ISOLATED": {
+                    "capacity": 3,
+                    "serves": ["ISOLATED", "SHARED_ASYNC", "SHARED_THREAD"]
+                }
+            })
+        );
+    }
+
+    /// A worker with no queue priorities and no queue caps writes its
+    /// snapshot on the baseline: the empty maps are `{}`, and the slot
+    /// health and class capacity columns hold the worker's values (Python
+    /// `core/worker/health.py`, `_update_worker_state`). The old statement
+    /// named neither column and bound NULL for the empty maps, so every
+    /// insert failed and no row landed.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_snapshot_with_empty_queue_maps_lands_with_every_baseline_column() {
+        use crate::worker::recovery::new_reaper_health;
+        use std::time::Duration;
+
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
+        let worker_config = WorkerConfig {
+            concurrency: 2,
+            ..Default::default()
+        };
+        assert!(worker_config.queue_priorities.is_empty());
+        assert!(worker_config.queue_max_concurrency.is_empty());
+        let cancel = CancellationToken::new();
+        let task = spawn_worker_state_loop(
+            pool.clone(),
+            worker_id.clone(),
+            "baseline-columns-test".to_owned(),
+            std::process::id() as i32,
+            worker_config,
+            app_config,
+            new_reaper_health(),
+            Arc::new(Semaphore::new(2)),
+            Utc::now(),
+            cancel.clone(),
+        );
+        type Columns = (
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+        );
+        let written = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let row: Option<Columns> = sqlx::query_as(
+                    "SELECT queue_priorities, queue_max_concurrency, slots_down, class_capacity
+                     FROM horsies_worker_states WHERE worker_id = $1",
+                )
+                .bind(&worker_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("read the snapshot");
+                if let Some(columns) = row {
+                    break columns;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        task.await.expect("the snapshot loop joins");
+        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .expect("delete the snapshots");
+
+        let (queue_priorities, queue_max_concurrency, slots_down, class_capacity) =
+            written.expect("the first snapshot must land on the baseline schema");
+        assert_eq!(queue_priorities, serde_json::json!({}));
+        assert_eq!(queue_max_concurrency, serde_json::json!({}));
+        assert_eq!(slots_down, serde_json::json!([]));
+        assert_eq!(class_capacity, in_process_class_capacity(2));
     }
 
     #[test]
