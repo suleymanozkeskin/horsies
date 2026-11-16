@@ -1219,38 +1219,5 @@ async fn release_lock(
     .map_err(SchemaInstallError::from)
 }
 
-// ---- Test fixtures ----
-
-/// Test fixture: installs the schema for a client of `family` on the
-/// database of a test's sqlx pool, through a core handle on the same URL
-/// ([`crate::broker::pools::handle_for_test_pool`]), and closes the handle.
-#[cfg(test)]
-pub(crate) async fn install_schema(
-    pool: &sqlx::PgPool,
-    family: ClientFamily,
-) -> Result<(), BrokerError> {
-    let handle = crate::broker::pools::handle_for_test_pool(pool);
-    let installed = match handle.pools() {
-        Ok(open) => install_schema_on(
-            open.pools().session_work(),
-            family,
-            InstallLockPlan::fleet(),
-            StatementLog::Off,
-        )
-        .await
-        .map_err(BrokerError::from),
-        Err(refused) => Err(BrokerError::from(refused)),
-    };
-    let _closed = handle.close().await;
-    installed
-}
-
-/// Test fixture: [`install_schema`] for the Rust client, the family of the
-/// core's constructors.
-#[cfg(test)]
-pub(crate) async fn run_horsies_migrations(pool: &sqlx::PgPool) -> Result<(), BrokerError> {
-    install_schema(pool, ClientFamily::Rust).await
-}
-
 #[cfg(test)]
 mod tests;

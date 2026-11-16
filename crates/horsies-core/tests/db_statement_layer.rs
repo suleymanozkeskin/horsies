@@ -1,8 +1,8 @@
 //! Statement layer against a live PostgreSQL.
 //!
 //! `DATABASE_URL` names the server (the `horsies-core` database of the core
-//! suite); each test creates its own database `stmt_<uuid>` and drops it at
-//! the end. The PgBouncer tests are ignored unless their URLs are set:
+//! suite); each test creates its own empty database through the core's test
+//! support (`src/test_support/database.rs`) and drops it at the end. The PgBouncer tests are ignored unless their URLs are set:
 //! `HORSIES_STMT_PGBOUNCER_STATEMENT_URL` (a pool in statement mode) and
 //! `HORSIES_STMT_PGBOUNCER_TRANSACTION_URL` (transaction mode with
 //! `max_prepared_statements = 0`).
@@ -109,7 +109,27 @@ fn test_environment() -> ConnectionEnvironment {
 }
 
 fn server_url() -> String {
-    std::env::var("DATABASE_URL").expect("DATABASE_URL names the test server")
+    test_database::server_url()
+}
+
+/// The test databases of the core (`src/test_support/database.rs`). This
+/// binary creates empty databases only.
+#[allow(dead_code)]
+#[path = "../src/test_support/database.rs"]
+mod test_database;
+
+/// Installs the schema into a test template through the public API. This
+/// binary creates empty databases only, so it never runs.
+#[allow(dead_code)]
+async fn install_template(url: &str) {
+    let broker = horsies_core::PostgresBroker::connect(url)
+        .await
+        .expect("connect the template broker");
+    broker
+        .migrate()
+        .await
+        .expect("install the schema into the test template");
+    broker.close().await;
 }
 
 /// The same URL with another database and extra query parameters.
@@ -155,22 +175,17 @@ async fn connect_direct(url: &str) -> (Client, JoinHandle<()>) {
 
 /// A database of its own for one test.
 struct TestDatabase {
-    name: String,
+    database: test_database::TestDatabase,
     admin: Client,
     admin_driver: JoinHandle<()>,
 }
 
 impl TestDatabase {
     async fn create() -> TestDatabase {
-        let name = format!("stmt_{}", Uuid::new_v4().simple());
         let (admin, admin_driver) =
             connect_direct(&with_database(&server_url(), "postgres", "")).await;
-        admin
-            .batch_execute(&format!("CREATE DATABASE \"{name}\""))
-            .await
-            .expect("create test database");
         let database = TestDatabase {
-            name,
+            database: test_database::TestDatabase::create_empty().await,
             admin,
             admin_driver,
         };
@@ -196,7 +211,7 @@ impl TestDatabase {
     }
 
     fn url(&self, extra_query: &str) -> String {
-        with_database(&server_url(), &self.name, extra_query)
+        with_database(&server_url(), self.database.name(), extra_query)
     }
 
     fn pool(
@@ -243,10 +258,7 @@ impl TestDatabase {
     }
 
     async fn remove(self) {
-        self.admin
-            .batch_execute(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
-            .await
-            .expect("drop test database");
+        self.database.drop().await;
         self.admin_driver.abort();
     }
 }
