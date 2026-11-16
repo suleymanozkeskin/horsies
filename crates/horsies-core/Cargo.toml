@@ -35,6 +35,9 @@ web = [
 ]
 
 [dependencies]
+# The `CodeCatalog` derive of the code enums; the tests of the workflow DSL
+# also derive `WorkflowInput` from it.
+horsies-macros = { path = "../horsies-macros" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", optional = true }
@@ -78,8 +81,6 @@ libc = "0.2"
 workspace = true
 
 [dev-dependencies]
-# Tests of the workflow DSL derive `WorkflowInput`.
-horsies-macros = { path = "../horsies-macros" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 serial_test = "3"
