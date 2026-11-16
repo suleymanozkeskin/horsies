@@ -2112,7 +2112,7 @@ class PostgresBroker:
                 self._staged_result_reader_published = False
             raise
         match read:
-            case LiveTaskResult(task_name=task_name, result=result):
+            case LiveTaskResult(task_name=task_name):
                 status = TaskStatus(read.status)
                 match status:
                     case (
@@ -2120,8 +2120,9 @@ class PostgresBroker:
                         | TaskStatus.FAILED
                         | TaskStatus.EXPIRED
                     ):
+                        # A live row stores no result.
                         return self._build_raw_result_record(
-                            task_id, task_name, status, result,
+                            task_id, task_name, status, None,
                         )
                     case _ if (
                         status is TaskStatus.CANCELLED or non_terminal_snapshot
@@ -3295,19 +3296,20 @@ class PostgresBroker:
 
     # ----------------- Sync API Facades -----------------
 
-    def send_route(self, idempotency_key: Optional[str]) -> SyncSendRoute:
+    def send_route(self) -> SyncSendRoute:
         """Where a sync ``enqueue`` writes its row. Pure.
 
-        ``CALLER_THREAD`` for an unkeyed send of a process that runs no task
-        bodies, once this broker's schema is initialized. A send with an
-        idempotency key, and a send before the schema setup (which the first
-        send may run), stay on the loop runner.
+        ``CALLER_THREAD`` for a send of a process that runs no task bodies,
+        once this broker's schema is initialized, with or without an
+        idempotency key: both are one ``horsies_enqueue_task`` statement in
+        autocommit. A send before the schema setup (which the first send may
+        run) stays on the loop runner.
         Task code in a worker child sends through the child's
         ``task_send_pool``, which the worker profile counts exactly, so it
         stays on the loop runner too.
         """
-        match (process_role(), idempotency_key, self._initialized):
-            case (ProcessRole.RUNS_NO_TASK_BODIES, None, True):
+        match (process_role(), self._initialized):
+            case (ProcessRole.RUNS_NO_TASK_BODIES, True):
                 return SyncSendRoute.CALLER_THREAD
             case _:
                 return SyncSendRoute.LOOP_RUNNER
@@ -3367,9 +3369,11 @@ class PostgresBroker:
         task_options: Optional[str],
         retention_class_key: RetentionClassKey | None,
         retain_rerun_input: Optional[bool],
+        idempotency_key: Optional[str],
     ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
-        """The unkeyed path of ``enqueue_async``, on the calling thread: the
-        same row, the same statement and the same error classification."""
+        """``enqueue_async`` on the calling thread: the same row (with the
+        key of a keyed send), the same statement and the same error
+        classification."""
         resolved_retention_class_key = resolve_retention_class_key(
             retention_class_key
         )
@@ -3389,13 +3393,12 @@ class PostgresBroker:
             task_options=task_options,
             retention_class_key=resolved_retention_class_key,
             retain_rerun_input=retain_rerun_input,
-            idempotency_key=None,
+            idempotency_key=idempotency_key,
             key_window=self.idempotency_reservation_window,
         )
         if is_err(prepared_r):
             return prepared_r
         prepared = prepared_r.ok_value
-        assert isinstance(prepared.row.key, Unkeyed), 'an unkeyed send has no key'
         try:
             outcome = self._enqueue_task_on_caller_thread(prepared.row, send_kind)
         except _DRIVER_ERRORS as exc:
@@ -3436,7 +3439,7 @@ class PostgresBroker:
             return _async_context_err(
                 'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
             )
-        match self.send_route(idempotency_key):
+        match self.send_route():
             case SyncSendRoute.CALLER_THREAD:
                 return self._enqueue_on_caller_thread(
                     task_name,
@@ -3453,6 +3456,7 @@ class PostgresBroker:
                     task_options=task_options,
                     retention_class_key=retention_class_key,
                     retain_rerun_input=retain_rerun_input,
+                    idempotency_key=idempotency_key,
                 )
             case SyncSendRoute.LOOP_RUNNER:
                 pass

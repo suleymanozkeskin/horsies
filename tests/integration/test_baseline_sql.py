@@ -273,6 +273,27 @@ async def test_migration_creates_the_baseline_functions(
     assert await _names(installed, _FUNCTIONS_SQL) == EXPECTED_FUNCTIONS
 
 
+_MOVE_SIGNATURES_SQL: Final = """
+    SELECT p.oid::regprocedure::text
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = current_schema()
+      AND p.proname = 'horsies_move_task_to_history'
+"""
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_single_move_has_one_signature_that_takes_the_locked_row(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+) -> None:
+    assert await _names(installed, _MOVE_SIGNATURES_SQL) == frozenset(
+        {
+            'horsies_move_task_to_history(horsies_tasks,text,text,'
+            'timestamp with time zone,text,text,text)',
+        }
+    )
+
+
 @pytest.mark.asyncio(loop_scope='function')
 async def test_migration_writes_the_seed_rows(
     installed: psycopg.AsyncConnection[tuple[object, ...]],

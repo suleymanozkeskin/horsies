@@ -16,7 +16,6 @@ import pytest
 from horsies.core.lifecycle.operations import TerminalizationKind
 from tests.baseline_sql import (
     baseline_function,
-    baseline_overload,
     baseline_sql,
     baseline_table,
     baseline_type,
@@ -27,8 +26,11 @@ pytestmark = [pytest.mark.unit]
 
 # The functions under test, read from the baseline migration, grouped as the
 # families they were written in.
-MOVE_BODY = baseline_overload('horsies_move_task_to_history', 'p_task_id uuid')
-"""The move overload that the writers call: it takes the task id."""
+MOVE_BODY = baseline_function('horsies_move_task_to_history')
+"""The single move that the writers call: it takes the row the writer locked."""
+BATCH_MOVE_BODY = baseline_function('horsies_move_tasks_to_history')
+"""The batch move stage that every batch writer calls with the ids it locked."""
+_BATCH_MOVE_CALL = 'horsies_move_tasks_to_history('
 ATTEMPT_ENCODER_FUNCTION = 'horsies_encode_task_attempts'
 COMPLETE_LOCKED_FUNCTION = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION = 'horsies_complete_task_fused'
@@ -99,20 +101,12 @@ def completion_batch_fragments() -> list[str]:
 def outcome_fragments() -> list[str]:
     return [
         baseline_type('horsies_terminalization_outcome'),
-        baseline_overload(
-            'horsies_terminalization_miss',
-            'p_task_id uuid',
-            'p_equivalent_kinds text[]',
-        ),
+        baseline_function('horsies_terminalization_miss'),
     ]
 
 
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
-MISS_CLASSIFIER_DDL = baseline_overload(
-    'horsies_terminalization_miss',
-    'p_task_id uuid',
-    'p_equivalent_kinds text[]',
-)
+MISS_CLASSIFIER_DDL = baseline_function('horsies_terminalization_miss')
 ATTEMPT_ENCODER_DDL = baseline_function(ATTEMPT_ENCODER_FUNCTION)
 
 
@@ -121,8 +115,9 @@ class TestOutcomeLayer:
         assert 'task_id uuid' in OUTCOME_TYPE_DDL
 
     def test_miss_classifier_consults_provenance_without_live(self) -> None:
+        # The one-argument provenance reader reads history only.
         assert (
-            'horsies_task_provenance_staged(p_task_id, FALSE)'
+            'horsies_task_provenance_staged(p_task_id) AS p'
             in MISS_CLASSIFIER_DDL
         )
 
@@ -133,8 +128,9 @@ class TestOutcomeLayer:
         lost = MISS_CLASSIFIER_DDL.index("'LOST_CLAIM'")
         assert absent < already < foreign < lost
 
-    def test_live_hit_from_provenance_after_live_miss_raises(self) -> None:
-        assert "ERRCODE = 'data_corrupted'" in MISS_CLASSIFIER_DDL
+    def test_provenance_cannot_answer_live_after_a_live_miss(self) -> None:
+        # No live flag is passed, so the reader cannot report the live table.
+        assert 'horsies_task_provenance_staged(p_task_id, ' not in MISS_CLASSIFIER_DDL
 
     def test_fragment_order(self) -> None:
         first, second = outcome_fragments()
@@ -144,20 +140,19 @@ class TestOutcomeLayer:
 
 class TestMoveStructure:
     def test_reconciled_step_order(self) -> None:
-        advisory = MOVE_BODY.index('pg_advisory_xact_lock')
-        snapshot = MOVE_BODY.index('SELECT * INTO STRICT v_task')
+        # The writer takes the advisory lock and reads the row it passes; the
+        # move starts at the shared leaf lock.
+        leaf_lock = MOVE_BODY.index('pg_advisory_xact_lock_shared')
         uniqueness = MOVE_BODY.index('horsies_task_history_duplicate_staged')
         insert = MOVE_BODY.index('INSERT INTO horsies_task_history')
         deletes = MOVE_BODY.index('DELETE FROM horsies_task_attempts')
         notify = MOVE_BODY.index("pg_notify('task_done'")
-        assert (
-            advisory < snapshot < uniqueness < insert < deletes < notify
-        )
+        assert leaf_lock < uniqueness < insert < deletes < notify
 
     def test_uniqueness_guard_uses_the_duplicate_guard(self) -> None:
         # The guard never probes the live table; the miss classifier keeps
         # the full provenance probe.
-        assert 'horsies_task_history_duplicate_staged(p_task_id)' in MOVE_BODY
+        assert 'horsies_task_history_duplicate_staged(p_task.id)' in MOVE_BODY
         assert 'horsies_task_provenance_staged' not in MOVE_BODY
 
     def test_node_lookup_is_strict_with_ownership_predicate(self) -> None:
@@ -176,7 +171,7 @@ class TestMoveStructure:
 
     def test_completed_status_is_never_eligible(self) -> None:
         assert (
-            "v_task.is_workflow_task OR p_terminal_status = 'COMPLETED'"
+            "p_task.is_workflow_task OR p_terminal_status = 'COMPLETED'"
             in MOVE_BODY
         )
 
@@ -190,21 +185,19 @@ class TestMoveStructure:
 
     def test_pending_written_only_for_deferred_variants(self) -> None:
         assert (
-            'IF v_requires_deferred_phase2 AND v_task.is_workflow_task'
+            'IF v_requires_deferred_phase2 AND p_task.is_workflow_task'
             in MOVE_BODY
         )
 
     def test_reservation_step_passes_the_live_rows_digest(self) -> None:
-        assert 'IF v_task.idempotency_key_digest IS NOT NULL' in MOVE_BODY
+        assert 'IF p_task.idempotency_key_digest IS NOT NULL' in MOVE_BODY
         assert (
-            'horsies_key_reservation_terminalize(\n'
-            '            v_task.idempotency_key_digest, p_task_id, '
-            'p_terminal_at\n'
-            '        )'
+            'horsies_key_reservation_terminalize('
+            'p_task.idempotency_key_digest, p_task.id, p_terminal_at)'
         ) in MOVE_BODY
 
     def test_unsupported_kinds_raise_until_their_family_lands(self) -> None:
-        assert 'has no move family yet' in MOVE_BODY
+        assert 'has no single-row move' in MOVE_BODY
         for kind in (
             TerminalizationKind.COMPLETE_LOCKED,
             TerminalizationKind.COMPLETE_FUSED,
@@ -252,24 +245,27 @@ class TestExpiryFamily:
         assert "'claimed-expiry projection disagrees'" in MOVE_BODY
 
     def test_owned_expiry_judges_the_deadline_from_the_capture(self) -> None:
-        owned = expiry_family_fragments()[0]
-        assert 'v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at' in (
-            owned
-        )
+        owned = ' '.join(expiry_family_fragments()[0].split())
+        assert (
+            'v_task.good_until IS NOT NULL'
+            ' AND v_task.good_until <= v_capture.evaluated_at'
+        ) in owned
         assert "'DEADLINE'" in owned
-        assert "'good_until', v_good_until" in owned
+        assert "'good_until', v_task.good_until" in owned
         assert 'LOOP' not in owned
 
     def test_batch_validates_before_any_mutation(self) -> None:
         batch = expiry_family_fragments()[1]
         size_check = batch.index('p_batch_size must be a positive integer')
-        fence = batch.index(
+        stage_call = batch.index(_BATCH_MOVE_CALL)
+        assert size_check < stage_call
+        fence = BATCH_MOVE_BODY.index(
             'deferred workflow terminalization requires a result payload'
         )
-        node_check = batch.index('lacks exactly one node row')
-        uniqueness = batch.index('exists in multiple locations')
-        insert = batch.index('INSERT INTO horsies_task_history')
-        assert size_check < fence < node_check < uniqueness < insert
+        node_check = BATCH_MOVE_BODY.index('lacks exactly one node row')
+        uniqueness = BATCH_MOVE_BODY.index('exists in multiple locations')
+        insert = BATCH_MOVE_BODY.index('INSERT INTO horsies_task_history')
+        assert fence < node_check < uniqueness < insert
 
     def test_batch_discovery_is_oldest_first_pending_only(self) -> None:
         batch = expiry_family_fragments()[1]
@@ -280,30 +276,30 @@ class TestExpiryFamily:
     def test_batch_outcomes_stream_from_live_before_the_deletes(self) -> None:
         batch = expiry_family_fragments()[1]
         outcome = batch.index("'APPLIED'::text")
-        deletes = batch.index('DELETE FROM horsies_task_attempts')
-        assert outcome < deletes
+        stage_call = batch.index(_BATCH_MOVE_CALL)
+        assert outcome < stage_call
         assert 'FROM horsies_task_history h' not in batch
 
     def test_batch_counts_are_asserted_both_ways(self) -> None:
-        batch = expiry_family_fragments()[1]
-        assert 'batch history insert moved' in batch
-        assert 'batch live delete removed' in batch
+        assert 'batch history insert moved' in BATCH_MOVE_BODY
+        assert 'batch live delete removed' in BATCH_MOVE_BODY
 
     def test_batch_notifies_per_moved_row(self) -> None:
-        batch = expiry_family_fragments()[1]
-        assert "pg_notify('task_done', u.tid::text)" in batch
+        assert "pg_notify('task_done', u.id::text)" in BATCH_MOVE_BODY
 
     def test_reservation_transition_has_one_owner(self) -> None:
         batch = expiry_family_fragments()[1]
-        assert 'horsies_key_reservation_terminalize_batch' in batch
-        assert 'UPDATE horsies_key_reservations' not in batch
-        assert 'UPDATE horsies_key_reservations' not in MOVE_BODY
+        assert 'horsies_key_reservation_terminalize_batch' in BATCH_MOVE_BODY
+        for body in (batch, BATCH_MOVE_BODY, MOVE_BODY):
+            assert 'UPDATE horsies_key_reservations' not in body
 
     def test_batch_workflow_linkage_agrees_with_the_single_row_path(
         self,
     ) -> None:
-        batch = expiry_family_fragments()[1]
-        assert 'CASE WHEN t.is_workflow_task THEN n.workflow_id END' in batch
+        assert (
+            'CASE WHEN t.is_workflow_task THEN n.workflow_id END'
+            in BATCH_MOVE_BODY
+        )
 
 
 class TestFailureFamily:
@@ -363,16 +359,17 @@ class TestBatchBuilder:
     def test_stage_order_is_the_builders(self, batch: str) -> None:
         size_check = batch.index('p_batch_size must be a positive integer')
         discovery = batch.index('FOR UPDATE')
-        uniqueness = batch.index('exists in multiple locations')
-        insert = batch.index('INSERT INTO horsies_task_history')
-        reservation = batch.index('horsies_key_reservation_terminalize_batch')
         outcome = batch.index("'APPLIED'::text")
-        deletes = batch.index('DELETE FROM horsies_task_attempts')
-        notify = batch.index("pg_notify('task_done'")
-        assert (
-            size_check < discovery < uniqueness < insert
-            < reservation < outcome < deletes < notify
-        )
+        stage_call = batch.index(_BATCH_MOVE_CALL)
+        assert size_check < discovery < outcome < stage_call
+
+    def test_batch_move_stage_order(self) -> None:
+        uniqueness = BATCH_MOVE_BODY.index('exists in multiple locations')
+        insert = BATCH_MOVE_BODY.index('INSERT INTO horsies_task_history')
+        reservation = BATCH_MOVE_BODY.index('horsies_key_reservation_terminalize_batch')
+        deletes = BATCH_MOVE_BODY.index('DELETE FROM horsies_task_attempts')
+        notify = BATCH_MOVE_BODY.index("pg_notify('task_done'")
+        assert uniqueness < insert < reservation < deletes < notify
 
     @pytest.mark.parametrize(
         'batch',
@@ -388,18 +385,22 @@ class TestBatchBuilder:
 
     def test_deferred_batch_has_fence_and_pending(self) -> None:
         expiry = expiry_family_fragments()[1]
-        assert 'requires a result payload' in expiry
-        assert 'INSERT INTO horsies_workflow_phase2_pending' in expiry
+        assert "'EXPIRED', 'EXPIRE_PENDING'" in expiry
+        assert 'requires a result payload' in BATCH_MOVE_BODY
+        assert 'INSERT INTO horsies_workflow_phase2_pending' in BATCH_MOVE_BODY
 
     def test_non_deferred_batch_has_neither(self) -> None:
         sweep = cancellation_family_fragments()[2]
         assert 'requires a result payload' not in sweep
         assert 'INSERT INTO horsies_workflow_phase2_pending' not in sweep
 
-    def test_non_deferred_linkage_is_deterministic_first_link(self) -> None:
-        sweep = cancellation_family_fragments()[2]
-        assert 'ORDER BY wt.id' in sweep
-        assert 'task links to multiple workflows' in sweep
+    def test_linkage_is_the_unique_task_link(self) -> None:
+        # ix_horsies_workflow_tasks_task_id is unique: a task has at most one
+        # node row, so the stage joins it by task id.
+        assert (
+            'LEFT JOIN horsies_workflow_tasks AS n ON n.task_id = t.id'
+            in BATCH_MOVE_BODY
+        )
 
     def test_sweep_physical_scan_is_cursor_ordered(self) -> None:
         sweep = cancellation_family_fragments()[2]
@@ -411,12 +412,12 @@ class TestBatchBuilder:
         assert 'FOR UPDATE OF t SKIP LOCKED' in sweep[classification:]
 
 
-_BATCH_MOVES = (
+_BATCH_WRITERS = (
     expiry_family_fragments()[1],
     cancellation_family_fragments()[2],
     *workflow_node_family_fragments()[2:],
 )
-_BATCH_MOVE_IDS = (
+_BATCH_WRITER_IDS = (
     'expire_pending',
     'cancel_orphan_sweep',
     'abandon_owned_nodes',
@@ -427,14 +428,14 @@ _BATCH_MOVE_IDS = (
 
 
 class TestLadderOrder:
-    """The single-row move and every batch move rank the rerun dispositions
+    """The single-row move and the batch move rank the rerun dispositions
     the same way: never eligible, declined by policy, over the bound,
     inline."""
 
     @pytest.mark.parametrize(
         'body',
-        [MOVE_BODY, *_BATCH_MOVES],
-        ids=['move', *_BATCH_MOVE_IDS],
+        [MOVE_BODY, BATCH_MOVE_BODY],
+        ids=['move', 'batch_move'],
     )
     def test_rungs_appear_in_ladder_order(self, body: str) -> None:
         position = body.index("'NEVER_ELIGIBLE'")
@@ -450,25 +451,32 @@ class TestLadderOrder:
 class TestSnapshotAndDigestReuse:
     """Each move encodes an attempt snapshot once and hashes a result once."""
 
-    @pytest.mark.parametrize('batch', _BATCH_MOVES, ids=_BATCH_MOVE_IDS)
-    def test_batch_encodes_each_snapshot_once(self, batch: str) -> None:
+    @pytest.mark.parametrize('writer', _BATCH_WRITERS, ids=_BATCH_WRITER_IDS)
+    def test_every_batch_writer_moves_through_the_stage_once(
+        self, writer: str
+    ) -> None:
+        assert writer.count(_BATCH_MOVE_CALL) == 1
+        assert f'{ATTEMPT_ENCODER_FUNCTION}(' not in writer
+        assert 'INSERT INTO horsies_task_history' not in writer
+
+    def test_batch_encodes_each_snapshot_once(self) -> None:
+        batch = BATCH_MOVE_BODY
         assert batch.count(f'{ATTEMPT_ENCODER_FUNCTION}(') == 1
         assert 'WITH attempt_data AS MATERIALIZED' in batch
         assert 'JOIN attempt_data ON attempt_data.id = t.id' in batch
         assert 'sha256(attempt_data.snapshot)' in batch
 
-    @pytest.mark.parametrize('batch', _BATCH_MOVES, ids=_BATCH_MOVE_IDS)
-    def test_batch_hashes_the_batch_result_once(self, batch: str) -> None:
+    def test_batch_hashes_the_batch_result_once(self) -> None:
         """The payload is one value per batch, so its digest is computed
         once, not once per moved row or per deferred record."""
+        batch = BATCH_MOVE_BODY
         assert batch.count('sha256(v_result_payload)') == 1
         assert 'v_result_digest bytea;' in batch
-        assert 'v_result_digest := CASE' in batch
-        if 'INSERT INTO horsies_workflow_phase2_pending' in batch:
-            pending = batch[
-                batch.index('INSERT INTO horsies_workflow_phase2_pending'):
-            ]
-            assert '1, v_result_digest,' in pending
+        assert 'v_result_digest := sha256(v_result_payload)' in batch
+        pending = batch[
+            batch.index('INSERT INTO horsies_workflow_phase2_pending'):
+        ]
+        assert '1, v_result_digest,' in pending
 
     def test_move_hashes_the_result_once(self) -> None:
         assert MOVE_BODY.count('sha256(v_result_payload)') == 1
@@ -496,14 +504,15 @@ class TestCancellationFamily:
     def test_node_lookup_shape_derives_from_deferral(self) -> None:
         strict = MOVE_BODY.index('IF v_requires_deferred_phase2 THEN')
         strict_lookup = MOVE_BODY.index('INTO STRICT v_workflow_node_row_id')
-        optional_lookup = MOVE_BODY.index('ORDER BY n.id')
+        optional_lookup = MOVE_BODY.index('INTO v_workflow_node_row_id, v_workflow_id')
         assert strict < strict_lookup < optional_lookup
-        assert 'task links to multiple workflows' in MOVE_BODY
+        # Both lookups probe the unique task_id link.
+        assert MOVE_BODY.count('WHERE n.task_id = p_task.id') == 2
 
     def test_orphan_refusal_carries_the_link_state(self) -> None:
         orphan = cancellation_family_fragments()[1]
         assert "'WORKFLOW_LINK_STATE'" in orphan
-        assert "jsonb_build_object('node_status', v_node_status)" in orphan
+        assert "jsonb_build_object('node_status', v_capture.node_status)" in orphan
 
 
 class TestWorkflowNodeFamily:
@@ -549,16 +558,11 @@ class TestWorkflowNodeFamily:
         assert 'CROSS JOIN LATERAL horsies_terminalization_miss' in batch
         assert 'input.ordinality' in batch
 
-    def test_all_four_batches_share_the_core_verbatim(self) -> None:
-        marker = 'Per-row uniqueness guard through the staged mechanism'
-        for batch in (
-            expiry_family_fragments()[1],
-            cancellation_family_fragments()[2],
-            *workflow_node_family_fragments()[2:4],
-            *workflow_node_family_fragments()[4:6],
-        ):
-            assert marker in batch
-            assert 'horsies_key_reservation_terminalize_batch' in batch
+    def test_all_batches_share_the_one_stage(self) -> None:
+        for batch in _BATCH_WRITERS:
+            assert batch.count(_BATCH_MOVE_CALL) == 1
+            assert 'horsies_key_reservation_terminalize_batch' not in batch
+        assert 'horsies_key_reservation_terminalize_batch' in BATCH_MOVE_BODY
 
     @pytest.mark.parametrize(
         'sweep', [*workflow_node_family_fragments()[4:6]]
@@ -586,16 +590,15 @@ class TestWorkflowNodeFamily:
 
         cancel_single = workflow_node_family_fragments()[1]
         assert 'NULL, NULL, NULL' in cancel_single
-        # Batch projection order pins error_code and final_failed_reason
-        # (the two expressions after result_digest) to NULL;
-        # whitespace-independent because the projection renders from the
-        # shared column authority, one expression per line.
+        # The batch writers pass a NULL result, error_code and
+        # final_failed_reason to the batch move stage.
         for fragment in (
             workflow_node_family_fragments()[3],
             workflow_node_family_fragments()[5],
         ):
             assert re.search(
-                r'v_result_digest,\s*NULL,\s*NULL,',
+                r"horsies_move_tasks_to_history\(\s*\w+,\s*'CANCELLED',\s*'\w+',"
+                r'\s*v_terminal_at,\s*NULL,\s*NULL,\s*NULL\s*\)',
                 fragment,
             )
 

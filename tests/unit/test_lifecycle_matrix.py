@@ -18,7 +18,7 @@ from typing import Final
 
 import pytest
 
-from tests.baseline_sql import baseline_function, baseline_overload
+from tests.baseline_sql import baseline_function
 from tests.lifecycle_matrix import (
     MATRIX,
     Attempt,
@@ -60,12 +60,11 @@ FUNCTION_OF_WRITER: Final[dict[str, str]] = {
 """The baseline function that implements each writer contract."""
 
 _MOVE_FUNCTION: Final = 'horsies_move_task_to_history'
-_MOVE_BY_ID: Final = 'p_task_id uuid'
-"""The first parameter of the move overload that the writers call."""
+_BATCH_MOVE_FUNCTION: Final = 'horsies_move_tasks_to_history'
 _MOVE_CALL_RE: Final = re.compile(
-    rf'\b{_MOVE_FUNCTION}\(\s*[\w.]+,\s*\'(\w+)\'',
+    r'\bhorsies_move_tasks?_to_history\(\s*[\w.]+,\s*\'(\w+)\'',
 )
-"""A call of the single-row move, capturing the status it is given."""
+"""A call of the single-row or the batch move, capturing the status it is given."""
 
 _WORKER_FENCE_RE: Final = re.compile(
     r'= CAST\(p_worker_id AS VARCHAR\)|\.claimed_by_worker_id = p_worker_id\b',
@@ -81,7 +80,9 @@ _FINALIZING_STALE_GUARD_RE: Final = re.compile(r'finalizing_at\s*<')
 _HEARTBEAT_STALE_GUARD: Final = 'secs => p_stale_after_ms::double precision'
 _WORKFLOW_STATUS_GUARD_RE: Final = re.compile(r'\bw\.status\s*(?:=|IN\b)')
 _RUNNABLE_LINK: Final = "wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')"
-_LINK_ABSENT_RE: Final = re.compile(r'\b(?:v_node_status|runnable_link\.found) IS NULL\b')
+_LINK_ABSENT_RE: Final = re.compile(
+    r'\b(?:v_node_status|v_capture\.node_status|runnable_link\.found) IS NULL\b',
+)
 _CAPACITY_WAKE: Final = "pg_notify('task_queue_' || v_ctx.queue_name, 'capacity')"
 _MOVE_EVENTS: Final = (
     "pg_notify('task_done',",
@@ -127,8 +128,8 @@ def _predicate(writer_id: str) -> str:
 def _moved_statuses(writer_id: str) -> set[str]:
     """The statuses the function gives its moved rows.
 
-    A single-row function passes a literal to the move; a batch function
-    writes one in its history insert.
+    A writer passes a literal to the single-row or the batch move; a function
+    that inserts history rows itself writes one in its history insert.
     """
     body = _body(writer_id)
     return set(_MOVE_CALL_RE.findall(body)) | {
@@ -155,12 +156,12 @@ class TestMatrixShape:
 
     def test_agrees_with_the_frozen_writer_allowlist(self) -> None:
         """Sixteen contracts resolve to fifteen functions, each of them a
-        history writer of the allowlist or a caller of the single-row move."""
+        history writer of the allowlist or a caller of a move."""
         assert set(FUNCTION_OF_WRITER) == {row.writer_id for row in MATRIX}
         functions = set(FUNCTION_OF_WRITER.values())
         assert len(functions) == 15
         history_writers = {name for _, name, _ in FROZEN_TERMINAL_WRITERS}
-        assert _MOVE_FUNCTION in history_writers
+        assert {_MOVE_FUNCTION, _BATCH_MOVE_FUNCTION} <= history_writers
         for row in MATRIX:
             name = FUNCTION_OF_WRITER[row.writer_id]
             calls_move = _MOVE_CALL_RE.search(_body(row.writer_id)) is not None
@@ -256,8 +257,9 @@ class TestDeclaredGuardsMatchTheStatements:
         sends_events = all(event in sql for event in _MOVE_EVENTS)
         assert calls_move or sends_events, row.writer_id
 
-    def test_the_move_sends_the_status_events(self) -> None:
-        sql = ' '.join(baseline_overload(_MOVE_FUNCTION, _MOVE_BY_ID).split())
+    @pytest.mark.parametrize('function', [_MOVE_FUNCTION, _BATCH_MOVE_FUNCTION])
+    def test_the_moves_send_the_status_events(self, function: str) -> None:
+        sql = ' '.join(baseline_function(function).split())
         for event in _MOVE_EVENTS:
             assert event in sql, event
 

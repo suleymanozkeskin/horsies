@@ -7,10 +7,17 @@
 --   record times; the phase-2 terminal status, generation, node identity and reason columns);
 -- - removed shims: the archive gate call, the REFERENCE rerun arm, the prior result of an administrative cancel;
 -- - the move builds the rerun envelope from input and task_options (horsies_encode_rerun_input);
+-- - each single terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...), and
+--   each batch terminal write calls the batch move stage horsies_move_tasks_to_history
+--   (0006_history_functions.sql);
+-- - each terminal write that misses passes its own kind and its fence kind (NONE, OWNER, OWNER_AND_GENERATION) to
+--   horsies_terminalization_miss(uuid, text, text, text, timestamptz) (0008_history_maintenance_functions.sql),
+--   which owns the equivalence classes of the kinds;
 -- - the owned-claim functions require the claim generation (22023 on NULL, or on a NULL element of a batch) and
---   fence on it with no NULL arm; horsies_terminalization_miss takes the caller's fence as a closed kind (NONE,
---   OWNER, OWNER_AND_GENERATION).
--- The trigger functions are in 0001_tables.sql. The published history readers are rendered at run time.
+--   fence on it with no NULL arm.
+-- The trigger functions are in 0001_tables.sql. The published history readers are rendered by
+-- horsies_publish_history_readers (0008_history_maintenance_functions.sql);
+-- horsies_task_history_duplicate_staged here is the first version that the first publication replaces.
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
@@ -89,23 +96,6 @@ CREATE TYPE horsies_phase2_quarantine_verdict AS (
 	detail text
 );
 
-CREATE TYPE horsies_task_lookup AS (
-	found boolean,
-	location text,
-	task_id uuid,
-	fingerprint_version smallint,
-	command_fingerprint bytea
-);
-
-CREATE TYPE horsies_task_provenance AS (
-	found boolean,
-	location text,
-	task_id uuid,
-	status text,
-	terminal_at timestamp with time zone,
-	terminalization_kind text
-);
-
 -- Functions
 
 CREATE FUNCTION horsies_abandon_nodes_of_paused_workflows(p_workflow_ids uuid[]) RETURNS SETOF horsies_terminalization_outcome
@@ -114,10 +104,6 @@ CREATE FUNCTION horsies_abandon_nodes_of_paused_workflows(p_workflow_ids uuid[])
 DECLARE
     v_ids uuid[];
     v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-    v_result_digest bytea;
 BEGIN
 
     -- Discovery under the batch locking rule: SKIP LOCKED never waits on
@@ -142,180 +128,12 @@ BEGIN
         RETURN;
     END IF;
 
-    IF EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_ids)
-          AND t.is_workflow_task
-          AND (SELECT count(DISTINCT wt.workflow_id)
-               FROM horsies_workflow_tasks wt
-               WHERE wt.task_id = t.id) > 1
-    ) THEN
-        RAISE EXCEPTION 'task links to multiple workflows'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
-    -- Per-row uniqueness guard through the staged mechanism.
-    IF EXISTS (
-        SELECT 1 FROM unnest(v_ids) AS u(tid)
-        WHERE horsies_task_history_duplicate_staged(u.tid)
-    ) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
     v_terminal_at := NOW();
-    v_result_payload := CASE
-        WHEN (NULL::text) IS NULL THEN NULL
-        ELSE convert_to((NULL::text), 'UTF8')
-    END;
-    -- The payload is one value for the whole batch: hash it once for the
-    -- history rows and the deferred records.
-    v_result_digest := CASE
-        WHEN v_result_payload IS NULL THEN NULL
-        ELSE sha256(v_result_payload)
-    END;
-
-    WITH attempt_data AS MATERIALIZED (
-        SELECT id, horsies_encode_task_attempts(id) AS snapshot
-        FROM unnest(v_ids) AS u(id)
-    )
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    )
-    SELECT
-        t.id,
-        t.task_name,
-        t.queue_name,
-        t.priority,
-        t.command_fingerprint_version,
-        t.command_fingerprint,
-        'CANCELLED',
-        'PAUSE_ABANDON_WORKFLOW',
-        v_terminal_at,
-        t.retention_class_key,
-        t.sent_at,
-        t.enqueued_at,
-        t.claimed_at,
-        t.started_at,
-        t.created_at,
-        t.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        'TASK_CANCELLED',
-        'Workflow paused before task start',
-        t.retry_count,
-        t.max_retries,
-        t.claimed_by_worker_id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        t.rerun_of_task_id,
-        t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task,
-        1,
-        1,
-        attempt_data.snapshot,
-        sha256(attempt_data.snapshot),
-        d.disposition,
-        CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
-        CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
-    FROM horsies_tasks t
-    JOIN attempt_data ON attempt_data.id = t.id
-    LEFT JOIN LATERAL (
-        SELECT wt.workflow_id
-        FROM horsies_workflow_tasks wt
-        WHERE wt.task_id = t.id
-        ORDER BY wt.id
-        LIMIT 1
-    ) n ON TRUE
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN NULL::bytea
-            WHEN NOT t.retain_rerun_input THEN NULL::bytea
-            ELSE horsies_encode_rerun_input(t.input, t.task_options)
-        END AS envelope
-    ) e
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN 'NEVER_ELIGIBLE'
-            WHEN NOT t.retain_rerun_input THEN 'DECLINED_BY_POLICY'
-            WHEN octet_length(e.envelope) > 65536 THEN 'OVER_BOUND'
-            ELSE 'INLINE'
-        END AS disposition
-    ) d
-    WHERE t.id = ANY(v_ids);
-    GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_ids);
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, v_terminal_at
-    FROM horsies_tasks t WHERE t.id = ANY(v_ids)
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > v_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    -- The reservation transition has ONE owner: the registry module.
-    PERFORM horsies_key_reservation_terminalize_batch(
-        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        (SELECT COALESCE(array_agg(t.id), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        v_terminal_at
-    );
-
-    -- Outcome rows stream from the still-locked live rows BEFORE the
-    -- deletes: reading them back through the partitioned parent by
-    -- task id would be the rejected fan-out mechanism. RETURN QUERY
-    -- materializes immediately; it does not end the function.
+    -- Outcome rows stream from the locked live rows before the move
+    -- stage deletes them: reading them back through the partitioned
+    -- parent by task id would be the rejected fan-out mechanism.
+    -- RETURN QUERY materializes immediately; it does not end the
+    -- function.
     RETURN QUERY SELECT
         t.id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'PAUSE_ABANDON_WORKFLOW'::text,
@@ -324,18 +142,12 @@ BEGIN
     FROM horsies_tasks t
     WHERE t.id = ANY(v_ids);
 
-    DELETE FROM horsies_task_attempts WHERE task_id = ANY(v_ids);
-    DELETE FROM horsies_tasks WHERE id = ANY(v_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_ids);
-    END IF;
-
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
-    PERFORM pg_notify('horsies_task_status', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
+    -- The batch move stage (0006_history_functions.sql) at the same
+    -- terminal time.
+    PERFORM horsies_move_tasks_to_history(
+        v_ids, 'CANCELLED', 'PAUSE_ABANDON_WORKFLOW', v_terminal_at,
+        NULL, 'TASK_CANCELLED', 'Workflow paused before task start'
+    );
 END
 $$;
 
@@ -343,9 +155,7 @@ CREATE FUNCTION horsies_abandon_owned_node(p_task_id uuid, p_worker_id text, p_c
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
     v_workflow_id uuid;
     v_workflow_status text;
@@ -368,8 +178,9 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at
-    INTO v_status, v_worker, v_claimed_at
+    -- The whole locked row: the move takes it as read here.
+    SELECT t.*
+    INTO v_task
     FROM horsies_tasks t
     WHERE t.id = p_task_id
       AND t.status = 'CLAIMED'
@@ -378,8 +189,8 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+            p_task_id, 'PAUSE_ABANDON_CLAIM', 'OWNER_AND_GENERATION',
+            p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -390,7 +201,7 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
             NULL::timestamptz, NULL::text,
-            v_status, v_worker, v_claimed_at,
+            v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
             'WORKFLOW_STATUS'::text,
             jsonb_build_object(
                 'workflow_id', v_workflow_id::text,
@@ -401,13 +212,13 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'CANCELLED', 'PAUSE_ABANDON_CLAIM', v_terminal_at,
+        v_task, 'CANCELLED', 'PAUSE_ABANDON_CLAIM', v_terminal_at,
         NULL, 'TASK_CANCELLED', 'Workflow paused before task start'
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'PAUSE_ABANDON_CLAIM'::text,
-        v_status, v_worker, v_claimed_at,
+        v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
         NULL::text, NULL::jsonb;
 END
 $$;
@@ -419,10 +230,6 @@ DECLARE
     v_applied_ids uuid[];
     v_refused_ids uuid[] := '{}';
     v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-    v_result_digest bytea;
 BEGIN
     IF p_ids IS NULL OR p_claimed_ats IS NULL THEN
         RAISE EXCEPTION 'batch arrays must be non-NULL'
@@ -521,178 +328,12 @@ BEGIN
 
     IF cardinality(v_applied_ids) > 0 THEN
 
-    IF EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_applied_ids)
-          AND t.is_workflow_task
-          AND (SELECT count(DISTINCT wt.workflow_id)
-               FROM horsies_workflow_tasks wt
-               WHERE wt.task_id = t.id) > 1
-    ) THEN
-        RAISE EXCEPTION 'task links to multiple workflows'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
-    -- Per-row uniqueness guard through the staged mechanism.
-    IF EXISTS (
-        SELECT 1 FROM unnest(v_applied_ids) AS u(tid)
-        WHERE horsies_task_history_duplicate_staged(u.tid)
-    ) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
     v_terminal_at := NOW();
-    v_result_payload := CASE
-        WHEN (NULL::text) IS NULL THEN NULL
-        ELSE convert_to((NULL::text), 'UTF8')
-    END;
-    -- The payload is one value for the whole batch: hash it once for the
-    -- history rows and the deferred records.
-    v_result_digest := CASE
-        WHEN v_result_payload IS NULL THEN NULL
-        ELSE sha256(v_result_payload)
-    END;
-
-    WITH attempt_data AS MATERIALIZED (
-        SELECT id, horsies_encode_task_attempts(id) AS snapshot
-        FROM unnest(v_applied_ids) AS u(id)
-    )
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    )
-    SELECT
-        t.id,
-        t.task_name,
-        t.queue_name,
-        t.priority,
-        t.command_fingerprint_version,
-        t.command_fingerprint,
-        'CANCELLED',
-        'PAUSE_ABANDON_CLAIM_BATCH',
-        v_terminal_at,
-        t.retention_class_key,
-        t.sent_at,
-        t.enqueued_at,
-        t.claimed_at,
-        t.started_at,
-        t.created_at,
-        t.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        'TASK_CANCELLED',
-        'Workflow paused before task start',
-        t.retry_count,
-        t.max_retries,
-        t.claimed_by_worker_id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        t.rerun_of_task_id,
-        t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task,
-        1,
-        1,
-        attempt_data.snapshot,
-        sha256(attempt_data.snapshot),
-        d.disposition,
-        CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
-        CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
-    FROM horsies_tasks t
-    JOIN attempt_data ON attempt_data.id = t.id
-    LEFT JOIN LATERAL (
-        SELECT wt.workflow_id
-        FROM horsies_workflow_tasks wt
-        WHERE wt.task_id = t.id
-        ORDER BY wt.id
-        LIMIT 1
-    ) n ON TRUE
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN NULL::bytea
-            WHEN NOT t.retain_rerun_input THEN NULL::bytea
-            ELSE horsies_encode_rerun_input(t.input, t.task_options)
-        END AS envelope
-    ) e
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN 'NEVER_ELIGIBLE'
-            WHEN NOT t.retain_rerun_input THEN 'DECLINED_BY_POLICY'
-            WHEN octet_length(e.envelope) > 65536 THEN 'OVER_BOUND'
-            ELSE 'INLINE'
-        END AS disposition
-    ) d
-    WHERE t.id = ANY(v_applied_ids);
-    GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_applied_ids) THEN
-        RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_applied_ids);
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, v_terminal_at
-    FROM horsies_tasks t WHERE t.id = ANY(v_applied_ids)
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > v_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    -- The reservation transition has ONE owner: the registry module.
-    PERFORM horsies_key_reservation_terminalize_batch(
-        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_applied_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        (SELECT COALESCE(array_agg(t.id), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_applied_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        v_terminal_at
-    );
-
-    -- Applied outcomes stream from the still-locked live rows at their
-    -- input ordinality, BEFORE the deletes.
+    -- Outcome rows stream from the locked live rows before the move
+    -- stage deletes them: reading them back through the partitioned
+    -- parent by task id would be the rejected fan-out mechanism.
+    -- RETURN QUERY materializes immediately; it does not end the
+    -- function.
     RETURN QUERY SELECT
         t.id, input.ordinality, 'APPLIED'::text,
         v_terminal_at, 'PAUSE_ABANDON_CLAIM_BATCH'::text,
@@ -703,18 +344,12 @@ BEGIN
         ON input.task_id = t.id
     WHERE t.id = ANY(v_applied_ids);
 
-    DELETE FROM horsies_task_attempts WHERE task_id = ANY(v_applied_ids);
-    DELETE FROM horsies_tasks WHERE id = ANY(v_applied_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_applied_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_applied_ids);
-    END IF;
-
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_applied_ids) AS u(tid);
-    PERFORM pg_notify('horsies_task_status', u.tid::text)
-    FROM unnest(v_applied_ids) AS u(tid);
+    -- The batch move stage (0006_history_functions.sql) at the same
+    -- terminal time.
+    PERFORM horsies_move_tasks_to_history(
+        v_applied_ids, 'CANCELLED', 'PAUSE_ABANDON_CLAIM_BATCH', v_terminal_at,
+        NULL, 'TASK_CANCELLED', 'Workflow paused before task start'
+    );
     END IF;
 
     -- Every other input gets its answer through the ONE miss
@@ -727,8 +362,8 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
+        input.task_id, 'PAUSE_ABANDON_CLAIM_BATCH', 'OWNER_AND_GENERATION',
+        p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -739,9 +374,7 @@ CREATE FUNCTION horsies_cancel_locked_task(p_task_id uuid, p_permitted_source_st
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
@@ -749,9 +382,10 @@ BEGIN
     );
     -- The caller chooses the permitted live source set; the database owns
     -- the fixed part: plain tasks only, live statuses only, and the
-    -- operation's literals are not caller-supplied.
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at
-    INTO v_status, v_worker, v_claimed_at
+    -- operation's literals are not caller-supplied. The whole locked row:
+    -- the move takes it as read here.
+    SELECT t.*
+    INTO v_task
     FROM horsies_tasks t
     WHERE t.id = p_task_id
       AND t.is_workflow_task = FALSE
@@ -760,21 +394,21 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['CANCEL_ADMIN']::text[],
-            'NONE', NULL::text, NULL::timestamptz
+            p_task_id, 'CANCEL_ADMIN', 'NONE',
+            NULL::text, NULL::timestamptz
         );
         RETURN;
     END IF;
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'CANCELLED', 'CANCEL_ADMIN', v_terminal_at,
+        v_task, 'CANCELLED', 'CANCEL_ADMIN', v_terminal_at,
         NULL, 'TASK_CANCELLED', 'Cancelled via monitoring API'
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'CANCEL_ADMIN'::text,
-        v_status, v_worker, v_claimed_at,
+        v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
         NULL::text, NULL::jsonb;
 END
 $$;
@@ -785,10 +419,6 @@ CREATE FUNCTION horsies_cancel_nodes_of_cancelled_workflow(p_workflow_ids uuid[]
 DECLARE
     v_ids uuid[];
     v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-    v_result_digest bytea;
 BEGIN
 
     -- Discovery under the batch locking rule: SKIP LOCKED never waits on
@@ -816,180 +446,12 @@ BEGIN
         RETURN;
     END IF;
 
-    IF EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_ids)
-          AND t.is_workflow_task
-          AND (SELECT count(DISTINCT wt.workflow_id)
-               FROM horsies_workflow_tasks wt
-               WHERE wt.task_id = t.id) > 1
-    ) THEN
-        RAISE EXCEPTION 'task links to multiple workflows'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
-    -- Per-row uniqueness guard through the staged mechanism.
-    IF EXISTS (
-        SELECT 1 FROM unnest(v_ids) AS u(tid)
-        WHERE horsies_task_history_duplicate_staged(u.tid)
-    ) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
     v_terminal_at := NOW();
-    v_result_payload := CASE
-        WHEN (NULL::text) IS NULL THEN NULL
-        ELSE convert_to((NULL::text), 'UTF8')
-    END;
-    -- The payload is one value for the whole batch: hash it once for the
-    -- history rows and the deferred records.
-    v_result_digest := CASE
-        WHEN v_result_payload IS NULL THEN NULL
-        ELSE sha256(v_result_payload)
-    END;
-
-    WITH attempt_data AS MATERIALIZED (
-        SELECT id, horsies_encode_task_attempts(id) AS snapshot
-        FROM unnest(v_ids) AS u(id)
-    )
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    )
-    SELECT
-        t.id,
-        t.task_name,
-        t.queue_name,
-        t.priority,
-        t.command_fingerprint_version,
-        t.command_fingerprint,
-        'CANCELLED',
-        'WORKFLOW_CANCEL_WORKFLOW',
-        v_terminal_at,
-        t.retention_class_key,
-        t.sent_at,
-        t.enqueued_at,
-        t.claimed_at,
-        t.started_at,
-        t.created_at,
-        t.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        NULL,
-        NULL,
-        t.retry_count,
-        t.max_retries,
-        t.claimed_by_worker_id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        t.rerun_of_task_id,
-        t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task,
-        1,
-        1,
-        attempt_data.snapshot,
-        sha256(attempt_data.snapshot),
-        d.disposition,
-        CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
-        CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
-    FROM horsies_tasks t
-    JOIN attempt_data ON attempt_data.id = t.id
-    LEFT JOIN LATERAL (
-        SELECT wt.workflow_id
-        FROM horsies_workflow_tasks wt
-        WHERE wt.task_id = t.id
-        ORDER BY wt.id
-        LIMIT 1
-    ) n ON TRUE
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN NULL::bytea
-            WHEN NOT t.retain_rerun_input THEN NULL::bytea
-            ELSE horsies_encode_rerun_input(t.input, t.task_options)
-        END AS envelope
-    ) e
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN 'NEVER_ELIGIBLE'
-            WHEN NOT t.retain_rerun_input THEN 'DECLINED_BY_POLICY'
-            WHEN octet_length(e.envelope) > 65536 THEN 'OVER_BOUND'
-            ELSE 'INLINE'
-        END AS disposition
-    ) d
-    WHERE t.id = ANY(v_ids);
-    GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_ids);
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, v_terminal_at
-    FROM horsies_tasks t WHERE t.id = ANY(v_ids)
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > v_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    -- The reservation transition has ONE owner: the registry module.
-    PERFORM horsies_key_reservation_terminalize_batch(
-        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        (SELECT COALESCE(array_agg(t.id), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        v_terminal_at
-    );
-
-    -- Outcome rows stream from the still-locked live rows BEFORE the
-    -- deletes: reading them back through the partitioned parent by
-    -- task id would be the rejected fan-out mechanism. RETURN QUERY
-    -- materializes immediately; it does not end the function.
+    -- Outcome rows stream from the locked live rows before the move
+    -- stage deletes them: reading them back through the partitioned
+    -- parent by task id would be the rejected fan-out mechanism.
+    -- RETURN QUERY materializes immediately; it does not end the
+    -- function.
     RETURN QUERY SELECT
         t.id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'WORKFLOW_CANCEL_WORKFLOW'::text,
@@ -998,18 +460,12 @@ BEGIN
     FROM horsies_tasks t
     WHERE t.id = ANY(v_ids);
 
-    DELETE FROM horsies_task_attempts WHERE task_id = ANY(v_ids);
-    DELETE FROM horsies_tasks WHERE id = ANY(v_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_ids);
-    END IF;
-
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
-    PERFORM pg_notify('horsies_task_status', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
+    -- The batch move stage (0006_history_functions.sql) at the same
+    -- terminal time.
+    PERFORM horsies_move_tasks_to_history(
+        v_ids, 'CANCELLED', 'WORKFLOW_CANCEL_WORKFLOW', v_terminal_at,
+        NULL, NULL, NULL
+    );
 END
 $$;
 
@@ -1027,10 +483,6 @@ DECLARE
     v_scan_count integer;
     v_cycle_complete boolean;
     v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-    v_result_digest bytea;
 BEGIN
     IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
         RAISE EXCEPTION
@@ -1141,180 +593,12 @@ BEGIN
         RETURN;
     END IF;
 
-    IF EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_ids)
-          AND t.is_workflow_task
-          AND (SELECT count(DISTINCT wt.workflow_id)
-               FROM horsies_workflow_tasks wt
-               WHERE wt.task_id = t.id) > 1
-    ) THEN
-        RAISE EXCEPTION 'task links to multiple workflows'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
-    -- Per-row uniqueness guard through the staged mechanism.
-    IF EXISTS (
-        SELECT 1 FROM unnest(v_ids) AS u(tid)
-        WHERE horsies_task_history_duplicate_staged(u.tid)
-    ) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
     v_terminal_at := NOW();
-    v_result_payload := CASE
-        WHEN (NULL::text) IS NULL THEN NULL
-        ELSE convert_to((NULL::text), 'UTF8')
-    END;
-    -- The payload is one value for the whole batch: hash it once for the
-    -- history rows and the deferred records.
-    v_result_digest := CASE
-        WHEN v_result_payload IS NULL THEN NULL
-        ELSE sha256(v_result_payload)
-    END;
-
-    WITH attempt_data AS MATERIALIZED (
-        SELECT id, horsies_encode_task_attempts(id) AS snapshot
-        FROM unnest(v_ids) AS u(id)
-    )
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    )
-    SELECT
-        t.id,
-        t.task_name,
-        t.queue_name,
-        t.priority,
-        t.command_fingerprint_version,
-        t.command_fingerprint,
-        'CANCELLED',
-        'CANCEL_ORPHAN_SWEEP',
-        v_terminal_at,
-        t.retention_class_key,
-        t.sent_at,
-        t.enqueued_at,
-        t.claimed_at,
-        t.started_at,
-        t.created_at,
-        t.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        'WORKFLOW_CHECK_FAILED',
-        'Workflow task orphaned: no live workflow_task linkage',
-        t.retry_count,
-        t.max_retries,
-        t.claimed_by_worker_id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        t.rerun_of_task_id,
-        t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task,
-        1,
-        1,
-        attempt_data.snapshot,
-        sha256(attempt_data.snapshot),
-        d.disposition,
-        CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
-        CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
-    FROM horsies_tasks t
-    JOIN attempt_data ON attempt_data.id = t.id
-    LEFT JOIN LATERAL (
-        SELECT wt.workflow_id
-        FROM horsies_workflow_tasks wt
-        WHERE wt.task_id = t.id
-        ORDER BY wt.id
-        LIMIT 1
-    ) n ON TRUE
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN NULL::bytea
-            WHEN NOT t.retain_rerun_input THEN NULL::bytea
-            ELSE horsies_encode_rerun_input(t.input, t.task_options)
-        END AS envelope
-    ) e
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN 'NEVER_ELIGIBLE'
-            WHEN NOT t.retain_rerun_input THEN 'DECLINED_BY_POLICY'
-            WHEN octet_length(e.envelope) > 65536 THEN 'OVER_BOUND'
-            ELSE 'INLINE'
-        END AS disposition
-    ) d
-    WHERE t.id = ANY(v_ids);
-    GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_ids);
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, v_terminal_at
-    FROM horsies_tasks t WHERE t.id = ANY(v_ids)
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > v_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    -- The reservation transition has ONE owner: the registry module.
-    PERFORM horsies_key_reservation_terminalize_batch(
-        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        (SELECT COALESCE(array_agg(t.id), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        v_terminal_at
-    );
-
-    -- Outcome rows stream from the still-locked live rows BEFORE the
-    -- deletes: reading them back through the partitioned parent by
-    -- task id would be the rejected fan-out mechanism. RETURN QUERY
-    -- materializes immediately; it does not end the function.
+    -- Outcome rows stream from the locked live rows before the move
+    -- stage deletes them: reading them back through the partitioned
+    -- parent by task id would be the rejected fan-out mechanism.
+    -- RETURN QUERY materializes immediately; it does not end the
+    -- function.
     RETURN QUERY SELECT
         t.id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'CANCEL_ORPHAN_SWEEP'::text,
@@ -1323,18 +607,13 @@ BEGIN
     FROM horsies_tasks t
     WHERE t.id = ANY(v_ids);
 
-    DELETE FROM horsies_task_attempts WHERE task_id = ANY(v_ids);
-    DELETE FROM horsies_tasks WHERE id = ANY(v_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_ids);
-    END IF;
-
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
-    PERFORM pg_notify('horsies_task_status', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
+    -- The batch move stage (0006_history_functions.sql) at the same
+    -- terminal time.
+    PERFORM horsies_move_tasks_to_history(
+        v_ids, 'CANCELLED', 'CANCEL_ORPHAN_SWEEP', v_terminal_at,
+        NULL, 'WORKFLOW_CHECK_FAILED',
+        'Workflow task orphaned: no live workflow_task linkage'
+    );
 END
 $$;
 
@@ -1342,9 +621,7 @@ CREATE FUNCTION horsies_cancel_owned_node(p_task_id uuid, p_worker_id text, p_cl
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
 BEGIN
     IF p_claimed_at IS NULL THEN
@@ -1356,9 +633,10 @@ BEGIN
     );
     -- Full ownership fence, with the explicit carve-out for a task this
     -- same child observed as requeued to PENDING, where no claim remains
-    -- to fence; the carve-out is a property of this variant only.
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at
-    INTO v_status, v_worker, v_claimed_at
+    -- to fence; the carve-out is a property of this variant only. The
+    -- whole locked row: the move takes it as read here.
+    SELECT t.*
+    INTO v_task
     FROM horsies_tasks t
     WHERE t.id = p_task_id
       AND (
@@ -1372,21 +650,21 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+            p_task_id, 'WORKFLOW_CANCEL_CLAIM', 'OWNER_AND_GENERATION',
+            p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'CANCELLED', 'WORKFLOW_CANCEL_CLAIM', v_terminal_at,
+        v_task, 'CANCELLED', 'WORKFLOW_CANCEL_CLAIM', v_terminal_at,
         NULL, NULL, NULL
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'WORKFLOW_CANCEL_CLAIM'::text,
-        v_status, v_worker, v_claimed_at,
+        v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
         NULL::text, NULL::jsonb;
 END
 $$;
@@ -1398,10 +676,6 @@ DECLARE
     v_applied_ids uuid[];
     v_refused_ids uuid[] := '{}';
     v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-    v_result_digest bytea;
 BEGIN
     IF p_ids IS NULL OR p_claimed_ats IS NULL THEN
         RAISE EXCEPTION 'batch arrays must be non-NULL'
@@ -1448,178 +722,12 @@ BEGIN
 
     IF cardinality(v_applied_ids) > 0 THEN
 
-    IF EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_applied_ids)
-          AND t.is_workflow_task
-          AND (SELECT count(DISTINCT wt.workflow_id)
-               FROM horsies_workflow_tasks wt
-               WHERE wt.task_id = t.id) > 1
-    ) THEN
-        RAISE EXCEPTION 'task links to multiple workflows'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
-    -- Per-row uniqueness guard through the staged mechanism.
-    IF EXISTS (
-        SELECT 1 FROM unnest(v_applied_ids) AS u(tid)
-        WHERE horsies_task_history_duplicate_staged(u.tid)
-    ) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
     v_terminal_at := NOW();
-    v_result_payload := CASE
-        WHEN (NULL::text) IS NULL THEN NULL
-        ELSE convert_to((NULL::text), 'UTF8')
-    END;
-    -- The payload is one value for the whole batch: hash it once for the
-    -- history rows and the deferred records.
-    v_result_digest := CASE
-        WHEN v_result_payload IS NULL THEN NULL
-        ELSE sha256(v_result_payload)
-    END;
-
-    WITH attempt_data AS MATERIALIZED (
-        SELECT id, horsies_encode_task_attempts(id) AS snapshot
-        FROM unnest(v_applied_ids) AS u(id)
-    )
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    )
-    SELECT
-        t.id,
-        t.task_name,
-        t.queue_name,
-        t.priority,
-        t.command_fingerprint_version,
-        t.command_fingerprint,
-        'CANCELLED',
-        'WORKFLOW_CANCEL_CLAIM_BATCH',
-        v_terminal_at,
-        t.retention_class_key,
-        t.sent_at,
-        t.enqueued_at,
-        t.claimed_at,
-        t.started_at,
-        t.created_at,
-        t.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        NULL,
-        NULL,
-        t.retry_count,
-        t.max_retries,
-        t.claimed_by_worker_id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        t.rerun_of_task_id,
-        t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task,
-        1,
-        1,
-        attempt_data.snapshot,
-        sha256(attempt_data.snapshot),
-        d.disposition,
-        CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
-        CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
-    FROM horsies_tasks t
-    JOIN attempt_data ON attempt_data.id = t.id
-    LEFT JOIN LATERAL (
-        SELECT wt.workflow_id
-        FROM horsies_workflow_tasks wt
-        WHERE wt.task_id = t.id
-        ORDER BY wt.id
-        LIMIT 1
-    ) n ON TRUE
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN NULL::bytea
-            WHEN NOT t.retain_rerun_input THEN NULL::bytea
-            ELSE horsies_encode_rerun_input(t.input, t.task_options)
-        END AS envelope
-    ) e
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'CANCELLED' = 'COMPLETED' THEN 'NEVER_ELIGIBLE'
-            WHEN NOT t.retain_rerun_input THEN 'DECLINED_BY_POLICY'
-            WHEN octet_length(e.envelope) > 65536 THEN 'OVER_BOUND'
-            ELSE 'INLINE'
-        END AS disposition
-    ) d
-    WHERE t.id = ANY(v_applied_ids);
-    GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_applied_ids) THEN
-        RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_applied_ids);
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, v_terminal_at
-    FROM horsies_tasks t WHERE t.id = ANY(v_applied_ids)
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > v_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    -- The reservation transition has ONE owner: the registry module.
-    PERFORM horsies_key_reservation_terminalize_batch(
-        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_applied_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        (SELECT COALESCE(array_agg(t.id), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_applied_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        v_terminal_at
-    );
-
-    -- Applied outcomes stream from the still-locked live rows at their
-    -- input ordinality, BEFORE the deletes.
+    -- Outcome rows stream from the locked live rows before the move
+    -- stage deletes them: reading them back through the partitioned
+    -- parent by task id would be the rejected fan-out mechanism.
+    -- RETURN QUERY materializes immediately; it does not end the
+    -- function.
     RETURN QUERY SELECT
         t.id, input.ordinality, 'APPLIED'::text,
         v_terminal_at, 'WORKFLOW_CANCEL_CLAIM_BATCH'::text,
@@ -1630,18 +738,12 @@ BEGIN
         ON input.task_id = t.id
     WHERE t.id = ANY(v_applied_ids);
 
-    DELETE FROM horsies_task_attempts WHERE task_id = ANY(v_applied_ids);
-    DELETE FROM horsies_tasks WHERE id = ANY(v_applied_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_applied_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_applied_ids);
-    END IF;
-
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_applied_ids) AS u(tid);
-    PERFORM pg_notify('horsies_task_status', u.tid::text)
-    FROM unnest(v_applied_ids) AS u(tid);
+    -- The batch move stage (0006_history_functions.sql) at the same
+    -- terminal time.
+    PERFORM horsies_move_tasks_to_history(
+        v_applied_ids, 'CANCELLED', 'WORKFLOW_CANCEL_CLAIM_BATCH', v_terminal_at,
+        NULL, NULL, NULL
+    );
     END IF;
 
     -- Every other input gets its answer through the ONE miss
@@ -1654,8 +756,8 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
+        input.task_id, 'WORKFLOW_CANCEL_CLAIM_BATCH', 'OWNER_AND_GENERATION',
+        p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -1666,11 +768,8 @@ CREATE FUNCTION horsies_cancel_owned_orphan(p_task_id uuid, p_worker_id text, p_
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
-    v_is_workflow_task boolean;
-    v_node_status text;
+    v_capture record;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
 BEGIN
     IF p_claimed_at IS NULL THEN
@@ -1680,11 +779,10 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
-    -- One capture: the row locked, the runnable-link observation read
-    -- beside it. A terminal link does not count as runnable and still
-    -- leaves the backing task orphaned.
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at,
-           t.is_workflow_task,
+    -- One capture: the whole row locked (the move takes it as read here),
+    -- the runnable-link observation read beside it. A terminal link does
+    -- not count as runnable and still leaves the backing task orphaned.
+    SELECT t AS task,
            (
                SELECT wt.status
                FROM horsies_workflow_tasks wt
@@ -1692,29 +790,31 @@ BEGIN
                  AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
                ORDER BY wt.id
                LIMIT 1
-           )
-    INTO v_status, v_worker, v_claimed_at, v_is_workflow_task,
-         v_node_status
+           ) AS node_status
+    INTO v_capture
     FROM horsies_tasks t
     WHERE t.id = p_task_id
     FOR UPDATE;
 
+    IF FOUND THEN
+        v_task := v_capture.task;
+    END IF;
     IF FOUND
-       AND v_status = 'CLAIMED'
-       AND v_worker = CAST(p_worker_id AS VARCHAR)
-       AND v_claimed_at = p_claimed_at
-       AND v_is_workflow_task THEN
-        IF v_node_status IS NULL THEN
+       AND v_task.status = 'CLAIMED'
+       AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+       AND v_task.claimed_at = p_claimed_at
+       AND v_task.is_workflow_task THEN
+        IF v_capture.node_status IS NULL THEN
             v_terminal_at := NOW();
             PERFORM horsies_move_task_to_history(
-                p_task_id, 'CANCELLED', 'CANCEL_ORPHAN', v_terminal_at,
+                v_task, 'CANCELLED', 'CANCEL_ORPHAN', v_terminal_at,
                 NULL, 'WORKFLOW_CHECK_FAILED',
                 'Workflow task orphaned: no live workflow_task linkage'
             );
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'APPLIED'::text,
                 v_terminal_at, 'CANCEL_ORPHAN'::text,
-                v_status, v_worker, v_claimed_at,
+                v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
                 NULL::text, NULL::jsonb;
             RETURN;
         END IF;
@@ -1725,15 +825,15 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
             NULL::timestamptz, NULL::text,
-            v_status, v_worker, v_claimed_at,
+            v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
             'WORKFLOW_LINK_STATE'::text,
-            jsonb_build_object('node_status', v_node_status);
+            jsonb_build_object('node_status', v_capture.node_status);
         RETURN;
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['CANCEL_ORPHAN', 'CANCEL_ORPHAN_SWEEP']::text[],
-        'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+        p_task_id, 'CANCEL_ORPHAN', 'OWNER_AND_GENERATION',
+        p_worker_id, p_claimed_at
     );
 END
 $$;
@@ -1844,43 +944,41 @@ CREATE FUNCTION horsies_complete_locked_task(p_task_id uuid, p_worker_id text, p
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
-    -- Read the row by id alone, so that only the primary key serves the
-    -- read whatever the statistics say, and check the fence on the locked
-    -- row. A row that fails the fence stays locked: the miss classifier
-    -- locks it by id too.
-    SELECT status, claimed_by_worker_id, claimed_at
-    INTO v_status, v_worker, v_claimed_at
+    -- Read the whole row by id alone, so that only the primary key serves
+    -- the read whatever the statistics say, and check the fence on the
+    -- locked row. A row that fails the fence stays locked: the miss
+    -- classifier locks it by id too. The move takes the row as read here.
+    SELECT *
+    INTO v_task
     FROM horsies_tasks
     WHERE id = p_task_id
     FOR UPDATE;
     IF NOT FOUND OR (
-        v_status = 'RUNNING'
-        AND v_worker = CAST(p_worker_id AS VARCHAR)
+        v_task.status = 'RUNNING'
+        AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
-            'OWNER', p_worker_id, NULL::timestamptz
+            p_task_id, 'COMPLETE_LOCKED', 'OWNER',
+            p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at,
+        v_task, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at,
         p_result, NULL, NULL
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'COMPLETE_LOCKED'::text,
-        'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
+        'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_task.claimed_at,
         NULL::text, NULL::jsonb;
 END
 $$;
@@ -1941,11 +1039,8 @@ CREATE FUNCTION horsies_expire_owned_claim(p_task_id uuid, p_worker_id text, p_r
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
-    v_good_until timestamptz;
-    v_evaluated_at timestamptz;
+    v_capture record;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
@@ -1954,27 +1049,30 @@ BEGIN
     -- One locked capture judges the deadline. Every good_until writer
     -- mutates this row and therefore needs the lock this transaction now
     -- holds, so the production retry-under-lock loop has no race to serve
-    -- and is deliberately not ported.
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at,
-           t.good_until, NOW()
-    INTO v_status, v_worker, v_claimed_at, v_good_until, v_evaluated_at
+    -- and is deliberately not ported. The move takes the row as read here.
+    SELECT t AS task, NOW() AS evaluated_at
+    INTO v_capture
     FROM horsies_tasks t
     WHERE t.id = p_task_id
     FOR UPDATE;
 
+    IF FOUND THEN
+        v_task := v_capture.task;
+    END IF;
     IF FOUND
-       AND v_status = 'CLAIMED'
-       AND v_worker = CAST(p_worker_id AS VARCHAR) THEN
-        IF v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at THEN
+       AND v_task.status = 'CLAIMED'
+       AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR) THEN
+        IF v_task.good_until IS NOT NULL
+           AND v_task.good_until <= v_capture.evaluated_at THEN
             v_terminal_at := NOW();
             PERFORM horsies_move_task_to_history(
-                p_task_id, 'EXPIRED', 'EXPIRE_CLAIMED', v_terminal_at,
+                v_task, 'EXPIRED', 'EXPIRE_CLAIMED', v_terminal_at,
                 p_result, p_error_code, NULL
             );
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'APPLIED'::text,
                 v_terminal_at, 'EXPIRE_CLAIMED'::text,
-                'CLAIMED'::text, v_worker, v_claimed_at,
+                'CLAIMED'::text, v_task.claimed_by_worker_id, v_task.claimed_at,
                 NULL::text, NULL::jsonb;
             RETURN;
         END IF;
@@ -1982,18 +1080,18 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
             NULL::timestamptz, NULL::text,
-            v_status, v_worker, v_claimed_at,
+            v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
             'DEADLINE'::text,
             jsonb_build_object(
-                'good_until', v_good_until,
-                'evaluated_at', v_evaluated_at
+                'good_until', v_task.good_until,
+                'evaluated_at', v_capture.evaluated_at
             );
         RETURN;
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[],
-        'OWNER', p_worker_id, NULL::timestamptz
+        p_task_id, 'EXPIRE_CLAIMED', 'OWNER',
+        p_worker_id, NULL::timestamptz
     );
 END
 $$;
@@ -2004,10 +1102,6 @@ CREATE FUNCTION horsies_expire_pending_tasks(p_batch_size integer, p_result text
 DECLARE
     v_ids uuid[];
     v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-    v_result_digest bytea;
 BEGIN
     IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
         RAISE EXCEPTION
@@ -2032,200 +1126,12 @@ BEGIN
         RETURN;
     END IF;
 
-    IF p_result IS NULL AND EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_ids) AND t.is_workflow_task
-    ) THEN
-        RAISE EXCEPTION
-            'deferred workflow terminalization requires a result payload'
-            USING ERRCODE = 'not_null_violation';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM horsies_tasks t
-        WHERE t.id = ANY(v_ids)
-          AND t.is_workflow_task
-          AND (SELECT count(*) FROM horsies_workflow_tasks n
-               WHERE n.task_id = t.id) <> 1
-    ) THEN
-        RAISE EXCEPTION
-            'workflow-backing task lacks exactly one node row'
-            USING ERRCODE = 'foreign_key_violation';
-    END IF;
-
-    -- Per-row uniqueness guard through the staged mechanism.
-    IF EXISTS (
-        SELECT 1 FROM unnest(v_ids) AS u(tid)
-        WHERE horsies_task_history_duplicate_staged(u.tid)
-    ) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
     v_terminal_at := NOW();
-    v_result_payload := CASE
-        WHEN (p_result) IS NULL THEN NULL
-        ELSE convert_to((p_result), 'UTF8')
-    END;
-    -- The payload is one value for the whole batch: hash it once for the
-    -- history rows and the deferred records.
-    v_result_digest := CASE
-        WHEN v_result_payload IS NULL THEN NULL
-        ELSE sha256(v_result_payload)
-    END;
-
-    WITH attempt_data AS MATERIALIZED (
-        SELECT id, horsies_encode_task_attempts(id) AS snapshot
-        FROM unnest(v_ids) AS u(id)
-    )
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    )
-    SELECT
-        t.id,
-        t.task_name,
-        t.queue_name,
-        t.priority,
-        t.command_fingerprint_version,
-        t.command_fingerprint,
-        'EXPIRED',
-        'EXPIRE_PENDING',
-        v_terminal_at,
-        t.retention_class_key,
-        t.sent_at,
-        t.enqueued_at,
-        t.claimed_at,
-        t.started_at,
-        t.created_at,
-        t.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        p_error_code,
-        NULL,
-        t.retry_count,
-        t.max_retries,
-        t.claimed_by_worker_id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        t.rerun_of_task_id,
-        t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task,
-        1,
-        1,
-        attempt_data.snapshot,
-        sha256(attempt_data.snapshot),
-        d.disposition,
-        CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
-        CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
-    FROM horsies_tasks t
-    JOIN attempt_data ON attempt_data.id = t.id
-    LEFT JOIN horsies_workflow_tasks n ON n.task_id = t.id
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'EXPIRED' = 'COMPLETED' THEN NULL::bytea
-            WHEN NOT t.retain_rerun_input THEN NULL::bytea
-            ELSE horsies_encode_rerun_input(t.input, t.task_options)
-        END AS envelope
-    ) e
-    CROSS JOIN LATERAL (
-        SELECT CASE
-            WHEN t.is_workflow_task OR 'EXPIRED' = 'COMPLETED' THEN 'NEVER_ELIGIBLE'
-            WHEN NOT t.retain_rerun_input THEN 'DECLINED_BY_POLICY'
-            WHEN octet_length(e.envelope) > 65536 THEN 'OVER_BOUND'
-            ELSE 'INLINE'
-        END AS disposition
-    ) d
-    WHERE t.id = ANY(v_ids);
-    GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_ids);
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, v_terminal_at
-    FROM horsies_tasks t WHERE t.id = ANY(v_ids)
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > v_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    INSERT INTO horsies_workflow_phase2_pending (
-        task_id, workflow_id, workflow_node_row_id,
-        terminalization_kind,
-        recovery_source, history_class, history_anchor,
-        history_schema_version, result_digest,
-        created_at, attempt_count
-    )
-    SELECT
-        t.id, n.workflow_id, n.id,
-        'EXPIRE_PENDING',
-        'HISTORY', t.retention_class_key, v_terminal_at,
-        1, v_result_digest,
-        statement_timestamp(), 0
-    FROM horsies_tasks t
-    JOIN horsies_workflow_tasks n ON n.task_id = t.id
-    WHERE t.id = ANY(v_ids) AND t.is_workflow_task;
-
-    -- The reservation transition has ONE owner: the registry module.
-    PERFORM horsies_key_reservation_terminalize_batch(
-        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        (SELECT COALESCE(array_agg(t.id), '{}')
-         FROM horsies_tasks t
-         WHERE t.id = ANY(v_ids)
-           AND t.idempotency_key_digest IS NOT NULL),
-        v_terminal_at
-    );
-
-    -- Outcome rows stream from the still-locked live rows BEFORE the
-    -- deletes: reading them back through the partitioned parent by
-    -- task id would be the rejected fan-out mechanism. RETURN QUERY
-    -- materializes immediately; it does not end the function.
+    -- Outcome rows stream from the locked live rows before the move
+    -- stage deletes them: reading them back through the partitioned
+    -- parent by task id would be the rejected fan-out mechanism.
+    -- RETURN QUERY materializes immediately; it does not end the
+    -- function.
     RETURN QUERY SELECT
         t.id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'EXPIRE_PENDING'::text,
@@ -2235,18 +1141,12 @@ BEGIN
     WHERE t.id = ANY(v_ids)
     ORDER BY t.good_until ASC;
 
-    DELETE FROM horsies_task_attempts WHERE task_id = ANY(v_ids);
-    DELETE FROM horsies_tasks WHERE id = ANY(v_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_ids);
-    END IF;
-
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
-    PERFORM pg_notify('horsies_task_status', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
+    -- The batch move stage (0006_history_functions.sql) at the same
+    -- terminal time.
+    PERFORM horsies_move_tasks_to_history(
+        v_ids, 'EXPIRED', 'EXPIRE_PENDING', v_terminal_at,
+        p_result, p_error_code, NULL
+    );
 END
 $$;
 
@@ -2254,43 +1154,41 @@ CREATE FUNCTION horsies_fail_locked_task(p_task_id uuid, p_worker_id text, p_res
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
+    v_task horsies_tasks;
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
-    -- Read the row by id alone, so that only the primary key serves the
-    -- read whatever the statistics say, and check the fence on the locked
-    -- row. A row that fails the fence stays locked: the miss classifier
-    -- locks it by id too.
-    SELECT status, claimed_by_worker_id, claimed_at
-    INTO v_status, v_worker, v_claimed_at
+    -- Read the whole row by id alone, so that only the primary key serves
+    -- the read whatever the statistics say, and check the fence on the
+    -- locked row. A row that fails the fence stays locked: the miss
+    -- classifier locks it by id too. The move takes the row as read here.
+    SELECT *
+    INTO v_task
     FROM horsies_tasks
     WHERE id = p_task_id
     FOR UPDATE;
     IF NOT FOUND OR (
-        v_status = 'RUNNING'
-        AND v_worker = CAST(p_worker_id AS VARCHAR)
+        v_task.status = 'RUNNING'
+        AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[],
-            'OWNER', p_worker_id, NULL::timestamptz
+            p_task_id, 'FAIL_RUNNING', 'OWNER',
+            p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'FAILED', 'FAIL_RUNNING', v_terminal_at,
+        v_task, 'FAILED', 'FAIL_RUNNING', v_terminal_at,
         p_result, p_error_code, p_failed_reason
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text,
         v_terminal_at, 'FAIL_RUNNING'::text,
-        'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
+        'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_task.claimed_at,
         NULL::text, NULL::jsonb;
 END
 $$;
@@ -2299,11 +1197,8 @@ CREATE FUNCTION horsies_fail_stale_task(p_task_id uuid, p_stale_after_ms integer
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    v_status text;
-    v_worker varchar;
-    v_claimed_at timestamptz;
-    v_started_at timestamptz;
-    v_finalizing_at timestamptz;
+    v_capture record;
+    v_task horsies_tasks;
     v_last_heartbeat timestamptz;
     v_evaluated_at timestamptz;
     v_terminal_at timestamptz;
@@ -2311,11 +1206,11 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
-    -- One capture: the row locked, the heartbeat read beside it, and the
-    -- instant both arms are judged at. Nothing is reread after a refusal,
-    -- so the evidence cannot show a heartbeat the guard never saw.
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at,
-           t.started_at, t.finalizing_at,
+    -- One capture: the whole row locked (the move takes it as read here),
+    -- the heartbeat read beside it, and the instant both arms are judged
+    -- at. Nothing is reread after a refusal, so the evidence cannot show a
+    -- heartbeat the guard never saw.
+    SELECT t AS task,
            (
                -- Recency bound, derived not constant: a heartbeat older
                -- than stale_after satisfies the staleness comparison for
@@ -2333,26 +1228,30 @@ BEGIN
                  )
                ORDER BY h.sent_at DESC
                LIMIT 1
-           ),
-           NOW()
-    INTO v_status, v_worker, v_claimed_at, v_started_at, v_finalizing_at,
-         v_last_heartbeat, v_evaluated_at
+           ) AS last_heartbeat,
+           NOW() AS evaluated_at
+    INTO v_capture
     FROM horsies_tasks t
     WHERE t.id = p_task_id
     FOR UPDATE;
 
-    IF FOUND AND v_status = 'RUNNING' THEN
-        IF v_started_at IS NOT NULL
+    IF FOUND THEN
+        v_task := v_capture.task;
+        v_last_heartbeat := v_capture.last_heartbeat;
+        v_evaluated_at := v_capture.evaluated_at;
+    END IF;
+    IF FOUND AND v_task.status = 'RUNNING' THEN
+        IF v_task.started_at IS NOT NULL
            AND (
-               v_finalizing_at IS NULL
-               OR v_finalizing_at
+               v_task.finalizing_at IS NULL
+               OR v_task.finalizing_at
                   < v_evaluated_at
                     - make_interval(
                         secs => p_finalizing_stale_after_ms::double precision
                             / 1000.0
                     )
            )
-           AND COALESCE(v_last_heartbeat, v_started_at)
+           AND COALESCE(v_last_heartbeat, v_task.started_at)
                < v_evaluated_at
                     - make_interval(
                         secs => p_stale_after_ms::double precision / 1000.0
@@ -2360,7 +1259,7 @@ BEGIN
         THEN
             v_terminal_at := NOW();
             PERFORM horsies_move_task_to_history(
-                p_task_id, 'FAILED', 'FAIL_STALE', v_terminal_at,
+                v_task, 'FAILED', 'FAIL_STALE', v_terminal_at,
                 p_result, p_error_code, p_failed_reason
             );
             -- Cross-worker by design: the observed claim is whichever
@@ -2368,7 +1267,7 @@ BEGIN
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'APPLIED'::text,
                 v_terminal_at, 'FAIL_STALE'::text,
-                'RUNNING'::text, v_worker, v_claimed_at,
+                'RUNNING'::text, v_task.claimed_by_worker_id, v_task.claimed_at,
                 NULL::text, NULL::jsonb;
             RETURN;
         END IF;
@@ -2376,12 +1275,12 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
             NULL::timestamptz, NULL::text,
-            v_status, v_worker, v_claimed_at,
+            v_task.status::text, v_task.claimed_by_worker_id, v_task.claimed_at,
             'STALENESS'::text,
             jsonb_build_object(
                 'last_heartbeat_at', v_last_heartbeat,
-                'started_at', v_started_at,
-                'finalizing_at', v_finalizing_at,
+                'started_at', v_task.started_at,
+                'finalizing_at', v_task.finalizing_at,
                 'stale_after_ms', p_stale_after_ms,
                 'finalizing_stale_after_ms', p_finalizing_stale_after_ms,
                 'evaluated_at', v_evaluated_at
@@ -2390,8 +1289,8 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['FAIL_STALE']::text[],
-        'NONE', NULL::text, NULL::timestamptz
+        p_task_id, 'FAIL_STALE', 'NONE',
+        NULL::text, NULL::timestamptz
     );
 END
 $$;
@@ -2545,334 +1444,6 @@ BEGIN
       AND r.disposition = 'LIVE';
     GET DIAGNOSTICS v_updated = ROW_COUNT;
     RETURN v_updated;
-END
-$$;
-
-CREATE FUNCTION horsies_move_task_to_history(p_task_id uuid, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_task horsies_tasks%ROWTYPE;
-    v_attempt_snapshot bytea;
-    v_result_payload bytea;
-    v_result_digest bytea;
-    v_workflow_id uuid;
-    v_workflow_node_row_id uuid;
-    v_link_count integer;
-    v_distinct_workflows integer;
-    v_history_rows bigint;
-    v_deleted_rows bigint;
-    v_requires_deferred_phase2 boolean;
-    v_rerun_disposition varchar(32);
-    v_rerun_version smallint;
-    v_rerun_digest bytea;
-    v_rerun_inline bytea;
-    v_rerun_envelope bytea;
-BEGIN
-    CASE p_terminalization_kind
-        WHEN 'COMPLETE_LOCKED' THEN
-            IF p_terminal_status <> 'COMPLETED' THEN
-                RAISE EXCEPTION 'completion-locked projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := TRUE;
-        WHEN 'COMPLETE_FUSED' THEN
-            IF p_terminal_status <> 'COMPLETED' THEN
-                RAISE EXCEPTION 'completion-fused projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'FAIL_RUNNING' THEN
-            IF p_terminal_status <> 'FAILED' THEN
-                RAISE EXCEPTION 'running-failure projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := TRUE;
-        WHEN 'FAIL_STALE' THEN
-            IF p_terminal_status <> 'FAILED' THEN
-                RAISE EXCEPTION 'stale-failure projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := TRUE;
-        WHEN 'EXPIRE_CLAIMED' THEN
-            IF p_terminal_status <> 'EXPIRED' THEN
-                RAISE EXCEPTION 'claimed-expiry projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := TRUE;
-        WHEN 'CANCEL_ADMIN' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'administrative-cancel projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'CANCEL_ORPHAN' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'orphan-cancel projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'PAUSE_ABANDON_CLAIM' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'pause-abandon projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'PAUSE_ABANDON_CLAIM_BATCH' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'pause-abandon-batch projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'PAUSE_ABANDON_WORKFLOW' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'paused-workflow-sweep projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'WORKFLOW_CANCEL_CLAIM' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'workflow-cancel projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'WORKFLOW_CANCEL_CLAIM_BATCH' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'workflow-cancel-batch projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        WHEN 'WORKFLOW_CANCEL_WORKFLOW' THEN
-            IF p_terminal_status <> 'CANCELLED' THEN
-                RAISE EXCEPTION 'cancelled-workflow-sweep projection disagrees';
-            END IF;
-            v_requires_deferred_phase2 := FALSE;
-        ELSE
-            RAISE EXCEPTION
-                'terminalization kind % has no move family yet',
-                p_terminalization_kind
-                USING ERRCODE = 'invalid_parameter_value';
-    END CASE;
-
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, 731)
-    );
-
-    SELECT * INTO STRICT v_task
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-    IF v_task.status NOT IN ('PENDING', 'CLAIMED', 'RUNNING') THEN
-        RAISE EXCEPTION 'live task has non-live status %', v_task.status;
-    END IF;
-    IF p_terminal_at IS NULL THEN
-        RAISE EXCEPTION 'terminal timestamp is required';
-    END IF;
-    -- The leaf lock of the row's leaf, shared, before the first read of history (lock order and effect: the
-    -- horsies_tasks overload in 0006_history_functions.sql).
-    PERFORM pg_advisory_xact_lock_shared(
-        horsies_task_history_leaf_lock_key(v_task.retention_class_key, p_terminal_at)
-    );
-    IF horsies_task_history_duplicate_staged(p_task_id) THEN
-        RAISE EXCEPTION 'task identity exists in multiple locations'
-            USING ERRCODE = 'data_corrupted';
-    END IF;
-
-    IF v_task.is_workflow_task THEN
-        IF p_terminalization_kind IN ('COMPLETE_FUSED', 'CANCEL_ADMIN') THEN
-            RAISE EXCEPTION
-                'operation cannot terminalize a workflow task'
-                USING ERRCODE = 'invalid_parameter_value';
-        END IF;
-        -- Linkage lookup shape derives from the SAME classification that
-        -- set deferral: the STRICT lookup's premise (a live
-        -- workflow's node row cannot be gone) holds exactly for deferred
-        -- kinds; orphan kinds are defined by its absence.
-        IF v_requires_deferred_phase2 THEN
-            SELECT n.id, n.workflow_id
-            INTO STRICT v_workflow_node_row_id, v_workflow_id
-            FROM horsies_workflow_tasks AS n
-            WHERE n.task_id = p_task_id
-            FOR UPDATE;
-            IF p_result IS NULL THEN
-                RAISE EXCEPTION
-                    'deferred workflow terminalization requires a result payload'
-                    USING ERRCODE = 'not_null_violation';
-            END IF;
-        ELSE
-            SELECT count(*), count(DISTINCT n.workflow_id)
-            INTO v_link_count, v_distinct_workflows
-            FROM horsies_workflow_tasks AS n
-            WHERE n.task_id = p_task_id;
-            IF v_distinct_workflows > 1 THEN
-                RAISE EXCEPTION
-                    'task links to multiple workflows'
-                    USING ERRCODE = 'data_corrupted';
-            END IF;
-            IF v_link_count > 0 THEN
-                SELECT n.id, n.workflow_id
-                INTO v_workflow_node_row_id, v_workflow_id
-                FROM horsies_workflow_tasks AS n
-                WHERE n.task_id = p_task_id
-                ORDER BY n.id
-                LIMIT 1
-                FOR UPDATE;
-            END IF;
-        END IF;
-    END IF;
-
-    -- Rerun-input envelope, built here from the stored input and options:
-    -- eligibility before policy, then the size bound. Only an eligible,
-    -- retained row is encoded.
-    IF v_task.is_workflow_task OR p_terminal_status = 'COMPLETED' THEN
-        v_rerun_disposition := 'NEVER_ELIGIBLE';
-    ELSIF NOT v_task.retain_rerun_input THEN
-        v_rerun_disposition := 'DECLINED_BY_POLICY';
-    ELSE
-        v_rerun_envelope := horsies_encode_rerun_input(
-            v_task.input, v_task.task_options
-        );
-        IF octet_length(v_rerun_envelope) > 65536 THEN
-            v_rerun_disposition := 'OVER_BOUND';
-        ELSE
-            v_rerun_disposition := 'INLINE';
-            v_rerun_version := 1;
-            v_rerun_digest := sha256(v_rerun_envelope);
-            v_rerun_inline := v_rerun_envelope;
-        END IF;
-    END IF;
-
-    -- Attempt capture: the complete ordered sequence as canonical
-    -- version-1 bytes. This block is the whole attempt decision.
-    v_attempt_snapshot := horsies_encode_task_attempts(p_task_id);
-
-    -- Result block: an administrative cancel stores no result.
-    IF p_terminalization_kind = 'CANCEL_ADMIN' THEN
-        v_result_payload := NULL;
-    ELSE
-        v_result_payload := CASE
-            WHEN p_result IS NULL THEN NULL
-            ELSE convert_to(p_result, 'UTF8')
-        END;
-    END IF;
-
-    -- One digest serves the history row and the deferred record.
-    v_result_digest := CASE WHEN v_result_payload IS NOT NULL
-                 THEN sha256(v_result_payload)
-             ELSE NULL END;
-
-    INSERT INTO horsies_task_history (
-        task_id,
-        task_name,
-        queue_name,
-        priority,
-        command_fingerprint_version,
-        command_fingerprint,
-        status,
-        terminalization_kind,
-        terminal_at,
-        retention_class_key,
-        sent_at,
-        enqueued_at,
-        claimed_at,
-        started_at,
-        created_at,
-        good_until,
-        result_envelope_version,
-        result_payload,
-        result_digest,
-        error_code,
-        final_failed_reason,
-        retry_count,
-        max_retries,
-        last_claimed_worker_id,
-        last_worker_hostname,
-        last_worker_pid,
-        last_worker_process_name,
-        rerun_of_task_id,
-        rerun_root_task_id,
-        workflow_id,
-        is_workflow_task,
-        history_schema_version,
-        attempt_archive_version,
-        attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition,
-        rerun_input_version,
-        rerun_input_digest,
-        rerun_input_inline
-    ) VALUES (
-        v_task.id,
-        v_task.task_name,
-        v_task.queue_name,
-        v_task.priority,
-        v_task.command_fingerprint_version,
-        v_task.command_fingerprint,
-        p_terminal_status,
-        p_terminalization_kind,
-        p_terminal_at,
-        v_task.retention_class_key,
-        v_task.sent_at,
-        v_task.enqueued_at,
-        v_task.claimed_at,
-        v_task.started_at,
-        v_task.created_at,
-        v_task.good_until,
-        1,
-        v_result_payload,
-        v_result_digest,
-        p_error_code,
-        p_failed_reason,
-        v_task.retry_count,
-        v_task.max_retries,
-        v_task.claimed_by_worker_id,
-        v_task.worker_hostname,
-        v_task.worker_pid,
-        v_task.worker_process_name,
-        v_task.rerun_of_task_id,
-        v_task.rerun_root_task_id,
-        v_workflow_id,
-        v_task.is_workflow_task,
-        1,
-        1,
-        v_attempt_snapshot,
-        sha256(v_attempt_snapshot),
-        v_rerun_disposition,
-        v_rerun_version,
-        v_rerun_digest,
-        v_rerun_inline
-    );
-    GET DIAGNOSTICS v_history_rows = ROW_COUNT;
-    IF v_history_rows <> 1 THEN
-        RAISE EXCEPTION 'terminal history insert did not affect one row';
-    END IF;
-    INSERT INTO horsies_task_history_clock_exceptions (
-        task_id, retention_class_key, terminal_at
-    )
-    SELECT t.id, t.retention_class_key, p_terminal_at
-    FROM horsies_tasks t WHERE t.id = p_task_id
-      AND horsies_uuid7_birth(t.id)
-          - INTERVAL '5 seconds' > p_terminal_at
-    ON CONFLICT (task_id) DO NOTHING;
-
-    IF v_requires_deferred_phase2 AND v_task.is_workflow_task THEN
-        INSERT INTO horsies_workflow_phase2_pending (
-            task_id, workflow_id, workflow_node_row_id,
-            terminalization_kind,
-            recovery_source, history_class, history_anchor,
-            history_schema_version, result_digest,
-            created_at, attempt_count
-        ) VALUES (
-            v_task.id, v_workflow_id, v_workflow_node_row_id,
-            p_terminalization_kind,
-            'HISTORY', v_task.retention_class_key, p_terminal_at,
-            1, v_result_digest,
-            statement_timestamp(), 0
-        );
-    END IF;
-
-    IF v_task.idempotency_key_digest IS NOT NULL THEN
-        PERFORM horsies_key_reservation_terminalize(
-            v_task.idempotency_key_digest, p_task_id, p_terminal_at
-        );
-    END IF;
-
-    DELETE FROM horsies_task_attempts WHERE task_id = p_task_id;
-    DELETE FROM horsies_tasks WHERE id = p_task_id;
-    GET DIAGNOSTICS v_deleted_rows = ROW_COUNT;
-    IF v_deleted_rows <> 1 THEN
-        RAISE EXCEPTION 'live task delete did not affect one row';
-    END IF;
-    PERFORM pg_notify('task_done', p_task_id::text);
-    PERFORM pg_notify('horsies_task_status', p_task_id::text);
 END
 $$;
 
@@ -3200,9 +1771,8 @@ CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid) RETURNS bo
     LANGUAGE plpgsql STABLE
     AS $$
             BEGIN
-                RETURN (
-                    SELECT prov.found
-                    FROM horsies_task_provenance_staged(p_task_id, FALSE) AS prov
+                RETURN EXISTS (
+                    SELECT 1 FROM horsies_task_provenance_staged(p_task_id)
                 ) OR EXISTS (
                     SELECT 1 FROM horsies_task_history_clock_exceptions
                     WHERE task_id = p_task_id
@@ -3219,102 +1789,6 @@ CREATE FUNCTION horsies_task_history_leaf_lock_key(p_class_key text, p_anchor ti
             ::bigint::text,
         1601
     )
-$$;
-
--- The miss classifier of every fenced terminal write. p_fence_kind names the caller's fence, a closed set:
--- - NONE: the caller fences on no claim (worker and generation NULL);
--- - OWNER: the caller fences on the worker only (generation NULL);
--- - OWNER_AND_GENERATION: the caller fences on the worker and the claim generation (both required).
--- Any other kind, or a worker or generation that does not fit the kind, is refused with 22023. A live row that the
--- fence does not hold is LOST_CLAIM; a fence that holds is SOURCE_STATE_CONFLICT.
-CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_row horsies_tasks%ROWTYPE;
-    v_provenance record;
-    v_held boolean;
-BEGIN
-    CASE p_fence_kind
-        WHEN 'NONE' THEN
-            IF num_nulls(p_worker_id, p_claimed_at) <> 2 THEN
-                RAISE EXCEPTION 'fence NONE takes no worker and no claim generation'
-                    USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-        WHEN 'OWNER' THEN
-            IF p_worker_id IS NULL OR p_claimed_at IS NOT NULL THEN
-                RAISE EXCEPTION 'fence OWNER takes a worker and no claim generation'
-                    USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-        WHEN 'OWNER_AND_GENERATION' THEN
-            IF num_nulls(p_worker_id, p_claimed_at) <> 0 THEN
-                RAISE EXCEPTION 'fence OWNER_AND_GENERATION takes a worker and a claim generation'
-                    USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-        ELSE
-            RAISE EXCEPTION 'unknown fence kind'
-                USING ERRCODE = 'invalid_parameter_value';
-    END CASE;
-
-    SELECT * INTO v_row
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        SELECT * INTO v_provenance
-        FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF NOT v_provenance.found THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'TASK_ABSENT'::text,
-                NULL::timestamptz, NULL::text,
-                NULL::text, NULL::varchar, NULL::timestamptz,
-                NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        IF v_provenance.location <> 'HISTORY' THEN
-            RAISE EXCEPTION
-                'provenance reported % after a live miss', v_provenance.location
-                USING ERRCODE = 'data_corrupted';
-        END IF;
-        IF v_provenance.terminalization_kind = ANY(p_equivalent_kinds) THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'ALREADY_APPLIED'::text,
-                v_provenance.terminal_at, v_provenance.terminalization_kind,
-                v_provenance.status, NULL::varchar, NULL::timestamptz,
-                NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-            v_provenance.terminal_at, v_provenance.terminalization_kind,
-            v_provenance.status, NULL::varchar, NULL::timestamptz,
-            'FOREIGN_TERMINALIZATION'::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    v_held := CASE p_fence_kind
-        WHEN 'NONE' THEN TRUE
-        WHEN 'OWNER' THEN v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-        WHEN 'OWNER_AND_GENERATION' THEN
-            v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-            AND v_row.claimed_at IS NOT DISTINCT FROM p_claimed_at
-    END;
-    IF NOT v_held THEN
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'LOST_CLAIM'::text,
-            NULL::timestamptz, NULL::text,
-            v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
-            NULL::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    RETURN QUERY SELECT
-        p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-        NULL::timestamptz, NULL::text,
-        v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
-        NULL::text, NULL::jsonb;
-END
 $$;
 
 CREATE FUNCTION horsies_uuid7_birth(p_id uuid) RETURNS timestamp with time zone
