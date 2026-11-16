@@ -16,11 +16,24 @@ pub struct DepResult {
 
 /// The object that injected members merge into: the node's stored input.
 ///
-/// `null` (the node sets no static input) is an empty object. Any other
-/// non-object input cannot take named members and is refused.
+/// The stored text must pass the core's strict JSON read rule. The merge
+/// re-encodes the object, so an integer that the parse would round is
+/// refused instead of changed. `{}` and `null` (no static input) are an empty
+/// object. Any other non-object input cannot take named members and is
+/// refused.
 pub(crate) fn input_object(
     input: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, WorkflowError> {
+    crate::core::codec::check_json_text(input).map_err(|error| {
+        WorkflowError::Validation(format!("stored node input refused: {error}"))
+    })?;
+    crate::core::history::rerun::input_envelope::validate_integer_domain(input).map_err(
+        |detail| {
+            WorkflowError::Validation(format!(
+                "stored node input holds a number that the merge would round: {detail}"
+            ))
+        },
+    )?;
     let parsed: serde_json::Value = serde_json::from_str(input).map_err(|e| {
         tracing::error!(error = %e, "failed to parse a node input for a member merge");
         e
@@ -300,9 +313,10 @@ mod tests {
     #[test]
     fn merge_invalid_existing_input_is_error() {
         let args_from = Some(json!({"dep_val": 0}));
-        let err =
-            merge_args_from_sync(r#"{"existing": true"#, &args_from, &HashMap::new()).unwrap_err();
-        assert!(matches!(err, WorkflowError::Serialization(_)));
+        for input in [r#"{"existing": true"#, r#"{"a":1,"a":2}"#] {
+            let err = merge_args_from_sync(input, &args_from, &HashMap::new()).unwrap_err();
+            assert!(matches!(err, WorkflowError::Validation(_)), "{input}");
+        }
     }
 
     #[test]

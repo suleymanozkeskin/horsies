@@ -436,14 +436,36 @@ pub(crate) fn build_claimed_task_input(
 /// validation (schedules and workflow nodes), so check-time dry-runs read the
 /// input exactly as execution does.
 ///
-/// The input is passed as stored. Only an object that carries the engine's
-/// `__horsies_workflow_ctx__` member changes: the member becomes
-/// `workflow_ctx` when `accepts_workflow_ctx` is true, and is removed
-/// otherwise. Check-time callers pass `false` (no runtime context).
+/// The input must pass the core's strict JSON read rule; a refused text fails
+/// the task before user code runs. The input is then passed as stored. Only
+/// an object that carries the engine's `__horsies_workflow_ctx__` member
+/// changes: the member becomes `workflow_ctx` when `accepts_workflow_ctx` is
+/// true, and is removed otherwise. Check-time callers pass `false` (no
+/// runtime context).
 pub(crate) fn build_task_input(
     input: &str,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
+    crate::core::codec::check_json_text(input).map_err(|e| {
+        TaskError::builtin(
+            OperationalErrorCode::WorkerSerializationError,
+            format!("stored input refused: {e}"),
+        )
+    })?;
+    // Any input without the context member passes byte for byte.
+    if !input.contains(WORKFLOW_CTX_KWARG) {
+        return Ok(input.as_bytes().to_vec());
+    }
+    // The context member is rewritten, which re-encodes the whole object: an
+    // integer that the parse would round is refused instead of changed.
+    crate::core::history::rerun::input_envelope::validate_integer_domain(input).map_err(
+        |detail| {
+            TaskError::builtin(
+                OperationalErrorCode::WorkerSerializationError,
+                format!("stored input holds a number that a rewrite would round: {detail}"),
+            )
+        },
+    )?;
     let value: serde_json::Value = serde_json::from_str(input).map_err(|e| {
         TaskError::builtin(
             OperationalErrorCode::WorkerSerializationError,
@@ -1658,12 +1680,22 @@ mod task_input_tests {
     }
 
     #[test]
-    fn corrupt_input_text_is_refused() {
-        let err = build_task_input("{", false).unwrap_err();
-        assert!(err
-            .message
-            .unwrap_or_default()
-            .contains("failed to parse input JSON"));
+    fn input_text_that_breaks_the_strict_read_rule_is_refused() {
+        for input in ["{", "NaN", r#"{"a":1,"a":2}"#] {
+            let err = build_task_input(input, false).unwrap_err();
+            assert!(
+                err.message
+                    .unwrap_or_default()
+                    .contains("stored input refused"),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_integer_passes_byte_for_byte() {
+        let input = r#"{"k":123456789012345678901234567890}"#;
+        assert_eq!(task_input(input), input);
     }
 }
 

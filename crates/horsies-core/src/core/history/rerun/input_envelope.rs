@@ -264,9 +264,10 @@ const FRAME_SUFFIX: &str = "}";
 /// Decode a version-1 framed rerun envelope into its exact input and options
 /// spans.
 ///
-/// Refuses an unknown version, a digest that disagrees with the payload, text
-/// that is not the framing, and spans that are not one JSON value each (the
-/// options must be an object or `null`).
+/// Refuses an unknown version, a digest that disagrees with the payload, a
+/// payload that breaks the core's strict JSON read rule, text that is not the
+/// framing, and options that are not an object or `null`. The spans are taken
+/// as text, so integers keep every digit.
 pub fn decode_framed_rerun_input(
     version: i16,
     payload: &[u8],
@@ -280,6 +281,8 @@ pub fn decode_framed_rerun_input(
             "payload digest disagrees with the stored digest".to_owned(),
         ));
     }
+    crate::core::codec::check_json_bytes(payload)
+        .map_err(|error| InputEnvelopeDecodeError::Corrupt(format!("payload refused: {error}")))?;
     let text = std::str::from_utf8(payload).map_err(|error| {
         InputEnvelopeDecodeError::Corrupt(format!("payload is not UTF-8: {error}"))
     })?;
@@ -287,10 +290,12 @@ pub fn decode_framed_rerun_input(
         InputEnvelopeDecodeError::Corrupt("payload does not open with the input member".to_owned())
     })?;
 
-    // The input span ends where its one JSON value ends.
-    let mut values = serde_json::Deserializer::from_str(after_prefix).into_iter::<Value>();
-    let input_value = match values.next() {
-        Some(Ok(value)) => value,
+    // The input span ends where its one JSON value ends. The value is skipped,
+    // not built, so no number is converted.
+    let mut values =
+        serde_json::Deserializer::from_str(after_prefix).into_iter::<serde::de::IgnoredAny>();
+    match values.next() {
+        Some(Ok(_)) => {}
         Some(Err(error)) => {
             return Err(InputEnvelopeDecodeError::Corrupt(format!(
                 "input member is not JSON: {error}"
@@ -301,7 +306,7 @@ pub fn decode_framed_rerun_input(
                 "input member is empty".to_owned(),
             ));
         }
-    };
+    }
     let input_end = values.byte_offset();
     let input = &after_prefix[..input_end];
 
@@ -313,12 +318,11 @@ pub fn decode_framed_rerun_input(
                 "payload does not close with the options member".to_owned(),
             )
         })?;
-    let options_value: Value = serde_json::from_str(options_text).map_err(|error| {
-        InputEnvelopeDecodeError::Corrupt(format!("options member is not JSON: {error}"))
-    })?;
-    let options = match options_value {
-        Value::Null => None,
-        Value::Object(_) => Some(options_text.to_owned()),
+    // The whole payload passed the strict rule, so the options span is one JSON
+    // value: its first byte names its kind.
+    let options = match options_text.as_bytes().first() {
+        Some(b'{') => Some(options_text.to_owned()),
+        _ if options_text == "null" => None,
         _ => {
             return Err(InputEnvelopeDecodeError::Corrupt(
                 "options is neither an object nor null".to_owned(),
@@ -326,8 +330,6 @@ pub fn decode_framed_rerun_input(
         }
     };
 
-    validate_finite_float_domain(&input_value)?;
-    validate_integer_domain(text).map_err(InputEnvelopeDecodeError::Corrupt)?;
     Ok(FramedRerunInput {
         input: input.to_owned(),
         options,
@@ -473,6 +475,10 @@ mod tests {
         assert_eq!(decoded.input, r#"{"b": 1, "a":[1e-07]}"#);
         assert_eq!(decoded.options.as_deref(), Some(r#"{"timeout_ms":5}"#));
 
+        let long =
+            decode_framed(br#"{"input":123456789012345678901234567890,"options":null}"#).unwrap();
+        assert_eq!(long.input, "123456789012345678901234567890");
+
         for (payload, input) in [
             (&br#"{"input":null,"options":null}"#[..], "null"),
             (&br#"{"input":7,"options":null}"#[..], "7"),
@@ -493,6 +499,8 @@ mod tests {
             &br#"{"input":1,"options":[1]}"#[..],
             &br#"{"input":,"options":null}"#[..],
             &br#"{"input":1,"options":null} "#[..],
+            &br#"{"input":{"a":1,"a":2},"options":null}"#[..],
+            &br#"{"input":NaN,"options":null}"#[..],
         ] {
             assert!(
                 matches!(

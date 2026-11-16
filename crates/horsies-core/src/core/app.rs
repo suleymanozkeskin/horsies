@@ -1454,8 +1454,8 @@ where
 }
 
 /// Decode a child workflow's params from the parent node's encoded input
-/// (`{}` when the node sets no params), with the stored-input read rule of
-/// task inputs.
+/// (`{}` when the node sets no params). The text must pass the core's strict
+/// JSON read rule; it is then read with the stored-input rule of task inputs.
 fn decode_parameterized_workflow_input<P>(
     workflow_name: &str,
     input_json: &str,
@@ -1463,6 +1463,12 @@ fn decode_parameterized_workflow_input<P>(
 where
     P: DeserializeOwned,
 {
+    crate::core::codec::check_json_text(input_json).map_err(|e| {
+        HorsiesError::new(format!(
+            "params of workflow '{}' are refused: {}",
+            workflow_name, e,
+        ))
+    })?;
     serde_json::from_str::<serde_json::Value>(input_json)
         .and_then(|value| crate::core::task::macros::deserialize_stored_input::<P>(&value))
         .map_err(|e| {

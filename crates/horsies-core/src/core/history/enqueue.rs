@@ -14,6 +14,7 @@ use super::identity::fingerprint::{
 };
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
 use super::rerun::input_envelope::validate_integer_domain;
+use crate::core::codec::{check_json_text, StrictJsonError};
 use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
 
 /// Facts of a task row that a send, a schedule slot or a rerun writes.
@@ -40,6 +41,12 @@ pub struct WorkflowTaskFacts {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueuePreparationError {
+    /// The text breaks the core's strict JSON read rule (`check_json_text`).
+    #[error("{field} JSON is refused: {source}")]
+    StrictJson {
+        field: &'static str,
+        source: StrictJsonError,
+    },
     #[error("{field} JSON is corrupt: {source}")]
     Json {
         field: &'static str,
@@ -59,8 +66,9 @@ pub enum EnqueuePreparationError {
 
 /// Facts of a first-run send.
 ///
-/// `input_json` is the encoded input as one JSON value. Any JSON value is
-/// accepted; the text is stored and fingerprinted byte for byte.
+/// `input_json` is the encoded input as one JSON value. Any JSON value that
+/// passes the strict read rule is accepted; the text is stored and
+/// fingerprinted byte for byte.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_enqueue_facts(
     task_name: &str,
@@ -156,17 +164,13 @@ pub fn prepare_workflow_task_facts(
     })
 }
 
-/// Refuse input text that is not one JSON value, or that holds an integer the
-/// parse would round.
+/// Refuse input text that breaks the strict read rule, so a refused text
+/// never reaches storage. The text is stored as written, so integers keep
+/// every digit.
 fn check_input(input_json: &str) -> Result<(), EnqueuePreparationError> {
-    let _parsed: Value =
-        serde_json::from_str(input_json).map_err(|source| EnqueuePreparationError::Json {
-            field: "input",
-            source,
-        })?;
-    validate_integer_domain(input_json).map_err(|detail| EnqueuePreparationError::NumberDomain {
+    check_json_text(input_json).map_err(|source| EnqueuePreparationError::StrictJson {
         field: "input",
-        detail,
+        source,
     })
 }
 
@@ -176,6 +180,12 @@ fn parse_optional_object(
     let Some(value) = value else {
         return Ok(None);
     };
+    check_json_text(value).map_err(|source| EnqueuePreparationError::StrictJson {
+        field: "task_options",
+        source,
+    })?;
+    // The options are parsed to read the execution class, so an integer that
+    // the parse would round is refused.
     let parsed: Value =
         serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
             field: "task_options",
@@ -198,33 +208,49 @@ mod tests {
 
     #[cfg(not(feature = "arbitrary-precision"))]
     #[test]
-    fn out_of_domain_integers_are_rejected_per_input_field() {
+    fn a_long_integer_is_kept_in_input_and_refused_in_options() {
+        // The input is stored as written, so every digit is kept (Python's
+        // limit is 4300 digits). The options are parsed to read the
+        // execution class, so an integer the parse would round is refused.
         let big = "123456789012345678901234567890";
-        for (input, options, field) in [
-            (format!("{{\"k\":{big}}}"), "{}".to_owned(), "input"),
-            ("{}".to_owned(), format!("{{\"k\":{big}}}"), "task_options"),
-        ] {
-            let error = prepare_enqueue_facts(
-                "task",
-                "default",
-                50,
-                &input,
-                None,
-                None,
-                Some(&options),
-                Some("standard_30d"),
-                true,
-                None,
-            )
-            .expect_err("an out-of-domain integer must not be rounded silently");
-            assert!(
-                matches!(
-                    error,
-                    EnqueuePreparationError::NumberDomain { field: got, .. } if got == field
-                ),
-                "{field}: {error}"
-            );
-        }
+        let input = format!("{{\"k\":{big}}}");
+        prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            &input,
+            None,
+            None,
+            Some("{}"),
+            Some("standard_30d"),
+            true,
+            None,
+        )
+        .expect("a long integer in the input is stored as written");
+        let options = format!("{{\"k\":{big}}}");
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
+            None,
+            None,
+            Some(&options),
+            Some("standard_30d"),
+            true,
+            None,
+        )
+        .expect_err("an out-of-domain integer in the options must not be rounded");
+        assert!(
+            matches!(
+                error,
+                EnqueuePreparationError::NumberDomain {
+                    field: "task_options",
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -258,17 +284,44 @@ mod tests {
     }
 
     #[test]
-    fn input_text_that_is_not_one_json_value_is_refused() {
-        for input in ["", "{", "[1] [2]"] {
+    fn input_text_that_breaks_the_strict_read_rule_is_refused() {
+        for input in ["", "{", "[1] [2]", "NaN", "{\"a\":1,\"a\":2}", "[1e400]"] {
             let error = prepare_enqueue_facts(
                 "task", "default", 50, input, None, None, None, None, false, None,
             )
-            .expect_err("corrupt input text must be refused");
+            .expect_err("refused input text must not reach storage");
             assert!(
-                matches!(error, EnqueuePreparationError::Json { field: "input", .. }),
+                matches!(
+                    error,
+                    EnqueuePreparationError::StrictJson { field: "input", .. }
+                ),
                 "{input:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn task_options_that_break_the_strict_read_rule_are_refused() {
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
+            None,
+            None,
+            Some("{\"execution\":\"ISOLATED\",\"execution\":\"SHARED_THREAD\"}"),
+            None,
+            false,
+            None,
+        )
+        .expect_err("a repeated options key must be refused");
+        assert!(matches!(
+            error,
+            EnqueuePreparationError::StrictJson {
+                field: "task_options",
+                ..
+            }
+        ));
     }
 
     #[test]
