@@ -397,38 +397,43 @@ def make_workflow_spec(
 
 
 # =============================================================================
-# Enqueue SHA helper
+# Send identity helper
 # =============================================================================
 
 
-def compute_test_enqueue_sha(
+def compute_test_command_fingerprint(
     task_name: str,
     queue_name: str = 'default',
     priority: int = 100,
-    args_json: str = '[]',
-    kwargs_json: str = '{}',
+    input_json: str = '{}',
     sent_at: datetime | None = None,
     good_until: datetime | None = None,
     task_options: str | None = None,
-) -> tuple[datetime, str]:
-    """Compute (sent_at, enqueue_sha) pair for test task insertion.
+    retention_class_key: str = 'standard_30d',
+    retain_rerun_input: bool = False,
+) -> tuple[datetime, bytes]:
+    """Compute (sent_at, command_fingerprint) for test task insertion.
 
-    Returns a consistent pair: the sent_at used in the hash matches
-    the one to be stored in the row.
+    The fingerprint is the version-1 command fingerprint that a send of
+    these values stores, with the stored ``input`` text in its kwargs
+    element. The returned sent_at is the one to store in the row.
     """
-    from horsies.core.utils.fingerprint import enqueue_fingerprint
+    from horsies.core.history.identity.fingerprint import EnqueueCommandV1
 
     if sent_at is None:
         sent_at = datetime.now(timezone.utc)
-    sha = enqueue_fingerprint(
+    fingerprint = EnqueueCommandV1(
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        sent_at=sent_at,
+        args_json=None,
+        kwargs_json=input_json,
         good_until=good_until,
         enqueue_delay_seconds=None,
-        task_options=task_options,
-    )
-    return sent_at, sha
+        task_options_json=task_options,
+        retention_class_key=retention_class_key,
+        retain_rerun_input=retain_rerun_input,
+        rerun_of_task_id=None,
+        rerun_root_task_id=None,
+    ).fingerprint
+    return sent_at, fingerprint
