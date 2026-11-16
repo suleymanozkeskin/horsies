@@ -24,6 +24,9 @@ pub enum BrokerErrorCode {
     ListenerSubscribeFailed,
     NoBroker,
     InvalidJsonPayload,
+    /// An argument of the call was refused before anything ran. Nothing was
+    /// written, and the same arguments are refused again.
+    InvalidInput,
 }
 
 impl std::fmt::Display for BrokerErrorCode {
@@ -103,6 +106,15 @@ mod tests {
     }
 
     #[test]
+    fn invalid_input_has_python_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&BrokerErrorCode::InvalidInput).unwrap(),
+            "\"INVALID_INPUT\""
+        );
+        assert_eq!(BrokerErrorCode::InvalidInput.to_string(), "INVALID_INPUT");
+    }
+
+    #[test]
     fn all_codes_round_trip() {
         let codes = [
             BrokerErrorCode::SchemaInitFailed,
@@ -118,6 +130,7 @@ mod tests {
             BrokerErrorCode::ListenerSubscribeFailed,
             BrokerErrorCode::NoBroker,
             BrokerErrorCode::InvalidJsonPayload,
+            BrokerErrorCode::InvalidInput,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).unwrap();

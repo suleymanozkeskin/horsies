@@ -413,8 +413,8 @@ pub fn history_facet_statement(query: &HistoryFacetQuery) -> HistoryStatement {
 pub(crate) fn window_conditions(window: HistoryWindow) -> (Vec<String>, Vec<HistoryBindValue>) {
     (
         vec![
-            "retention_anchor_at >= $1".to_owned(),
-            "retention_anchor_at < $2".to_owned(),
+            "terminal_at >= $1".to_owned(),
+            "terminal_at < $2".to_owned(),
         ],
         vec![
             HistoryBindValue::Timestamp(window.lower),

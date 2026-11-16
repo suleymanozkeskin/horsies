@@ -89,6 +89,7 @@ pub enum ErrorCode {
     ConfigInvalidSchedule,
     CliInvalidArgs,
     WorkerInvalidLocator,
+    ConfigInvalidResilience,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -142,6 +143,7 @@ impl ErrorCode {
             Self::ConfigInvalidSchedule => "HRS-205",
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
+            Self::ConfigInvalidResilience => "HRS-208",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -200,6 +202,7 @@ impl ErrorCode {
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
+            | Self::ConfigInvalidResilience
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -267,6 +270,7 @@ impl ErrorCode {
                 | Self::ConfigInvalidSchedule
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
+                | Self::ConfigInvalidResilience
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
@@ -460,6 +464,8 @@ mod tests {
             ErrorCategory::Config,
         );
         assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
+        assert_eq!(ErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
+        assert!(ErrorCode::ConfigInvalidResilience.is_config_error());
     }
 
     #[test]

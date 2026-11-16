@@ -21,7 +21,6 @@ from horsies.core.history.commands import (
     OPEN_END_ANCHOR,
     CollectPartitionHealth,
     CreateDailyHistoryLeaf,
-    CreateOpenEndedHistoryLeaf,
     DetachEmptyForeverLeaf,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
@@ -365,7 +364,6 @@ class TestCommandUnion:
         assert set(get_args(PartitionMaintenanceCommand.__value__)) == {
             InspectHistoryLeaf,
             CreateDailyHistoryLeaf,
-            CreateOpenEndedHistoryLeaf,
             EnsureLeafCoverage,
             DetachExpiredHistoryLeaf,
             DetachEmptyForeverLeaf,
@@ -383,7 +381,6 @@ class TestCommandUnion:
         permitted: dict[type, set[str]] = {
             InspectHistoryLeaf: {'leaf', 'lifecycle'},
             CreateDailyHistoryLeaf: {'leaf'},
-            CreateOpenEndedHistoryLeaf: {'lower'},
             EnsureLeafCoverage: {'class_key', 'horizon_days'},
             DetachExpiredHistoryLeaf: {
                 'leaf',

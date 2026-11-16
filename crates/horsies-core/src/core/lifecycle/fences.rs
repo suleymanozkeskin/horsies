@@ -62,14 +62,13 @@ pub struct WorkerOwned {
 
 /// One task, held by this worker at this claim generation.
 ///
-/// `claimed_at` of `None` disables the generation half, leaving worker
-/// ownership. That is a compatibility seam rather than a loophole: a caller
-/// without a dispatch context still fences on ownership rather than silently
-/// fencing on nothing.
+/// The claim generation is required: every dispatch carries the `claimed_at`
+/// that its claim returned, so no caller can turn the generation half of the
+/// fence off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedClaim {
     pub worker_id: String,
-    pub claimed_at: Option<DateTime<Utc>>,
+    pub claimed_at: DateTime<Utc>,
 }
 
 /// Many tasks, each at its own claim generation.
@@ -83,13 +82,13 @@ pub struct OwnedClaim {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedClaimBatch {
     worker_id: String,
-    claim_generations: Vec<(Uuid, Option<DateTime<Utc>>)>,
+    claim_generations: Vec<(Uuid, DateTime<Utc>)>,
 }
 
 impl OwnedClaimBatch {
     pub fn new(
         worker_id: String,
-        claim_generations: Vec<(Uuid, Option<DateTime<Utc>>)>,
+        claim_generations: Vec<(Uuid, DateTime<Utc>)>,
     ) -> Result<Self, LifecycleValidationError> {
         let mut seen = std::collections::HashSet::new();
         for (task_id, _) in &claim_generations {
@@ -114,7 +113,7 @@ impl OwnedClaimBatch {
             .collect()
     }
 
-    pub fn generations(&self) -> Vec<Option<DateTime<Utc>>> {
+    pub fn generations(&self) -> Vec<DateTime<Utc>> {
         self.claim_generations
             .iter()
             .map(|(_, generation)| *generation)

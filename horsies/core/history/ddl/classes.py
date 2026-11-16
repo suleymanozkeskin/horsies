@@ -2,10 +2,11 @@
 
 A retention class is immutable once registered: enqueue snapshots the class
 onto every request, so changing a duration in place would rewrite promises
-already made. Registration therefore either creates the class — metadata
-row plus its RANGE parent attached under the LIST hierarchy — verifies an
-identical existing registration, or refuses with the conflicting facts.
-Changing a duration means registering a new class key.
+already made. Registration therefore either creates the class — a ``PERIOD``
+row with its whole days, plus its RANGE parent on ``terminal_at`` attached
+under the LIST hierarchy — verifies an identical existing registration, or
+refuses with the conflicting facts. Changing a duration means registering a
+new class key.
 
 Class keys come from the caller. A finite class key is a function of its
 period (`horsies.core.history.periods`), so a key always means one
@@ -15,7 +16,6 @@ than the column bound and enforced here.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final
@@ -23,9 +23,12 @@ from typing import Final
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import is_safe_identifier
 from ..names import RETENTION_CLASSES, TASK_HISTORY_PARENT
-from ..partitions.catalog import RetentionClassRow, read_retention_class
+from ..partitions.catalog import (
+    RetentionClassRow,
+    history_class_parent_name,
+    read_retention_class,
+)
 from ..periods import RetentionClassKey, RetentionDays, period_class_key
 from .tables import FOREVER_CLASS_KEY
 
@@ -85,12 +88,7 @@ type ClassRegistration = ClassRegistered | ClassAlreadyRegistered | ClassConflic
 
 def finite_class_parent_name(class_key: str) -> str:
     """The RANGE parent relation name for one finite class."""
-    name = f'{TASK_HISTORY_PARENT}_{class_key}'
-    if not is_safe_identifier(name):
-        raise ValueError(
-            f'class key {class_key!r} does not form a safe relation name'
-        )
-    return name
+    return history_class_parent_name(class_key)
 
 
 async def register_finite_retention_class(
@@ -103,6 +101,8 @@ async def register_finite_retention_class(
     """Create or verify one finite class inside the caller's transaction."""
     if duration <= timedelta(0):
         raise ValueError('retention duration must be positive')
+    if duration % timedelta(days=1) != timedelta(0):
+        raise ValueError('a retention period is a whole number of days')
     if partition_interval != timedelta(days=1):
         raise ValueError('finite classes use daily partition intervals')
     parent_name = finite_class_parent_name(class_key)
@@ -132,19 +132,15 @@ async def register_finite_retention_class(
         text(
             f"""
             INSERT INTO {RETENTION_CLASSES} (
-                class_key, duration, partition_interval,
-                finite_parent_name, created_at
+                class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
             ) VALUES (
-                :class_key, :duration, :partition_interval,
-                :finite_parent_name, statement_timestamp()
+                :class_key, 'PERIOD', :retention_days, NULL, statement_timestamp()
             )
             """
         ),
         {
             'class_key': class_key,
-            'duration': duration,
-            'partition_interval': partition_interval,
-            'finite_parent_name': parent_name,
+            'retention_days': duration.days,
         },
     )
     await connection.execute(
@@ -153,79 +149,8 @@ async def register_finite_retention_class(
             CREATE TABLE {parent_name}
                 PARTITION OF {TASK_HISTORY_PARENT}
                 FOR VALUES IN ('{class_key}')
-                PARTITION BY RANGE (retention_anchor_at)
+                PARTITION BY RANGE (terminal_at)
             """
         )
     )
     return ClassRegistered(class_key=class_key, finite_parent_name=parent_name)
-
-
-@dataclass(frozen=True, slots=True)
-class PeriodKeyCollision:
-    """A period's class key is registered with another duration.
-
-    Only a class declared by name before 0.6.1 can hold such a row: a key
-    like ``standard_14d`` declared with 7 days. Stamping rows into it would
-    delete them on the registered duration.
-    """
-
-    class_key: str
-    period: timedelta
-    registered_duration: timedelta | None
-
-
-async def find_period_key_collisions(
-    connection: AsyncConnection,
-    period_classes: Sequence[tuple[RetentionClassKey, timedelta]],
-) -> tuple[PeriodKeyCollision, ...]:
-    """The period classes whose registry row has another duration.
-
-    Read-only: one query in the caller's transaction; it does not commit.
-    A key with no row does not collide, because registration creates it
-    with the period. A database without the registry table has no row.
-    """
-    match period_classes:
-        case ():
-            return ()
-        case _:
-            pass
-    registry_present = (
-        await connection.execute(
-            text('SELECT to_regclass(:relation) IS NOT NULL'),
-            {'relation': RETENTION_CLASSES},
-        )
-    ).scalar_one()
-    match bool(registry_present):
-        case False:
-            return ()
-        case True:
-            pass
-    expected = dict(period_classes)
-    rows = (
-        await connection.execute(
-            text(
-                f'SELECT class_key, duration FROM {RETENTION_CLASSES} '
-                'WHERE class_key = ANY(:keys) ORDER BY class_key'
-            ),
-            {'keys': list(expected)},
-        )
-    ).all()
-    return tuple(
-        PeriodKeyCollision(
-            class_key=row.class_key,
-            period=expected[row.class_key],
-            registered_duration=row.duration,
-        )
-        for row in rows
-        if row.duration != expected[row.class_key]
-    )
-
-
-def describe_period_key_collision(collision: PeriodKeyCollision) -> str:
-    """One line that names the key, both durations and the fix."""
-    return (
-        f'retention class {collision.class_key!r} is registered with '
-        f'duration {collision.registered_duration}, but the key stands for '
-        f'{collision.period.days} days; a class declared by name before '
-        '0.6.1 holds the key. Choose another number of days for this period'
-    )

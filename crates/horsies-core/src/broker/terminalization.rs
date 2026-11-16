@@ -17,13 +17,12 @@
 //! coupled workflow-node write belongs in the same transaction as the
 //! transition it proves.
 
-use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::core::lifecycle::operations::{equivalence_class_of, function_name_of};
+use crate::core::lifecycle::operations::function_name_of;
 use crate::core::lifecycle::outcomes::decode_outcome_row;
-use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, TerminalizationOutcome};
+use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 
 use super::error::BrokerError;
 
@@ -52,8 +51,6 @@ const CANCEL_OWNED_NODES_SQL: &str =
     "SELECT * FROM horsies_cancel_owned_nodes($1, $2::timestamptz[], $3)";
 const CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL: &str =
     "SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow($1)";
-const LOCKED_READ_MISS_SQL: &str =
-    "SELECT * FROM horsies_terminalization_miss($1, $2::text[], $3, $4::timestamptz)";
 
 /// How many rows the command's function must report, per the wire contract.
 #[derive(Clone, Copy)]
@@ -407,46 +404,6 @@ pub async fn terminalize_in_tx(
     Ok(outcomes)
 }
 
-/// Classify a failed generation-fenced locking read without mutating.
-///
-/// The locked-shape commands carry only the worker half of their fence: the
-/// generation was already checked by the caller's `SELECT … FOR UPDATE`. If
-/// that read matched nothing, invoking the operation function would be
-/// unsafe — the same worker may already own a newer generation. The shared
-/// miss classifier accepts the full dispatched generation and distinguishes
-/// an idempotent replay from that lost claim while keeping
-/// terminal-before-fence ordering identical to every operation function.
-pub async fn classify_locked_read_miss_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    task_id: uuid::Uuid,
-    requested: TerminalizationKind,
-    worker_id: &str,
-    claimed_at: Option<DateTime<Utc>>,
-) -> Result<TerminalizationOutcome, BrokerError> {
-    let operation = "horsies_terminalization_miss";
-    let mut equivalent_kinds: Vec<String> = equivalence_class_of(requested)
-        .iter()
-        .map(|kind| kind.as_str().to_owned())
-        .collect();
-    equivalent_kinds.sort();
-    let rows = sqlx::query(LOCKED_READ_MISS_SQL)
-        .bind(task_id)
-        .bind(equivalent_kinds)
-        .bind(worker_id)
-        .bind(claimed_at)
-        .fetch_all(tx.as_mut())
-        .await
-        .map_err(BrokerError::Database)?;
-    let mut outcomes = enforce_cardinality(
-        decode_all(&rows, operation)?,
-        Cardinality::ExactlyOne,
-        operation,
-    )?;
-    let outcome = outcomes.remove(0);
-    log_terminalization_outcome(operation, &outcome);
-    Ok(outcome)
-}
-
 #[cfg(test)]
 mod catalog_tests {
     //! Catalog conformance: the installed database program must match the
@@ -454,6 +411,7 @@ mod catalog_tests {
     //! composite type's column list. A stale overload left behind by a
     //! changed argument list appears here as a difference.
     use super::*;
+    use crate::core::lifecycle::TerminalizationKind;
     use serial_test::serial;
     use sqlx::Row;
 

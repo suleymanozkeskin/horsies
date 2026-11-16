@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// URLs so structured logs / panics never leak credentials. Parity with
 /// horsies PR #101 f368965c.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PostgresConfig {
     /// PostgreSQL runtime connection URL.
     ///
@@ -120,16 +121,53 @@ fn default_pool_recycle() -> u32 {
 }
 
 /// Validation error for PostgresConfig.
-#[derive(Debug, Clone, thiserror::Error)]
+///
+/// Every variant is a refusal of the settings themselves: the same settings
+/// are refused again, so none is retryable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PostgresConfigError {
-    #[error("invalid database URL scheme: expected 'postgresql://' or 'postgres://', got '{0}'")]
-    InvalidUrlScheme(String),
+    /// `database_url` does not start with `postgresql://` or `postgres://`.
+    /// The value is the scheme only (the text before `://`), or
+    /// [`NO_URL_SCHEME`] when the URL has none, so no credential is echoed.
     #[error(
-        "invalid session_database_url scheme: expected 'postgresql://' or 'postgres://', got '{0}'"
+        "invalid database_url scheme {0:?}: the URL must start with 'postgresql://' or \
+         'postgres://'; a driver suffix such as 'postgresql+psycopg://' is refused, \
+         write 'postgresql://' instead"
+    )]
+    InvalidUrlScheme(String),
+    /// `session_database_url` does not start with `postgresql://` or
+    /// `postgres://`. The value is the scheme only, as in
+    /// [`PostgresConfigError::InvalidUrlScheme`].
+    #[error(
+        "invalid session_database_url scheme {0:?}: the URL must start with 'postgresql://' \
+         or 'postgres://'; a driver suffix such as 'postgresql+psycopg://' is refused, \
+         write 'postgresql://' instead"
     )]
     InvalidSessionUrlScheme(String),
     #[error("pgbouncer_transaction_mode=true requires session_database_url for schema initialization, partition maintenance, and LISTEN/NOTIFY")]
     MissingSessionDatabaseUrl,
+    #[error(
+        "session_database_url must not use the transaction-pool URL: partition maintenance \
+         and LISTEN require PostgreSQL session affinity; use a direct or session-capable \
+         URL for session_database_url"
+    )]
+    SessionUrlIsTransactionPoolUrl,
+    /// The driver cannot parse a URL whose scheme passed. The value is the
+    /// driver's reason, which does not hold the URL.
+    #[error("database URL cannot be parsed: {0}")]
+    UnparseableUrl(String),
+}
+
+/// The scheme reported for a URL that has no `://`.
+pub const NO_URL_SCHEME: &str = "<no scheme>";
+
+/// The scheme of a URL (the text before `://`), or [`NO_URL_SCHEME`].
+/// Never returns text after `://`, where credentials live.
+fn url_scheme(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, _rest)) => scheme.to_owned(),
+        None => NO_URL_SCHEME.to_owned(),
+    }
 }
 
 impl PostgresConfig {
@@ -177,28 +215,30 @@ impl PostgresConfig {
     }
 
     /// Validate the configuration.
+    ///
+    /// Accepts only the `postgresql://` and `postgres://` schemes for both
+    /// URLs. In PgBouncer transaction mode, requires a session URL that
+    /// differs from `database_url`.
     pub fn validate(&self) -> Result<(), PostgresConfigError> {
         if !is_postgres_url(&self.database_url) {
-            let scheme = self
-                .database_url
-                .split("://")
-                .next()
-                .unwrap_or(&self.database_url[..20.min(self.database_url.len())]);
-            return Err(PostgresConfigError::InvalidUrlScheme(scheme.to_owned()));
+            return Err(PostgresConfigError::InvalidUrlScheme(url_scheme(
+                &self.database_url,
+            )));
         }
         if let Some(session_url) = &self.session_database_url {
             if !is_postgres_url(session_url) {
-                let scheme = session_url
-                    .split("://")
-                    .next()
-                    .unwrap_or(&session_url[..20.min(session_url.len())]);
-                return Err(PostgresConfigError::InvalidSessionUrlScheme(
-                    scheme.to_owned(),
-                ));
+                return Err(PostgresConfigError::InvalidSessionUrlScheme(url_scheme(
+                    session_url,
+                )));
             }
         }
         if self.pgbouncer_transaction_mode && self.session_database_url.is_none() {
             return Err(PostgresConfigError::MissingSessionDatabaseUrl);
+        }
+        if self.pgbouncer_transaction_mode
+            && self.session_database_url.as_deref() == Some(self.database_url.as_str())
+        {
+            return Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl);
         }
         Ok(())
     }
@@ -339,6 +379,34 @@ mod tests {
         ));
     }
 
+    /// Python `PostgresConfig.validate_pgbouncer_configuration`: in PgBouncer
+    /// mode the session URL must differ from the transaction-pool URL.
+    #[test]
+    fn pgbouncer_session_url_must_differ_from_the_pool_url() {
+        let config = PostgresConfig::from_pgbouncer_urls(
+            "postgresql://user:pass@pooler/db",
+            "postgresql://user:pass@pooler/db",
+        );
+        assert!(matches!(
+            config.validate(),
+            Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl),
+        ));
+
+        // Outside PgBouncer mode the two roles may share one URL.
+        let mut direct = PostgresConfig::from_url("postgresql://user:pass@direct/db");
+        direct.session_database_url = Some("postgresql://user:pass@direct/db".to_owned());
+        assert!(direct.validate().is_ok());
+    }
+
+    #[test]
+    fn unknown_key_is_refused() {
+        let error = serde_json::from_str::<PostgresConfig>(
+            r#"{"database_url": "postgresql://localhost/db", "pool_sizes": 3}"#,
+        )
+        .expect_err("an unknown key must be refused");
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
     #[test]
     fn invalid_session_url_scheme() {
         let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
@@ -348,5 +416,53 @@ mod tests {
             config.validate(),
             Err(PostgresConfigError::InvalidSessionUrlScheme(_)),
         ));
+    }
+
+    /// The SQLAlchemy form of Python 0.7.0 is refused, and the refusal names
+    /// the fix.
+    #[test]
+    fn a_driver_suffix_scheme_is_refused_with_the_fix() {
+        let config = PostgresConfig::from_url("postgresql+psycopg://user:secret@localhost/db");
+
+        let error = config.validate().unwrap_err();
+
+        assert_eq!(
+            error,
+            PostgresConfigError::InvalidUrlScheme("postgresql+psycopg".to_owned()),
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("write 'postgresql://' instead"),
+            "{message}"
+        );
+        assert!(!message.contains("secret"), "{message}");
+    }
+
+    #[test]
+    fn a_driver_suffix_session_scheme_is_refused() {
+        let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
+        config.session_database_url = Some("postgres+asyncpg://user:pass@direct/db".to_owned());
+
+        assert_eq!(
+            config.validate(),
+            Err(PostgresConfigError::InvalidSessionUrlScheme(
+                "postgres+asyncpg".to_owned()
+            )),
+        );
+    }
+
+    /// A URL with no `://` is reported without its text, which can hold a
+    /// password.
+    #[test]
+    fn a_url_without_a_scheme_is_refused_without_echoing_it() {
+        let config = PostgresConfig::from_url("user:secret@localhost/db");
+
+        let error = config.validate().unwrap_err();
+
+        assert_eq!(
+            error,
+            PostgresConfigError::InvalidUrlScheme(NO_URL_SCHEME.to_owned()),
+        );
+        assert!(!error.to_string().contains("secret"));
     }
 }

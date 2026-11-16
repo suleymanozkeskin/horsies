@@ -7,6 +7,9 @@ pub const WORKFLOW_PHASE2_PENDING: &str = "horsies_workflow_phase2_pending";
 pub const WORKFLOW_PHASE2_QUARANTINE: &str = "horsies_workflow_phase2_quarantine";
 pub const TASK_HISTORY_PARENT: &str = "horsies_task_history";
 pub const TASK_HISTORY_FOREVER: &str = "horsies_task_history_forever";
+/// The one static `forever` leaf. The first migration creates it with an
+/// `OPEN` lower bound (`MINVALUE`), its two indexes and its catalog row.
+pub const TASK_HISTORY_FOREVER_LEAF: &str = "horsies_task_history_forever_open";
 pub const LEAF_CATALOG: &str = "horsies_task_history_leaf_catalog";
 pub const LEAF_LOCK_KEY_FUNCTION: &str = "horsies_task_history_leaf_lock_key";
 pub const KEY_RESERVATIONS: &str = "horsies_key_reservations";

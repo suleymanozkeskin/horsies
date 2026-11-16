@@ -1,5 +1,38 @@
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+
+/// Largest `worker_state_snapshot_interval_ms`: half the live window.
+///
+/// A worker reads as live only while its latest snapshot is inside the live
+/// window. At half the window, the other half is room for a late snapshot
+/// write. Mirrors Python's `WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS`.
+pub const WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: u64 = WORKER_STATE_LIVE_WINDOW_S * 1_000 / 2;
+
+/// The fail-closed window is `running_stale_threshold_ms` divided by this.
+///
+/// With `auto_fail_stale_running` on, a worker stops when no runner heartbeat
+/// lands for this window. The rest of the threshold is the time left to stop
+/// its work before the reaper acts. Mirrors Python's
+/// `FAIL_CLOSED_WINDOW_DIVISOR`.
+pub const FAIL_CLOSED_WINDOW_DIVISOR: u64 = 2;
+
+/// Time a runner heartbeat may take to land, counted from its planned start.
+///
+/// The fail-closed window must hold one `runner_heartbeat_interval_ms` plus
+/// this allowance, or the worker stops while every beat lands. Mirrors
+/// Python's `RUNNER_BEAT_LANDING_ALLOWANCE_MS`.
+pub const RUNNER_BEAT_LANDING_ALLOWANCE_MS: u64 = 2_000;
+
+/// Smallest `running_stale_threshold_ms` with `auto_fail_stale_running` on:
+/// its fail-closed window holds one beat interval plus
+/// [`RUNNER_BEAT_LANDING_ALLOWANCE_MS`].
+pub fn fail_closed_threshold_floor_ms(runner_heartbeat_interval_ms: u64) -> u64 {
+    FAIL_CLOSED_WINDOW_DIVISOR.saturating_mul(
+        runner_heartbeat_interval_ms.saturating_add(RUNNER_BEAT_LANDING_ALLOWANCE_MS),
+    )
+}
+
 /// Configuration for automatic stale task detection and crash recovery.
 ///
 /// - CLAIMED tasks that never start: safe to auto-requeue
@@ -78,8 +111,10 @@ pub struct RecoveryConfig {
     pub claimer_heartbeat_interval_ms: u64,
 
     /// How often each worker persists a worker-state snapshot (monitoring
-    /// timeseries) in milliseconds (1s–5min). Each snapshot is one row in
-    /// `horsies_worker_states`, so shorter intervals grow the table faster.
+    /// timeseries) in milliseconds (1s to
+    /// [`WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS`], half the live window). Each
+    /// snapshot is one row in `horsies_worker_states`, so shorter intervals
+    /// grow the table faster.
     #[serde(default = "default_worker_state_snapshot_interval")]
     pub worker_state_snapshot_interval_ms: u64,
 }
@@ -242,6 +277,33 @@ pub enum RecoveryConfigError {
         minimum: u64,
     },
 
+    /// With `auto_fail_stale_running` on, the worker stops when no runner
+    /// heartbeat lands for half of `running_stale_threshold_ms`; that half
+    /// must hold one beat interval plus the landing allowance.
+    #[error(
+        "running_stale_threshold_ms ({threshold}ms) too low for auto_fail_stale_running: \
+         the worker stops when no runner heartbeat lands for half of the threshold, and \
+         that half must hold one runner_heartbeat_interval_ms ({heartbeat}ms) plus \
+         {allowance}ms for a beat to land; set running_stale_threshold_ms >= {minimum}ms, \
+         or set auto_fail_stale_running=false",
+        allowance = RUNNER_BEAT_LANDING_ALLOWANCE_MS
+    )]
+    RunningThresholdBelowFailClosedFloor {
+        threshold: u64,
+        heartbeat: u64,
+        minimum: u64,
+    },
+
+    /// A snapshot interval above half the live window makes a live worker
+    /// read as not live between its snapshots.
+    #[error(
+        "worker_state_snapshot_interval_ms={value}ms is above the cap of {cap}ms: \
+         the cap is half the {window}s live window; a worker reads as live only \
+         while its latest snapshot is inside the live window",
+        window = WORKER_STATE_LIVE_WINDOW_S
+    )]
+    SnapshotIntervalAboveLiveWindowCap { value: u64, cap: u64 },
+
     #[error(
         "claimed_stale_threshold_ms ({threshold}ms) must be at least 2x claimer_heartbeat_interval_ms ({heartbeat}ms), minimum: {minimum}ms"
     )]
@@ -398,11 +460,10 @@ impl RecoveryConfig {
                 max: 120_000,
             });
         }
-        if self.worker_state_snapshot_interval_ms > 300_000 {
-            errors.push(RecoveryConfigError::AboveMaximum {
-                field: "worker_state_snapshot_interval_ms",
+        if self.worker_state_snapshot_interval_ms > WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS {
+            errors.push(RecoveryConfigError::SnapshotIntervalAboveLiveWindowCap {
                 value: self.worker_state_snapshot_interval_ms,
-                max: 300_000,
+                cap: WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
             });
         }
         if self.running_stale_threshold_ms > 7_200_000 {
@@ -427,14 +488,12 @@ impl RecoveryConfig {
             });
         }
 
-        // Relational: thresholds must be >= 2x heartbeat.
+        // Relational: thresholds must be >= 2x heartbeat; with
+        // auto_fail_stale_running on, the running threshold must also hold
+        // the fail-closed window (Python `_running_threshold_errors`).
         let min_running = self.runner_heartbeat_interval_ms * 2;
-        if self.running_stale_threshold_ms < min_running {
-            errors.push(RecoveryConfigError::RunningThresholdTooLow {
-                threshold: self.running_stale_threshold_ms,
-                heartbeat: self.runner_heartbeat_interval_ms,
-                minimum: min_running,
-            });
+        if let Some(error) = self.running_threshold_error() {
+            errors.push(error);
         }
 
         let min_claimed = self.claimer_heartbeat_interval_ms * 2;
@@ -456,6 +515,37 @@ impl RecoveryConfig {
 
         errors
     }
+
+    /// The refusal of `running_stale_threshold_ms`, or none.
+    ///
+    /// With `auto_fail_stale_running` on, the floor is
+    /// [`fail_closed_threshold_floor_ms`]: below it the worker stops while
+    /// every runner heartbeat lands. With it off, the floor is two beat
+    /// intervals.
+    fn running_threshold_error(&self) -> Option<RecoveryConfigError> {
+        let threshold = self.running_stale_threshold_ms;
+        let heartbeat = self.runner_heartbeat_interval_ms;
+        match self.auto_fail_stale_running {
+            true => {
+                let minimum = fail_closed_threshold_floor_ms(heartbeat);
+                (threshold < minimum).then_some(
+                    RecoveryConfigError::RunningThresholdBelowFailClosedFloor {
+                        threshold,
+                        heartbeat,
+                        minimum,
+                    },
+                )
+            }
+            false => {
+                let minimum = heartbeat.saturating_mul(2);
+                (threshold < minimum).then_some(RecoveryConfigError::RunningThresholdTooLow {
+                    threshold,
+                    heartbeat,
+                    minimum,
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +563,7 @@ mod tests {
         let config = RecoveryConfig {
             running_stale_threshold_ms: 10_000,
             runner_heartbeat_interval_ms: 30_000,
+            auto_fail_stale_running: false,
             ..Default::default()
         };
         let errors = config.validate();
@@ -480,6 +571,68 @@ mod tests {
         assert!(matches!(
             errors[0],
             RecoveryConfigError::RunningThresholdTooLow { .. }
+        ));
+    }
+
+    /// Python `test_runner_heartbeat.py::test_the_smallest_window_holds_one_interval_and_a_landing`
+    /// and the floor rule of `RecoveryConfig._running_threshold_errors`: with
+    /// `auto_fail_stale_running` on, the smallest threshold is
+    /// 2 x (interval + 2,000 ms); one millisecond less is refused.
+    #[test]
+    fn the_smallest_fail_closed_threshold_holds_one_interval_and_a_landing() {
+        let interval_ms = 1_000;
+        let floor_ms = fail_closed_threshold_floor_ms(interval_ms);
+        assert_eq!(
+            floor_ms,
+            2 * (interval_ms + RUNNER_BEAT_LANDING_ALLOWANCE_MS)
+        );
+        assert_eq!(
+            floor_ms / FAIL_CLOSED_WINDOW_DIVISOR,
+            interval_ms + RUNNER_BEAT_LANDING_ALLOWANCE_MS,
+        );
+
+        let at_floor = RecoveryConfig {
+            runner_heartbeat_interval_ms: interval_ms,
+            running_stale_threshold_ms: floor_ms,
+            ..Default::default()
+        };
+        assert!(at_floor.validate().is_empty(), "{:?}", at_floor.validate());
+
+        let below_floor = RecoveryConfig {
+            running_stale_threshold_ms: floor_ms - 1,
+            ..at_floor.clone()
+        };
+        let errors = below_floor.validate();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::RunningThresholdBelowFailClosedFloor {
+                threshold,
+                heartbeat: 1_000,
+                minimum,
+            } if threshold == floor_ms - 1 && minimum == floor_ms
+        ));
+    }
+
+    /// With `auto_fail_stale_running` off, the floor stays two beat intervals:
+    /// the fail-closed window does not exist.
+    #[test]
+    fn without_auto_fail_the_running_floor_is_two_intervals() {
+        let config = RecoveryConfig {
+            runner_heartbeat_interval_ms: 1_000,
+            running_stale_threshold_ms: 2_000,
+            auto_fail_stale_running: false,
+            ..Default::default()
+        };
+        assert!(config.validate().is_empty(), "{:?}", config.validate());
+
+        let on = RecoveryConfig {
+            auto_fail_stale_running: true,
+            ..config
+        };
+        assert!(matches!(
+            on.validate().as_slice(),
+            [RecoveryConfigError::RunningThresholdBelowFailClosedFloor { .. }]
         ));
     }
 
@@ -693,7 +846,7 @@ mod tests {
         assert!(at_min.validate().is_empty());
 
         let at_max = RecoveryConfig {
-            worker_state_snapshot_interval_ms: 300_000,
+            worker_state_snapshot_interval_ms: WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
             ..Default::default()
         };
         assert!(at_max.validate().is_empty());
@@ -713,17 +866,32 @@ mod tests {
         ));
 
         let above = RecoveryConfig {
-            worker_state_snapshot_interval_ms: 300_001,
+            worker_state_snapshot_interval_ms: WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS + 1,
             ..Default::default()
         };
         let errors = above.validate();
         assert_eq!(errors.len(), 1);
         assert!(matches!(
             errors[0],
-            RecoveryConfigError::AboveMaximum {
-                field: "worker_state_snapshot_interval_ms",
-                ..
-            }
+            RecoveryConfigError::SnapshotIntervalAboveLiveWindowCap {
+                value,
+                cap: WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
+            } if value == WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS + 1
+        ));
+    }
+
+    /// Python `test_app_config.py::TestWorkerStateSnapshotInterval::test_cap_is_60_seconds_half_the_120_second_live_window`.
+    #[test]
+    fn snapshot_interval_cap_is_60_seconds_half_the_120_second_live_window() {
+        assert_eq!(WORKER_STATE_LIVE_WINDOW_S, 120);
+        assert_eq!(WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS, 60_000);
+        let previous_cap = RecoveryConfig {
+            worker_state_snapshot_interval_ms: 300_000,
+            ..Default::default()
+        };
+        assert!(matches!(
+            previous_cap.validate().as_slice(),
+            [RecoveryConfigError::SnapshotIntervalAboveLiveWindowCap { .. }]
         ));
     }
 

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 /// JSON wire payloads approximates the stored size; the guardrail does not
 /// require byte exactness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PayloadPolicy {
     /// Warn when a serialized payload exceeds this many bytes (once per
     /// task_name and payload kind per process); `None` disables the warning.
@@ -149,6 +150,13 @@ mod tests {
         assert_eq!(p.reject_bytes, None);
         let from_empty: PayloadPolicy = serde_json::from_str("{}").expect("defaults");
         assert_eq!(from_empty, p);
+    }
+
+    #[test]
+    fn unknown_key_is_refused() {
+        let error = serde_json::from_str::<PayloadPolicy>(r#"{"warn_byte": 10}"#)
+            .expect_err("an unknown key must be refused");
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[test]

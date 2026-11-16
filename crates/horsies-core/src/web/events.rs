@@ -1,12 +1,12 @@
 //! PostgreSQL LISTEN to SSE invalidation events.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, MutexGuard, Weak};
 use std::time::Duration;
 
 use sqlx::postgres::PgListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +21,12 @@ pub const TOPIC_DEGRADED: &str = "degraded";
 pub const MAX_IDS_PER_EVENT: usize = 100;
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// The most items one web client can have queued. On overflow, the client's
+/// queued events are dropped and it gets one event with no ids for every
+/// topic ("refresh the whole topic"), so a slow client cannot grow the web
+/// process. Python keeps an unbounded queue (`horsies/web/events.py:211`).
+pub const SUBSCRIBER_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicEvent {
@@ -96,22 +102,110 @@ impl EventCoalescer {
     }
 }
 
-type Subscriber = mpsc::UnboundedSender<Option<TopicEvent>>;
+/// One item of a client stream: an event, or `None`, the degraded marker
+/// that ends the stream.
+type StreamItem = Option<TopicEvent>;
+
+/// One event with no ids for every topic: the client reads each whole topic
+/// again.
+pub(crate) fn refresh_events() -> Vec<TopicEvent> {
+    CHANNEL_TOPICS
+        .iter()
+        .map(|(_, topic)| TopicEvent {
+            topic: (*topic).to_owned(),
+            ids: Vec::new(),
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct QueueState {
+    items: VecDeque<StreamItem>,
+    closed: bool,
+}
+
+/// The bounded queue of one web client, written by the broadcaster and read
+/// by the client's stream. It holds at most [`SUBSCRIBER_QUEUE_CAPACITY`]
+/// items.
+#[derive(Debug, Default)]
+struct SubscriberQueue {
+    state: std::sync::Mutex<QueueState>,
+    ready: Notify,
+}
+
+impl SubscriberQueue {
+    /// Lock the state. A poisoned lock is recovered: a panic while holding
+    /// it cannot leave an item half-written.
+    fn lock(&self) -> MutexGuard<'_, QueueState> {
+        match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Queue one item. A full queue drops its items and takes one refresh
+    /// event per topic instead; a degraded marker is kept after them. A
+    /// closed queue takes nothing.
+    fn push(&self, item: StreamItem) {
+        {
+            let mut state = self.lock();
+            if state.closed {
+                return;
+            }
+            match state.items.len() < SUBSCRIBER_QUEUE_CAPACITY {
+                true => state.items.push_back(item),
+                false => {
+                    state.items.clear();
+                    state.items.extend(refresh_events().into_iter().map(Some));
+                    match item {
+                        Some(_covered_by_the_refresh) => {}
+                        None => state.items.push_back(None),
+                    }
+                }
+            }
+        }
+        self.ready.notify_one();
+    }
+
+    /// End the stream after the items already queued.
+    fn close(&self) {
+        self.lock().closed = true;
+        self.ready.notify_one();
+    }
+
+    /// The next item, or `None` once the queue is closed and empty.
+    async fn pop(&self) -> Option<StreamItem> {
+        loop {
+            {
+                let mut state = self.lock();
+                if let Some(item) = state.items.pop_front() {
+                    return Some(item);
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            // `notify_one` stores a permit when no task waits, so a push
+            // between the check above and this wait is not lost.
+            self.ready.notified().await;
+        }
+    }
+}
 
 pub struct EventSubscription {
-    receiver: mpsc::UnboundedReceiver<Option<TopicEvent>>,
+    queue: Arc<SubscriberQueue>,
 }
 
 impl EventSubscription {
     pub(crate) async fn recv(&mut self) -> Option<Option<TopicEvent>> {
-        self.receiver.recv().await
+        self.queue.pop().await
     }
 }
 
 pub struct EventBroadcaster {
     broker: Arc<PostgresBroker>,
     debounce: Duration,
-    subscribers: Mutex<Vec<Subscriber>>,
+    subscribers: Mutex<Vec<Weak<SubscriberQueue>>>,
     start_lock: Mutex<()>,
     task: Mutex<Option<JoinHandle<()>>>,
     cancel: CancellationToken,
@@ -148,14 +242,14 @@ impl EventBroadcaster {
     }
 
     pub async fn subscribe(self: &Arc<Self>) -> EventSubscription {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.subscribers.lock().await.push(sender);
+        let queue = Arc::new(SubscriberQueue::default());
+        self.subscribers.lock().await.push(Arc::downgrade(&queue));
         if self.degraded() {
             self.degrade().await;
         } else if !self.started.load(Ordering::Acquire) {
             self.start().await;
         }
-        EventSubscription { receiver }
+        EventSubscription { queue }
     }
 
     async fn start(self: &Arc<Self>) {
@@ -223,9 +317,24 @@ impl EventBroadcaster {
                         }
                     }
                 }
-                notification = listener.recv() => {
+                // `try_recv` reports a lost connection as `Ok(None)` after the
+                // driver connected and listened again: notifications sent in
+                // between are lost, so every client reads every topic again.
+                notification = listener.try_recv() => {
                     match notification {
-                        Ok(notification) => {
+                        Ok(None) => {
+                            tracing::warn!(
+                                "monitoring event listener reconnected; \
+                                 sending a refresh of every topic",
+                            );
+                            let Some(broadcaster) = broadcaster.upgrade() else {
+                                break;
+                            };
+                            for event in refresh_events() {
+                                broadcaster.publish(Some(event)).await;
+                            }
+                        }
+                        Ok(Some(notification)) => {
                             if let Some((_, topic)) = CHANNEL_TOPICS
                                 .iter()
                                 .find(|(channel, _)| *channel == notification.channel())
@@ -258,7 +367,13 @@ impl EventBroadcaster {
         self.subscribers
             .lock()
             .await
-            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+            .retain(|subscriber| match subscriber.upgrade() {
+                Some(queue) => {
+                    queue.push(event.clone());
+                    true
+                }
+                None => false,
+            });
     }
 
     async fn degrade(&self) {
@@ -275,7 +390,11 @@ impl EventBroadcaster {
             let _ = handle.await;
         }
         self.publish(None).await;
-        self.subscribers.lock().await.clear();
+        for subscriber in self.subscribers.lock().await.drain(..) {
+            if let Some(queue) = subscriber.upgrade() {
+                queue.close();
+            }
+        }
     }
 }
 
@@ -292,4 +411,120 @@ pub(crate) fn data_frame(event: &TopicEvent) -> String {
 
 pub(crate) fn degraded_frame() -> &'static str {
     "{\"topic\": \"degraded\"}"
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn event(topic: &str, id: &str) -> StreamItem {
+        Some(TopicEvent {
+            topic: topic.to_owned(),
+            ids: vec![id.to_owned()],
+        })
+    }
+
+    async fn drain(queue: &SubscriberQueue) -> Vec<StreamItem> {
+        queue.close();
+        let mut items = Vec::new();
+        while let Some(item) = queue.pop().await {
+            items.push(item);
+        }
+        items
+    }
+
+    #[tokio::test]
+    async fn items_below_the_bound_arrive_in_order() {
+        let queue = SubscriberQueue::default();
+        queue.push(event("tasks", "a"));
+        queue.push(event("workers", "w"));
+
+        assert_eq!(
+            drain(&queue).await,
+            vec![event("tasks", "a"), event("workers", "w")]
+        );
+    }
+
+    /// A full queue drops what it holds and asks the client to read every
+    /// topic again, so it never holds more than the bound.
+    #[tokio::test]
+    async fn an_overflow_replaces_the_queue_with_one_refresh_per_topic() {
+        let queue = SubscriberQueue::default();
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
+            queue.push(event("tasks", &index.to_string()));
+        }
+        assert_eq!(queue.lock().items.len(), SUBSCRIBER_QUEUE_CAPACITY);
+
+        queue.push(event("tasks", "overflow"));
+
+        let refreshed: Vec<StreamItem> = refresh_events().into_iter().map(Some).collect();
+        assert_eq!(refreshed.len(), CHANNEL_TOPICS.len());
+        assert!(refreshed
+            .iter()
+            .all(|item| item.as_ref().is_some_and(|event| event.ids.is_empty())));
+        assert_eq!(drain(&queue).await, refreshed);
+    }
+
+    #[tokio::test]
+    async fn an_overflow_keeps_the_degraded_marker_last() {
+        let queue = SubscriberQueue::default();
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
+            queue.push(event("tasks", &index.to_string()));
+        }
+
+        queue.push(None);
+
+        let items = drain(&queue).await;
+        assert_eq!(items.len(), CHANNEL_TOPICS.len() + 1);
+        assert_eq!(items.last(), Some(&None));
+    }
+
+    #[tokio::test]
+    async fn a_closed_queue_takes_nothing_and_ends() {
+        let queue = SubscriberQueue::default();
+        queue.close();
+        queue.push(event("tasks", "late"));
+
+        assert_eq!(queue.pop().await, None);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_reader_wakes_on_a_push() {
+        let queue = Arc::new(SubscriberQueue::default());
+        let reader = tokio::spawn({
+            let queue = Arc::clone(&queue);
+            async move { queue.pop().await }
+        });
+        tokio::task::yield_now().await;
+
+        queue.push(event("workflows", "wf"));
+
+        let item = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("the reader wakes")
+            .expect("the reader does not panic");
+        assert_eq!(item, Some(event("workflows", "wf")));
+    }
+
+    /// A dropped client stream is removed at the next publish.
+    #[tokio::test]
+    async fn publish_drops_a_client_whose_stream_ended() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(pool)));
+        let kept = Arc::new(SubscriberQueue::default());
+        let dropped = Arc::new(SubscriberQueue::default());
+        broadcaster
+            .subscribers
+            .lock()
+            .await
+            .extend([Arc::downgrade(&kept), Arc::downgrade(&dropped)]);
+        drop(dropped);
+
+        broadcaster.publish(event("tasks", "a")).await;
+
+        assert_eq!(broadcaster.subscribers.lock().await.len(), 1);
+        assert_eq!(kept.lock().items.len(), 1);
+    }
 }

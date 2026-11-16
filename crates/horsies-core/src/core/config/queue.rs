@@ -16,6 +16,7 @@ pub enum QueueMode {
 /// - `priority`: 1 = highest priority, 100 = lowest
 /// - `max_concurrency`: max concurrent tasks for this queue (app-level cap still applies)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomQueueConfig {
     pub name: String,
     /// Queue priority (1 = first executed, 100 = last).
@@ -44,6 +45,8 @@ const MAX_QUEUE_NAME_BYTES: usize = 52;
 pub enum CustomQueueConfigError {
     #[error("queue name must not be empty")]
     EmptyName,
+    #[error("invalid queue name {name:?}: the name has whitespace at the start or the end")]
+    EdgeWhitespace { name: String },
     #[error(
         "queue '{name}' name is {len} bytes; the NOTIFY channel 'task_queue_' + name \
          must fit Postgres's 63-byte limit, so the name must be at most {max} bytes"
@@ -62,6 +65,8 @@ impl CustomQueueConfig {
     ///
     /// Checks:
     /// - `name` is not empty
+    /// - `name` has no whitespace at the start or the end (Python
+    ///   `check_queue_name`: `name != name.strip()`)
     /// - `name` is at most 52 bytes (the NOTIFY channel-name limit)
     /// - `priority` is between 1 and 100 (matching Python `Field(ge=1, le=100)`)
     pub fn validate(&self) -> Vec<CustomQueueConfigError> {
@@ -69,6 +74,12 @@ impl CustomQueueConfig {
 
         if self.name.is_empty() {
             errors.push(CustomQueueConfigError::EmptyName);
+        }
+
+        if has_edge_whitespace(&self.name) {
+            errors.push(CustomQueueConfigError::EdgeWhitespace {
+                name: self.name.clone(),
+            });
         }
 
         if self.name.len() > MAX_QUEUE_NAME_BYTES {
@@ -88,6 +99,20 @@ impl CustomQueueConfig {
 
         errors
     }
+}
+
+/// True when the name starts or ends with a character that Python's
+/// `str.strip()` removes.
+fn has_edge_whitespace(name: &str) -> bool {
+    let first = name.chars().next();
+    let last = name.chars().next_back();
+    first.is_some_and(is_python_whitespace) || last.is_some_and(is_python_whitespace)
+}
+
+/// Python's `str.isspace()`: Unicode `White_Space`, plus the four
+/// information separators U+001C to U+001F, which Python also strips.
+fn is_python_whitespace(character: char) -> bool {
+    character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character)
 }
 
 fn default_priority() -> u32 {
@@ -231,5 +256,49 @@ mod tests {
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], CustomQueueConfigError::EmptyName));
+    }
+
+    /// Python `test_custom_queue_name.py::test_name_with_edge_whitespace_is_refused`.
+    #[test]
+    fn name_with_edge_whitespace_is_refused() {
+        for name in [
+            " fast",
+            "fast ",
+            "\tfast",
+            "fast\n",
+            "\u{1f}fast",
+            "fast\u{3000}",
+        ] {
+            let config = CustomQueueConfig {
+                name: name.to_owned(),
+                priority: 1,
+                max_concurrency: Some(5),
+            };
+            let errors = config.validate();
+            assert_eq!(errors.len(), 1, "{name:?}: {errors:?}");
+            assert!(
+                matches!(errors[0], CustomQueueConfigError::EdgeWhitespace { .. }),
+                "{name:?}: {errors:?}",
+            );
+            assert!(errors[0].to_string().contains("whitespace"));
+        }
+    }
+
+    /// Python `test_custom_queue_name.py::test_name_with_inner_space_is_accepted`.
+    #[test]
+    fn name_with_inner_space_is_accepted() {
+        let config = CustomQueueConfig {
+            name: "fast lane".to_owned(),
+            priority: 1,
+            max_concurrency: Some(5),
+        };
+        assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn unknown_key_is_refused() {
+        let error = serde_json::from_str::<CustomQueueConfig>(r#"{"name": "a", "prio": 2}"#)
+            .expect_err("an unknown key must be refused");
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

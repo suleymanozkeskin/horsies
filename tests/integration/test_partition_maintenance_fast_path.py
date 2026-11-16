@@ -56,7 +56,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 partition_schema = terminalization_schema_fixture(
     'task_history_it_maintenance_fast_path',
-    partitioned_heartbeats=True,
 )
 
 

@@ -457,6 +457,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         assert_eq!(meta_response.status(), StatusCode::OK);
         let meta = json(meta_response).await;
         assert_eq!(meta["schema_compatible"], compatible);
+        assert_eq!(meta["schema_state"], serde_json::to_value(state).unwrap());
         assert_eq!(meta["actions_enabled"], compatible);
         assert_eq!(
             meta["schema_version"],
@@ -984,7 +985,6 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
         serde_json::json!({
             "outcome": "cancelled",
             "was_status": "PENDING",
-            "next_attempt_number": null,
             "warning": null
         })
     );

@@ -77,7 +77,7 @@ HORIZON = heartbeat_horizon(
 )
 
 terminalization_schema = terminalization_schema_fixture(
-    'task_history_it_prune_driver', partitioned_heartbeats=True
+    'task_history_it_prune_driver'
 )
 
 

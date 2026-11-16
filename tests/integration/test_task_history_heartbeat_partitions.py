@@ -48,7 +48,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration]
 
-CLASS_KEY = 'it_hb'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-hb-1'
 HORIZON = heartbeat_horizon(
     stale_after=timedelta(minutes=10),
@@ -57,7 +57,7 @@ HORIZON = heartbeat_horizon(
 )
 
 terminalization_schema = terminalization_schema_fixture(
-    'task_history_it_heartbeats', partitioned_heartbeats=True
+    'task_history_it_heartbeats'
 )
 
 

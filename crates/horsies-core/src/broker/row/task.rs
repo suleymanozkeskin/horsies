@@ -18,7 +18,7 @@ pub struct ClaimedId {
 /// with the CLAIMED → RUNNING transition.
 ///
 /// `retry_count`, `max_retries`, and `good_until` are threaded through
-/// execution into finalize with NO re-read: `should_retry`, the retry-delay
+/// execution into finalize with NO re-read: `admit_retry`, the retry-delay
 /// math, and the expired-vs-reclaimed postcheck all consume them directly.
 /// That is sound under three invariants the schema and statements maintain:
 ///
@@ -49,14 +49,13 @@ pub struct SetRunningRow {
 
 /// Task columns returned by the claim (and the buffered-claimed reload).
 ///
-/// The column set matches `horsies_claim`'s v12 return shape exactly —
-/// shared with the Python implementation so both stacks can run one
-/// database. `claimed_at` is the claim generation this dispatch was born
-/// from: set by the claim, cleared by every requeue, and threaded through
-/// dispatch so every statement acting on a row this worker believes it owns
-/// while it is still CLAIMED (`set_running`, unclaim, expire-before-start)
-/// can fence on it. `started_at` cannot serve there — a CLAIMED row has
-/// none. `None` degrades gracefully by disabling the fence.
+/// `claimed_at` is the claim generation this dispatch was born from: set by
+/// the claim, cleared by every requeue, and threaded through dispatch so
+/// every statement acting on a row this worker believes it owns can fence on
+/// it. `started_at` cannot serve there — a CLAIMED row has none. Both reads
+/// that build this row select rows that the claim wrote, and the claim sets
+/// `claimed_at` on every row it takes, so the generation is required: a NULL
+/// fails the decode instead of turning the fence off.
 ///
 /// The attempt context (`retry_count`, `max_retries`, `good_until`) is NOT
 /// part of this row; the dispatch reads it from [`SetRunningRow`], returned
@@ -70,7 +69,7 @@ pub struct ClaimedTaskRow {
     pub queue_name: String,
     pub is_workflow_task: bool,
     pub task_options: Option<String>,
-    pub claimed_at: Option<DateTime<Utc>>,
+    pub claimed_at: DateTime<Utc>,
 }
 
 /// Columns fetched for result retrieval.
@@ -199,6 +198,8 @@ pub struct TaskAttemptRow {
 ///
 /// Represents a RUNNING task whose worker has not sent a heartbeat within
 /// the configured threshold, indicating the worker may have crashed.
+/// `started_at` is set: the query selects only rows that started before the
+/// threshold. `last_heartbeat` is `None` for a task with no runner beat.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct StaleTaskRow {
     pub id: Uuid,
@@ -206,7 +207,7 @@ pub struct StaleTaskRow {
     pub worker_hostname: Option<String>,
     pub worker_pid: Option<i32>,
     pub worker_process_name: Option<String>,
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: DateTime<Utc>,
     pub last_heartbeat: Option<DateTime<Utc>>,
 }
 
@@ -220,8 +221,12 @@ pub struct ExpiredTaskRow {
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
-    pub sent_at: Option<DateTime<Utc>>,
-    pub good_until: Option<DateTime<Utc>>,
+    pub sent_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    pub good_until: DateTime<Utc>,
+    /// How long ago `good_until` passed, in milliseconds, on the database
+    /// clock (Python's `expired_for`).
+    pub expired_for_ms: i64,
 }
 
 #[cfg(test)]
