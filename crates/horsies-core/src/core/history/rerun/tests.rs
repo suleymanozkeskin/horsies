@@ -1271,10 +1271,14 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_task_info_with_attempts(failed, false, false, true)
         .await
         .unwrap_err();
+    // Python's code: only a stored result that fails its check is
+    // INVALID_JSON_PAYLOAD; an attempt snapshot that does not decode is
+    // TASK_INFO_QUERY_FAILED, not retryable.
     assert_eq!(
         attempt_error.code,
-        crate::BrokerErrorCode::InvalidJsonPayload
+        crate::BrokerErrorCode::TaskInfoQueryFailed
     );
+    assert!(!attempt_error.retryable);
 
     cleanup(&pool, &[completed, failed, expired, cancelled], &[]).await;
 
