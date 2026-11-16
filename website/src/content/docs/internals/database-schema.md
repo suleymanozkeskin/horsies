@@ -15,6 +15,7 @@ The schema is one migration, version 1000: the SQL files in
 | `0001_tables.sql` | Tables, constraints, seed rows, `horsies_uuidv7()`, the notification triggers |
 | `0002_indexes.sql` | The indexes that no constraint creates |
 | `0003_interim_functions.sql` | The SQL functions the client calls, and their composite types |
+| `0005_workflow_functions.sql` | The workflow engine functions: start, phase 2, child completion, pause, resume, cancel, phase-2 recovery |
 | `0007_scheduler_monitoring_functions.sql` | The schedule fire and slot id functions, and the monitoring reads: task detail, list, facets, status counts and breakdown, stale and expired lists, workflow names, runs, run and node, schedules |
 
 The broker installs the schema at its first initialization (`ensure_schema_initialized`, or the first
@@ -114,7 +115,9 @@ sub-workflow (depth 0-32; a root has depth 0 and no parent).
 
 `horsies_workflow_tasks` holds one row per node: `input`, the dependencies and join (`all`, `any`, or `quorum`
 with `min_success`), status, the linked task id, the sub-workflow fields of a sub-workflow node, and the typed
-facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`).
+facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`). A sub-workflow node also
+stores `sub_workflow_params`: `GIVEN` when the node was given params for the child's `build_with`, `NOT_GIVEN`
+when it was given none; a task node stores NULL.
 
 ## Workflow progression outbox and quarantine
 
