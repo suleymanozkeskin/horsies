@@ -481,7 +481,7 @@ class TestOnErrorFail:
         task_id = wt_result.fetchone()[0]
 
         task_result = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT input FROM horsies_tasks WHERE id = :tid'),
             {'tid': task_id},
         )
         kwargs = loads_json(task_result.fetchone()[0]).unwrap()
@@ -1355,7 +1355,7 @@ class TestEnqueuedFailureConversion:
             text("""
                 UPDATE horsies_workflow_tasks
                 SET status = 'READY',
-                    task_kwargs = '{"input_result": 123}'
+                    input = '{"input_result": 123}'
                 WHERE workflow_id = :wf_id AND task_index = 1
             """),
             {'wf_id': handle.workflow_id},
@@ -1818,7 +1818,7 @@ class TestAllowFailedDeps:
         task_id = wt_result.fetchone()[0]
 
         task_result = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT input FROM horsies_tasks WHERE id = :tid'),
             {'tid': task_id},
         )
         kwargs = loads_json(task_result.fetchone()[0]).unwrap()
@@ -2022,7 +2022,7 @@ class TestAllowFailedDeps:
         task_id = wt_result.fetchone()[0]
 
         task_result = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT input FROM horsies_tasks WHERE id = :tid'),
             {'tid': task_id},
         )
         kwargs = loads_json(task_result.fetchone()[0]).unwrap()

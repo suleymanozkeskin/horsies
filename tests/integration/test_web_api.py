@@ -53,6 +53,7 @@ from tests.integration.monitoring_seeding import (
     insert_rows,
     task_row,
 )
+from tests.session_database import database_name_prefix
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -1090,7 +1091,7 @@ def web_args(**overrides: Any) -> Any:
 @pytest_asyncio.fixture
 async def fresh_database() -> AsyncGenerator[str, None]:
     """A brand-new database with no horsies schema in it."""
-    name = f'horsies_noddl_{uuid.uuid4().hex[:12]}'
+    name = f'{database_name_prefix()}noddl_{uuid.uuid4().hex[:12]}'
     admin = to_psycopg_url(DB_URL)
 
     connection = await psycopg.AsyncConnection.connect(admin, autocommit=True)
