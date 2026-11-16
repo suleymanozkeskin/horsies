@@ -8,7 +8,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::core::lifecycle::{AfterFailure, AttemptWriteRefusal};
+use crate::db::StatementFailure;
 
 const WORKER: &str = "attempt-writer";
 const QUEUE: &str = "attempt_writes";
@@ -83,7 +85,7 @@ fn failure(seeded: &Seeded, retry: RetryRequest) -> FinishFailedAttempt {
             claimed_at: seeded.claimed_at,
         },
         retry,
-        result_json: r#"{"__type":"err","value":{"error_code":"BOOM","message":"boom"}}"#
+        result_json: r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":"BOOM","data":null,"message":"boom"}}"#
             .to_owned(),
         error_code: Some("BOOM".to_owned()),
         failed_reason: None,
@@ -93,6 +95,23 @@ fn failure(seeded: &Seeded, retry: RetryRequest) -> FinishFailedAttempt {
             failed_reason: None,
         },
     }
+}
+
+/// The failed-attempt write (rule `REFUSE`) on a core pool on the test
+/// database.
+async fn write_failed_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<FailedAttemptOutcome, BrokerError> {
+    finish_failed_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The workflow-success write on a core pool on the test database.
+async fn write_workflow_success(
+    pool: &PgPool,
+    command: &FinishWorkflowSuccess,
+) -> Result<WorkflowSuccessOutcome, BrokerError> {
+    finish_workflow_success(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
 }
 
 fn retry_after(retry_count: i32, delay_seconds: f64) -> RetryRequest {
@@ -165,7 +184,7 @@ async fn a_retry_writes_pending_and_an_attempt_that_will_retry() {
     let seeded = seed_running(&pool, 1, 3, None, false).await;
     let before = database_clock(&pool).await;
 
-    let outcome = finish_failed_attempt(&pool, &failure(&seeded, retry_after(1, 30.0)))
+    let outcome = write_failed_attempt(&pool, &failure(&seeded, retry_after(1, 30.0)))
         .await
         .expect("finish");
 
@@ -223,7 +242,7 @@ async fn a_retry_at_or_after_good_until_is_the_terminal_failure() {
     let good_until = Utc::now() + Duration::seconds(10);
     let seeded = seed_running(&pool, 0, 3, Some(good_until), false).await;
 
-    let outcome = finish_failed_attempt(&pool, &failure(&seeded, retry_after(0, 60.0)))
+    let outcome = write_failed_attempt(&pool, &failure(&seeded, retry_after(0, 60.0)))
         .await
         .expect("finish");
 
@@ -250,7 +269,7 @@ async fn a_plain_failure_moves_the_row_with_its_attempt() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;
 
-    let outcome = finish_failed_attempt(&pool, &failure(&seeded, RetryRequest::NoRetry))
+    let outcome = write_failed_attempt(&pool, &failure(&seeded, RetryRequest::NoRetry))
         .await
         .expect("finish");
 
@@ -269,7 +288,7 @@ async fn a_plain_failure_moves_the_row_with_its_attempt() {
     );
 
     // A second call of the same command is a replay and writes nothing.
-    let replay = finish_failed_attempt(&pool, &failure(&seeded, RetryRequest::NoRetry))
+    let replay = write_failed_attempt(&pool, &failure(&seeded, RetryRequest::NoRetry))
         .await
         .expect("replay");
     assert!(matches!(
@@ -287,7 +306,7 @@ async fn a_changed_retry_count_is_part_of_the_fence() {
     let seeded = seed_running(&pool, 1, 3, None, false).await;
     let before = live_row(&pool, seeded.task_id).await;
 
-    let outcome = finish_failed_attempt(&pool, &failure(&seeded, retry_after(0, 1.0)))
+    let outcome = write_failed_attempt(&pool, &failure(&seeded, retry_after(0, 1.0)))
         .await
         .expect("finish");
 
@@ -311,7 +330,7 @@ async fn a_stale_claim_generation_writes_no_failure() {
         claimed_at: seeded.claimed_at - Duration::seconds(1),
     };
 
-    let outcome = finish_failed_attempt(&pool, &failure(&stale, RetryRequest::NoRetry))
+    let outcome = write_failed_attempt(&pool, &failure(&stale, RetryRequest::NoRetry))
         .await
         .expect("finish");
 
@@ -331,7 +350,7 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
     let seeded = seed_running(&pool, 0, 0, None, true).await;
     let before = live_row(&pool, seeded.task_id).await;
 
-    let outcome = finish_workflow_success(
+    let outcome = write_workflow_success(
         &pool,
         &FinishWorkflowSuccess {
             task_id: seeded.task_id,
@@ -339,7 +358,7 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
                 worker_id: WORKER.to_owned(),
                 claimed_at: seeded.claimed_at - Duration::seconds(1),
             },
-            result_json: r#"{"__type":"ok","value":1}"#.to_owned(),
+            result_json: r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
         },
     )
     .await
@@ -361,7 +380,7 @@ async fn a_plain_task_success_through_the_workflow_writer_is_refused() {
     let seeded = seed_running(&pool, 0, 0, None, false).await;
     let before = live_row(&pool, seeded.task_id).await;
 
-    let refused = finish_workflow_success(
+    let refused = write_workflow_success(
         &pool,
         &FinishWorkflowSuccess {
             task_id: seeded.task_id,
@@ -369,14 +388,14 @@ async fn a_plain_task_success_through_the_workflow_writer_is_refused() {
                 worker_id: WORKER.to_owned(),
                 claimed_at: seeded.claimed_at,
             },
-            result_json: r#"{"__type":"ok","value":1}"#.to_owned(),
+            result_json: r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
         },
     )
     .await;
 
     match refused {
-        Err(BrokerError::Database(sqlx::Error::Database(error))) => {
-            assert_eq!(error.code().as_deref(), Some("22023"));
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })) => {
+            assert_eq!(cause.server_error().code().code(), "22023");
         }
         other => panic!("expected invalid_parameter_value, got {other:?}"),
     }

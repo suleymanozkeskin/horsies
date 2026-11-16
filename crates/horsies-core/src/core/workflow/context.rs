@@ -8,8 +8,14 @@ use crate::core::task::result::TaskResult;
 use crate::core::workflow::node::NodeKey;
 use crate::core::workflow::summary::SubWorkflowSummary;
 
-/// Reserved kwarg key used to transport workflow context from the engine.
-pub const WORKFLOW_CTX_KWARG: &str = "__horsies_workflow_ctx__";
+/// Reserved kwarg key used to transport workflow context from the engine (Python `_ENGINE_KEY_WORKFLOW_CTX`,
+/// `core/workflows/engine.py:141`).
+pub const WORKFLOW_CTX_KWARG: &str = "__h_workflow_ctx__";
+
+/// Reserved kwarg key of the workflow metadata that Python's engine injects into every node
+/// (`_ENGINE_KEY_WORKFLOW_META`, `core/workflows/engine.py:142`). The worker removes it before the task
+/// input is decoded, as Python's child does (`core/worker/child_runner.py:1641-1642`).
+pub const WORKFLOW_META_KWARG: &str = "__h_workflow_meta__";
 
 /// Context passed to workflow tasks that need access to upstream results.
 ///
@@ -423,10 +429,9 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::new(
-                "CUSTOM_ERR".to_owned(),
-                "something broke".to_owned(),
-            )),
+            TaskResult::Err(
+                TaskError::new("CUSTOM_ERR".to_owned(), "something broke".to_owned()).unwrap(),
+            ),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         assert!(ctx.has_result("failed:0"));
@@ -437,7 +442,7 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned())),
+            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned()).unwrap()),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         let key: NodeKey<String> = NodeKey::new("failed:0".to_owned());
@@ -454,7 +459,7 @@ mod tests {
             "task_index": 3,
             "task_name": "parse",
             "results_by_id": {
-                "fetch:0": {"__type": "ok", "value": 99}
+                "fetch:0": {"__h_task_result__": true, "ok": 99, "err": null}
             }
         }"#;
         let ctx: WorkflowContext = serde_json::from_str(json).unwrap();

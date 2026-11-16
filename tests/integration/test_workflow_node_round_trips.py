@@ -196,9 +196,11 @@ async def _run_node_a(
         await session.execute(
             text("""
                 UPDATE horsies_tasks t
-                SET status = 'RUNNING', claimed = FALSE,
+                SET status = 'RUNNING',
                     claimed_by_worker_id = :worker, claimed_at = :claimed_at,
-                    started_at = NOW()
+                    claim_expires_at = NULL, started_at = NOW(),
+                    worker_pid = 4242, worker_hostname = 'host-1',
+                    worker_process_name = 'child-1'
                 FROM horsies_workflow_tasks wt
                 WHERE wt.workflow_id = :wf AND wt.task_index = 0
                   AND t.id = wt.task_id

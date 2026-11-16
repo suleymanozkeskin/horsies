@@ -5,26 +5,34 @@
 //!   connection outside the shared pool, so a busy pool cannot starve it.
 //! - A beat lands only on a row that is RUNNING, owned by this worker, at the
 //!   claim generation of the dispatch, and without the finalizing marker.
-//! - With `auto_fail_stale_running` on, a watchdog on its own OS thread ends
-//!   the process with [`RUNNER_HEARTBEAT_LOST_EXIT_CODE`] when no beat lands
-//!   for half of `running_stale_threshold_ms`, so no task runs without a beat
-//!   when the reaper fails its row. The watchdog does not depend on the async
-//!   runtime: a runtime blocked by task code cannot keep it from acting.
+//! - With `auto_fail_stale_running` on, a watchdog on its own OS thread fails
+//!   closed when no beat lands for half of `running_stale_threshold_ms`, so
+//!   no task runs without a beat when the reaper fails its row. It closes the
+//!   registry, kills every child that holds a task, and asks the worker to
+//!   stop; the process exits with [`RUNNER_HEARTBEAT_LOST_EXIT_CODE`] when
+//!   the worker has not stopped within [`FAIL_CLOSED_EXIT_GRACE`], or at once
+//!   when task code runs in the worker process itself. The watchdog does not
+//!   depend on the async runtime: a runtime blocked by task code cannot keep
+//!   it from acting.
 //! - With it off, no reaper fails a RUNNING row: late beats are logged and
 //!   the worker runs on.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::core::config::recovery::{RecoveryConfig, FAIL_CLOSED_WINDOW_DIVISOR};
+use crate::worker::executor::protocol::ProcessId;
+use crate::worker::executor::supervisor::{ChildId, KillOutcome, SpawnerHandle, WorkerKillMark};
 
 /// Exit code of the worker process when it failed closed because its runner
 /// heartbeats stopped. No other horsies process uses it. The core parent
@@ -33,6 +41,18 @@ pub const RUNNER_HEARTBEAT_LOST_EXIT_CODE: i32 = 77;
 
 /// How often the watchdog reads the time since the last beat.
 const WATCH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// After it failed closed and asked the worker to stop, the watchdog waits
+/// this long for the stop, then ends the process (Python
+/// `FAIL_CLOSED_EXIT_GRACE_S`).
+pub const FAIL_CLOSED_EXIT_GRACE: Duration = Duration::from_secs(120);
+
+/// The longest wait for the spawner's answers to the kills of a fail-closed
+/// stop. The kills are queued at once; the answers only feed the log.
+const FAIL_CLOSED_KILL_ANSWER_WAIT: Duration = Duration::from_secs(5);
+
+/// How often the watchdog looks for those answers.
+const KILL_ANSWER_POLL: Duration = Duration::from_millis(10);
 
 /// The fail-closed window ends at least this long before the reaper may count
 /// the last beat as stale: two watch intervals. It is below the smallest beat
@@ -68,54 +88,195 @@ WHERE t.status = 'RUNNING'
   AND t.claimed_at = d.claimed_at
   AND t.finalizing_at IS NULL";
 
-/// The dispatches this worker holds: task id and claim generation.
+/// A child that holds a dispatch: what the fail-closed watchdog needs to
+/// mark and kill it.
+#[derive(Clone)]
+pub struct HeldChild {
+    pub id: ChildId,
+    pub pid: ProcessId,
+    pub spawner: SpawnerHandle,
+    pub kill_mark: WorkerKillMark,
+}
+
+/// The process that runs a held dispatch.
+#[derive(Clone)]
+pub enum DispatchRunner {
+    /// A child process of the executor. A fail-closed stop kills its session.
+    Child(HeldChild),
+    /// The worker process itself: the in-process runner of the worker loop.
+    /// Only the end of the process stops its task code.
+    WorkerProcess,
+}
+
+/// One dispatch the registry holds.
+#[derive(Clone)]
+struct LiveDispatch {
+    task_id: Uuid,
+    /// The claim generation; the beat fences on it.
+    claimed_at: DateTime<Utc>,
+    runner: DispatchRunner,
+}
+
+/// Whether the registry takes new dispatches (Python executor design,
+/// section 8.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryState {
+    Open,
+    /// The worker failed closed: no beat would cover a new dispatch.
+    Closed,
+}
+
+struct Registry {
+    state: RegistryState,
+    /// By ticket. A ticket is never reused, so the guard of an ended
+    /// dispatch cannot remove a later dispatch of the same task.
+    held: BTreeMap<u64, LiveDispatch>,
+    next_ticket: u64,
+}
+
+/// The runner heartbeats failed closed: no beat covers a new dispatch. The
+/// caller does not start the task; a child that would run it is killed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the runner heartbeats failed closed; no beat would cover a new task")]
+pub struct RegistryClosed;
+
+/// The dispatches this worker holds: task id, claim generation and the
+/// process that runs each (Python `core/worker/live_dispatches.py`).
 ///
-/// A dispatch is held from its start until its outcome is written; the
-/// [`HeldDispatch`] guard removes it when dropped.
-#[derive(Clone, Default)]
+/// A dispatch is held from its send until its end is read, a kill is sent
+/// to its child, or its child's exit is seen; the [`HeldDispatch`] guard
+/// removes it when dropped. One lock guards every read and write; no caller
+/// holds it across I/O.
+#[derive(Clone)]
 pub struct LiveDispatches {
-    held: Arc<Mutex<HashMap<Uuid, DateTime<Utc>>>>,
+    registry: Arc<Mutex<Registry>>,
+}
+
+impl Default for LiveDispatches {
+    fn default() -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(Registry {
+                state: RegistryState::Open,
+                held: BTreeMap::new(),
+                next_ticket: 1,
+            })),
+        }
+    }
 }
 
 /// One held dispatch. Dropping it ends the runner beats of the task.
 pub struct HeldDispatch {
     live: LiveDispatches,
-    task_id: Uuid,
+    ticket: u64,
 }
 
 impl LiveDispatches {
-    /// Start beating `task_id` at the claim generation `claimed_at`.
-    pub fn hold(&self, task_id: Uuid, claimed_at: DateTime<Utc>) -> HeldDispatch {
-        // A poisoned lock means a panic while the map was held; the map
-        // itself is still a valid set of ids, so it is used as it is.
-        self.held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(task_id, claimed_at);
-        HeldDispatch {
-            live: self.clone(),
-            task_id,
+    fn lock(&self) -> MutexGuard<'_, Registry> {
+        // A poisoned lock means a panic while the registry was held; its
+        // map and state are still valid values, so they are used as they are.
+        self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Start beating `task_id` at the claim generation `claimed_at`, run by
+    /// `runner`.
+    ///
+    /// `Err(RegistryClosed)` after the watchdog failed closed: the caller
+    /// must not start the task, because no beat would cover it.
+    pub fn hold(
+        &self,
+        task_id: Uuid,
+        claimed_at: DateTime<Utc>,
+        runner: DispatchRunner,
+    ) -> Result<HeldDispatch, RegistryClosed> {
+        let mut registry = self.lock();
+        match registry.state {
+            RegistryState::Closed => return Err(RegistryClosed),
+            RegistryState::Open => {}
         }
+        let ticket = registry.next_ticket;
+        registry.next_ticket += 1;
+        registry.held.insert(
+            ticket,
+            LiveDispatch {
+                task_id,
+                claimed_at,
+                runner,
+            },
+        );
+        Ok(HeldDispatch {
+            live: self.clone(),
+            ticket,
+        })
     }
 
     /// The held task ids and their claim generations, in matching order.
+    /// Empty after [`LiveDispatches::close`].
     fn snapshot(&self) -> (Vec<Uuid>, Vec<DateTime<Utc>>) {
-        self.held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .map(|(task_id, claimed_at)| (*task_id, *claimed_at))
+        self.lock()
+            .held
+            .values()
+            .map(|dispatch| (dispatch.task_id, dispatch.claimed_at))
             .unzip()
+    }
+
+    /// Refuse every later hold, and return and remove what is held, in
+    /// ticket order. A second call returns nothing.
+    fn close(&self) -> Vec<LiveDispatch> {
+        let mut registry = self.lock();
+        registry.state = RegistryState::Closed;
+        std::mem::take(&mut registry.held).into_values().collect()
     }
 }
 
 impl Drop for HeldDispatch {
     fn drop(&mut self) {
-        self.live
-            .held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.task_id);
+        let _released = self.live.lock().held.remove(&self.ticket);
+    }
+}
+
+/// How the watchdog asks the worker to stop after it failed closed, and
+/// how the worker reads why.
+#[derive(Clone)]
+pub struct FailClosedStop {
+    /// Cancelled to ask the worker to stop.
+    worker_stop: CancellationToken,
+    cause: Arc<OnceLock<String>>,
+}
+
+/// Whether the runner heartbeats failed closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailClosedState {
+    Watching,
+    /// The watchdog failed closed for this cause and asked for the stop.
+    FailedClosed {
+        cause: String,
+    },
+}
+
+impl FailClosedStop {
+    /// A stop that cancels `worker_stop`, the worker's own stop token.
+    pub fn new(worker_stop: CancellationToken) -> Self {
+        Self {
+            worker_stop,
+            cause: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn request(&self, cause: String) {
+        // Only the watchdog sets the cause, once; a second set is ignored.
+        let _first = self.cause.set(cause);
+        self.worker_stop.cancel();
+    }
+
+    /// Whether the watchdog failed closed, and why. The worker reads it
+    /// after its stop, to end with an error.
+    pub fn state(&self) -> FailClosedState {
+        match self.cause.get() {
+            Some(cause) => FailClosedState::FailedClosed {
+                cause: cause.clone(),
+            },
+            None => FailClosedState::Watching,
+        }
     }
 }
 
@@ -272,10 +433,21 @@ pub struct RunnerBeatWatch {
     watch: std::thread::JoinHandle<()>,
 }
 
+/// What the watchdog acts on: the registry it closes and the stop it asks
+/// for.
+struct WatchContext {
+    stale_running: StaleRunningRecovery,
+    interval: Duration,
+    coverage: SharedCoverage,
+    live: LiveDispatches,
+    fail_closed_stop: FailClosedStop,
+}
+
 /// Start the beat writer on the current runtime and its watchdog on its own
 /// thread. Returns the watchdog and the writer task, which the worker
 /// supervises with its other service loops. The writer stops when `cancel`
-/// fires; the watchdog when [`RunnerBeatWatch::stop`] runs.
+/// fires; the watchdog when [`RunnerBeatWatch::stop`] runs. A watchdog that
+/// fails closed asks for the stop through `fail_closed_stop`.
 ///
 /// Errors: the OS refused to start the watchdog thread; the writer is not
 /// started then.
@@ -286,13 +458,20 @@ pub fn launch_runner_beats(
     stale_running: StaleRunningRecovery,
     live: LiveDispatches,
     cancel: CancellationToken,
+    fail_closed_stop: FailClosedStop,
 ) -> std::io::Result<(RunnerBeatWatch, JoinHandle<()>)> {
     let coverage = SharedCoverage::new(Instant::now());
     let (stop_watch, stop_received) = std::sync::mpsc::channel::<()>();
-    let watch_coverage = coverage.clone();
+    let context = WatchContext {
+        stale_running,
+        interval,
+        coverage: coverage.clone(),
+        live: live.clone(),
+        fail_closed_stop,
+    };
     let watch = std::thread::Builder::new()
         .name(WATCH_THREAD_NAME.to_owned())
-        .spawn(move || run_watch(stale_running, interval, &watch_coverage, &stop_received))?;
+        .spawn(move || run_watch(&context, &stop_received))?;
     let writer = tokio::spawn(run_beats(
         pool,
         sender,
@@ -488,34 +667,177 @@ fn watch_until_end(window: Duration, coverage: &SharedCoverage, stop: &Receiver<
 }
 
 /// The watchdog thread body.
-fn run_watch(
-    stale_running: StaleRunningRecovery,
-    interval: Duration,
-    coverage: &SharedCoverage,
-    stop: &Receiver<()>,
-) {
-    match stale_running {
+fn run_watch(context: &WatchContext, stop: &Receiver<()>) {
+    match context.stale_running {
         StaleRunningRecovery::On { threshold } => {
             let window = fail_closed_window(threshold);
-            match watch_until_end(window, coverage, stop) {
+            match watch_until_end(window, &context.coverage, stop) {
                 WatchEnd::Stopped => {}
-                WatchEnd::FailClosed(verdict) => fail_closed(&verdict),
+                WatchEnd::FailClosed(verdict) => fail_closed(context, &verdict, stop),
             }
         }
-        StaleRunningRecovery::Off => watch_and_log(interval * LATE_BEAT_INTERVALS, coverage, stop),
+        StaleRunningRecovery::Off => watch_and_log(
+            context.interval * LATE_BEAT_INTERVALS,
+            &context.coverage,
+            stop,
+        ),
     }
 }
 
-/// End the process: no runner beat landed within the fail-closed window, so
-/// the reaper may fail rows whose attempts still run here. Task code runs in
-/// this process, so ending the process ends every attempt it holds.
-fn fail_closed(verdict: &WatchVerdict) {
+/// Whether the closed registry held a dispatch that runs in the worker
+/// process itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskCodeInWorker {
+    Held,
+    NoneHeld,
+}
+
+/// No runner beat landed within the fail-closed window, so the reaper may
+/// fail rows whose attempts still run here (Python `_fail_closed`). Close
+/// the registry and kill every child that held a task. Task code of the
+/// worker process itself ends only with the process: exit at once. Else ask
+/// the worker to stop, and exit when it has not stopped within
+/// [`FAIL_CLOSED_EXIT_GRACE`]. A panic here also ends the process.
+fn fail_closed(context: &WatchContext, verdict: &WatchVerdict, stop: &Receiver<()>) {
+    let cause = describe(verdict);
     tracing::error!(
-        exit_code = RUNNER_HEARTBEAT_LOST_EXIT_CODE,
-        cause = %describe(verdict),
-        "worker failed closed: runner heartbeats stopped; ending the process",
+        cause = %cause,
+        "worker failed closed: runner heartbeats stopped; every child that holds a task \
+         is killed now, so the reaper cannot fail a task that still runs",
     );
-    std::process::exit(RUNNER_HEARTBEAT_LOST_EXIT_CODE);
+    let stopped = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        match kill_held_children(&context.live) {
+            TaskCodeInWorker::Held => {
+                tracing::error!(
+                    exit_code = RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+                    "task code runs in the worker process; ending the process",
+                );
+                return WorkerStop::NotStopped;
+            }
+            TaskCodeInWorker::NoneHeld => {}
+        }
+        context.fail_closed_stop.request(cause);
+        match stop.recv_timeout(FAIL_CLOSED_EXIT_GRACE) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => WorkerStop::Stopped,
+            Err(RecvTimeoutError::Timeout) => {
+                tracing::error!(
+                    exit_code = RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+                    grace_s = FAIL_CLOSED_EXIT_GRACE.as_secs(),
+                    "the worker did not stop within the grace; ending the process",
+                );
+                WorkerStop::NotStopped
+            }
+        }
+    }));
+    match stopped {
+        Ok(WorkerStop::Stopped) => {}
+        Ok(WorkerStop::NotStopped) => std::process::exit(RUNNER_HEARTBEAT_LOST_EXIT_CODE),
+        Err(_) => {
+            tracing::error!(
+                exit_code = RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+                "failing closed panicked; ending the process",
+            );
+            std::process::exit(RUNNER_HEARTBEAT_LOST_EXIT_CODE);
+        }
+    }
+}
+
+/// Whether the worker stopped within the grace after a fail-closed request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStop {
+    Stopped,
+    NotStopped,
+}
+
+/// The children of a closed registry, each once, with the tasks it held.
+struct ChildToKill {
+    child: HeldChild,
+    task_ids: Vec<Uuid>,
+}
+
+/// Close the registry, mark each child that held a task as killed by the
+/// worker, and queue `SIGKILL` to its session through the spawner thread.
+/// The answers are read for the log, at most
+/// [`FAIL_CLOSED_KILL_ANSWER_WAIT`] in all.
+fn kill_held_children(live: &LiveDispatches) -> TaskCodeInWorker {
+    let mut in_worker = TaskCodeInWorker::NoneHeld;
+    let mut children: BTreeMap<ChildId, ChildToKill> = BTreeMap::new();
+    for dispatch in live.close() {
+        match dispatch.runner {
+            DispatchRunner::WorkerProcess => in_worker = TaskCodeInWorker::Held,
+            DispatchRunner::Child(child) => children
+                .entry(child.id)
+                .or_insert_with(|| ChildToKill {
+                    child,
+                    task_ids: Vec::new(),
+                })
+                .task_ids
+                .push(dispatch.task_id),
+        }
+    }
+    let mut pending: Vec<(ChildToKill, oneshot::Receiver<KillOutcome>)> = Vec::new();
+    for (_, to_kill) in children {
+        to_kill.child.kill_mark.mark();
+        match to_kill.child.spawner.request_kill(to_kill.child.id) {
+            Ok(answer) => pending.push((to_kill, answer)),
+            Err(refused) => log_kill(&to_kill, refused),
+        }
+    }
+    read_kill_answers(pending);
+    in_worker
+}
+
+/// Read the spawner's answers until each came or the wait passed.
+fn read_kill_answers(mut pending: Vec<(ChildToKill, oneshot::Receiver<KillOutcome>)>) {
+    let until = Instant::now() + FAIL_CLOSED_KILL_ANSWER_WAIT;
+    loop {
+        let mut waiting = Vec::with_capacity(pending.len());
+        for (to_kill, mut answer) in pending {
+            match answer.try_recv() {
+                Ok(outcome) => log_kill(&to_kill, outcome),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    log_kill(&to_kill, KillOutcome::SpawnerStopped)
+                }
+                Err(oneshot::error::TryRecvError::Empty) => waiting.push((to_kill, answer)),
+            }
+        }
+        pending = waiting;
+        if pending.is_empty() {
+            return;
+        }
+        if Instant::now() >= until {
+            for (to_kill, _) in &pending {
+                tracing::error!(
+                    pid = to_kill.child.pid.get(),
+                    tasks = ?to_kill.task_ids,
+                    "the spawner did not answer the kill of a child that held tasks in time",
+                );
+            }
+            return;
+        }
+        std::thread::sleep(KILL_ANSWER_POLL);
+    }
+}
+
+fn log_kill(to_kill: &ChildToKill, outcome: KillOutcome) {
+    let pid = to_kill.child.pid.get();
+    match outcome {
+        KillOutcome::Sent => tracing::error!(
+            pid,
+            tasks = ?to_kill.task_ids,
+            "killed a child that held tasks",
+        ),
+        KillOutcome::AlreadyReaped => {}
+        KillOutcome::NotPermitted
+        | KillOutcome::Failed { .. }
+        | KillOutcome::QueueFull
+        | KillOutcome::SpawnerStopped => tracing::error!(
+            pid,
+            tasks = ?to_kill.task_ids,
+            outcome = ?outcome,
+            "cannot kill a child that held tasks",
+        ),
+    }
 }
 
 fn describe(verdict: &WatchVerdict) -> String {
@@ -574,10 +896,143 @@ mod tests {
         let live = LiveDispatches::default();
         let task_id = Uuid::new_v4();
         let claimed_at = Utc::now();
-        let held = live.hold(task_id, claimed_at);
+        let held = live
+            .hold(task_id, claimed_at, DispatchRunner::WorkerProcess)
+            .unwrap();
         assert_eq!(live.snapshot(), (vec![task_id], vec![claimed_at]));
         drop(held);
         assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
+    }
+
+    /// Tickets: the guard of an ended dispatch does not end the beats of a
+    /// later dispatch of the same task.
+    #[test]
+    fn an_old_guard_does_not_release_a_later_hold_of_the_same_task() {
+        let live = LiveDispatches::default();
+        let task_id = Uuid::new_v4();
+        let first = Utc::now();
+        let second = first + chrono::Duration::seconds(1);
+        let old = live
+            .hold(task_id, first, DispatchRunner::WorkerProcess)
+            .unwrap();
+        let new = live
+            .hold(task_id, second, DispatchRunner::WorkerProcess)
+            .unwrap();
+        drop(old);
+        assert_eq!(live.snapshot(), (vec![task_id], vec![second]));
+        drop(new);
+        assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
+    }
+
+    /// Python `test_live_dispatches.py`: `close` refuses later holds and
+    /// returns what is held, in ticket order; a second close returns
+    /// nothing, and a guard dropped after the close changes nothing.
+    #[test]
+    fn a_closed_registry_refuses_holds_and_gives_up_what_it_held() {
+        let live = LiveDispatches::default();
+        let ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let claimed_at = Utc::now();
+        let guards: Vec<HeldDispatch> = ids
+            .iter()
+            .map(|id| {
+                live.hold(*id, claimed_at, DispatchRunner::WorkerProcess)
+                    .unwrap()
+            })
+            .collect();
+        let closed: Vec<Uuid> = live.close().iter().map(|held| held.task_id).collect();
+        assert_eq!(closed, ids.to_vec());
+        assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
+        assert!(matches!(
+            live.hold(Uuid::new_v4(), claimed_at, DispatchRunner::WorkerProcess),
+            Err(RegistryClosed)
+        ));
+        drop(guards);
+        assert!(live.close().is_empty());
+    }
+
+    /// Task code that runs in the worker process ends only with the
+    /// process: the fail-closed stop exits at once.
+    #[test]
+    fn a_worker_process_dispatch_makes_the_fail_closed_stop_exit_at_once() {
+        let live = LiveDispatches::default();
+        assert_eq!(kill_held_children(&live), TaskCodeInWorker::NoneHeld);
+        let live = LiveDispatches::default();
+        let _held = live
+            .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::WorkerProcess)
+            .unwrap();
+        assert_eq!(kill_held_children(&live), TaskCodeInWorker::Held);
+    }
+
+    /// Python `test_runner_heartbeat.py`, the kill of held children: the
+    /// watchdog marks each held child as killed by the worker and kills its
+    /// session through the spawner thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_fail_closed_stop_marks_and_kills_each_held_child() {
+        use crate::worker::executor::supervisor::{
+            wait_for_exit, ChildCommand, ChildExit, ExitState, ReapedExit, Spawner,
+        };
+        let spawner = Spawner::start().unwrap();
+        let mut spawned = spawner
+            .handle()
+            .spawn(ChildCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "exec sleep 60".into()],
+            })
+            .await
+            .unwrap();
+        let kill_mark = WorkerKillMark::default();
+        let child = HeldChild {
+            id: spawned.id,
+            pid: spawned.pid,
+            spawner: spawner.handle(),
+            kill_mark: kill_mark.clone(),
+        };
+        let live = LiveDispatches::default();
+        let claimed_at = Utc::now();
+        let _first = live
+            .hold(
+                Uuid::new_v4(),
+                claimed_at,
+                DispatchRunner::Child(child.clone()),
+            )
+            .unwrap();
+        let _second = live
+            .hold(Uuid::new_v4(), claimed_at, DispatchRunner::Child(child))
+            .unwrap();
+        let closing = live.clone();
+        let in_worker = tokio::task::spawn_blocking(move || kill_held_children(&closing))
+            .await
+            .unwrap();
+        assert_eq!(in_worker, TaskCodeInWorker::NoneHeld);
+        assert_eq!(
+            wait_for_exit(&mut spawned.exit, Duration::from_secs(10)).await,
+            ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGKILL))
+        );
+        assert_ne!(*spawned.exit.borrow(), ExitState::Running);
+        assert!(matches!(
+            live.hold(Uuid::new_v4(), claimed_at, DispatchRunner::WorkerProcess),
+            Err(RegistryClosed)
+        ));
+        assert_eq!(
+            kill_mark.read(),
+            crate::worker::executor::supervisor::channel::KillMark::KilledByParent
+        );
+        let _ = spawner.stop(Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_fail_closed_stop_cancels_the_worker_and_keeps_its_cause() {
+        let worker_stop = CancellationToken::new();
+        let stop = FailClosedStop::new(worker_stop.clone());
+        assert_eq!(stop.state(), FailClosedState::Watching);
+        stop.request("no runner heartbeat landed".to_owned());
+        assert!(worker_stop.is_cancelled());
+        assert_eq!(
+            stop.state(),
+            FailClosedState::FailedClosed {
+                cause: "no runner heartbeat landed".to_owned()
+            }
+        );
     }
 
     /// Python `test_runner_heartbeat.py`: the fail-closed window is half the
