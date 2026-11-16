@@ -1778,7 +1778,7 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
     .execute(&pool)
     .await
     .unwrap();
-    let failed = crate::broker::terminalization::terminalize(
+    let failed = crate::broker::terminalization::on_test_pool::terminalize(
         &pool,
         &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
             task_id,

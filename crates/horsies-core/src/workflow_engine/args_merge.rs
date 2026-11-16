@@ -118,19 +118,15 @@ impl ArgsFromConflict {
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
-        TaskError {
-            data: Some(serde_json::json!({
-                "workflow_id": workflow_id.to_string(),
-                "task_index": task_index,
-            })),
-            ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
-                format!(
-                    "args_from key '{}' conflicts with static kwarg ({node})",
-                    self.key
-                ),
-            )
-        }
+        crate::workflow_engine::engine::node_not_prepared_error(
+            workflow_id,
+            task_index,
+            OperationalErrorCode::WorkflowEnqueueFailed,
+            format!(
+                "args_from key '{}' conflicts with static kwarg ({node})",
+                self.key
+            ),
+        )
     }
 }
 

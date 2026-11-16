@@ -13,7 +13,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 
 use super::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;

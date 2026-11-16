@@ -546,7 +546,7 @@ fn count_raise(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::config::retention::RetentionConfig;
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};

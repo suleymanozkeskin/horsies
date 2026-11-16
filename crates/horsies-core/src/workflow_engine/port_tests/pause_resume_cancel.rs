@@ -18,7 +18,7 @@ use super::support::{
     workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink, WorkflowDoneListener,
     WorkflowSeed, PORT_QUEUE, WORKER,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::outcomes::{GuardEvidence, ObservedWorkflowState};

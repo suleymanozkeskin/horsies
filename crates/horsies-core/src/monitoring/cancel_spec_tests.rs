@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::spec_support::{
     seed_live, seed_terminal, set_history_status, Ending, LiveTask, SpecDatabase,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::{ClaimPassParams, PostgresBroker};
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
 use crate::monitoring::{cancel_task, TaskActionErrorCode};

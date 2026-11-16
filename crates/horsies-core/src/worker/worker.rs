@@ -2755,7 +2755,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        use crate::broker::terminalization::terminalize;
+        use crate::broker::terminalization::on_test_pool::terminalize;
         use crate::core::lifecycle::{
             PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
         };
