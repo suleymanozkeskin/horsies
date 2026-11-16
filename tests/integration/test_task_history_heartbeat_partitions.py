@@ -15,8 +15,10 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies.core.history.heartbeats import partitioning
 from horsies.core.history.heartbeats.partitioning import (
     EnsureHeartbeatCoverage,
     HeartbeatClassRegistered,
@@ -30,11 +32,16 @@ from horsies.core.history.heartbeats.partitioning import (
     register_heartbeat_class,
     sweep_expired_heartbeat_leaves,
 )
+from horsies.core.history.commands import DetachExpiredHistoryLeaf
 from horsies.core.history.outcomes import (
     LeafCreated,
     LeafDetached,
     LeafDropped,
+    LeafInspection,
+    LeafMaintenanceBusy,
+    LeafSweep,
 )
+from horsies.core.history.partitions.publication import LoaderPublication
 from horsies.core.history.partitions.catalog import database_now
 from horsies.core.history.partitions.publication import UnpublishedLoader
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
@@ -331,16 +338,17 @@ class TestSweep:
             )
             assert isinstance(current, LeafCreated)
 
-        swept = await sweep_expired_heartbeat_leaves(
+        sweep = await sweep_expired_heartbeat_leaves(
             PartitionMaintenanceDatabase(
                 terminalization_schema.engine, connection_capacity=2
             ),
             UnpublishedLoader(),
         )
-        assert len(swept) == 1
-        assert swept[0].leaf_name == expired.leaf_name
-        assert isinstance(swept[0].detach, LeafDetached)
-        assert swept[0].drop == LeafDropped(leaf_name=expired.leaf_name)
+        assert sweep.errors == ()
+        assert len(sweep.swept) == 1
+        assert sweep.swept[0].leaf_name == expired.leaf_name
+        assert isinstance(sweep.swept[0].detach, LeafDetached)
+        assert sweep.swept[0].drop == LeafDropped(leaf_name=expired.leaf_name)
 
         async with terminalization_schema.engine.begin() as connection:
             gone = (
@@ -376,10 +384,51 @@ class TestSweep:
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_heartbeat_storage(connection)
-        swept = await sweep_expired_heartbeat_leaves(
+        sweep = await sweep_expired_heartbeat_leaves(
             PartitionMaintenanceDatabase(
                 terminalization_schema.engine, connection_capacity=2
             ),
             UnpublishedLoader(),
         )
-        assert swept == ()
+        assert sweep == LeafSweep(swept=(), errors=())
+
+    @pytest.mark.asyncio
+    async def test_one_leaf_error_does_not_stop_the_sweep(
+        self,
+        terminalization_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with terminalization_schema.engine.begin() as connection:
+            await register_heartbeat_class(connection, horizon=HORIZON)
+            now = await database_now(connection)
+            hour = now.replace(minute=0, second=0, microsecond=0)
+            failing = hourly_leaf_ref(hour - timedelta(hours=7))
+            expired = hourly_leaf_ref(hour - timedelta(hours=6))
+            for leaf in (failing, expired):
+                created = await create_hourly_heartbeat_leaf(
+                    connection, CreateHourlyHeartbeatLeaf(leaf=leaf)
+                )
+                assert isinstance(created, LeafCreated)
+        detach = partitioning.detach_expired_leaf
+
+        async def detach_failing_first(
+            database: PartitionMaintenanceDatabase,
+            command: DetachExpiredHistoryLeaf,
+            publisher: LoaderPublication,
+        ) -> LeafInspection | LeafMaintenanceBusy:
+            if command.leaf.leaf_name == failing.leaf_name:
+                raise OperationalError('ALTER TABLE', {}, Exception('connection lost'))
+            return await detach(database, command, publisher)
+
+        monkeypatch.setattr(partitioning, 'detach_expired_leaf', detach_failing_first)
+
+        sweep = await sweep_expired_heartbeat_leaves(
+            PartitionMaintenanceDatabase(
+                terminalization_schema.engine, connection_capacity=2
+            ),
+            UnpublishedLoader(),
+        )
+
+        assert [error.split(':', 1)[0] for error in sweep.errors] == [failing.leaf_name]
+        assert [entry.leaf_name for entry in sweep.swept] == [expired.leaf_name]
+        assert sweep.swept[0].drop == LeafDropped(leaf_name=expired.leaf_name)

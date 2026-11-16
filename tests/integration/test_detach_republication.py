@@ -141,9 +141,10 @@ async def test_heartbeat_detach_keeps_a_current_publication(
     async with terminalization_schema.engine.connect() as connection:
         assert await publisher.is_current(connection)
 
-    swept = await sweep_expired_heartbeat_leaves(
+    sweep = await sweep_expired_heartbeat_leaves(
         _database(terminalization_schema), publisher,
     )
-    assert [sweep.leaf_name for sweep in swept] == [expired.leaf_name]
-    assert isinstance(swept[0].detach, LeafDetached)
+    assert sweep.errors == ()
+    assert [entry.leaf_name for entry in sweep.swept] == [expired.leaf_name]
+    assert isinstance(sweep.swept[0].detach, LeafDetached)
     assert publisher.republished == 0

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..maintenance.database import PartitionMaintenanceDatabase
@@ -64,6 +65,7 @@ from ..outcomes import (
     LeafIndexRepaired,
     LeafInspection,
     LeafMaintenanceBusy,
+    LeafSweep,
     RetentionClassAbsent,
 )
 from ..partitions.catalog import (
@@ -586,7 +588,7 @@ class HeartbeatLeafSwept:
 async def sweep_expired_heartbeat_leaves(
     database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
-) -> tuple[HeartbeatLeafSwept, ...]:
+) -> LeafSweep[HeartbeatLeafSwept]:
     """Detach and drop every heartbeat leaf past its horizon.
 
     Discovery reads the catalog for reserved-class leaves whose upper
@@ -595,6 +597,9 @@ async def sweep_expired_heartbeat_leaves(
     use; a heartbeat leaf can never be pending-blocked because no pending
     locator carries the reserved class.
     One leaf per transaction (the inherited bounded-relations invariant).
+    A database error of one leaf is reported as `leaf: cause` and the
+    sweep goes on with the next leaf; a database error of the discovery
+    raises.
     """
     async with database.connect() as connection:
         rows = (
@@ -619,47 +624,58 @@ async def sweep_expired_heartbeat_leaves(
         ).all()
 
     swept: list[HeartbeatLeafSwept] = []
+    errors: list[str] = []
     for row in rows:
         ref = LeafRef(
             leaf_name=row.leaf_name,
             class_key=HEARTBEAT_CLASS_KEY,
             bounds=decode_leaf_bounds(row.lower_anchor, row.upper_anchor),
         )
-        detach_outcome = await detach_expired_leaf(
-            database,
-            DetachExpiredHistoryLeaf(
-                leaf=ref,
-                statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
-            ),
-            publisher,
-        )
-        drop_outcome: LeafDrop | None = None
-        detached = isinstance(detach_outcome, LeafDetached)
-        if not detached:
-            # A crash between detach and drop leaves a detached leaf the
-            # next sweep must still drop; re-inspect for that state.
-            async with database.connect() as connection:
-                inspection = await inspect_leaf(
-                    connection,
-                    InspectHistoryLeaf(
-                        leaf=ref, lifecycle=LeafLifecycle.RETENTION
-                    ),
-                )
-            detached = isinstance(inspection, LeafDetached)
-        if detached:
-            async with database.begin() as connection:
-                drop_outcome = await drop_detached_leaf(
-                    connection,
-                    DropDetachedHistoryLeaf(
-                        leaf=ref, lifecycle=LeafLifecycle.RETENTION
-                    ),
-                    publisher,
-                )
-        swept.append(
-            HeartbeatLeafSwept(
-                leaf_name=ref.leaf_name,
-                detach=detach_outcome,
-                drop=drop_outcome,
+        try:
+            swept.append(await _sweep_heartbeat_leaf(database, publisher, ref))
+        except SQLAlchemyError as error:
+            errors.append(f'{ref.leaf_name}: {error}')
+    return LeafSweep(swept=tuple(swept), errors=tuple(errors))
+
+
+async def _sweep_heartbeat_leaf(
+    database: PartitionMaintenanceDatabase,
+    publisher: LoaderPublication,
+    ref: LeafRef,
+) -> HeartbeatLeafSwept:
+    """Detach one expired heartbeat leaf and drop it once detached.
+
+    A leaf that an earlier crash left detached is dropped too. A database
+    error raises.
+    """
+    detach_outcome = await detach_expired_leaf(
+        database,
+        DetachExpiredHistoryLeaf(
+            leaf=ref,
+            statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
+        ),
+        publisher,
+    )
+    drop_outcome: LeafDrop | None = None
+    detached = isinstance(detach_outcome, LeafDetached)
+    if not detached:
+        # A crash between detach and drop leaves a detached leaf the
+        # next sweep must still drop; re-inspect for that state.
+        async with database.connect() as connection:
+            inspection = await inspect_leaf(
+                connection,
+                InspectHistoryLeaf(leaf=ref, lifecycle=LeafLifecycle.RETENTION),
             )
-        )
-    return tuple(swept)
+        detached = isinstance(inspection, LeafDetached)
+    if detached:
+        async with database.begin() as connection:
+            drop_outcome = await drop_detached_leaf(
+                connection,
+                DropDetachedHistoryLeaf(leaf=ref, lifecycle=LeafLifecycle.RETENTION),
+                publisher,
+            )
+    return HeartbeatLeafSwept(
+        leaf_name=ref.leaf_name,
+        detach=detach_outcome,
+        drop=drop_outcome,
+    )

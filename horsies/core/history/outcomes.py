@@ -254,6 +254,20 @@ type LeafDrop = (
 """Outcome of one drop attempt; non-detached inspections pass through."""
 
 
+@dataclass(frozen=True, slots=True)
+class LeafSweep[E]:
+    """One sweep over the expired leaves of one kind.
+
+    `swept` holds one entry per leaf whose sweep ended in an outcome;
+    `errors` holds one `leaf: cause` entry per leaf whose sweep raised a
+    database error. A failed leaf's effects are unknown; it stays a
+    candidate of the next pass.
+    """
+
+    swept: tuple[E, ...]
+    errors: tuple[str, ...]
+
+
 # ---------------------------------------------------------------------------
 # Coverage and health
 # ---------------------------------------------------------------------------

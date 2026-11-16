@@ -14,8 +14,8 @@ anchored lower bound.
 Refusals are outcomes, not errors: a pending locator pinning a leaf, a
 loader still referencing a relation, or a blocked finalization each
 skip the leaf and surface in the pass report — one leaf's refusal or
-failure never stops the pass, and a leaf skipped this pass is the next
-pass's candidate. Detach and finalize manage their own autocommit
+database error never stops the pass, and a leaf skipped this pass is
+the next pass's candidate. Detach and finalize manage their own autocommit
 connections (the manager's invariant); the drop joins a transaction
 opened here. The concurrent detach carries a statement timeout so a
 single long reader stalls one leaf's detach, never the maintenance
@@ -53,6 +53,7 @@ from ..outcomes import (
     LeafDropped,
     LeafInspection,
     LeafMaintenanceBusy,
+    LeafSweep,
 )
 from ..partitions.catalog import decode_leaf_bounds
 from ..partitions.manager import (
@@ -232,14 +233,14 @@ async def _finalize_interrupted_detaches(
 async def sweep_expired_history_leaves(
     database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
-) -> tuple[tuple[HistoryLeafSwept, ...], tuple[str, ...]]:
+) -> LeafSweep[HistoryLeafSwept]:
     """Detach and drop every finite task-history leaf past its horizon.
 
     Mirrors the heartbeat sweep's sequence per leaf — detach, re-inspect
-    for the crashed-between-detach-and-drop state, drop — with two
-    driver-grade additions: a statement timeout on the concurrent
-    detach, and per-leaf error containment so one leaf's failure never
-    stops the pass. Returns (swept entries, error strings).
+    for the crashed-between-detach-and-drop state, drop — with a
+    statement timeout on the concurrent detach. A database error of one
+    leaf is reported as `leaf: cause` and the sweep goes on with the next
+    leaf; a database error of the discovery raises.
     """
     async with database.connect() as connection:
         candidates = await _expired_candidates(
@@ -292,7 +293,7 @@ async def sweep_expired_history_leaves(
             )
         except SQLAlchemyError as error:
             errors.append(f'{ref.leaf_name}: {error}')
-    return tuple(swept), tuple(errors)
+    return LeafSweep(swept=tuple(swept), errors=tuple(errors))
 
 
 def _sweep_refusals(
@@ -324,10 +325,11 @@ async def prune_expired_partitions(
     and finite-history sweeps.
 
     The finalize phase runs first across every finite class because one
-    pending finalization blocks all further detaches on its parent. The
-    heartbeat sweep runs as the tested unit it is; a failure inside it
-    is contained as one pass error and the task-history sweep still
-    runs, with per-leaf containment of its own.
+    pending finalization blocks all further detaches on its parent. Both
+    sweeps contain a database error per leaf: the leaf is reported and
+    the sweep goes on with the next leaf. A failed heartbeat discovery is
+    one pass error (`heartbeat sweep: cause`) and the task-history sweep
+    still runs.
     """
     finalized, finalize_refusals, errors_list = (
         await _finalize_interrupted_detaches(database, publisher)
@@ -335,15 +337,15 @@ async def prune_expired_partitions(
     errors: list[str] = list(errors_list)
     heartbeat_swept: tuple[HeartbeatLeafSwept, ...] = ()
     try:
-        heartbeat_swept = await sweep_expired_heartbeat_leaves(
-            database, publisher
-        )
+        heartbeat = await sweep_expired_heartbeat_leaves(database, publisher)
     except SQLAlchemyError as error:
         errors.append(f'heartbeat sweep: {error}')
-    history_swept, history_errors = await sweep_expired_history_leaves(
-        database, publisher
-    )
-    errors.extend(history_errors)
+    else:
+        heartbeat_swept = heartbeat.swept
+        errors.extend(f'heartbeat {error}' for error in heartbeat.errors)
+    history = await sweep_expired_history_leaves(database, publisher)
+    history_swept = history.swept
+    errors.extend(history.errors)
     return PrunePass(
         finalized_leaves=finalized,
         heartbeat_swept=heartbeat_swept,
