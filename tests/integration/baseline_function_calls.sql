@@ -1,6 +1,8 @@
--- Calls every interim function of the baseline on a fresh install. The caller runs the script in one transaction
--- and rolls it back. PL/pgSQL checks a statement against the tables only when the statement runs, so each function
--- is called on a path that runs its statements that name columns. Each call checks its outcome.
+-- Calls every interim function of the baseline on a fresh install, and the functions of 0004_lifecycle_functions.sql
+-- that replace interim ones by name, with their new arguments (baseline_lifecycle_functions.sql tests that file in
+-- full). The caller runs the script in one transaction and rolls it back. PL/pgSQL checks a statement against the
+-- tables only when the statement runs, so each function is called on a path that runs its statements that name
+-- columns. Each call checks its outcome.
 
 -- The published provenance reader is rendered at run time; this stand-in answers "not found".
 CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
@@ -104,16 +106,16 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_complete_task_fused(
         '00000000-0000-7000-8000-000000000001', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000001'),
-        '{"ok":1}', 'task_queue_default', 'capacity')),
+        '{"ok":1}', TRUE)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000002', 'RUNNING', 'w1', FALSE);
 SELECT expect_value(
     'complete_tasks_fused',
     (SELECT string_agg(outcome, ',') FROM horsies_complete_tasks_fused(
-        ARRAY['00000000-0000-7000-8000-000000000002'::uuid], ARRAY['w1'],
+        ARRAY['00000000-0000-7000-8000-000000000002'::uuid],
         ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000002')],
-        ARRAY['{"ok":2}'], ARRAY['task_queue_default'], ARRAY['capacity'])),
+        ARRAY['{"ok":2}'], 'w1', TRUE)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000003', 'RUNNING', 'w1', FALSE);
@@ -130,7 +132,7 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000000004', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000004'),
-        0, 1.0, 'same_class', '{"err":1}', 'E1', 'reason', 'FAILED', 'message', 'reason')),
+        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE)),
     'RETRY_SCHEDULED'
 );
 UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'w1', started_at = now(),
@@ -141,7 +143,7 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000000004', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000004'),
-        NULL, NULL, NULL, '{"err":2}', 'E1', 'reason', 'FAILED', 'message', 'reason')),
+        'NONE', NULL, NULL, NULL, '{"err":2}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE)),
     'APPLIED'
 );
 SELECT expect_value(
@@ -223,7 +225,7 @@ SELECT fixture_node(
     '00000000-0000-7000-8000-00000000000b'
 );
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-00000000000b', 'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
+    '00000000-0000-7000-8000-00000000000b'::uuid, 'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
 );
 SELECT expect_value(
     'phase2_consume history',
@@ -254,7 +256,8 @@ SELECT fixture_node(
 );
 SELECT expect_value(
     'abandon_owned_node',
-    (SELECT outcome FROM horsies_abandon_owned_node('00000000-0000-7000-8000-00000000000d', 'w1', NULL)),
+    (SELECT outcome FROM horsies_abandon_owned_node(
+        '00000000-0000-7000-8000-00000000000d', 'w1', (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000d'))),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-00000000000e', 'CLAIMED', 'w1', TRUE);
@@ -265,7 +268,8 @@ SELECT fixture_node(
 SELECT expect_value(
     'abandon_owned_nodes',
     (SELECT string_agg(outcome, ',') FROM horsies_abandon_owned_nodes(
-        ARRAY['00000000-0000-7000-8000-00000000000e'::uuid], ARRAY[NULL::timestamptz], 'w1')),
+        ARRAY['00000000-0000-7000-8000-00000000000e'::uuid],
+        ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000e')], 'w1')),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-00000000000f', 'CLAIMED', 'w1', TRUE);
@@ -275,7 +279,8 @@ SELECT fixture_node(
 );
 SELECT expect_value(
     'cancel_owned_node',
-    (SELECT outcome FROM horsies_cancel_owned_node('00000000-0000-7000-8000-00000000000f', 'w1', NULL, FALSE)),
+    (SELECT outcome FROM horsies_cancel_owned_node(
+        '00000000-0000-7000-8000-00000000000f', 'w1', (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000f'), FALSE)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000010', 'CLAIMED', 'w1', TRUE);
@@ -286,13 +291,15 @@ SELECT fixture_node(
 SELECT expect_value(
     'cancel_owned_nodes',
     (SELECT string_agg(outcome, ',') FROM horsies_cancel_owned_nodes(
-        ARRAY['00000000-0000-7000-8000-000000000010'::uuid], ARRAY[NULL::timestamptz], 'w1')),
+        ARRAY['00000000-0000-7000-8000-000000000010'::uuid],
+        ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000010')], 'w1')),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000011', 'CLAIMED', 'w1', TRUE);
 SELECT expect_value(
     'cancel_owned_orphan',
-    (SELECT outcome FROM horsies_cancel_owned_orphan('00000000-0000-7000-8000-000000000011', 'w1', NULL)),
+    (SELECT outcome FROM horsies_cancel_owned_orphan(
+        '00000000-0000-7000-8000-000000000011', 'w1', (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000011'))),
     'APPLIED'
 );
 
@@ -331,7 +338,7 @@ SELECT count(*) FROM horsies_cancel_orphaned_tasks(10);
 SELECT expect_value(
     'terminalization_miss',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-0000000000ff', ARRAY['FAIL_RUNNING'], NULL, NULL)),
+        '00000000-0000-7000-8000-0000000000ff', ARRAY['FAIL_RUNNING'], 'NONE', NULL, NULL)),
     'TASK_ABSENT'
 );
 SELECT expect_value(

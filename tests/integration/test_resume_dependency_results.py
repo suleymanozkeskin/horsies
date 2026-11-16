@@ -36,11 +36,11 @@ async def _get_linked_task_kwargs(
     workflow_id: str,
     task_index: int,
 ) -> str:
-    """Return the raw kwargs JSON of the backing task linked to a node."""
+    """Return the stored input (the kwargs JSON) of the backing task linked to a node."""
     row = (
         await session.execute(
             text("""
-                SELECT t.kwargs
+                SELECT t.input
                 FROM horsies_workflow_tasks wt
                 JOIN horsies_tasks t ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = :idx
