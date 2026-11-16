@@ -149,7 +149,7 @@ pub fn task_error_write(
     error: &TaskError,
     envelope: &ResultEnvelopeText,
 ) -> FinishFailedAttempt {
-    let error_code = error.error_code.as_ref().map(ToString::to_string);
+    let error_code = Some(error.error_code.to_string());
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
