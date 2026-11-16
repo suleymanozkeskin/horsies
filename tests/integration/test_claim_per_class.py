@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 # pyright: reportPrivateUsage=false
 
 import json
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import Execution
 from horsies.core.worker.claiming import ClaimMixin, ClaimPass
+from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.row_class import RowClassMismatch
 from horsies.core.worker.slots import SlotPool
@@ -864,13 +866,20 @@ class _Probe(ClaimMixin):
         )
         self.worker_instance_id = _worker_id()
         self._registered_classes = registered
+        self._queue_cap_hold = QueueCapHold(
+            start_check_caps(self.cfg.prefetch_buffer, self.cfg.queue_max_concurrency),
+        )
         self.dispatched: list[str] = []
 
     def _claim_slot_count(self) -> int:
         return self.cfg.processes
 
-    async def _dispatch_one(self, task_id: str, *args: Any, **kwargs: Any) -> None:
+    async def _dispatch_one(
+        self, task_id: str, *args: Any, **kwargs: Any,
+    ) -> asyncio.Future[None]:
         self.dispatched.append(task_id)
+        # A finalizer that does not end while the test runs.
+        return asyncio.get_running_loop().create_future()
 
 
 async def _row_state(session: AsyncSession, task_id: str) -> tuple[Any, ...]:

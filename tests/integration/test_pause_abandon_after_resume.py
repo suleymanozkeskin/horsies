@@ -9,6 +9,7 @@ With the re-check, the abandon refuses and the claim is run instead.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,6 +34,7 @@ from horsies.core.worker import child_runner, claiming
 from horsies.core.worker.child_pool import _initialize_worker_pool
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.workflows.lifecycle import resume_workflow
 from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
@@ -112,9 +114,15 @@ def _claim_filter_probe(broker: PostgresBroker) -> ClaimMixin:
             self._claim_runner = PooledStatements(self.sf)
             self.cfg = cfg
             self.worker_instance_id = WORKER_ID
+            self._queue_cap_hold = QueueCapHold(
+                start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
+            )
 
-        async def _dispatch_one(self, *args: Any, **kwargs: Any) -> None:
-            return None
+        async def _dispatch_one(
+            self, *args: Any, **kwargs: Any,
+        ) -> asyncio.Future[None]:
+            # A finalizer that does not end while the test runs.
+            return asyncio.get_running_loop().create_future()
 
     return _Probe()
 

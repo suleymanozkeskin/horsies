@@ -497,8 +497,9 @@ class DispatchMixin:
         claimed_at: datetime,
         execution: Execution,
         task_options: str | None,
-    ) -> None:
-        """Submit to the slot pool and spawn the finalizer.
+    ) -> asyncio.Future[Any]:
+        """Submit to the slot pool, spawn the finalizer, and return the
+        finalizer task.
 
         Never raises for a task: the pool answers every submit, and the
         finalizer handles that answer. ``execution`` is the class column of
@@ -522,7 +523,7 @@ class DispatchMixin:
 
         match dispatch_route(execution, self.cfg.claim_plan(), task_options, timeout):
             case RunShared(work=work):
-                self._dispatch_shared(
+                return self._dispatch_shared(
                     slots,
                     work,
                     task_id,
@@ -533,9 +534,8 @@ class DispatchMixin:
                     is_workflow_task,
                     claimed_at,
                 )
-                return
             case RunSharedThread(work=thread_work):
-                self._dispatch_shared_thread(
+                return self._dispatch_shared_thread(
                     slots,
                     ThreadRunRequest(
                         task_id=task_id,
@@ -549,7 +549,6 @@ class DispatchMixin:
                     ),
                     queue_name,
                 )
-                return
             case RunIsolated(timeout=isolated_timeout):
                 pass
             case _ as unreachable:
@@ -568,7 +567,7 @@ class DispatchMixin:
         )
 
         # When done, record the outcome
-        self._spawn_background(
+        return self._spawn_background(
             self._finalize_after(
                 handle,
                 task_id,
@@ -593,10 +592,10 @@ class DispatchMixin:
         queue_name: str,
         is_workflow_task: bool,
         claimed_at: datetime,
-    ) -> None:
-        """Submit a ``SHARED_ASYNC`` row to the shared async children, and
-        spawn its finalizer. ``work`` is the task with its deadline, or the
-        refusal that fails it. Never raises for a task."""
+    ) -> asyncio.Future[Any]:
+        """Submit a ``SHARED_ASYNC`` row to the shared async children, spawn
+        its finalizer, and return the finalizer task. ``work`` is the task with
+        its deadline, or the refusal that fails it. Never raises for a task."""
         handle = slots.submit_shared(
             SharedRunRequest(
                 task_id=task_id,
@@ -609,7 +608,7 @@ class DispatchMixin:
                 work=work,
             ),
         )
-        self._spawn_background(
+        return self._spawn_background(
             self._finalize_shared_after(
                 handle,
                 task_id,
@@ -628,13 +627,14 @@ class DispatchMixin:
         slots: SlotPool,
         request: ThreadRunRequest,
         queue_name: str,
-    ) -> None:
-        """Submit a ``SHARED_THREAD`` row to the shared thread children, and
-        spawn its finalizer. ``request.work`` is the task with its deadline,
-        or the refusal that fails it. Never raises for a task."""
+    ) -> asyncio.Future[Any]:
+        """Submit a ``SHARED_THREAD`` row to the shared thread children, spawn
+        its finalizer, and return the finalizer task. ``request.work`` is the
+        task with its deadline, or the refusal that fails it. Never raises for
+        a task."""
         handle = slots.submit_shared(request)
         work: ThreadSeatWork = request.work
-        self._spawn_background(
+        return self._spawn_background(
             self._finalize_shared_after(
                 handle,
                 request.task_id,

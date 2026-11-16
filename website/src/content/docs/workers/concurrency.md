@@ -8,7 +8,7 @@ tags: [workers, concurrency, claiming, limits]
 ## Operational Notes
 
 - **Priority ordering:** Priority holds within one execution class. Each (queue, class) is its own claim stream in `(priority, enqueued_at, id)` order. A budget that claims more than one class reads the merge of their streams in that order. Two budgets do not compare priorities: a high-priority `SHARED_ASYNC` row does not take a seat from an `ISOLATED` row. Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
-- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate seats. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
+- **Soft-cap start check:** With `prefetch_buffer > 0`, the claim counts only RUNNING tasks against a queue's `max_concurrency`, so a worker can claim more rows of a capped queue than its cap. The worker starts such a row only when the queue has room: each claim pass reads, for each capped queue with claimed rows that wait, its RUNNING rows plus the rows that this worker started and that are not RUNNING yet, and starts the waiting rows in claim order while that count stays under the cap. The other rows stay CLAIMED, and the worker returns them to the queue when it stops. Workers read the count without a lock, so two workers that start rows of one queue in the same instant can pass the cap by the rows that they start in that instant. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
 ## Concurrency Levels
@@ -366,7 +366,7 @@ config = AppConfig(
 - Prefetch allowed: workers can claim tasks ahead of execution
 - Lease expiry: prefetched claims expire and can be reclaimed by other workers
 - No prefetch without capacity: a budget whose children or seats are all down (capacity in service 0) claims no row, and neither does a worker whose budgets are all at 0. Its rows stay for a worker with seats.
-- Soft limit: RUNNING tasks can exceed the cap — buffered CLAIMED tasks don't count against it and dispatch without a re-check, so the excess persists while those tasks run and scales with worker count (see [Soft-cap overshoot](#operational-notes))
+- Start check: a claimed row of a capped queue starts only while the queue's RUNNING rows, plus the rows that the worker started and that are not RUNNING yet, are under the cap; the other claimed rows wait, CLAIMED (see [Soft-cap start check](#operational-notes))
 
 **Important:** `cluster_wide_cap` and `prefetch_buffer > 0` cannot be combined. If you need a global cap, use hard cap mode.
 **Important:** `claim_lease_ms` must be set when `prefetch_buffer > 0`. In hard cap mode (`prefetch_buffer = 0`), it is optional and overrides the default 60s lease.

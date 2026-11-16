@@ -523,3 +523,22 @@ _RETENTION_PASS_TIME_BUDGET_S = 60.0
 
 
 _FINALIZER_DRAIN_TIMEOUT_S: float = 30.0
+
+# Soft-cap start check (worker/queue_cap_hold.py): for each capped queue in
+# :queues, its RUNNING rows on every worker plus the rows of :started_ids that
+# this worker started and that are still CLAIMED. One row per queue that has
+# any; a queue with no row has 0.
+COUNT_QUEUE_STARTS_SQL = text("""
+    SELECT t.queue_name,
+           COUNT(*) FILTER (WHERE t.status = 'RUNNING') AS running,
+           COUNT(*) FILTER (WHERE t.status = 'CLAIMED') AS started_not_running
+    FROM horsies_tasks t
+    WHERE t.queue_name = ANY(CAST(:queues AS VARCHAR[]))
+      AND (
+          t.status = 'RUNNING'
+          OR (t.status = 'CLAIMED'
+              AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
+              AND t.id = ANY(CAST(:started_ids AS uuid[])))
+      )
+    GROUP BY t.queue_name
+""")
