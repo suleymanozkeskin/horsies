@@ -1823,3 +1823,94 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
         "{body}"
     );
 }
+
+/// Every database of [`an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing`]
+/// has this name prefix, then 32 hex digits.
+const EMPTY_DATABASE_PREFIX: &str = "core_web_empty_";
+
+/// The horsies relations and functions of the database that `connection`
+/// reads: `horsies_tasks`, `horsies_schema_version` and `horsies_migrations`
+/// by name, then every relation and function whose name starts with
+/// `horsies`.
+async fn horsies_objects(
+    connection: &mut PgConnection,
+) -> (Option<String>, Option<String>, Option<String>, i64) {
+    sqlx::query_as(
+        "SELECT to_regclass('horsies_tasks')::text,
+                to_regclass('horsies_schema_version')::text,
+                to_regclass('horsies_migrations')::text,
+                (SELECT count(*) FROM pg_class WHERE left(relname, 7) = 'horsies')
+                  + (SELECT count(*) FROM pg_proc WHERE left(proname, 7) = 'horsies')",
+    )
+    .fetch_one(connection)
+    .await
+    .expect("read the horsies objects")
+}
+
+/// Python `test_web_api.py::TestTheToolNeverRunsDdl::test_actions_are_refused_and_still_nothing_is_created`:
+/// the web router of an observe-only broker on a new, empty database answers
+/// a cancel that carries the intent header with 409 `SCHEMA_INCOMPATIBLE` and
+/// Python's detail, and the database still holds no horsies relation or
+/// function afterwards.
+#[tokio::test]
+#[serial]
+async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing() {
+    let base_options = PgConnectOptions::from_str(&migrated_database_url().await).unwrap();
+    let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
+        .await
+        .expect("connect to the admin database");
+    let name = format!("{EMPTY_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+        .execute(&mut admin)
+        .await
+        .expect("create the empty database");
+    let options = base_options.database(&name);
+    let url = options.to_url_lossy().to_string();
+    let broker = Arc::new(
+        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
+            .await
+            .expect("connect the observe-only broker"),
+    );
+    let app =
+        Horsies::new(AppConfig::for_database_url(&url)).expect("the app of the empty database");
+    let router = super::app::create_monitoring_router(
+        &app,
+        Arc::clone(&broker),
+        AllowAll,
+        MonitoringUiConfig::default(),
+        true,
+    );
+
+    let response = router
+        .oneshot(action_request(&format!(
+            "/api/tasks/{}/cancel",
+            Uuid::new_v4()
+        )))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    let mut reader = PgConnection::connect_with(&options)
+        .await
+        .expect("connect to the empty database");
+    let objects = horsies_objects(&mut reader).await;
+    reader.close().await.expect("close the reader");
+    broker.pool().close().await;
+    broker.session_pool().close().await;
+    drop(broker);
+    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .expect("drop the empty database");
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], SCHEMA_INCOMPATIBLE);
+    assert!(
+        body["detail"]
+            .as_str()
+            .expect("a text detail")
+            .contains("no horsies schema"),
+        "{body}"
+    );
+    assert_eq!(objects, (None, None, None, 0));
+}

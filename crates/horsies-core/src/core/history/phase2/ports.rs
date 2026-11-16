@@ -8,12 +8,13 @@
 //! database.
 
 use serial_test::serial;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::consumption::{consume_phase2, Phase2DispositionKind};
 use super::quarantine::{quarantine_one, QuarantineVerdict};
 use crate::broker::terminalization::terminalize_in_tx;
+use crate::core::history::errors::HistoryError;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 
 const PORT_WORKER: &str = "port-phase2-worker";
@@ -440,5 +441,158 @@ async fn an_unknown_task_is_pending_gone() {
         .await
         .expect("quarantine");
     assert_eq!(outcome.verdict, QuarantineVerdict::PendingGone);
+    transaction.rollback().await.expect("rollback");
+}
+
+/// The primary message of a database refusal.
+fn refusal_message(error: &HistoryError) -> String {
+    match error {
+        HistoryError::Database(error) => error
+            .as_database_error()
+            .map(|database| database.message().to_owned())
+            .expect("the refusal comes from the database"),
+        other => panic!("expected a database refusal, got {other:?}"),
+    }
+}
+
+/// The pending-row write that a test makes the database refuse.
+#[derive(Debug, Clone, Copy)]
+enum PendingWrite {
+    Update,
+    Delete,
+}
+
+impl PendingWrite {
+    fn event(self) -> &'static str {
+        match self {
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// Makes the database raise `message` for each pending row that `write`
+/// touches and `condition` (the trigger's `WHEN` clause) selects, until
+/// `transaction` ends.
+async fn refuse_pending_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    name: &str,
+    write: PendingWrite,
+    condition: &str,
+    message: &str,
+) {
+    sqlx::query(&format!(
+        "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $function$
+         BEGIN
+             RAISE EXCEPTION '{message}';
+         END
+         $function$"
+    ))
+    .execute(transaction.as_mut())
+    .await
+    .expect("create the refusing function");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {name}
+         BEFORE {} ON horsies_workflow_phase2_pending
+         FOR EACH ROW WHEN ({condition})
+         EXECUTE FUNCTION {name}()",
+        write.event()
+    ))
+    .execute(transaction.as_mut())
+    .await
+    .expect("create the refusing trigger");
+}
+
+async fn quarantine_copies(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(transaction.as_mut())
+        .await
+        .expect("count quarantine copies")
+}
+
+/// `test_task_history_workflow_recovery_prototypes.py::test_quarantine_copy_rolls_back_when_repoint_fails`:
+/// the copy and the repoint are one call of `horsies_phase2_quarantine_one`,
+/// so a refused repoint leaves no copy and the pending row keeps its history
+/// source.
+#[tokio::test]
+#[serial]
+async fn a_refused_repoint_leaves_no_quarantine_copy() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    refuse_pending_rows(
+        &mut transaction,
+        "port_refuse_pending_repoint",
+        PendingWrite::Update,
+        "NEW.recovery_source = 'QUARANTINE'",
+        "repoint disabled by test",
+    )
+    .await;
+
+    let mut savepoint = transaction.begin().await.expect("begin savepoint");
+    let refused = quarantine_one(&mut savepoint, evidence.task_id)
+        .await
+        .expect_err("the repoint is refused");
+    savepoint.rollback().await.expect("roll back the savepoint");
+
+    assert_eq!(refusal_message(&refused), "repoint disabled by test");
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id)
+            .await
+            .as_deref(),
+        Some("HISTORY")
+    );
+    assert_eq!(
+        quarantine_copies(&mut transaction, evidence.task_id).await,
+        0
+    );
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `test_task_history_workflow_recovery_prototypes.py::test_phase2_delete_failure_rolls_back_all_durable_effects`:
+/// consumption writes the node, then deletes the pending row and the
+/// quarantine copy in one call of `horsies_phase2_consume`, so a refused
+/// pending delete leaves the node unwritten and both recovery rows in place.
+/// The prototype's parent-propagation rows have no baseline counterpart.
+#[tokio::test]
+#[serial]
+async fn a_refused_pending_delete_leaves_the_node_and_both_recovery_rows() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    let quarantined = quarantine_one(&mut transaction, evidence.task_id)
+        .await
+        .expect("quarantine");
+    assert_eq!(quarantined.verdict, QuarantineVerdict::Repointed);
+    refuse_pending_rows(
+        &mut transaction,
+        "port_refuse_pending_delete",
+        PendingWrite::Delete,
+        "TRUE",
+        "pending delete disabled by test",
+    )
+    .await;
+
+    let mut savepoint = transaction.begin().await.expect("begin savepoint");
+    let refused = consume_phase2(&mut savepoint, evidence.task_id, "FAILED")
+        .await
+        .expect_err("the pending delete is refused");
+    savepoint.rollback().await.expect("roll back the savepoint");
+
+    assert_eq!(refusal_message(&refused), "pending delete disabled by test");
+    let (status, result) = node_state(&mut transaction, evidence.node_id).await;
+    assert_eq!(status, "RUNNING");
+    assert_eq!(result, None);
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id)
+            .await
+            .as_deref(),
+        Some("QUARANTINE")
+    );
+    assert_eq!(
+        quarantine_copies(&mut transaction, evidence.task_id).await,
+        1
+    );
     transaction.rollback().await.expect("rollback");
 }
