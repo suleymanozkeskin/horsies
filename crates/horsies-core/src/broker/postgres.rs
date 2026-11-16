@@ -57,7 +57,9 @@ use crate::broker::task_lists::{
 use crate::broker::wait_limit::WaitLimit;
 use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
 
-use crate::broker::pools::{CloseOutcome, CoreHandle, PoolProfile, SessionPool};
+use crate::broker::pools::{
+    CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
+};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
     Transaction as CoreTransaction, TypedStatement,
@@ -1300,15 +1302,21 @@ impl PostgresBroker {
         &self.session_pool
     }
 
-    /// The core pool on `database_url`, for the lifecycle writers that run
-    /// on the statement layer ([`crate::broker::attempt_writes`]). In a
-    /// worker it is the worker profile pool.
-    pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
-        self.core.main()
+    /// The open core pools, for a lifecycle writer that runs on the main
+    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
+    /// write: [`PostgresBroker::close`] waits for the write while the token
+    /// lives. In a worker the main core pool is the worker profile pool. An
+    /// `Idle` handle opens its pools first.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
+    pub(crate) fn core_pools_for_write(
+        &self,
+    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
+        Ok(self.core.pools_for_write()?)
     }
 
     /// Whether this broker logs each core statement it runs, for the
-    /// lifecycle writers that run on [`PostgresBroker::core_main_pool`].
+    /// lifecycle writers that run on the main core pool.
     pub(crate) fn statement_log(&self) -> StatementLog {
         self.statement_log
     }
