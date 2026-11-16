@@ -318,7 +318,6 @@ async fn one_republish_heals_a_stale_detail_body() {
 /// unanalyzed leaf keeps an index plan.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #845"]
 async fn every_rendered_reader_runs_without_sequential_scans() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
