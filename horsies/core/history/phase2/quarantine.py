@@ -1,38 +1,22 @@
-"""Detach-horizon quarantine: copy, verify, repoint one stale locator.
+"""Phase-2 quarantine: copy, verify, repoint one pending row.
 
-A pending locator pins its history leaf against detach. When a locator
-outlives the caller's horizon, maintenance moves the recovery material out
-of the leaf: copy the minimum recovery projection into the quarantine
-table, verify the copy, and repoint pending at the copy — after which the
-leaf no longer carries recovery evidence and detach can proceed. A failed
-copy or verification keeps the history locator and blocks detach with a
-typed refusal; maintenance never deletes unresolved recovery evidence to
-make retention progress.
+Phase-2 recovery quarantines a pending row whose attempt count reached the
+bound: the database function copies the minimum recovery projection out of
+the history leaf into the quarantine table, verifies the copy, and repoints
+the pending row at it. A failed copy or verification keeps the history
+locator and returns a typed refusal; nothing deletes unresolved recovery
+evidence.
 
-Each per-task copy/verify/repoint is one database function call, so one
-statement is one transaction even on the autocommit connection that holds
-the session-scoped leaf advisory lock — every repoint is committed before
-the leaf is declared unpinned. The caller must hold the leaf advisory
-lock; the operation itself locks only the pending row, a single-tier
-acquisition that can participate in no lock cycle with consumption's
-workflow -> node -> pending order.
-
-Bounded relations per statement: the pending table, one pruned history
-leaf, the node row, and the quarantine table — inherently per-leaf, since
-a locator names exactly one leaf.
+The function locks only the pending row, a single-tier acquisition that can
+take part in no lock cycle with consumption's workflow -> node -> pending
+order. It reads one pruned history leaf, the node row, and the quarantine
+table.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any, Final
+from typing import Final
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
-
-from ..commands import LeafRef
-from ..errors import HistoryContractError
 from ..names import (
     TASK_HISTORY_PARENT,
     WORKFLOW_PHASE2_PENDING,
@@ -183,7 +167,7 @@ def quarantine_fragments() -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
-# Typed command, outcomes, and the per-leaf operation
+# Verdict vocabulary
 # ---------------------------------------------------------------------------
 
 
@@ -192,7 +176,6 @@ DRAINED_VERDICTS: Final = frozenset({'PENDING_GONE', 'ALREADY_QUARANTINED'})
 REFUSAL_VERDICTS: Final = frozenset(
     {
         'NODE_ROW_ABSENT',
-        'NODE_IDENTITY_ABSENT',
         'SOURCE_ABSENT',
         'COPY_VERIFICATION_FAILED',
     }
@@ -200,153 +183,3 @@ REFUSAL_VERDICTS: Final = frozenset(
 KNOWN_QUARANTINE_VERDICTS: Final = (
     frozenset({REPOINTED}) | DRAINED_VERDICTS | REFUSAL_VERDICTS
 )
-
-
-@dataclass(frozen=True, slots=True)
-class QuarantineLeafBlockers:
-    """Quarantine every locator on one leaf older than the horizon.
-
-    The caller must hold the leaf's advisory lock; the horizon is the age
-    (by the pending row's `created_at`) past which a locator is treated as
-    stalled recovery evidence rather than in-flight drain traffic.
-    """
-
-    leaf: LeafRef
-    horizon: timedelta
-
-    def __post_init__(self) -> None:
-        if self.horizon <= timedelta(0):
-            raise ValueError('quarantine horizon must be positive')
-
-
-@dataclass(frozen=True, slots=True)
-class TaskQuarantineRefusal:
-    """One locator that could not be quarantined; pending is retained."""
-
-    task_id: str
-    verdict: str
-    detail: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class NoOverHorizonBlockers:
-    """No locator on the leaf has outlived the horizon."""
-
-    leaf_name: str
-
-
-@dataclass(frozen=True, slots=True)
-class BlockersQuarantined:
-    """Every over-horizon locator was repointed or found already drained."""
-
-    leaf_name: str
-    repointed: int
-    drained: int
-
-
-@dataclass(frozen=True, slots=True)
-class QuarantineRefused:
-    """At least one locator refused; the leaf remains pinned.
-
-    Repoints that committed before a refusal stand — each is individually
-    consistent — but the refusing locators keep their history rows pinned
-    and the alert/repair path owns them.
-    """
-
-    leaf_name: str
-    repointed: int
-    refusals: tuple[TaskQuarantineRefusal, ...]
-
-
-type LeafQuarantine = (
-    NoOverHorizonBlockers | BlockersQuarantined | QuarantineRefused
-)
-
-
-async def quarantine_over_horizon_blockers(
-    connection: AsyncConnection,
-    command: QuarantineLeafBlockers,
-) -> LeafQuarantine:
-    """Copy, verify, and repoint every over-horizon locator on one leaf.
-
-    Statement-at-a-time by design: discovery is one read, and each
-    copy/verify/repoint is one call to the database function, so the
-    operation is correct on an autocommit maintenance connection and every
-    repoint is durable before the caller re-inspects the leaf. Discovery
-    orders by task id; each call locks only its own pending row.
-    """
-    leaf = command.leaf
-    task_ids = (
-        (
-            await connection.execute(
-                text(
-                    f"""
-                    SELECT task_id
-                    FROM {WORKFLOW_PHASE2_PENDING}
-                    WHERE recovery_source = 'HISTORY'
-                      AND history_class = :class_key
-                      AND history_anchor >= :lower
-                      AND history_anchor < :upper
-                      AND created_at <= statement_timestamp() - :horizon
-                    ORDER BY task_id
-                    """
-                ),
-                {
-                    'class_key': leaf.class_key,
-                    'lower': leaf.bounds.lower,
-                    'upper': leaf.bounds.upper,
-                    'horizon': command.horizon,
-                },
-            )
-        )
-        .scalars()
-        .all()
-    )
-    if not task_ids:
-        return NoOverHorizonBlockers(leaf_name=leaf.leaf_name)
-
-    reason = f'over-horizon phase-2 locator on {leaf.leaf_name}'
-    repointed = 0
-    drained = 0
-    refusals: list[TaskQuarantineRefusal] = []
-    for task_id in task_ids:
-        row = (
-            await connection.execute(
-                text(
-                    f'SELECT * FROM {PHASE2_QUARANTINE_FUNCTION}('
-                    'CAST(:task_id AS uuid), :reason)'
-                ),
-                {'task_id': task_id, 'reason': reason},
-            )
-        ).one()
-        verdict = _decode_quarantine_verdict(row)
-        if verdict == REPOINTED:
-            repointed += 1
-        elif verdict in DRAINED_VERDICTS:
-            drained += 1
-        else:
-            refusals.append(
-                TaskQuarantineRefusal(
-                    task_id=str(task_id),
-                    verdict=verdict,
-                    detail=row.detail,
-                )
-            )
-    if refusals:
-        return QuarantineRefused(
-            leaf_name=leaf.leaf_name,
-            repointed=repointed,
-            refusals=tuple(refusals),
-        )
-    return BlockersQuarantined(
-        leaf_name=leaf.leaf_name, repointed=repointed, drained=drained
-    )
-
-
-def _decode_quarantine_verdict(row: Any) -> str:
-    verdict = row.verdict
-    if verdict not in KNOWN_QUARANTINE_VERDICTS:
-        raise HistoryContractError(
-            f'unknown phase-2 quarantine verdict {verdict!r}'
-        )
-    return verdict

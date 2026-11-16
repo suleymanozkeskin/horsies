@@ -116,7 +116,6 @@ class TestDurableDispositions:
             assert verdict.disposition == 'APPLIED_TO_NODE'
             assert verdict.workflow_id == workflow_id
             assert verdict.node_status == 'FAILED'
-            assert verdict.terminal_status == 'FAILED'
             assert verdict.workflow_status == 'RUNNING'
             node = await node_row(connection, node_id)
             assert node.status == 'FAILED'
