@@ -763,11 +763,11 @@ pub(super) async fn start(
 /// The time an unreachable pool waits for a connection.
 const UNREACHABLE_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A handle whose broker pool connects to a port that refuses connections:
-/// every database call fails with a retryable connection error
-/// (`PoolTimedOut` after [`UNREACHABLE_ACQUIRE_TIMEOUT`]).
-pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowHandle<serde_json::Value> {
-    let pool = PgPoolOptions::new()
+/// A pool that connects to a port that refuses connections: every database
+/// call fails with a retryable connection error (`PoolTimedOut` after
+/// [`UNREACHABLE_ACQUIRE_TIMEOUT`]).
+pub(super) fn unreachable_pool() -> PgPool {
+    PgPoolOptions::new()
         .acquire_timeout(UNREACHABLE_ACQUIRE_TIMEOUT)
         .connect_lazy_with(
             PgConnectOptions::new()
@@ -775,8 +775,12 @@ pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowHandle<serde_json
                 .port(1)
                 .username("postgres")
                 .database("horsies_unreachable"),
-        );
-    handle(&pool, workflow_id)
+        )
+}
+
+/// A handle whose broker pool is [`unreachable_pool`].
+pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowHandle<serde_json::Value> {
+    handle(&unreachable_pool(), workflow_id)
 }
 
 /// A handle on `workflow_id` with an empty registry and default policies.
