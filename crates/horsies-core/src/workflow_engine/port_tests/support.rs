@@ -39,6 +39,11 @@ use crate::workflow_engine::start::start_workflow;
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
 
+/// The queue of the task nodes that the ports start. No worker test claims
+/// from it, so a live task that a test leaves on the shared database stays
+/// where it is.
+pub(super) const PORT_QUEUE: &str = "port_workflow_q";
+
 /// Task options that the core refuses each time it builds a task from them:
 /// a JSON array where the core reads an object (`InvalidTaskOptions`). A node
 /// that stores them raises on every promotion, in the same way as Python's
@@ -131,6 +136,19 @@ impl IsolatedDatabase {
     /// state in memory with the first one.
     pub(super) async fn other_process_pool(&self) -> PgPool {
         connect(&self.options).await
+    }
+
+    /// Allows or refuses new connections to the database. Connections that
+    /// are open stay open, so a pool keeps working while a new connection,
+    /// such as a listener's, is refused.
+    pub(super) async fn allow_connections(&mut self, allowed: bool) {
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS {allowed}",
+            self.name
+        ))
+        .execute(&mut self.admin)
+        .await
+        .expect("change ALLOW_CONNECTIONS of the isolated database");
     }
 
     /// Closes the pool and drops the database.
@@ -619,7 +637,7 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         args_from: std::collections::HashMap::new(),
         workflow_ctx_from: None,
         workflow_ctx_from_refs: None,
-        queue: Some("default".to_owned()),
+        queue: Some(PORT_QUEUE.to_owned()),
         priority: Some(100),
         allow_failed_deps: false,
         join: JoinType::All,
@@ -714,6 +732,25 @@ pub(super) async fn start(
         Err(error) => panic!("start of workflow '{}' failed: {error:?}", spec.name),
     }
     workflow_id
+}
+
+/// The time an unreachable pool waits for a connection.
+const UNREACHABLE_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A handle whose broker pool connects to a port that refuses connections:
+/// every database call fails with a retryable connection error
+/// (`PoolTimedOut` after [`UNREACHABLE_ACQUIRE_TIMEOUT`]).
+pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowHandle<serde_json::Value> {
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(UNREACHABLE_ACQUIRE_TIMEOUT)
+        .connect_lazy_with(
+            PgConnectOptions::new()
+                .host("127.0.0.1")
+                .port(1)
+                .username("postgres")
+                .database("horsies_unreachable"),
+        );
+    handle(&pool, workflow_id)
 }
 
 /// A handle on `workflow_id` with an empty registry and default policies.
@@ -976,6 +1013,20 @@ pub(super) async fn workflow_error_code(pool: &PgPool, workflow_id: Uuid) -> Opt
         .map(stored_error)
         .as_ref()
         .and_then(code)
+}
+
+/// Ends seeded workflows that a test leaves RUNNING or PAUSED on the shared
+/// database, so no global pass of another test works on them.
+pub(super) async fn end_workflows(pool: &PgPool, workflow_ids: &[Uuid]) {
+    sqlx::query(
+        "UPDATE horsies_workflows
+         SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
+         WHERE id = ANY($1) AND status IN ('PENDING', 'RUNNING', 'PAUSED')",
+    )
+    .bind(workflow_ids)
+    .execute(pool)
+    .await
+    .expect("end the seeded workflows");
 }
 
 /// Runs `statement` on its own and checks that it succeeded.

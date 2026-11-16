@@ -6,5 +6,6 @@
 mod support;
 
 mod completion_edges;
+mod handle_reads;
 mod output_skipped;
 mod recovery_limit_pass;
