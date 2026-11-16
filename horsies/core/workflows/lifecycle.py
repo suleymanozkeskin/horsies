@@ -84,10 +84,11 @@ from horsies.core.workflows.sql import (
     GET_READY_WORKFLOW_TASKS_SQL,
     GET_PAUSED_CHILD_WORKFLOWS_SQL,
     RESUME_CHILD_WORKFLOW_SQL,
-    SUBWORKFLOW_NODE_FACT_PARAMS,
+    SubWorkflowParams,
     TaskNodeFacts,
-    task_node_fact_params,
+    subworkflow_node_kind_params,
     task_node_facts,
+    task_node_kind_params,
     workflow_task_row_params,
 )
 from horsies.core.history.identity.uuid7 import mint_task_id
@@ -250,6 +251,22 @@ def start_task_node_facts(
         good_until=good_until,
         queue_retention_class=queue_retention_class,
     )
+
+
+def subworkflow_params_of(node: SubWorkflowNode[Any]) -> SubWorkflowParams:
+    """The params choice of a sub-workflow node, from its definition.
+
+    ``GIVEN`` when the node was given params: its ``kwargs`` for the child's
+    ``build_with`` are not empty. ``NOT_GIVEN`` when it was given none. The
+    stored ``input`` text and ``args_from`` play no part: ``args_from``
+    values are the engine's injections, not params the node was given.
+    Does no I/O.
+    """
+    match len(node.kwargs):
+        case 0:
+            return SubWorkflowParams.NOT_GIVEN
+        case _:
+            return SubWorkflowParams.GIVEN
 
 
 def _start_loop_limit(
@@ -556,7 +573,9 @@ async def start_workflow_async(
                             'join_type': node.join,
                             'min_success': node.min_success,
                             'task_options': None,
-                            **SUBWORKFLOW_NODE_FACT_PARAMS,
+                            **subworkflow_node_kind_params(
+                                subworkflow_params_of(node),
+                            ),
                             'status': 'PENDING' if dep_indices else 'READY',
                             'is_subworkflow': True,
                             'sub_wf_name': node.workflow_def.name,
@@ -670,7 +689,7 @@ async def start_workflow_async(
                         'join_type': task.join,
                         'min_success': task.min_success,
                         'task_options': task_options_json,
-                        **task_node_fact_params(node_facts),
+                        **task_node_kind_params(node_facts),
                         'status': 'ENQUEUED'
                         if is_fast_root
                         else ('PENDING' if dep_indices else 'READY'),
