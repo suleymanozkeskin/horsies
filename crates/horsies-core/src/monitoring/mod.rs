@@ -29,6 +29,7 @@ pub use models::{
     TaskDetail, TaskListPage, TaskSummary, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
     WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
 };
+pub use models::{DownSlotInfo, SlotHealthKind};
 pub use queries::{
     categorize_error_code, elapsed_s, get_task_detail, get_workflow_node, get_workflow_run,
     list_schedules, list_tasks, list_workflow_names, list_workflow_runs, normalize_optional_text,

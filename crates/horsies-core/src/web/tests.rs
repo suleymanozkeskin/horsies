@@ -823,6 +823,75 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     );
 }
 
+/// Python `test_web_api.py::TestWorkerReads::test_worker_list_carries_the_slot_health`.
+#[tokio::test]
+#[serial]
+async fn worker_list_carries_the_slot_health() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let worker_id = format!("itest-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now(), 'itest-host', 4242, 2, 0, 2,
+            ARRAY['default'], '{}'::jsonb, '{\"default\": 3}'::jsonb, '{}'::jsonb,
+            0, 0, now(),
+            $2, '{}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .bind(serde_json::json!([{
+        "slot": 1,
+        "cause": {"kind": "resource_shortage", "errno": "EMFILE"},
+        "detail": "OSError: [Errno 24] Too many open files",
+        "down_since": "2026-11-10T12:00:00+00:00",
+        "failed_boots": 2,
+    }]))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let worker = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["worker_id"] == worker_id.as_str())
+        .expect("the worker is listed");
+    assert_eq!(worker["slot_health"], "slots_down");
+    assert_eq!(
+        worker["down_slots"],
+        serde_json::json!([{
+            "slot": 1,
+            "cause": "the OS ran short of a resource (EMFILE)",
+            "detail": "OSError: [Errno 24] Too many open files",
+            "down_since": "2026-11-10T12:00:00Z",
+            "failed_boots": 2,
+        }])
+    );
+    assert_eq!(
+        worker["queue_max_concurrency"],
+        serde_json::json!({"default": 3})
+    );
+}
+
 async fn clean_w4(pool: &PgPool, prefix: &str) {
     let pattern = format!("{prefix}%");
     for statement in [

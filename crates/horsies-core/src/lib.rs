@@ -70,6 +70,12 @@ pub use crate::worker::{
     WorkerError,
 };
 
+// worker state snapshot values
+pub use crate::broker::{
+    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,

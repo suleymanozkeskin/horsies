@@ -2,6 +2,7 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod class_budgets;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
 pub mod error;
@@ -10,17 +11,23 @@ pub mod listener;
 pub mod migrations;
 #[cfg(test)]
 mod monitoring_schema_tests;
+#[cfg(test)]
+pub(crate) mod monitoring_test_database;
 pub mod postgres;
 pub mod result_types;
 pub mod row;
 pub mod shared_listener;
+pub mod slot_health;
 pub mod task_lists;
 pub mod terminalization;
 #[cfg(test)]
 pub(crate) mod terminalization_matrix;
 pub mod wait_limit;
+#[cfg(test)]
+mod worker_state_read_tests;
 
 pub use bound_handle::TaskHandle;
+pub use class_budgets::{ClassBudget, ClassBudgets};
 pub use error::{is_retryable_sqlx_error, BrokerError};
 pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
@@ -40,3 +47,7 @@ pub use row::task::{
 pub use row::worker_state::WorkerStateRow;
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use shared_listener::SharedNotifyListener;
+pub use slot_health::{
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};

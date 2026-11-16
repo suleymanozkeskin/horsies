@@ -12,7 +12,10 @@ pub const MIN_CANCEL_GRACE_MS: i64 = 100;
 pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
 
 /// How a worker runs a task. The column `execution` holds one of these values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The order is the order of Python's `Execution` members: `ISOLATED`,
+/// `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Execution {
     /// One task at a time in its own child process. The default class.
     Isolated,
@@ -32,7 +35,9 @@ impl Execution {
         }
     }
 
-    fn from_stored(value: &str) -> Option<Self> {
+    /// The class of a stored value; `None` for a value outside the three
+    /// class names.
+    pub(crate) fn from_stored(value: &str) -> Option<Self> {
         match value {
             "ISOLATED" => Some(Self::Isolated),
             "SHARED_ASYNC" => Some(Self::SharedAsync),

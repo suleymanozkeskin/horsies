@@ -235,6 +235,34 @@ pub struct WorkflowTaskDetail {
     pub attempts: Vec<TaskAttemptInfo>,
 }
 
+/// One slot that was down when the worker wrote its snapshot (Python
+/// `DownSlotInfo`, `horsies/monitoring/models.py:307-318`).
+///
+/// `cause` describes the cause of the last failed child start, and `detail`
+/// is its error text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownSlotInfo {
+    pub slot: u32,
+    pub cause: String,
+    pub detail: String,
+    pub down_since: DateTime<Utc>,
+    pub failed_boots: u64,
+}
+
+/// Whether any slot of a worker was down (Python `SlotHealthKind`,
+/// `horsies/monitoring/execution_classes.py:42`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotHealthKind {
+    AllServing,
+    SlotsDown,
+}
+
+/// Latest state snapshot for one worker (Python `WorkerStateInfo`,
+/// `horsies/monitoring/models.py:321-351`).
+///
+/// `down_slots` lists the down slots in slot order; it is empty unless
+/// `slot_health` is `slots_down`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerStateInfo {
     pub worker_id: String,
@@ -247,13 +275,15 @@ pub struct WorkerStateInfo {
     pub uptime_s: Option<i64>,
     pub processes: i32,
     pub queues: Vec<String>,
-    pub queue_max_concurrency: Option<BTreeMap<String, i32>>,
+    pub queue_max_concurrency: BTreeMap<String, i64>,
     pub tasks_running: i32,
     pub tasks_claimed: i32,
     pub cluster_wide_cap: Option<i32>,
     pub memory_usage_mb: Option<f64>,
     pub memory_percent: Option<f64>,
     pub cpu_percent: Option<f64>,
+    pub slot_health: SlotHealthKind,
+    pub down_slots: Vec<DownSlotInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -30,8 +30,8 @@ use crate::core::{
 
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
-    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    read_worker_snapshot, read_worker_snapshots, DatabasePing, StoredWorkerState,
+    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
@@ -492,7 +492,8 @@ WITH RECURSIVE latest AS (
             worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
             queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-            memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+            memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+            worker_started_at, slots_down, class_capacity
         FROM horsies_worker_states
         ORDER BY worker_id, snapshot_at DESC
         LIMIT 1
@@ -504,7 +505,8 @@ WITH RECURSIVE latest AS (
             w.worker_id, w.snapshot_at, w.hostname, w.pid, w.processes, w.max_claim_batch,
             w.max_claim_per_worker, w.cluster_wide_cap, w.queues, w.queue_priorities,
             w.queue_max_concurrency, w.recovery_config, w.tasks_running, w.tasks_claimed,
-            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.worker_started_at
+            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.children_memory_mb,
+            w.worker_started_at, w.slots_down, w.class_capacity
         FROM horsies_worker_states w
         WHERE w.worker_id > l.worker_id
         ORDER BY w.worker_id, w.snapshot_at DESC
@@ -519,7 +521,8 @@ SELECT
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+    memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+    worker_started_at, slots_down, class_capacity
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -532,7 +535,8 @@ SELECT
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+    memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+    worker_started_at, slots_down, class_capacity
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -2443,32 +2447,43 @@ impl PostgresBroker {
     /// reported a snapshot appears regardless of current load — unlike the
     /// retired `get_worker_stats` (which counted RUNNING tasks only and missed
     /// idle workers). Mirrors Python's `list_worker_states_async`.
+    ///
+    /// A stored `slots_down`, `class_capacity` or map column of another shape
+    /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
+    /// worker and the column (Python `postgres.py:2961-3034`).
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
-        sqlx::query_as(LIST_WORKER_STATES_SQL)
+        let rows: Vec<StoredWorkerState> = sqlx::query_as(LIST_WORKER_STATES_SQL)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| monitoring_query_error("list_worker_states", e))
+            .map_err(|e| monitoring_query_error("list_worker_states", e))?;
+        read_worker_snapshots("list_worker_states", rows)
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.
     ///
-    /// Mirrors Python's `get_worker_state_async`.
+    /// An unreadable stored row fails the read as in
+    /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
+    /// `get_worker_state_async`.
     pub async fn get_worker_state(
         &self,
         worker_id: &str,
     ) -> BrokerResult<Option<WorkerStateSnapshot>> {
-        sqlx::query_as(GET_WORKER_STATE_LATEST_SQL)
+        let row: Option<StoredWorkerState> = sqlx::query_as(GET_WORKER_STATE_LATEST_SQL)
             .bind(worker_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| monitoring_query_error("get_worker_state", e))
+            .map_err(|e| monitoring_query_error("get_worker_state", e))?;
+        row.map(|stored| read_worker_snapshot("get_worker_state", stored))
+            .transpose()
     }
 
     /// State-snapshot history for one worker, newest first.
     ///
     /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
     /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
-    /// Mirrors Python's `get_worker_state_history_async`.
+    /// An unreadable stored row fails the read as in
+    /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
+    /// `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,
@@ -2479,12 +2494,13 @@ impl PostgresBroker {
                 "limit must be positive when set, got {refused}"
             )));
         }
-        sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
+        let rows: Vec<StoredWorkerState> = sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
             .bind(worker_id)
             .bind(limit)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| monitoring_query_error("get_worker_state_history", e))
+            .map_err(|e| monitoring_query_error("get_worker_state_history", e))?;
+        read_worker_snapshots("get_worker_state_history", rows)
     }
 
     /// Find PENDING tasks that have expired (past their `good_until` deadline).
