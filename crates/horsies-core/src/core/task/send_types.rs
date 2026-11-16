@@ -284,7 +284,10 @@ pub fn send_error_from_enqueue(
         | BrokerError::ClientFamilyMismatch { .. }
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
+        | BrokerError::InvalidClaimArgument(_)
+        | BrokerError::Statement(_)
+        | BrokerError::PoolSettings(_)
+        | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,

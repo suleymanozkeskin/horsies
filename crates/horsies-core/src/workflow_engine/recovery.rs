@@ -478,6 +478,7 @@ WHERE id = $1
 /// Re-enqueue a READY task into horsies_tasks.
 /// An engine-minted task row carries no command fingerprint, no idempotency
 /// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+/// `sent_at` is the start call time of the node's workflow ($11).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -487,13 +488,14 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// Link workflow_task to a newly created horsies_task.
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -1585,6 +1587,7 @@ async fn enqueue_ready_task(
         .bind(&facts.retention_class_key)
         .bind(max_retries)
         .bind(good_until)
+        .bind(row.workflow_id)
         .execute(&mut *tx)
         .await?;
 
@@ -3061,7 +3064,8 @@ mod cap_tests {
                 sent_at, created_at, started_at, updated_at
              ) VALUES (
                 $1::uuid, 'p6_recovery_wf', 'RUNNING', 'fail', NULL,
-                'p6.recovery.v1', 0, $1::uuid, NOW(), NOW(), NOW(), NOW()
+                'p6.recovery.v1', 0, $1::uuid, timestamptz '2026-01-01 00:00:00+00',
+                NOW(), NOW(), NOW()
              )",
         )
         .bind(&workflow_id)
@@ -3102,6 +3106,18 @@ mod cap_tests {
         assert!(enqueue_ready_task(&pool, &row, &retention)
             .await
             .expect("recovery enqueue path"));
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the recovery node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input
@@ -3117,6 +3133,18 @@ mod cap_tests {
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
         assert!(!facts.3);
+        // The task row stores the start call time of its workflow as `sent_at`.
+        let sent_at_is_the_start_call_time: bool = sqlx::query_scalar(
+            "SELECT t.sent_at = timestamptz '2026-01-01 00:00:00+00'
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read recovery task sent_at");
+        assert!(sent_at_is_the_start_call_time);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (

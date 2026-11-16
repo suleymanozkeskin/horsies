@@ -28,6 +28,7 @@ from horsies.core.history.names import (
 from horsies.core.history.partitions.catalog import execute_with_utc_rendering
 from horsies.core.models.broker import PostgresConfig
 from tests.integration.conftest import DB_URL
+from tests.session_database import database_name_prefix
 
 pytestmark = [pytest.mark.integration]
 
@@ -118,7 +119,7 @@ async def make_database() -> AsyncIterator[MakeDatabase]:
     created: list[str] = []
 
     async def _create() -> str:
-        name = f'horsies_emission_{uuid.uuid4().hex[:12]}'
+        name = f'{database_name_prefix()}emission_{uuid.uuid4().hex[:12]}'
         admin = create_async_engine(DB_URL, isolation_level='AUTOCOMMIT')
         async with admin.connect() as connection:
             await connection.execute(text(f'CREATE DATABASE {name}'))

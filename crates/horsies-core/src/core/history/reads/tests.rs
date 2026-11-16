@@ -803,7 +803,10 @@ async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identit
         panic!("retained task did not decode as history detail");
     };
     assert_eq!(detail.task_id, normal_id);
-    assert_eq!(detail.status, "FAILED");
+    assert_eq!(
+        detail.status,
+        crate::core::types::status::TaskStatus::Failed
+    );
     assert_eq!(detail.attempts.len(), 1);
     assert_eq!(detail.attempts[0].outcome(), "FAILED");
     assert!(StagedLoaderPublisher
@@ -997,6 +1000,49 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
     .expect("read missing leaf catalog evidence");
     assert!(catalog_still_attached);
     drop(connection);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let mut transaction = database.pool.begin().await.expect("begin status setup");
+    let today = utc_day(database_now(&mut transaction).await.expect("database now"));
+    let parent = register_test_class(&mut transaction, class_key, 30).await;
+    let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let task_id = v7_with_birth(today + Duration::hours(1));
+    let _snapshot = seed_history_row(
+        &mut transaction,
+        task_id,
+        class_key,
+        today + Duration::hours(2),
+        "FAILED",
+        "FAIL_RUNNING",
+    )
+    .await;
+    StagedLoaderPublisher
+        .republish(&mut transaction)
+        .await
+        .expect("publish status setup");
+    sqlx::query(&format!(
+        "UPDATE {TASK_HISTORY_PARENT} SET status = 'BOGUS' WHERE task_id = $1"
+    ))
+    .bind(task_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("store a status that is not a task status");
+    assert!(matches!(
+        read_task_detail(&mut transaction, task_id)
+            .await
+            .expect_err("an unknown status must refuse detail"),
+        HistoryError::Contract(ref detail) if detail.contains("\"BOGUS\"")
+    ));
+    transaction
+        .rollback()
+        .await
+        .expect("roll back status setup");
     database.drop().await;
 }
 

@@ -10,6 +10,7 @@ the cutover backfill later consults, so policy has exactly one owner.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import SecretStr
@@ -48,6 +49,7 @@ async def _enqueue(
         'policy.task',
         task_id=task_id,
         enqueue_sha='b' * 64,
+        sent_at=datetime.now(timezone.utc),
         args_json='[]',
         kwargs_json='{}',
         retain_rerun_input=retain,
@@ -83,8 +85,7 @@ async def test_none_inherits_and_explicit_overrides(
                 for row in (
                     await connection.execute(
                         text(
-                            'SELECT id, retain_rerun_input, '
-                            'prepared_rerun_input_disposition '
+                            'SELECT id, retain_rerun_input '
                             'FROM horsies_tasks'
                         )
                     )
@@ -94,10 +95,5 @@ async def test_none_inherits_and_explicit_overrides(
         await engine.dispose()
 
     assert rows[inherited].retain_rerun_input is True
-    assert rows[inherited].prepared_rerun_input_disposition == 'INLINE'
     assert rows[declined].retain_rerun_input is False
-    assert (
-        rows[declined].prepared_rerun_input_disposition
-        == 'DECLINED_BY_POLICY'
-    )
     assert rows[explicit].retain_rerun_input is True
