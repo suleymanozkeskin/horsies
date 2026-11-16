@@ -7,9 +7,9 @@ use chrono::{DateTime, Timelike, Utc};
 use crate::core::history::commands::{is_safe_identifier, open_end_anchor};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_DUPLICATE_GUARD_FUNCTION,
-    TASK_HISTORY_PARENT, TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE, TASK_PROVENANCE_FUNCTION,
-    TASK_PROVENANCE_TYPE, TASK_RESULT_FUNCTION,
+    CLOCK_EXCEPTIONS, HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION,
+    TASK_DUPLICATE_GUARD_FUNCTION, TASK_HISTORY_PARENT, TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE,
+    TASK_PROVENANCE_FUNCTION, TASK_PROVENANCE_TYPE, TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::catalog::{LeafCatalogRow, LeafLowerBound};
 
@@ -202,12 +202,15 @@ pub fn render_staged_result_function(manifest: &LookupManifest) -> String {
 }
 
 /// Duplicate-identity guard of the move family: TRUE when the id is in a
-/// history leaf that can hold it. UUIDv7 ids probe only the leaves whose upper
-/// anchor is after the id's birth (minus the clock bound); the fallback probes
-/// of the readers are omitted, so a row placed in an older leaf by a wrong
-/// client clock is not found. Other ids probe every leaf. The live table is
-/// not probed.
+/// history leaf that can hold it or is a recorded clock exception. UUIDv7 ids
+/// probe only the leaves whose upper anchor is after the id's birth (minus the
+/// clock bound); the fallback probes of the readers are omitted, and a row
+/// that a wrong client clock placed in an older leaf is found through the
+/// clock exception table, which the move writes. Other ids probe every leaf.
+/// The live table is not probed.
 pub fn render_staged_duplicate_guard_function(manifest: &LookupManifest) -> String {
+    let absence =
+        format!("RETURN EXISTS (SELECT 1 FROM {CLOCK_EXCEPTIONS} WHERE task_id = p_task_id);");
     staged_function(
         TASK_DUPLICATE_GUARD_FUNCTION,
         "boolean",
@@ -221,7 +224,7 @@ pub fn render_staged_duplicate_guard_function(manifest: &LookupManifest) -> Stri
         },
         manifest,
         FallbackProbes::Omitted,
-        Absence::Statement("RETURN FALSE;"),
+        Absence::Statement(&absence),
     )
 }
 

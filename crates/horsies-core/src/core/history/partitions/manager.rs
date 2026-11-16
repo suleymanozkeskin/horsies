@@ -20,8 +20,8 @@ use crate::core::history::ddl::runtime_names::{
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER, TASK_HISTORY_FOREVER_LEAF,
-    WORKFLOW_PHASE2_PENDING,
+    CLOCK_EXCEPTIONS, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER,
+    TASK_HISTORY_FOREVER_LEAF, WORKFLOW_PHASE2_PENDING,
 };
 use crate::core::history::outcomes::{
     CatalogConflictKind, LeafAttachment, LeafCreation, LeafDrop, LeafInspection,
@@ -1119,6 +1119,19 @@ pub async fn drop_detached_leaf<P: LoaderPublication>(
     sqlx::query(&format!("DROP TABLE {}", leaf.leaf_name()))
         .execute(&mut *connection)
         .await?;
+    // The exceptions of the rows the leaf held go with it. A heartbeat leaf
+    // holds no history row, so it has none.
+    if leaf.class_key() != HEARTBEAT_CLASS_KEY {
+        sqlx::query(&format!(
+            "DELETE FROM {CLOCK_EXCEPTIONS}
+             WHERE retention_class_key = $1 AND terminal_at >= $2 AND terminal_at < $3"
+        ))
+        .bind(leaf.class_key())
+        .bind(leaf.bounds().lower())
+        .bind(leaf.bounds().upper())
+        .execute(&mut *connection)
+        .await?;
+    }
     let sql = format!(
         "UPDATE {LEAF_CATALOG}
          SET detached_at = COALESCE(detached_at, statement_timestamp()),

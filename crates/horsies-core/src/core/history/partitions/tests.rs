@@ -2038,6 +2038,73 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
 
 #[tokio::test]
 #[serial]
+async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let now = database_now(&mut clock).await.expect("database now");
+    drop(clock);
+    let lower = utc_day_start(now - Duration::days(5));
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let inside = Uuid::new_v4();
+    let next_day = Uuid::new_v4();
+    let other_class = Uuid::new_v4();
+    for (task_id, exception_class, terminal_at) in [
+        (inside, class_key, lower + Duration::hours(1)),
+        (next_day, class_key, lower + Duration::hours(25)),
+        (other_class, "standard_30d", lower + Duration::hours(1)),
+    ] {
+        sqlx::query(
+            "INSERT INTO horsies_task_history_clock_exceptions (
+                 task_id, retention_class_key, terminal_at
+             ) VALUES ($1, $2, $3)",
+        )
+        .bind(task_id)
+        .bind(exception_class)
+        .bind(terminal_at)
+        .execute(&database.pool)
+        .await
+        .expect("seed clock exception");
+    }
+    let detach =
+        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    assert!(matches!(
+        detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
+            .await
+            .expect("detach expired leaf"),
+        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+    ));
+    let mut transaction = database.pool.begin().await.expect("begin drop");
+    assert!(matches!(
+        drop_detached_leaf(
+            &mut transaction,
+            &DropDetachedHistoryLeaf::new(leaf),
+            &UnpublishedLoader,
+        )
+        .await
+        .expect("drop detached leaf"),
+        LeafDrop::Dropped { .. }
+    ));
+    transaction.commit().await.expect("commit drop");
+    let mut remaining: Vec<Uuid> =
+        sqlx::query_scalar("SELECT task_id FROM horsies_task_history_clock_exceptions")
+            .fetch_all(&database.pool)
+            .await
+            .expect("read remaining exceptions");
+    remaining.sort();
+    let mut expected = vec![next_day, other_class];
+    expected.sort();
+    assert_eq!(remaining, expected);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
 async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
     let database = TestDatabase::create().await;
     let horizon = hours(2);
