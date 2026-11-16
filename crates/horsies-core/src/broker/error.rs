@@ -95,6 +95,11 @@ pub enum BrokerError {
     /// read contract.
     #[error("task-history read contract violation: {0}")]
     HistoryReadContract(String),
+
+    /// A claim-pass argument is outside the range that the claim function
+    /// takes. It is refused, never clamped.
+    #[error("invalid claim argument: {0}")]
+    InvalidClaimArgument(String),
 }
 
 impl BrokerError {
@@ -131,7 +136,8 @@ impl BrokerError {
             | Self::EnqueueContract(_)
             | Self::InvalidIdempotencyReservationWindow(_)
             | Self::TerminalizationContract(_)
-            | Self::HistoryReadContract(_) => false,
+            | Self::HistoryReadContract(_)
+            | Self::InvalidClaimArgument(_) => false,
         }
     }
 }
