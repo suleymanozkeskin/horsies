@@ -70,10 +70,10 @@ from horsies.core.history.terminalization.move import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.workflow.enums import WF_TASK_TERMINAL_VALUES
 from horsies.core.models.workflow.handle import (
     LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
     LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
-    WF_TASK_TERMINAL_VALUES,
 )
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.types.result import Ok, is_ok

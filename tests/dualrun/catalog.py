@@ -90,6 +90,19 @@ _PROCESS_SAMPLE: Final = Ignored(
 JSON: Final = StoredJson(storage=JsonStorage.TEXT, format=Unversioned(), paths=())
 """A JSON text with no ids or clock values inside."""
 
+TASK_INPUT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(Key(name='__h_workflow_meta__'), Key(name='workflow_id')),
+            rule=WORKFLOW_ID,
+        ),
+    ),
+)
+"""A task's input. The input of an engine-minted workflow task names its
+workflow in ``__h_workflow_meta__``."""
+
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -343,7 +356,7 @@ _TASKS: Final = TableRules(
         ('task_name', EXACT),
         ('queue_name', EXACT),
         ('priority', EXACT),
-        ('input', JSON),
+        ('input', TASK_INPUT),
         ('task_options', TASK_OPTIONS),
         ('execution', EXACT),
         ('retention_class_key', EXACT),

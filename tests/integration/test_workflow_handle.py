@@ -321,6 +321,52 @@ class TestWorkflowHandleGet:
         assert result.is_err()
         assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_PAUSED
 
+    async def test_paused_expiry_sets_completed_at_on_the_skipped_nodes(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The PENDING node that the expiry of a paused workflow skips gets completed_at."""
+        failing = make_failing_task(app, 'expiry_skip_completed_at_a')
+        waiting = make_simple_task(app, 'expiry_skip_completed_at_b')
+        node_a = TaskNode(fn=failing)
+        node_b = TaskNode(fn=waiting, kwargs={'value': 1}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker,
+            name='expiry_skip_completed_at',
+            tasks=[node_a, node_b],
+            on_error=OnError.PAUSE,
+        )
+        handle = await start_ok(spec, broker)
+        await _complete_task(
+            session,
+            broker,
+            handle.workflow_id,
+            0,
+            TaskResult(err=TaskError(error_code='FAIL', message='pause')),
+        )
+
+        expired = await expire_paused_workflows(
+            current_resources(broker).session_factory,
+            older_than=timedelta(0),
+            batch_size=1,
+        )
+
+        assert expired == 1
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, completed_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).one()
+        assert row.status == 'SKIPPED'
+        assert row.completed_at is not None
+
     async def test_auto_expired_pause_returns_workflow_expired_error(
         self,
         clean_workflow_tables: None,
@@ -1012,28 +1058,51 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
 
-    async def test_cancel_sets_completed_at(
+    async def test_cancel_sets_completed_at_on_every_cancelled_workflow(
         self,
         clean_workflow_tables: None,
         session: AsyncSession,
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """cancel() sets completed_at, as every terminal workflow status does."""
+        """The cancelled root and its cancelled child both get completed_at."""
         task_a = make_simple_task(app, 'cancel_completed_at_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='cancel_completed_at', tasks=[node_a],
         )
         handle = await start_ok(spec, broker)
-        assert await _workflow_completed_at(session, handle.workflow_id) is None
+        child_workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
+                VALUES
+                    (:child_id, 'cancel_completed_at_child', 'PAUSED', 'fail', 1,
+                     :parent_id, 0, :parent_id, NOW(), NOW(), NOW(), NOW())
+            """),
+            {'child_id': child_workflow_id, 'parent_id': handle.workflow_id},
+        )
+        await session.commit()
 
         cancel_r = await handle.cancel_async()
         assert is_ok(cancel_r)
 
-        completed_at = await _workflow_completed_at(session, handle.workflow_id)
-        assert completed_at is not None
-        assert completed_at <= datetime.now(timezone.utc)
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT id, status, completed_at FROM horsies_workflows
+                    WHERE id IN (:root_id, :child_id)
+                """),
+                {'root_id': handle.workflow_id, 'child_id': child_workflow_id},
+            )
+        ).fetchall()
+        assert len(rows) == 2
+        for row in rows:
+            assert row.status == 'CANCELLED', row
+            assert row.completed_at is not None, row
 
     async def test_cancel_skips_pending(
         self,
@@ -1063,6 +1132,40 @@ class TestWorkflowHandleCancel:
         assert is_ok(tasks_r)
         # B should be SKIPPED
         assert tasks_r.ok_value[1].status == WorkflowTaskStatus.SKIPPED
+
+    async def test_cancel_sets_completed_at_on_the_skipped_nodes(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The PENDING node and the ENQUEUED node that the cancel skips get completed_at."""
+        task_a = make_simple_task(app, 'cancel_skip_completed_at_a')
+        task_b = make_simple_task(app, 'cancel_skip_completed_at_b')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_skip_completed_at', tasks=[node_a, node_b],
+        )
+        handle = await start_ok(spec, broker)
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, completed_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id ORDER BY task_index
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchall()
+        assert [(row.task_index, row.status) for row in rows] == [
+            (0, 'SKIPPED'), (1, 'SKIPPED'),
+        ]
+        assert all(row.completed_at is not None for row in rows), rows
 
     async def test_cancel_completed_is_noop(
         self,
@@ -2317,10 +2420,12 @@ class TestWorkflowHandleInfraErrors:
         )
         handle = await start_ok(spec, broker)
 
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = OperationalError(
+        mock_connection = AsyncMock()
+        mock_connection.execute.side_effect = OperationalError(
             'connection lost', {}, Exception('test'),
         )
+        mock_session = AsyncMock()
+        mock_session.connection = AsyncMock(return_value=mock_connection)
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
