@@ -26,6 +26,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedStaleness,
     ObservedWorkflowLink,
     ObservedWorkflowState,
+    ObservedWorkflowTask,
     OutcomeDecodeError,
     SourceStateConflict,
     TaskAbsent,
@@ -297,6 +298,46 @@ class TestGuardEvidence:
             committed_kind=None,
             terminal_at=_NOW,
         )
+
+    def test_workflow_task_evidence_names_the_status(self) -> None:
+        """A finished workflow task refused by the cancel: the status is the evidence."""
+        outcome = decode_outcome_row(
+            _row(
+                outcome='SOURCE_STATE_CONFLICT',
+                observed_status='FAILED',
+                observed_worker_id=None,
+                observed_claimed_at=None,
+                terminalization_kind='FAIL_RUNNING',
+                guard_kind='WORKFLOW_TASK',
+            )
+        )
+        assert isinstance(outcome, SourceStateConflict)
+        assert outcome.evidence == ObservedWorkflowTask(observed_status=TaskStatus.FAILED)
+
+    def test_workflow_task_evidence_without_a_status_is_refused(self) -> None:
+        with pytest.raises(OutcomeDecodeError, match='without an observed status'):
+            decode_outcome_row(
+                _row(
+                    outcome='SOURCE_STATE_CONFLICT',
+                    observed_status=None,
+                    terminal_at=None,
+                    terminalization_kind=None,
+                    guard_kind='WORKFLOW_TASK',
+                )
+            )
+
+    def test_workflow_task_evidence_with_a_payload_is_refused(self) -> None:
+        with pytest.raises(OutcomeDecodeError, match='must not send a payload'):
+            decode_outcome_row(
+                _row(
+                    outcome='SOURCE_STATE_CONFLICT',
+                    observed_status='PENDING',
+                    terminal_at=None,
+                    terminalization_kind=None,
+                    guard_kind='WORKFLOW_TASK',
+                    observed_guard={'is_workflow_task': True},
+                )
+            )
 
 
 class TestDecodingFailsClosed:

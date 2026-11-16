@@ -51,6 +51,7 @@ class GuardKind(Enum):
     WORKFLOW_LINK_ABSENT = 'WORKFLOW_LINK_ABSENT'
     WORKFLOW_LINK_STATE = 'WORKFLOW_LINK_STATE'
     FOREIGN_TERMINALIZATION = 'FOREIGN_TERMINALIZATION'
+    WORKFLOW_TASK = 'WORKFLOW_TASK'
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,14 @@ class ObservedForeignTerminalization:
     terminal_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedWorkflowTask:
+    """The task belongs to a workflow, live or finished, and the operation
+    acts on plain tasks only. ``observed_status`` is the task's status."""
+
+    observed_status: TaskStatus
+
+
 type GuardEvidence = (
     ObservedClaim
     | ObservedDeadline
@@ -144,6 +153,7 @@ type GuardEvidence = (
     | ObservedWorkflowState
     | ObservedWorkflowLink
     | ObservedForeignTerminalization
+    | ObservedWorkflowTask
 )
 
 
@@ -250,6 +260,7 @@ _GUARD_PAYLOAD_KEYS: dict[GuardKind, frozenset[str]] = {
     GuardKind.WORKFLOW_LINK_ABSENT: frozenset(),
     GuardKind.WORKFLOW_LINK_STATE: frozenset({'node_status'}),
     GuardKind.FOREIGN_TERMINALIZATION: frozenset(),
+    GuardKind.WORKFLOW_TASK: frozenset(),
 }
 
 
@@ -368,6 +379,13 @@ def _decode_evidence(
                 committed_kind=_optional_kind(row),
                 terminal_at=_optional_datetime(row, 'terminal_at'),
             )
+        case GuardKind.WORKFLOW_TASK:
+            if observed.status is None:
+                raise OutcomeDecodeError(
+                    'a workflow-task refusal without an observed status. The '
+                    'refusal names the status of the task it refused.'
+                )
+            return ObservedWorkflowTask(observed_status=observed.status)
         case _ as unreachable:
             assert_never(unreachable)
 
