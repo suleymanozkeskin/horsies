@@ -1367,10 +1367,11 @@ impl PostgresBroker {
     }
 
     /// The open core pools, for a lifecycle writer that runs on the main
-    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
-    /// write: [`PostgresBroker::close`] waits for the write while the token
-    /// lives. In a worker the main core pool is the worker profile pool. An
-    /// `Idle` handle opens its pools first.
+    /// core pool ([`crate::broker::attempt_writes`]) or a workflow step
+    /// (`workflow_engine::steps`), and the token of its write:
+    /// [`PostgresBroker::close`] waits for the write while the token lives.
+    /// In a worker the main core pool is the worker profile pool. An `Idle`
+    /// handle opens its pools first.
     ///
     /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
     pub(crate) fn core_pools_for_write(
@@ -1453,7 +1454,10 @@ impl PostgresBroker {
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
-    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written. A family
+    /// read that fails on the core statement layer is
+    /// `RerunError::FamilyCheckStatement`, `FamilyCheckPoolSettings` or
+    /// `FamilyCheckRowDecode`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
@@ -3257,17 +3261,20 @@ fn idempotency_reservation_window_seconds(
 ///
 /// # Panics
 ///
-/// `ensure_client_family_for_write` fails only with a database error or a
-/// family mismatch; any other error is a defect of that function.
+/// `ensure_client_family_for_write` fails only with a family mismatch, a
+/// statement failure, a pool settings refusal or an unreadable family row;
+/// any other error is a defect of that function.
 fn rerun_family_error(error: BrokerError) -> RerunError {
     match error {
         BrokerError::ClientFamilyMismatch { stored, own } => {
             RerunError::ClientFamilyMismatch { stored, own }
         }
-        BrokerError::Database(database) => RerunError::Database(database),
+        BrokerError::Statement(failure) => RerunError::FamilyCheckStatement(failure),
+        BrokerError::PoolSettings(refused) => RerunError::FamilyCheckPoolSettings(refused),
+        BrokerError::RowDecode(unreadable) => RerunError::FamilyCheckRowDecode(unreadable),
         other => panic!(
-            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
-             error nor a family mismatch"
+            "ensure_client_family_for_write failed with {other:?}, which is none of a family \
+             mismatch, a statement failure, a pool settings refusal or an unreadable family row"
         ),
     }
 }
