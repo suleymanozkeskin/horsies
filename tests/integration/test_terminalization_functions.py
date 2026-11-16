@@ -1603,8 +1603,8 @@ async def _link_workflow_task(
                 task_options, max_retries, execution, good_until,
                 retention_class_key, status, task_id, is_subworkflow,
                 sub_workflow_id, sub_workflow_name, sub_definition_key,
-                sub_workflow_summary, result, error, created_at, started_at,
-                completed_at
+                sub_workflow_params, sub_workflow_summary, result, error,
+                created_at, started_at, completed_at
             )
             VALUES (
                 :id, :workflow_id, 0, 'node_0', 'terminalization.test', '{}',
@@ -1613,8 +1613,8 @@ async def _link_workflow_task(
                 NULL, 0, 'ISOLATED', NULL,
                 :retention_class_key, :node_status, :task_id, FALSE,
                 NULL, NULL, NULL,
-                NULL, NULL, NULL, NOW(), NULL,
-                NULL
+                NULL, NULL, NULL, NULL,
+                NOW(), NULL, NULL
             )
         """),
         {

@@ -55,12 +55,14 @@ RETURNS void LANGUAGE sql AS $$
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
         good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-        sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
+        sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
+        completed_at
     ) VALUES (
         p_id, p_workflow, p_index, 'node_' || p_index, 'fixture.task', '{"x":1}', 'default', 100, '{}', NULL,
         NULL, FALSE, 'all', NULL, NULL, 1, 'ISOLATED',
         NULL, 'forever', p_status, p_task, FALSE, NULL, NULL,
-        NULL, NULL, NULL, NULL, now(), NULL, NULL
+        NULL, NULL, NULL, NULL, NULL, now(), NULL,
+        NULL
     )
 $$;
 
