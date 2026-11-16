@@ -674,11 +674,15 @@ async def test_reaper_recovers_stale_runner_when_owner_worker_state_is_fresh(
             INSERT INTO horsies_worker_states (
                 worker_id, snapshot_at, hostname, pid, processes,
                 max_claim_batch, max_claim_per_worker, queues,
-                tasks_running, tasks_claimed, worker_started_at
+                queue_priorities, queue_max_concurrency, recovery_config,
+                tasks_running, tasks_claimed, worker_started_at,
+                slots_down, class_capacity
             ) VALUES (
                 :worker_id, NOW(), 'itest-host', 9999, 1,
                 0, 1, :queues,
-                1, 0, NOW() - INTERVAL '1 minute'
+                '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                1, 0, NOW() - INTERVAL '1 minute',
+                '[]'::jsonb, '{}'::jsonb
             )
         """),
         {'worker_id': worker_id, 'queues': ['default']},

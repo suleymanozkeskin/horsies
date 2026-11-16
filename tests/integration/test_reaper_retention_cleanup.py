@@ -76,17 +76,20 @@ async def test_expired_worker_states_deleted(
         INSERT INTO horsies_worker_states
             (worker_id, snapshot_at, hostname, pid, processes,
              max_claim_batch, max_claim_per_worker,
-             queues, tasks_running, tasks_claimed,
-             worker_started_at)
+             queues, queue_priorities, queue_max_concurrency,
+             recovery_config, tasks_running, tasks_claimed,
+             worker_started_at, slots_down, class_capacity)
         VALUES
             ('w1', NOW() - INTERVAL '48 hours', 'host', 1, 1,
              10, 10,
-             '{default}', 0, 0,
-             NOW() - INTERVAL '48 hours'),
+             '{default}', '{}'::jsonb, '{}'::jsonb,
+             '{}'::jsonb, 0, 0,
+             NOW() - INTERVAL '48 hours', '[]'::jsonb, '{}'::jsonb),
             ('w1', NOW() - INTERVAL '1 hour', 'host', 1, 1,
              10, 10,
-             '{default}', 0, 0,
-             NOW() - INTERVAL '2 hours')
+             '{default}', '{}'::jsonb, '{}'::jsonb,
+             '{}'::jsonb, 0, 0,
+             NOW() - INTERVAL '2 hours', '[]'::jsonb, '{}'::jsonb)
     """))
     await session.commit()
 

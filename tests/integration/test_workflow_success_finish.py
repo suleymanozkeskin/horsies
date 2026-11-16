@@ -325,12 +325,14 @@ class TestApplied:
                 text("""
                     INSERT INTO horsies_task_attempts
                         (task_id, attempt, outcome, will_retry,
-                         started_at, finished_at, error_code)
+                         started_at, finished_at, error_code, worker_id,
+                         worker_hostname, worker_pid, worker_process_name)
                     SELECT CAST(:id AS uuid), n, 'FAILED', TRUE,
-                           NOW() - interval '1 minute', NOW(), 'FLAKY'
+                           NOW() - interval '1 minute', NOW(), 'FLAKY',
+                           :worker, 'host-1', 4242, 'child-1'
                     FROM generate_series(1, 2) AS n
                 """),
-                {'id': seeded.task_id},
+                {'id': seeded.task_id, 'worker': WORKER},
             )
 
         outcome = await _finish(engine, _command(seeded))
