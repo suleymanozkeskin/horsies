@@ -2738,8 +2738,6 @@ async def get_dependency_results(
             source metadata so args_from decode resolves SubWorkflowNode
             OkT by the unique definition_key, not the ambiguous name)
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
-
     if not dependency_indices:
         return ({}, {}, {})
 
@@ -2757,37 +2755,66 @@ async def get_dependency_results(
     definition_keys_by_index: dict[int, str | None] = {}
     for row in result.fetchall():
         task_index = row.task_index
-        task_name = row.task_name
-        status = row.status
-        stored_result = row.result
-        sub_definition_key = row.sub_definition_key
-        task_names_by_index[task_index] = task_name
-        definition_keys_by_index[task_index] = sub_definition_key
-
-        if status == WorkflowTaskStatus.SKIPPED.value:
-            # Inject sentinel TaskResult for SKIPPED dependencies
-            results[task_index] = TaskResult(
-                err=TaskError(
-                    error_code=OutcomeCode.UPSTREAM_SKIPPED,
-                    message='Upstream dependency was SKIPPED',
-                    data={'dependency_index': task_index},
-                )
-            )
-        elif stored_result:
-            decoded_tr = _decode_stored_task_result(
-                stored_result,
-                app=app,
-                task_name=task_name,
-                context={
-                    'workflow_id': workflow_id,
-                    'task_index': task_index,
-                    'status': status,
-                },
-                sub_definition_key=sub_definition_key,
-            )
-            results[task_index] = decoded_tr
+        task_names_by_index[task_index] = row.task_name
+        definition_keys_by_index[task_index] = row.sub_definition_key
+        dependency_result = terminal_dependency_result(
+            app,
+            workflow_id=workflow_id,
+            task_index=task_index,
+            status=row.status,
+            stored_result=row.result,
+            task_name=row.task_name,
+            sub_definition_key=row.sub_definition_key,
+        )
+        if dependency_result is not None:
+            results[task_index] = dependency_result
 
     return (results, task_names_by_index, definition_keys_by_index)
+
+
+def terminal_dependency_result(
+    app: 'Horsies | None',
+    *,
+    workflow_id: str,
+    task_index: int,
+    status: str,
+    stored_result: str | None,
+    task_name: str,
+    sub_definition_key: str | None,
+) -> 'TaskResult[Any, TaskError] | None':
+    """The result that a terminal dependency gives a node that it promotes.
+
+    - SKIPPED: an ``UPSTREAM_SKIPPED`` error naming the dependency index.
+    - COMPLETED or FAILED with a stored result: the result decoded with the
+      source's ok type (``_decode_stored_task_result``).
+    - COMPLETED or FAILED with no stored result: ``None``; the node gets no
+      value for it.
+
+    Does no I/O.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    if status == WorkflowTaskStatus.SKIPPED.value:
+        return TaskResult(
+            err=TaskError(
+                error_code=OutcomeCode.UPSTREAM_SKIPPED,
+                message='Upstream dependency was SKIPPED',
+                data={'dependency_index': task_index},
+            )
+        )
+    if not stored_result:
+        return None
+    return _decode_stored_task_result(
+        stored_result,
+        app=app,
+        task_name=task_name,
+        context={
+            'workflow_id': workflow_id,
+            'task_index': task_index,
+            'status': status,
+        },
+        sub_definition_key=sub_definition_key,
+    )
 
 
 

@@ -17,11 +17,10 @@ from typing import Final
 
 
 from horsies.core.lifecycle.persistence import apply_batch_async
-from horsies.core.codec.json_io import Json, dumps_json, loads_json, SerializationError, SerdeResult
+from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import Execution, OutcomeCode, TaskError
-from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.brokers.result_types import (
@@ -30,7 +29,6 @@ from horsies.core.brokers.result_types import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
-    TaskNode,
     WorkflowHandle,
     SubWorkflowNode,
     validate_workflow_generic_output_match,
@@ -63,15 +61,18 @@ from horsies.core.workflows.functions import (
     PauseOutcome,
     decode_pause_outcome,
 )
-from horsies.core.workflows.retention import queue_retention_class
+from horsies.core.workflows.start_tree import start_parameters, start_tree
+from horsies.core.workflows.steps import (
+    START_WORKFLOW_FUNCTION_SQL,
+    ParentAdvanceFailure,
+    StartDisposition,
+    advance_parents,
+    decode_step_rows,
+    require_no_child_starts,
+    run_in_transaction,
+)
 from horsies.core.workflows.sql import (
-    GET_WORKFLOW_STATUS_SQL,
-    INSERT_TASK_FOR_WORKFLOW_SQL,
-    INSERT_WORKFLOW_TASKS_BULK_SQL,
-    REVERT_PRELINKED_FAST_ROOTS_SQL,
     CHECK_WORKFLOW_EXISTS_SQL,
-    GET_WORKFLOW_NAME_SQL,
-    INSERT_WORKFLOW_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
     RESUME_WORKFLOW_SQL,
@@ -81,13 +82,8 @@ from horsies.core.workflows.sql import (
     RESUME_CHILD_WORKFLOW_SQL,
     SubWorkflowParams,
     TaskNodeFacts,
-    subworkflow_node_kind_params,
     task_node_facts,
-    task_node_kind_params,
-    with_downstream_subworkflow,
-    workflow_task_row_params,
 )
-from horsies.core.history.identity.uuid7 import mint_task_id
 
 logger = get_logger('workflow.engine')
 
@@ -277,6 +273,36 @@ def _start_loop_limit(
     )
 
 
+_START_FUNCTION: Final = 'horsies_workflow_start'
+
+
+async def _advance_after_start(
+    broker: 'PostgresBroker',
+    session_factory: async_sessionmaker[AsyncSession],
+    workflow_id: str,
+    parent_advances: tuple[str, ...],
+) -> None:
+    """Advance the parent nodes of the child workflows that the owed child
+    starts of a start ended, one transaction per level.
+
+    The start committed, so a failed advance does not fail it: the error is
+    logged, and workflow recovery advances the node (a terminal child under
+    a live parent node). Does nothing when none is owed.
+    """
+    if not parent_advances:
+        return
+    failure = await advance_parents(broker, session_factory, parent_advances)
+    match failure:
+        case None:
+            return
+        case ParentAdvanceFailure(failed_child_workflow_id=child_id, cause=cause):
+            logger.error(
+                f'Parent advance after the start of workflow {workflow_id} failed at '
+                f'child workflow {child_id}: {type(cause).__name__}: {cause}; '
+                'workflow recovery advances it',
+            )
+
+
 async def start_workflow_async(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
@@ -287,7 +313,20 @@ async def start_workflow_async(
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow asynchronously.
 
-    Creates workflow and workflow_tasks records, then enqueues root tasks.
+    The tree is built in memory first (``start_tree``): the workflow row,
+    every node row, a pre-built child for every sub-workflow root (its
+    ``build_with`` runs here, also when the id exists already, so it must
+    have no side effects), and a failed-node record for each sub-workflow
+    root whose child cannot be built. Then one call of
+    ``horsies_workflow_start`` writes it and enqueues the root nodes:
+
+    - no failed-node record: one statement in autocommit;
+    - failed-node records: ``BEGIN``, the start, one
+      ``horsies_workflow_child_start`` per child start that their
+      progression owes, ``COMMIT``. After the commit, the parent nodes of
+      the child workflows that those child starts ended advance, one
+      transaction per level; a failed advance is logged and left to
+      workflow recovery.
 
     Args:
         spec: The workflow specification.
@@ -302,26 +341,20 @@ async def start_workflow_async(
         ``Ok(WorkflowHandle)`` on success.
         ``Err(WorkflowStartError)`` on failure; match on the variant. A
         ``WorkflowValidationError`` from prevalidation is
-        ``WorkflowStartValidationFailed``. A database or driver error in the
-        start transaction is ``WorkflowStartEnqueueFailed``. Any other
-        exception from prevalidation or from the start transaction is a
-        defect and propagates, also a ``SerializationError``: the start
-        transaction encodes only values that the process built and
-        validated before the start. The transaction then rolls back.
+        ``WorkflowStartValidationFailed``. A database or driver error of the
+        start statement is ``WorkflowStartEnqueueFailed``; nothing committed,
+        or the commit outcome is unknown (a resend with the same id then
+        finds the workflow). Any other exception from prevalidation, from
+        the tree build or from the statement is a defect and propagates,
+        also a ``SerializationError`` (the tree encodes only values that the
+        process built and validated before the start) and an
+        ``OutcomeDecodeError`` (a row outside the function's contract).
 
     Notes:
-        If workflow_id is provided and already exists, returns existing handle
-        (best-effort idempotent by workflow_id, not payload-verified).
+        If workflow_id is provided and already exists with the same name,
+        returns the existing handle (best-effort idempotent by workflow_id,
+        not payload-verified); with another name, ``WorkflowStartIdConflict``.
     """
-    # Deferred imports: engine.py and task_decorator.py each load this
-    # module when they are imported.
-    from horsies.core.workflows.engine import (
-        drain_parent_propagations_in_session,
-        enqueue_workflow_task,
-        enqueue_subworkflow_task,
-    )
-    from horsies.core.task_decorator import resolve_node_queue
-
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
 
@@ -380,6 +413,12 @@ async def start_workflow_async(
             exception=exc,
         ))
 
+    # ── Zone 1b: the tree (no I/O) ───────────────────────────────────
+    # The child of every sub-workflow root is built here, before the
+    # statement: its build_with runs even when the id exists already.
+    tree = start_tree(broker, spec, wf_id)
+    parameters = start_parameters(tree, workflow_sent_at)
+
     # ── Zone 2: Schema init + DB transaction (retried when transient) ─
     from horsies.core.types.result import is_err
 
@@ -422,353 +461,34 @@ async def start_workflow_async(
                 continue
             return Err(last_err)
 
-        # ── DB transaction ───────────────────────────────────────────
+        # ── The start statement ──────────────────────────────────────
         try:
             async with resources.session_factory() as session:
-                # 1. Insert workflow record atomically (idempotent on workflow ID)
-                output_index = spec.output.index if spec.output else None
-
-                # Serialize success_policy to index-based format
-                success_policy_json: dict[str, Any] | None = None
-                if spec.success_policy is not None:
-                    success_policy_json = {
-                        'cases': [
-                            {
-                                'required_indices': [
-                                    t.index for t in case.required if t.index is not None
-                                ]
-                            }
-                            for case in spec.success_policy.cases
-                        ],
-                    }
-                    if spec.success_policy.optional:
-                        success_policy_json['optional_indices'] = [
-                            t.index for t in spec.success_policy.optional if t.index is not None
-                        ]
-
-                insert_result = await session.execute(
-                    INSERT_WORKFLOW_SQL,
-                    {
-                        'id': wf_id,
-                        'name': spec.name,
-                        'on_error': spec.on_error.value,
-                        'output_idx': output_index,
-                        'success_policy': _ser_or_raise(dumps_json(success_policy_json), 'success_policy')
-                        if success_policy_json
-                        else None,
-                        'definition_key': spec.definition_key,
-                        'sent_at': workflow_sent_at,
-                    },
-                )
-                inserted_wf_id = insert_result.scalar_one_or_none()
-                if inserted_wf_id is None:
-                    existing_name_result = await session.execute(
-                        GET_WORKFLOW_NAME_SQL,
-                        {'wf_id': wf_id},
-                    )
-                    existing_name_row = existing_name_result.fetchone()
-                    existing_name = existing_name_row.name if existing_name_row else None
-                    if existing_name is not None and existing_name != spec.name:
-                        return Err(WorkflowStartIdConflict(
-                            message=(
-                                f"workflow_id '{wf_id}' already exists for workflow "
-                                f"name '{existing_name}', cannot start workflow "
-                                f"name '{spec.name}' with the same id"
+                match tree.has_failed_records:
+                    case False:
+                        connection = await autocommit_connection(session)
+                        rows = (
+                            await connection.execute(START_WORKFLOW_FUNCTION_SQL, parameters)
+                        ).fetchall()
+                        outcome = require_no_child_starts(
+                            decode_step_rows(
+                                rows, _START_FUNCTION, StartDisposition, tree.workflow_names(),
                             ),
-                            workflow_name=spec.name,
-                            workflow_id=wf_id,
-                            existing_workflow_name=existing_name,
-                        ))
-                    logger.warning(
-                        f'Workflow {wf_id} already exists, returning existing handle'
-                    )
-                    return Ok(cast(
-                        'WorkflowHandle[OutT]',
-                        WorkflowHandle(
-                workflow_id=wf_id,
-                broker=broker,
-                out_type=(
-                    _resolve_source_node_ok_type(spec.output)
-                    if spec.output is not None
-                    else _OUTPUTLESS_TERMINALS
-                ),
-            ),
-                    ))
-
-                # 2+3. Build every node row in memory, then bulk insert.
-                # The previous shape executed one INSERT per node plus
-                # three statements per root, sequentially — O(4N) round
-                # trips in one transaction (~16s at N=119 against a
-                # ~33ms-RTT remote database). The batched shape is a fixed
-                # handful of pipelined statements.
-                #
-                # Fast-path roots (plain TaskNodes without args_from /
-                # workflow_ctx_from) are inserted directly as ENQUEUED with
-                # task_id pre-linked and their horsies_tasks row created in
-                # the same batch. The READY->ENQUEUED CAS that the
-                # promotion path performs is vacuous here: these rows are
-                # created in this same uncommitted transaction (see
-                # INSERT_WORKFLOW_TASKS_BULK_SQL). Subworkflow roots and
-                # args_from/ctx_from roots keep the per-row path below —
-                # they need recursive child starts or engine-owned
-                # context assembly and conflict checks.
-                #
-                # NOTE: serialization failures (_ser_or_raise) raise while
-                # building params, before any INSERT executes. They are
-                # defects and propagate; the transaction rolls back with no
-                # partial state.
-                node_params: list[dict[str, Any]] = []
-                fast_root_task_params: list[dict[str, Any]] = []
-                fast_root_indexes: list[int] = []
-                slow_root_nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
-
-                for node in spec.tasks:
-                    dep_indices = [d.index for d in node.waits_for if d.index is not None]
-                    args_from_indices = {
-                        k: v.index for k, v in node.args_from.items() if v.index is not None
-                    }
-                    ctx_from_ids = (
-                        [n.node_id for n in node.workflow_ctx_from if n.node_id is not None]
-                        if node.workflow_ctx_from
-                        else None
-                    )
-                    args_from_json = (
-                        _ser_or_raise(dumps_json(args_from_indices), 'args_from')
-                        if args_from_indices
-                        else None
-                    )
-                    is_root = not node.waits_for
-
-                    wt_id = str(uuid.uuid4())
-
-                    if isinstance(node, SubWorkflowNode):
-                        # SubWorkflowNode: no fn, queue, priority, good_until
-                        assert not node.args, (
-                            f"SubWorkflowNode '{node.name}' reached the start "
-                            f'transaction with {len(node.args)} positional args; '
-                            'spec construction refuses them'
+                            _START_FUNCTION,
                         )
-                        if is_root:
-                            slow_root_nodes.append(node)
-                        node_params.append({
-                            'id': wt_id,
-                            'wf_id': wf_id,
-                            'idx': node.index,
-                            'node_id': node.node_id,
-                            'name': node.name,
-                            'input': _ser_or_raise(
-                                dumps_json(stored_kwargs(node)),
-                                f'kwargs for node {node.name}',
-                            ),
-                            'queue': 'default',  # SubWorkflowNode doesn't have queue
-                            'priority': 100,  # SubWorkflowNode doesn't have priority
-                            'deps': dep_indices,
-                            'args_from': args_from_json,
-                            'ctx_from': ctx_from_ids,
-                            'allow_failed': node.allow_failed_deps,
-                            'join_type': node.join,
-                            'min_success': node.min_success,
-                            'task_options': None,
-                            **subworkflow_node_kind_params(
-                                subworkflow_params_of(node),
-                            ),
-                            'status': 'PENDING' if dep_indices else 'READY',
-                            'is_subworkflow': True,
-                            'sub_wf_name': node.workflow_def.name,
-                            'sub_def_key': node.workflow_def._require_definition_key(),
-                            'task_id': None,
-                            'is_enqueued': False,
-                        })
-                        continue
-
-                    # TaskNode: has fn, queue, priority, good_until
-                    task = node
-                    assert not task.args, (
-                        f"TaskNode '{task.name}' reached the start transaction "
-                        f'with {len(task.args)} positional args; spec '
-                        'construction refuses them'
-                    )
-
-                    # Get task_options_json from the task function (set by @task decorator)
-                    # and merge in TaskNode.good_until if set. The options are
-                    # the decorator's serialization of a validated TaskOptions,
-                    # so options that are not a JSON object are a defect.
-                    task_options_json: str | None = task.fn.task_options_json
-                    if task.good_until is not None:
-                        # Merge good_until from TaskNode into task_options
-                        base_options: dict[str, Json] = {}
-                        if task_options_json:
-                            match loads_json(task_options_json):
-                                case Ok(dict() as parsed_options):
-                                    base_options = parsed_options
-                                case Ok(not_an_object):
-                                    raise SerializationError(
-                                        f'Task options for node {task.name} are not '
-                                        f'a JSON object: got {type(not_an_object).__name__}',
-                                    )
-                                case Err(parse_error):
-                                    raise SerializationError(
-                                        f'Corrupt task_options_json for node {task.name}: {parse_error}',
-                                    )
-                                case _ as unreachable:
-                                    assert_never(unreachable)
-                        base_options['good_until'] = task.good_until.isoformat()
-                        task_options_json = _ser_or_raise(
-                            dumps_json(base_options),
-                            f'task_options for node {task.name}',
+                        parent_advances: tuple[str, ...] = ()
+                    case True:
+                        committed = await run_in_transaction(
+                            session,
+                            broker,
+                            START_WORKFLOW_FUNCTION_SQL,
+                            parameters,
+                            _START_FUNCTION,
+                            StartDisposition,
+                            tree.workflow_names(),
                         )
-
-                    encoded_kwargs = stored_kwargs(task)
-                    resolved_queue = resolve_node_queue(task)
-                    # Prevalidation refused priority=None for every TaskNode
-                    # in spec.tasks, and the spec and its nodes are frozen.
-                    assert task.priority is not None, (
-                        f"TaskNode '{task.name}' reached the start transaction "
-                        'with priority=None; start prevalidation refuses it'
-                    )
-                    resolved_priority = task.priority
-                    node_facts = start_task_node_facts(
-                        task_options_json,
-                        task.name,
-                        queue_retention_class(broker, resolved_queue),
-                    )
-
-                    is_fast_root = (
-                        is_root and not args_from_indices and not ctx_from_ids
-                    )
-                    task_id: str | None = None
-                    if is_fast_root:
-                        task_id = mint_task_id()
-                        # Task-row kwargs = node kwargs + workflow_meta
-                        # (mirrors enqueue_workflow_task; args_from/ctx
-                        # injection is structurally absent on fast roots).
-                        task_kwargs: dict[str, Any] = dict(encoded_kwargs)
-                        task_kwargs['__h_workflow_meta__'] = {
-                            'workflow_id': wf_id,
-                            'task_index': task.index,
-                            'task_name': task.name,
-                        }
-                        task_kwargs_json = _ser_or_raise(
-                            dumps_json(task_kwargs),
-                            f'task kwargs for node {task.name}',
-                        )
-                        fast_root_indexes.append(task.index)
-                        fast_root_task_params.append(workflow_task_row_params(
-                            task_id=task_id,
-                            task_name=task.name,
-                            queue_name=resolved_queue,
-                            priority=resolved_priority,
-                            input_json=task_kwargs_json,
-                            sent_at=workflow_sent_at,
-                            task_options_json=task_options_json,
-                            facts=node_facts,
-                        ))
-                    elif is_root:
-                        slow_root_nodes.append(task)
-
-                    node_params.append({
-                        'id': wt_id,
-                        'wf_id': wf_id,
-                        'idx': task.index,
-                        'node_id': task.node_id,
-                        'name': task.name,
-                        'input': _ser_or_raise(
-                            dumps_json(encoded_kwargs),
-                            f'kwargs for node {task.name}',
-                        ),
-                        'queue': resolved_queue,
-                        'priority': resolved_priority,
-                        'deps': dep_indices,
-                        'args_from': args_from_json,
-                        'ctx_from': ctx_from_ids,
-                        'allow_failed': task.allow_failed_deps,
-                        'join_type': task.join,
-                        'min_success': task.min_success,
-                        'task_options': task_options_json,
-                        **task_node_kind_params(node_facts),
-                        'status': 'ENQUEUED'
-                        if is_fast_root
-                        else ('PENDING' if dep_indices else 'READY'),
-                        'is_subworkflow': False,
-                        'sub_wf_name': None,
-                        'sub_def_key': None,
-                        'task_id': task_id,
-                        'is_enqueued': task_id is not None,
-                    })
-
-                if node_params:
-                    await session.execute(
-                        INSERT_WORKFLOW_TASKS_BULK_SQL,
-                        with_downstream_subworkflow(node_params),
-                    )
-                # Slow-path roots first: subworkflows start child
-                # workflows recursively; args_from/ctx_from roots go
-                # through the engine's enqueue (context assembly,
-                # conflict checks). A slow root's failure may pause THIS
-                # workflow (its on_error policy), which must gate the
-                # fast-root task rows below.
-                for root_node in slow_root_nodes:
-                    if root_node.index is not None:
-                        if isinstance(root_node, SubWorkflowNode):
-                            # Start child workflow
-                            await enqueue_subworkflow_task(
-                                session,
-                                broker,
-                                wf_id,
-                                root_node.index,
-                                all_dep_results={},
-                                all_dep_task_names={},
-                                parent_depth=0,
-                                root_workflow_id=wf_id,
-                                child_sent_at=workflow_sent_at,
-                            )
-                        else:
-                            # Enqueue regular task
-                            await enqueue_workflow_task(
-                                session,
-                                wf_id,
-                                root_node.index,
-                                all_dep_results={},
-                                all_dep_task_names={},
-                                broker=broker,
-                            )
-
-                # A synchronously terminal child workflow can queue parent
-                # propagation while slow roots run. Drain before the fast-root
-                # gate so a child failure can pause THIS workflow before any
-                # runnable fast-root task rows land.
-                if slow_root_nodes:
-                    await drain_parent_propagations_in_session(session, broker)
-
-                # Fast-root task rows land only if the workflow is still
-                # runnable: a slow root's failure, or drained child->parent
-                # propagation from a synchronously failed child, may have
-                # paused it. On pause, the fast roots revert to READY — the
-                # paused workflow gains no runnable task rows, and resume
-                # re-enqueues READY nodes through the normal path.
-                if fast_root_task_params:
-                    runnable = True
-                    if slow_root_nodes:
-                        status_check = await session.execute(
-                            GET_WORKFLOW_STATUS_SQL, {'wf_id': wf_id},
-                        )
-                        status_row = status_check.fetchone()
-                        runnable = (
-                            status_row is not None
-                            and status_row.status == 'RUNNING'
-                        )
-                    if runnable:
-                        await session.execute(
-                            INSERT_TASK_FOR_WORKFLOW_SQL, fast_root_task_params,
-                        )
-                    else:
-                        await session.execute(
-                            REVERT_PRELINKED_FAST_ROOTS_SQL,
-                            {'wf_id': wf_id, 'idxs': fast_root_indexes},
-                        )
-
-                await session.commit()
-
+                        outcome = committed.outcome
+                        parent_advances = committed.parent_advances
         except asyncio.CancelledError:
             raise
         except (SQLAlchemyError, PsycopgError) as exc:
@@ -784,6 +504,30 @@ async def start_workflow_async(
             if last_err.retryable and attempt < max_attempts - 1:
                 continue
             return Err(last_err)
+
+        await _advance_after_start(broker, resources.session_factory, wf_id, parent_advances)
+        match outcome.disposition:
+            case StartDisposition.STARTED:
+                pass
+            case StartDisposition.EXISTS:
+                match outcome.detail:
+                    case str() as existing_name if existing_name != spec.name:
+                        return Err(WorkflowStartIdConflict(
+                            message=(
+                                f"workflow_id '{wf_id}' already exists for workflow "
+                                f"name '{existing_name}', cannot start workflow "
+                                f"name '{spec.name}' with the same id"
+                            ),
+                            workflow_name=spec.name,
+                            workflow_id=wf_id,
+                            existing_workflow_name=existing_name,
+                        ))
+                    case _:
+                        logger.warning(
+                            f'Workflow {wf_id} already exists, returning existing handle'
+                        )
+            case _ as unreachable:
+                assert_never(unreachable)
 
         # Success — exit retry loop.
         return Ok(cast(

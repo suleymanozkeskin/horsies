@@ -1,13 +1,14 @@
-"""Workflow start: what prevalidation and the start transaction catch.
+"""Workflow start: what prevalidation and the start statement catch.
 
 Prevalidation returns ``WorkflowStartValidationFailed`` only for a
-``WorkflowValidationError``. The start transaction returns no
+``WorkflowValidationError``. The build of the start statement returns no
 ``WorkflowStartValidationFailed``: it encodes only values that the process
 built and validated before the start, so a ``SerializationError`` there is a
-defect too. Any other exception from either part, except a database or
-driver error in the transaction, is a defect and propagates. The transaction
-asserts the facts that spec construction and prevalidation guarantee, and it
-takes the node queue from the rule that ``app.workflow()`` uses.
+defect too, raised before any statement is sent. Any other exception from
+either part, except a database or driver error of the statement, is a defect
+and propagates. The build asserts the facts that spec construction and
+prevalidation guarantee, and it takes the node queue from the rule that
+``app.workflow()`` uses.
 """
 
 from __future__ import annotations
@@ -43,8 +44,13 @@ from horsies.core.models.workflow import (
 from horsies.core.task_decorator import TaskFunction
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
-from horsies.core.workflows.sql import INSERT_WORKFLOW_TASKS_BULK_SQL
 from tests.broker_resources_support import attach_resources, fake_resources
+from tests.workflow_start_support import (
+    node_rows,
+    outcome_row,
+    start_parameters,
+    start_session,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -81,20 +87,13 @@ def _register_echo(app: Horsies, queue_name: str | None = None) -> TaskFunction[
 
 
 def _accepting_session(app: Horsies) -> MagicMock:
-    """Give the app's broker a session whose workflow INSERT inserts a new row.
+    """Give the app's broker a session whose start statement writes a new tree.
 
-    Nothing reaches a database. Returns the session, to read what the start
-    sent to it.
+    Nothing reaches a database. Returns the session; the statement goes to
+    its autocommit connection (``session.connection``).
     """
     broker = app.get_broker()
-    insert_result = MagicMock()
-    insert_result.scalar_one_or_none.return_value = WORKFLOW_ID
-    session = MagicMock()
-    session.execute = AsyncMock(return_value=insert_result)
-    session.commit = AsyncMock()
-    session_ctx = MagicMock()
-    session_ctx.__aenter__ = AsyncMock(return_value=session)
-    session_ctx.__aexit__ = AsyncMock(return_value=False)
+    session, session_ctx, _ = start_session([outcome_row('STARTED')])
     attach_resources(
         broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)),
     )
@@ -103,14 +102,14 @@ def _accepting_session(app: Horsies) -> MagicMock:
 
 
 def _workflow_task_rows(session: MagicMock) -> list[dict[str, Any]]:
-    """The node rows of the one ``INSERT_WORKFLOW_TASKS_BULK_SQL`` call."""
-    calls = [
-        call for call in session.execute.await_args_list
-        if call.args[0] is INSERT_WORKFLOW_TASKS_BULK_SQL
-    ]
-    assert len(calls) == 1, calls
-    rows: list[dict[str, Any]] = calls[0].args[1]
-    return rows
+    """The node rows of the one start statement."""
+    return node_rows(start_parameters(session.connection.return_value))
+
+
+def _assert_nothing_sent(session: MagicMock) -> None:
+    """The start sent no statement."""
+    session.connection.assert_not_awaited()
+    session.execute.assert_not_awaited()
 
 
 def _definition_key(label: str) -> str:
@@ -163,15 +162,15 @@ class TestPrevalidationCatch:
 
 
 # =============================================================================
-# Start transaction
+# The start statement
 # =============================================================================
 
 
 class TestTransactionValueError:
-    """The start transaction has no ``ValueError`` arm."""
+    """The build of the start statement has no ``ValueError`` arm."""
 
     @pytest.mark.asyncio
-    async def test_a_value_error_in_the_transaction_propagates_and_nothing_commits(
+    async def test_a_value_error_in_the_statement_build_propagates_and_nothing_is_sent(
         self,
     ) -> None:
         app = _default_app()
@@ -185,21 +184,21 @@ class TestTransactionValueError:
         defect = ValueError(DEFECT_MARKER)
 
         with patch(
-            'horsies.core.workflows.lifecycle.workflow_task_row_params',
+            'horsies.core.workflows.lifecycle.start_parameters',
             side_effect=defect,
         ):
             with pytest.raises(ValueError) as exc_info:
                 await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert exc_info.value is defect
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
 
 class TestTransactionSerializationError:
-    """The start transaction has no ``SerializationError`` arm."""
+    """The build of the start statement has no ``SerializationError`` arm."""
 
     @pytest.mark.asyncio
-    async def test_corrupt_task_options_of_a_root_propagate_and_nothing_commits(
+    async def test_corrupt_task_options_of_a_root_propagate_and_nothing_is_sent(
         self,
     ) -> None:
         app = _default_app()
@@ -217,10 +216,10 @@ class TestTransactionSerializationError:
             await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert 'start_catches.echo' in str(exc_info.value)
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
     @pytest.mark.asyncio
-    async def test_corrupt_task_options_of_a_dependent_propagate_and_nothing_commits(
+    async def test_corrupt_task_options_of_a_dependent_propagate_and_nothing_is_sent(
         self,
     ) -> None:
         """The start writes the task facts of every task node, so it parses
@@ -246,14 +245,10 @@ class TestTransactionSerializationError:
             await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert 'start_catches.corrupt_dependent' in str(exc_info.value)
-        assert not any(
-            call.args[0] is INSERT_WORKFLOW_TASKS_BULK_SQL
-            for call in session.execute.await_args_list
-        )
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
     @pytest.mark.asyncio
-    async def test_a_serialization_error_in_the_transaction_propagates_and_nothing_commits(
+    async def test_a_serialization_error_in_the_statement_build_propagates_and_nothing_is_sent(
         self,
     ) -> None:
         app = _default_app()
@@ -267,18 +262,18 @@ class TestTransactionSerializationError:
         defect = SerializationError(DEFECT_MARKER)
 
         with patch(
-            'horsies.core.workflows.lifecycle.stored_kwargs',
+            'horsies.core.workflows.child_build.stored_kwargs',
             side_effect=defect,
         ):
             with pytest.raises(SerializationError) as exc_info:
                 await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert exc_info.value is defect
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
 
 class TestTransactionGoodUntilMerge:
-    """The transaction merges a node's ``good_until`` into the task options.
+    """The tree build merges a node's ``good_until`` into the task options.
 
     The options are the task decorator's serialization of a validated
     ``TaskOptions``. Options that are JSON but not an object are a defect,
@@ -311,7 +306,7 @@ class TestTransactionGoodUntilMerge:
         [('"just a string"', 'str'), ('[1, 2]', 'list'), ('null', 'NoneType')],
         ids=['string', 'array', 'null'],
     )
-    async def test_options_that_are_not_an_object_raise_and_nothing_commits(
+    async def test_options_that_are_not_an_object_raise_and_nothing_is_sent(
         self,
         options_json: str,
         type_name: str,
@@ -334,7 +329,7 @@ class TestTransactionGoodUntilMerge:
             'Task options for node start_catches.echo are not a JSON object: '
             f'got {type_name}'
         )
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
 
 def _child_workflow(echo: TaskFunction[..., int]) -> type[WorkflowDefinition[int]]:
@@ -348,7 +343,7 @@ def _child_workflow(echo: TaskFunction[..., int]) -> type[WorkflowDefinition[int
 
 
 class TestTransactionAsserts:
-    """The transaction asserts what construction and prevalidation guarantee."""
+    """The tree build asserts what construction and prevalidation guarantee."""
 
     @pytest.mark.asyncio
     async def test_a_task_node_with_positional_args_fails_an_assert_that_names_it(
@@ -370,7 +365,7 @@ class TestTransactionAsserts:
         message = str(exc_info.value)
         assert "TaskNode 'start_catches.echo'" in message
         assert '1 positional args' in message
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
     @pytest.mark.asyncio
     async def test_a_subworkflow_node_with_positional_args_fails_an_assert_that_names_it(
@@ -392,7 +387,7 @@ class TestTransactionAsserts:
         message = str(exc_info.value)
         assert "SubWorkflowNode 'start_catches_child'" in message
         assert '2 positional args' in message
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
     @pytest.mark.asyncio
     async def test_a_priority_that_turns_none_after_prevalidation_fails_an_assert(
@@ -407,7 +402,7 @@ class TestTransactionAsserts:
         )
         session = _accepting_session(app)
 
-        # Prevalidation reads 50; the transaction reads None.
+        # Prevalidation reads 50; the tree build reads None.
         with patch.object(
             TaskNode, 'priority', new_callable=PropertyMock, side_effect=[50, None],
         ):
@@ -417,7 +412,7 @@ class TestTransactionAsserts:
         message = str(exc_info.value)
         assert "TaskNode 'start_catches.echo'" in message
         assert 'priority=None' in message
-        session.commit.assert_not_awaited()
+        _assert_nothing_sent(session)
 
 
 class TestTransactionQueueRule:
@@ -440,7 +435,7 @@ class TestTransactionQueueRule:
         result = await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert is_ok(result)
-        assert [row['queue'] for row in _workflow_task_rows(session)] == ['emails']
+        assert [row['queue_name'] for row in _workflow_task_rows(session)] == ['emails']
 
     @pytest.mark.asyncio
     async def test_a_direct_spec_with_an_empty_queue_and_no_task_queue_stores_default(
@@ -459,7 +454,7 @@ class TestTransactionQueueRule:
         result = await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert is_ok(result)
-        assert [row['queue'] for row in _workflow_task_rows(session)] == ['default']
+        assert [row['queue_name'] for row in _workflow_task_rows(session)] == ['default']
 
     @pytest.mark.asyncio
     async def test_a_frozen_node_with_an_empty_queue_reused_in_app_workflow(
@@ -486,4 +481,4 @@ class TestTransactionQueueRule:
         result = await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert is_ok(result)
-        assert [row['queue'] for row in _workflow_task_rows(session)] == ['emails']
+        assert [row['queue_name'] for row in _workflow_task_rows(session)] == ['emails']
