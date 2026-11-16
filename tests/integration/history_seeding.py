@@ -64,6 +64,29 @@ HISTORY_SEED_CLASS_KEY = DEFAULT_RETENTION_CLASS_KEY
 live rows, and production-enqueued rows all share one registered class."""
 
 
+def seed_terminalization_kind(status: str) -> str:
+    """The kind a seeded history row carries when its test names none.
+
+    Each kind is one a real operation writes with that status. FAILED,
+    EXPIRED and CANCELLED take a kind of the reaper's families, so a worker
+    that finalizes the row afterwards is told another operation won.
+    COMPLETED takes the locked completion, the only family that writes it
+    besides the fused one. Each FAILED, EXPIRED and COMPLETED kind is one
+    the phase-2 outbox accepts.
+    """
+    match status:
+        case 'COMPLETED':
+            return 'COMPLETE_LOCKED'
+        case 'FAILED':
+            return 'FAIL_STALE'
+        case 'EXPIRED':
+            return 'EXPIRE_CLAIMED'
+        case 'CANCELLED':
+            return 'CANCEL_ORPHAN_SWEEP'
+        case _:
+            raise AssertionError(f'{status!r} is not a terminal status')
+
+
 async def ensure_history_seedable(connection: AsyncConnection) -> None:
     """Register the default class, cover leaves + heartbeats, publish.
 
@@ -224,9 +247,8 @@ def history_row_params(
 ) -> dict[str, object | None]:
     """Project a terminal live-shaped fixture onto the history row.
 
-    ``LEGACY_TERMINAL`` is the one kind that admits all four terminal
-    statuses without asserting which move operation produced the row —
-    fixtures built from live-shaped models carry no such provenance.
+    The kind is ``seed_terminalization_kind`` of the row's status:
+    fixtures built from live-shaped models name no operation.
     """
     terminal_at = task.terminal_at
     if terminal_at is None:
@@ -247,7 +269,7 @@ def history_row_params(
         'fingerprint_version': 1,
         'fingerprint': sha256(task.id.encode()).digest(),
         'status': task.status.value,
-        'terminalization_kind': 'LEGACY_TERMINAL',
+        'terminalization_kind': seed_terminalization_kind(task.status.value),
         'terminal_at': terminal_at,
         'retention_class_key': HISTORY_SEED_CLASS_KEY,
         'sent_at': task.sent_at,
@@ -467,8 +489,9 @@ async def force_terminal(
 ) -> None:
     """Put a live task where a real terminalization would have left it.
 
-    Post-split that is a history row (LEGACY_TERMINAL when the forcing
-    test names no operation), no live row, and no live attempt rows —
+    Post-split that is a history row (``seed_terminalization_kind`` of the
+    status when the forcing test names no operation), no live row, and no
+    live attempt rows —
     the simulate-a-worker-finished shape the suites previously wrote as
     an in-place UPDATE. The stored result rides as the record's payload.
     """
@@ -517,7 +540,9 @@ async def force_terminal(
         """),
         {
             'status': status,
-            'kind': kind if kind is not None else 'LEGACY_TERMINAL',
+            'kind': (
+                kind if kind is not None else seed_terminalization_kind(status)
+            ),
             'id': task_id,
             'payload': payload,
             'error_code': error_code,
