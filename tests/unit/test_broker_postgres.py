@@ -2847,7 +2847,7 @@ class TestSyncFacades:
         broker = _make_broker()
         broker._loop_runner = MagicMock()
 
-        def _route(_key: str | None) -> SyncSendRoute:
+        def _route() -> SyncSendRoute:
             return SyncSendRoute.CALLER_THREAD
 
         monkeypatch.setattr(broker, 'send_route', _route)
@@ -2863,6 +2863,7 @@ class TestSyncFacades:
             sent_at=datetime.now(timezone.utc),
             kwargs_json='{"k": "v"}',
             priority=50,
+            idempotency_key='order-17',
         )
 
         assert result == 'task-id-456'
@@ -2870,6 +2871,7 @@ class TestSyncFacades:
         assert on_caller.call_args.args == ('my_task', 'queue')
         assert on_caller.call_args.kwargs['task_id'] == 'test-task-id'
         assert on_caller.call_args.kwargs['priority'] == 50
+        assert on_caller.call_args.kwargs['idempotency_key'] == 'order-17'
 
     def test_enqueue_delegates_to_loop_runner(
         self,
@@ -2881,7 +2883,7 @@ class TestSyncFacades:
         broker._loop_runner = MagicMock()
         broker._loop_runner.call = MagicMock(return_value='task-id-123')
 
-        def _route(_key: str | None) -> SyncSendRoute:
+        def _route() -> SyncSendRoute:
             return SyncSendRoute.LOOP_RUNNER
 
         monkeypatch.setattr(broker, 'send_route', _route)
