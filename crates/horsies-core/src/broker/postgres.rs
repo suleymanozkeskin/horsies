@@ -1012,11 +1012,18 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction.
+    ///
+    /// The handle checks its client family before the transaction: a
+    /// database of another family, or with no family row, is
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
         let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
         transaction.commit().await?;
@@ -2731,6 +2738,25 @@ fn map_history_enqueue_error(error: HistoryError) -> BrokerError {
     match error {
         HistoryError::Database(error) => BrokerError::Database(error),
         other => BrokerError::EnqueueContract(other.to_string()),
+    }
+}
+
+/// The rerun error of a failed client-family check.
+///
+/// # Panics
+///
+/// `ensure_client_family_for_write` fails only with a database error or a
+/// family mismatch; any other error is a defect of that function.
+fn rerun_family_error(error: BrokerError) -> RerunError {
+    match error {
+        BrokerError::ClientFamilyMismatch { stored, own } => {
+            RerunError::ClientFamilyMismatch { stored, own }
+        }
+        BrokerError::Database(database) => RerunError::Database(database),
+        other => panic!(
+            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
+             error nor a family mismatch"
+        ),
     }
 }
 

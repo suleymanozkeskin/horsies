@@ -164,6 +164,16 @@ pub enum RerunError {
     Identity(#[from] Uuid7Error),
     #[error("rerun JSON serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// The database records another client family, or none. Nothing was
+    /// read or written. Not retryable: the database stays of its family.
+    #[error(
+        "rerun refused: this database was installed by {stored}; this is the {} client",
+        own.as_str()
+    )]
+    ClientFamilyMismatch {
+        stored: crate::broker::client_family::RecordedFamily,
+        own: crate::broker::client_family::ClientFamily,
+    },
 }
 
 pub async fn rerun_task_in_tx(
