@@ -1,23 +1,33 @@
 //! TLS settings of a connection URL and the rustls connector built from them.
 //!
-//! The six libpq `sslmode` values map to a [`TlsPolicy`]:
+//! The six libpq `sslmode` values, as libpq applies them:
 //!
 //! | `sslmode` | Order of attempts | Server certificate check |
 //! |---|---|---|
 //! | `disable` | plain only | none |
-//! | `allow` | plain, then TLS if the server refuses plain | none; the chain when `sslrootcert` names a file |
-//! | `prefer` (default) | TLS when the server offers it, else plain | none; the chain when `sslrootcert` names a file |
-//! | `require` | TLS only | none; the chain when `sslrootcert` names a file |
-//! | `verify-ca` | TLS only | the chain against `sslrootcert` |
-//! | `verify-full` | TLS only | the chain and the host name |
+//! | `allow` | plain; TLS when the server refuses plain | the chain when a root file exists, else none |
+//! | `prefer` (default) | TLS; plain when TLS fails or the server refuses the TLS session | the chain when a root file exists, else none |
+//! | `require` | TLS only | the chain when a root file exists, else none |
+//! | `verify-ca` | TLS only | the chain; the root file must exist |
+//! | `verify-full` | TLS only | the chain and the host name; the root file must exist |
 //!
-//! libpq's rule that `require` with a root CA file behaves as `verify-ca` is
-//! applied to `allow` and `prefer` too, as libpq does. `sslrootcert=system`
-//! loads the platform trust store; it makes `verify-full` the default and
-//! refuses every weaker `sslmode`.
+//! The root file is `sslrootcert`, or libpq's default `~/.postgresql/root.crt`
+//! when the URL does not name one. `sslrootcert=system` loads the platform
+//! trust store; it makes `verify-full` the default and refuses every weaker
+//! `sslmode`. The client certificate and key are `sslcert` and `sslkey`, or
+//! libpq's defaults `~/.postgresql/postgresql.crt` and
+//! `~/.postgresql/postgresql.key`.
 //!
-//! The core reads only the files the URL names. It does not read the libpq
-//! default files under `~/.postgresql/`.
+//! Where the core differs from libpq, it refuses by name:
+//! - A file that the URL names and that cannot be read is an error (libpq
+//!   goes on without it in some modes).
+//! - A default CRL file `~/.postgresql/root.crl` next to a root file is an
+//!   error: libpq would apply it, and the core does not support CRLs.
+//! - An encrypted key is an error (`sslpassword` is not supported).
+//!
+//! [`TlsSettings::resolve`] is pure (URL parsing). [`load_tls`] does the file
+//! I/O: [`probe_default_tls_files`] looks for the default files, the pure
+//! [`plan_tls`] applies the rules, and the connector reads the chosen files.
 
 use std::fmt;
 use std::io::Read;
@@ -36,11 +46,25 @@ use rustls::{
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 
+use super::environment::HomeDirectory;
+
 /// The largest certificate or key file the core reads.
 pub const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
 
 /// The most certificates the core takes from one PEM file.
 pub const MAX_CERTIFICATES_PER_FILE: usize = 4096;
+
+/// libpq's default root certificate file, under the home directory.
+pub const DEFAULT_ROOT_CERTIFICATE_FILE: &str = ".postgresql/root.crt";
+
+/// libpq's default certificate revocation list, under the home directory.
+pub const DEFAULT_ROOT_CRL_FILE: &str = ".postgresql/root.crl";
+
+/// libpq's default client certificate, under the home directory.
+pub const DEFAULT_CLIENT_CERTIFICATE_FILE: &str = ".postgresql/postgresql.crt";
+
+/// libpq's default client key, under the home directory.
+pub const DEFAULT_CLIENT_KEY_FILE: &str = ".postgresql/postgresql.key";
 
 /// The ALPN protocol name of PostgreSQL. libpq 17 and later always send it;
 /// direct TLS negotiation needs it.
@@ -100,17 +124,19 @@ pub enum SslModeSource {
 /// The `sslrootcert` URL parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootCertificates {
-    NotGiven,
+    /// Not set, or empty: libpq's default file `~/.postgresql/root.crt`.
+    Default,
     File(PathBuf),
     /// `sslrootcert=system`: the platform trust store.
     System,
 }
 
-/// The `sslcert` and `sslkey` URL parameters, which come as a pair.
+/// The `sslcert` or `sslkey` URL parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClientIdentity {
-    NotGiven,
-    CertificateAndKey { certificate: PathBuf, key: PathBuf },
+pub enum ClientFile {
+    /// Not set, or empty: libpq's default file under `~/.postgresql/`.
+    Default,
+    File(PathBuf),
 }
 
 /// The `sslnegotiation` URL parameter.
@@ -120,6 +146,213 @@ pub enum TlsNegotiation {
     Postgres,
     /// A TLS handshake at once (PostgreSQL 17 and later).
     Direct,
+}
+
+/// The order of plain and TLS attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptOrder {
+    /// `allow`: plain first; TLS when the server refuses plain.
+    PlainThenTls,
+    /// `prefer`: TLS first; plain when TLS fails or is refused.
+    TlsThenPlain,
+    /// `require`, `verify-ca`, `verify-full`.
+    TlsOnly,
+}
+
+/// Root certificates from a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileRoots {
+    /// libpq's default file `~/.postgresql/root.crt`.
+    Default,
+    File(PathBuf),
+}
+
+/// Root certificates for `verify-full`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StrictRoots {
+    Files(FileRoots),
+    System,
+}
+
+/// The resolved `sslmode` with its root source. Combinations that libpq
+/// refuses cannot be built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TlsMode {
+    Disabled,
+    /// `allow`, `prefer`, `require`: the chain is checked when a root file
+    /// exists.
+    Weak {
+        order: AttemptOrder,
+        roots: FileRoots,
+    },
+    /// `verify-ca`.
+    VerifyChain {
+        roots: FileRoots,
+    },
+    /// `verify-full`.
+    VerifyChainAndHostName {
+        roots: StrictRoots,
+    },
+}
+
+impl TlsMode {
+    /// The libpq `sslmode` this mode stands for.
+    pub fn sslmode(&self) -> SslMode {
+        match self {
+            TlsMode::Disabled => SslMode::Disable,
+            TlsMode::Weak {
+                order: AttemptOrder::PlainThenTls,
+                ..
+            } => SslMode::Allow,
+            TlsMode::Weak {
+                order: AttemptOrder::TlsThenPlain,
+                ..
+            } => SslMode::Prefer,
+            TlsMode::Weak {
+                order: AttemptOrder::TlsOnly,
+                ..
+            } => SslMode::Require,
+            TlsMode::VerifyChain { .. } => SslMode::VerifyCa,
+            TlsMode::VerifyChainAndHostName { .. } => SslMode::VerifyFull,
+        }
+    }
+}
+
+/// The TLS settings of one URL, as parsed. No file is read yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsSettings {
+    mode: TlsMode,
+    certificate: ClientFile,
+    key: ClientFile,
+    negotiation: TlsNegotiation,
+}
+
+/// A combination of TLS parameters that libpq refuses.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TlsPolicyError {
+    #[error("sslmode={sslmode} may not be used with sslrootcert=system; use sslmode=verify-full")]
+    WeakSslModeWithSystemRoots { sslmode: SslMode },
+    #[error(
+        "sslnegotiation=direct needs sslmode require, verify-ca or verify-full, not {sslmode}"
+    )]
+    DirectNegotiationNeedsRequiredTls { sslmode: SslMode },
+}
+
+/// Whether the negotiation fits the mode: direct TLS needs TLS-only
+/// attempts, as libpq requires.
+enum NegotiationCheck {
+    Allowed,
+    NeedsRequiredTls,
+}
+
+/// `sslrootcert` without its `system` case.
+enum RootChoice {
+    System,
+    Files(FileRoots),
+}
+
+impl TlsSettings {
+    /// Applies libpq's rules that need no file to the TLS parameters of one
+    /// URL.
+    ///
+    /// Errors: [`TlsPolicyError`] for a combination that libpq refuses.
+    pub fn resolve(
+        sslmode: SslModeSource,
+        roots: RootCertificates,
+        certificate: ClientFile,
+        key: ClientFile,
+        negotiation: TlsNegotiation,
+    ) -> Result<TlsSettings, TlsPolicyError> {
+        let mode = resolve_mode(sslmode, roots)?;
+        let negotiation_check = match (negotiation, &mode) {
+            (TlsNegotiation::Postgres, _)
+            | (
+                TlsNegotiation::Direct,
+                TlsMode::Weak {
+                    order: AttemptOrder::TlsOnly,
+                    ..
+                }
+                | TlsMode::VerifyChain { .. }
+                | TlsMode::VerifyChainAndHostName { .. },
+            ) => NegotiationCheck::Allowed,
+            (
+                TlsNegotiation::Direct,
+                TlsMode::Disabled
+                | TlsMode::Weak {
+                    order: AttemptOrder::PlainThenTls | AttemptOrder::TlsThenPlain,
+                    ..
+                },
+            ) => NegotiationCheck::NeedsRequiredTls,
+        };
+        match negotiation_check {
+            NegotiationCheck::Allowed => Ok(TlsSettings {
+                mode,
+                certificate,
+                key,
+                negotiation,
+            }),
+            NegotiationCheck::NeedsRequiredTls => {
+                Err(TlsPolicyError::DirectNegotiationNeedsRequiredTls {
+                    sslmode: mode.sslmode(),
+                })
+            }
+        }
+    }
+
+    pub fn mode(&self) -> &TlsMode {
+        &self.mode
+    }
+
+    pub fn certificate(&self) -> &ClientFile {
+        &self.certificate
+    }
+
+    pub fn key(&self) -> &ClientFile {
+        &self.key
+    }
+
+    pub fn negotiation(&self) -> TlsNegotiation {
+        self.negotiation
+    }
+}
+
+fn resolve_mode(
+    sslmode: SslModeSource,
+    roots: RootCertificates,
+) -> Result<TlsMode, TlsPolicyError> {
+    use SslMode::{Allow, Disable, Prefer, Require, VerifyCa, VerifyFull};
+    use SslModeSource::{Default, Given};
+
+    let choice = match roots {
+        RootCertificates::System => RootChoice::System,
+        RootCertificates::Default => RootChoice::Files(FileRoots::Default),
+        RootCertificates::File(path) => RootChoice::Files(FileRoots::File(path)),
+    };
+    match (sslmode, choice) {
+        (Default | Given(VerifyFull), RootChoice::System) => Ok(TlsMode::VerifyChainAndHostName {
+            roots: StrictRoots::System,
+        }),
+        (Given(mode), RootChoice::System) => {
+            Err(TlsPolicyError::WeakSslModeWithSystemRoots { sslmode: mode })
+        }
+        (Given(Disable), RootChoice::Files(_)) => Ok(TlsMode::Disabled),
+        (Default | Given(Prefer), RootChoice::Files(roots)) => Ok(TlsMode::Weak {
+            order: AttemptOrder::TlsThenPlain,
+            roots,
+        }),
+        (Given(Allow), RootChoice::Files(roots)) => Ok(TlsMode::Weak {
+            order: AttemptOrder::PlainThenTls,
+            roots,
+        }),
+        (Given(Require), RootChoice::Files(roots)) => Ok(TlsMode::Weak {
+            order: AttemptOrder::TlsOnly,
+            roots,
+        }),
+        (Given(VerifyCa), RootChoice::Files(roots)) => Ok(TlsMode::VerifyChain { roots }),
+        (Given(VerifyFull), RootChoice::Files(roots)) => Ok(TlsMode::VerifyChainAndHostName {
+            roots: StrictRoots::Files(roots),
+        }),
+    }
 }
 
 /// Where the trusted root certificates come from.
@@ -145,173 +378,49 @@ pub enum ServerVerification {
 /// attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TlsPolicy {
-    /// `sslmode=disable`.
     Disabled,
-    /// `sslmode=allow`: plain first; TLS when the server refuses plain.
     PlainThenTls(ServerVerification),
-    /// `sslmode=prefer`: TLS when the server offers it, else plain.
     TlsThenPlain(ServerVerification),
-    /// `require`, `verify-ca`, `verify-full`.
     TlsOnly(ServerVerification),
 }
 
-/// The resolved TLS settings of one URL.
+/// The client certificate the TLS attempt presents.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TlsSettings {
-    policy: TlsPolicy,
-    identity: ClientIdentity,
-    negotiation: TlsNegotiation,
+pub enum ClientIdentity {
+    NoCertificate,
+    CertificateAndKey { certificate: PathBuf, key: PathBuf },
 }
 
-/// A combination of TLS parameters that libpq refuses, or that needs a file
-/// the core does not read by default.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum TlsPolicyError {
-    #[error(
-        "sslmode={sslmode} needs sslrootcert: the core reads no default root certificate file"
-    )]
-    RootCertificateRequired { sslmode: SslMode },
-    #[error("sslmode={sslmode} may not be used with sslrootcert=system; use sslmode=verify-full")]
-    WeakSslModeWithSystemRoots { sslmode: SslMode },
-    #[error(
-        "sslnegotiation=direct needs sslmode require, verify-ca or verify-full, not {sslmode}"
-    )]
-    DirectNegotiationNeedsRequiredTls { sslmode: SslMode },
-    #[error(
-        "{given} is set and {missing} is not; the core reads no default client certificate or \
-         key file"
-    )]
-    ClientIdentityIncomplete {
-        given: &'static str,
-        missing: &'static str,
-    },
+/// One libpq default file, as found on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultFile {
+    Present(PathBuf),
+    Absent(PathBuf),
+    /// The home directory is unknown, so there is no default path.
+    NoHome,
 }
 
-impl TlsSettings {
-    /// Applies libpq's rules to the TLS parameters of one URL.
-    ///
-    /// Errors: [`TlsPolicyError`] for a combination that libpq refuses or
-    /// that needs a default file.
-    pub fn resolve(
-        sslmode: SslModeSource,
-        roots: RootCertificates,
-        identity: ClientIdentity,
-        negotiation: TlsNegotiation,
-    ) -> Result<TlsSettings, TlsPolicyError> {
-        let policy = resolve_policy(sslmode, roots)?;
-        let negotiation_check = match (negotiation, &policy) {
-            (TlsNegotiation::Postgres, _) | (TlsNegotiation::Direct, TlsPolicy::TlsOnly(_)) => {
-                NegotiationCheck::Allowed
-            }
-            (
-                TlsNegotiation::Direct,
-                TlsPolicy::Disabled | TlsPolicy::PlainThenTls(_) | TlsPolicy::TlsThenPlain(_),
-            ) => NegotiationCheck::NeedsRequiredTls,
-        };
-        match negotiation_check {
-            NegotiationCheck::Allowed => Ok(TlsSettings {
-                policy,
-                identity,
-                negotiation,
-            }),
-            NegotiationCheck::NeedsRequiredTls => {
-                Err(TlsPolicyError::DirectNegotiationNeedsRequiredTls {
-                    sslmode: match sslmode {
-                        SslModeSource::Given(mode) => mode,
-                        SslModeSource::Default => SslMode::Prefer,
-                    },
-                })
-            }
-        }
-    }
-
-    pub fn policy(&self) -> &TlsPolicy {
-        &self.policy
-    }
-
-    pub fn identity(&self) -> &ClientIdentity {
-        &self.identity
-    }
-
-    pub fn negotiation(&self) -> TlsNegotiation {
-        self.negotiation
-    }
+/// The four libpq default TLS files, as found on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultTlsFiles {
+    pub root_certificate: DefaultFile,
+    pub root_crl: DefaultFile,
+    pub client_certificate: DefaultFile,
+    pub client_key: DefaultFile,
 }
 
-/// Whether the negotiation fits the policy: direct TLS needs a TLS-only
-/// policy, as libpq requires.
-enum NegotiationCheck {
-    Allowed,
-    NeedsRequiredTls,
+/// The files and the attempt order a URL's TLS uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsPlan {
+    pub policy: TlsPolicy,
+    pub identity: ClientIdentity,
 }
 
-fn resolve_policy(
-    sslmode: SslModeSource,
-    roots: RootCertificates,
-) -> Result<TlsPolicy, TlsPolicyError> {
-    use RootCertificates::{File, NotGiven, System};
-    use SslMode::{Allow, Disable, Prefer, Require, VerifyCa, VerifyFull};
-    use SslModeSource::{Default, Given};
-    use TlsPolicy::{Disabled, PlainThenTls, TlsOnly, TlsThenPlain};
-
-    match (sslmode, roots) {
-        (Default | Given(VerifyFull), System) => Ok(TlsOnly(ServerVerification::ChainAndHostName(
-            RootSource::System,
-        ))),
-        (Given(mode), System) => Err(TlsPolicyError::WeakSslModeWithSystemRoots { sslmode: mode }),
-        (Given(Disable), NotGiven | File(_)) => Ok(Disabled),
-        (Default | Given(Prefer), NotGiven) => Ok(TlsThenPlain(ServerVerification::NotVerified)),
-        (Default | Given(Prefer), File(root_file)) => {
-            Ok(TlsThenPlain(ServerVerification::ChainOnly { root_file }))
-        }
-        (Given(Allow), NotGiven) => Ok(PlainThenTls(ServerVerification::NotVerified)),
-        (Given(Allow), File(root_file)) => {
-            Ok(PlainThenTls(ServerVerification::ChainOnly { root_file }))
-        }
-        (Given(Require), NotGiven) => Ok(TlsOnly(ServerVerification::NotVerified)),
-        (Given(Require), File(root_file)) => {
-            Ok(TlsOnly(ServerVerification::ChainOnly { root_file }))
-        }
-        (Given(mode @ (VerifyCa | VerifyFull)), NotGiven) => {
-            Err(TlsPolicyError::RootCertificateRequired { sslmode: mode })
-        }
-        (Given(VerifyCa), File(root_file)) => {
-            Ok(TlsOnly(ServerVerification::ChainOnly { root_file }))
-        }
-        (Given(VerifyFull), File(root_file)) => Ok(TlsOnly(ServerVerification::ChainAndHostName(
-            RootSource::File(root_file),
-        ))),
-    }
-}
-
-/// Pairs `sslcert` and `sslkey`. A non-empty value counts as given.
-pub(crate) fn client_identity(
-    certificate: Option<String>,
-    key: Option<String>,
-) -> Result<ClientIdentity, TlsPolicyError> {
-    let certificate = certificate.filter(|text| !text.is_empty());
-    let key = key.filter(|text| !text.is_empty());
-    match (certificate, key) {
-        (None, None) => Ok(ClientIdentity::NotGiven),
-        (Some(certificate), Some(key)) => Ok(ClientIdentity::CertificateAndKey {
-            certificate: PathBuf::from(certificate),
-            key: PathBuf::from(key),
-        }),
-        (Some(_), None) => Err(TlsPolicyError::ClientIdentityIncomplete {
-            given: "sslcert",
-            missing: "sslkey",
-        }),
-        (None, Some(_)) => Err(TlsPolicyError::ClientIdentityIncomplete {
-            given: "sslkey",
-            missing: "sslcert",
-        }),
-    }
-}
-
-/// The TLS file a load error refers to.
+/// The TLS file an error refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TlsFile {
     RootCertificates,
+    RootRevocationList,
     ClientCertificate,
     ClientKey,
 }
@@ -319,16 +428,46 @@ pub enum TlsFile {
 impl fmt::Display for TlsFile {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            TlsFile::RootCertificates => "sslrootcert",
-            TlsFile::ClientCertificate => "sslcert",
-            TlsFile::ClientKey => "sslkey",
+            TlsFile::RootCertificates => "root certificate (sslrootcert)",
+            TlsFile::RootRevocationList => "certificate revocation list",
+            TlsFile::ClientCertificate => "client certificate (sslcert)",
+            TlsFile::ClientKey => "client key (sslkey)",
         })
     }
 }
 
-/// Loading the TLS files or building the rustls configuration failed.
+/// The TLS files cannot be used, or the rustls configuration cannot be built.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsLoadError {
+    #[error(
+        "sslmode={sslmode} needs a root certificate: sslrootcert is not set and {} does not \
+         exist; give sslrootcert, use sslrootcert=system, or use a weaker sslmode",
+        .path.display()
+    )]
+    DefaultRootCertificateMissing { sslmode: SslMode, path: PathBuf },
+    #[error(
+        "sslmode={sslmode} needs a root certificate: sslrootcert is not set and the home \
+         directory is unknown; give sslrootcert or use sslrootcert=system"
+    )]
+    RootCertificateNeedsHome { sslmode: SslMode },
+    #[error(
+        "{} exists and libpq would check the server against it; the core does not support \
+         certificate revocation lists, so remove or rename the file",
+        .path.display()
+    )]
+    DefaultCrlPresent { path: PathBuf },
+    #[error(
+        "the client certificate {} exists and its key {} does not; give sslkey or add the key",
+        .certificate.display(),
+        .key.display()
+    )]
+    ClientKeyMissing { certificate: PathBuf, key: PathBuf },
+    #[error(
+        "the client certificate {} has no key: sslkey is not set and the home directory is \
+         unknown",
+        .certificate.display()
+    )]
+    ClientKeyNeedsHome { certificate: PathBuf },
     #[error("reading the {file} file {} failed: {cause}", .path.display())]
     ReadFailed {
         file: TlsFile,
@@ -356,13 +495,14 @@ pub enum TlsLoadError {
         limit: usize,
     },
     #[error(
-        "the sslkey file {} holds no unencrypted private key (encrypted keys need sslpassword, \
-         which the core does not support)",
+        "the client key file {} holds no unencrypted private key (encrypted keys need \
+         sslpassword, which the core does not support)",
         .path.display()
     )]
     NoPrivateKey { path: PathBuf },
     #[error(
-        "the sslkey file {} has group or world access (mode {mode:o}); use u=rw (0600) or less",
+        "the client key file {} has group or world access (mode {mode:o}); use u=rw (0600) or \
+         less",
         .path.display()
     )]
     KeyFileTooOpen { path: PathBuf, mode: u32 },
@@ -384,23 +524,246 @@ pub enum TlsLoadError {
     ProtocolVersionsRefused { cause: rustls::Error },
 }
 
-/// Builds the rustls connector of one URL. Reads the files that the settings
-/// name (blocking file reads); a URL with TLS disabled reads nothing.
+/// The TLS attempt order and the rustls connector of one URL.
+pub(crate) struct LoadedTls {
+    pub(crate) policy: TlsPolicy,
+    pub(crate) connector: MakeRustlsConnect,
+}
+
+/// Builds the TLS side of one URL (blocking file I/O). With `sslmode=disable`
+/// nothing is read.
+pub(crate) fn load_tls(
+    settings: &TlsSettings,
+    home: &HomeDirectory,
+) -> Result<LoadedTls, TlsLoadError> {
+    let plan = match settings.mode {
+        TlsMode::Disabled => disabled_plan(),
+        TlsMode::Weak { .. }
+        | TlsMode::VerifyChain { .. }
+        | TlsMode::VerifyChainAndHostName { .. } => {
+            plan_tls(settings, &probe_default_tls_files(home)?)?
+        }
+    };
+    let connector = build_connector(&plan)?;
+    Ok(LoadedTls {
+        policy: plan.policy,
+        connector,
+    })
+}
+
+fn disabled_plan() -> TlsPlan {
+    TlsPlan {
+        policy: TlsPolicy::Disabled,
+        identity: ClientIdentity::NoCertificate,
+    }
+}
+
+/// Looks for libpq's four default TLS files under the home directory.
+pub fn probe_default_tls_files(home: &HomeDirectory) -> Result<DefaultTlsFiles, TlsLoadError> {
+    let HomeDirectory::Known(home) = home else {
+        return Ok(DefaultTlsFiles {
+            root_certificate: DefaultFile::NoHome,
+            root_crl: DefaultFile::NoHome,
+            client_certificate: DefaultFile::NoHome,
+            client_key: DefaultFile::NoHome,
+        });
+    };
+    Ok(DefaultTlsFiles {
+        root_certificate: probe(
+            home.join(DEFAULT_ROOT_CERTIFICATE_FILE),
+            TlsFile::RootCertificates,
+        )?,
+        root_crl: probe(
+            home.join(DEFAULT_ROOT_CRL_FILE),
+            TlsFile::RootRevocationList,
+        )?,
+        client_certificate: probe(
+            home.join(DEFAULT_CLIENT_CERTIFICATE_FILE),
+            TlsFile::ClientCertificate,
+        )?,
+        client_key: probe(home.join(DEFAULT_CLIENT_KEY_FILE), TlsFile::ClientKey)?,
+    })
+}
+
+/// A missing file or a missing directory on the path means absent, as libpq
+/// reads `ENOENT` and `ENOTDIR`; any other error is refused.
+fn probe(path: PathBuf, file: TlsFile) -> Result<DefaultFile, TlsLoadError> {
+    match std::fs::metadata(&path) {
+        Ok(_) => Ok(DefaultFile::Present(path)),
+        Err(cause)
+            if matches!(
+                cause.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(DefaultFile::Absent(path))
+        }
+        Err(cause) => Err(TlsLoadError::ReadFailed { file, path, cause }),
+    }
+}
+
+/// What the TLS attempt must check, before the root file is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequiredCheck {
+    /// Weak modes: the chain when a root file exists.
+    ChainWhenRootFileExists,
+    Chain,
+    ChainAndHostName,
+}
+
+/// Applies libpq's file rules. Pure: the default files were probed before.
+pub fn plan_tls(
+    settings: &TlsSettings,
+    defaults: &DefaultTlsFiles,
+) -> Result<TlsPlan, TlsLoadError> {
+    let sslmode = settings.mode.sslmode();
+    let (order, verification) = match &settings.mode {
+        TlsMode::Disabled => return Ok(disabled_plan()),
+        TlsMode::Weak { order, roots } => (
+            *order,
+            verification_from_files(
+                roots,
+                RequiredCheck::ChainWhenRootFileExists,
+                defaults,
+                sslmode,
+            )?,
+        ),
+        TlsMode::VerifyChain { roots } => (
+            AttemptOrder::TlsOnly,
+            verification_from_files(roots, RequiredCheck::Chain, defaults, sslmode)?,
+        ),
+        TlsMode::VerifyChainAndHostName {
+            roots: StrictRoots::System,
+        } => (
+            AttemptOrder::TlsOnly,
+            ServerVerification::ChainAndHostName(RootSource::System),
+        ),
+        TlsMode::VerifyChainAndHostName {
+            roots: StrictRoots::Files(roots),
+        } => (
+            AttemptOrder::TlsOnly,
+            verification_from_files(roots, RequiredCheck::ChainAndHostName, defaults, sslmode)?,
+        ),
+    };
+    refuse_default_crl(&verification, &defaults.root_crl)?;
+    let identity = client_identity(&settings.certificate, &settings.key, defaults)?;
+    let policy = match order {
+        AttemptOrder::PlainThenTls => TlsPolicy::PlainThenTls(verification),
+        AttemptOrder::TlsThenPlain => TlsPolicy::TlsThenPlain(verification),
+        AttemptOrder::TlsOnly => TlsPolicy::TlsOnly(verification),
+    };
+    Ok(TlsPlan { policy, identity })
+}
+
+fn verification_from_files(
+    roots: &FileRoots,
+    required: RequiredCheck,
+    defaults: &DefaultTlsFiles,
+    sslmode: SslMode,
+) -> Result<ServerVerification, TlsLoadError> {
+    let root_file = match (roots, &defaults.root_certificate) {
+        (FileRoots::File(path), _) | (FileRoots::Default, DefaultFile::Present(path)) => {
+            RootFile::Found(path.clone())
+        }
+        (FileRoots::Default, DefaultFile::Absent(path)) => RootFile::Missing(path.clone()),
+        (FileRoots::Default, DefaultFile::NoHome) => RootFile::NoHome,
+    };
+    match (required, root_file) {
+        (
+            RequiredCheck::ChainWhenRootFileExists | RequiredCheck::Chain,
+            RootFile::Found(root_file),
+        ) => Ok(ServerVerification::ChainOnly { root_file }),
+        (RequiredCheck::ChainAndHostName, RootFile::Found(root_file)) => Ok(
+            ServerVerification::ChainAndHostName(RootSource::File(root_file)),
+        ),
+        (RequiredCheck::ChainWhenRootFileExists, RootFile::Missing(_) | RootFile::NoHome) => {
+            Ok(ServerVerification::NotVerified)
+        }
+        (RequiredCheck::Chain | RequiredCheck::ChainAndHostName, RootFile::Missing(path)) => {
+            Err(TlsLoadError::DefaultRootCertificateMissing { sslmode, path })
+        }
+        (RequiredCheck::Chain | RequiredCheck::ChainAndHostName, RootFile::NoHome) => {
+            Err(TlsLoadError::RootCertificateNeedsHome { sslmode })
+        }
+    }
+}
+
+/// The root file of a check that uses files.
+enum RootFile {
+    Found(PathBuf),
+    Missing(PathBuf),
+    NoHome,
+}
+
+/// libpq loads `~/.postgresql/root.crl` whenever it loads a root file; the
+/// core does not support CRLs, so it refuses instead of ignoring the file.
+fn refuse_default_crl(
+    verification: &ServerVerification,
+    root_crl: &DefaultFile,
+) -> Result<(), TlsLoadError> {
+    match (verification, root_crl) {
+        (
+            ServerVerification::ChainOnly { .. }
+            | ServerVerification::ChainAndHostName(RootSource::File(_)),
+            DefaultFile::Present(path),
+        ) => Err(TlsLoadError::DefaultCrlPresent { path: path.clone() }),
+        (
+            ServerVerification::NotVerified
+            | ServerVerification::ChainAndHostName(RootSource::System),
+            _,
+        )
+        | (_, DefaultFile::Absent(_) | DefaultFile::NoHome) => Ok(()),
+    }
+}
+
+/// libpq's rule: the certificate is `sslcert` or the default file; without a
+/// certificate no key is read. With a certificate, the key is `sslkey` or the
+/// default file, and it must exist. A named certificate that cannot be read
+/// is refused when it is read.
+fn client_identity(
+    certificate: &ClientFile,
+    key: &ClientFile,
+    defaults: &DefaultTlsFiles,
+) -> Result<ClientIdentity, TlsLoadError> {
+    let certificate = match (certificate, &defaults.client_certificate) {
+        (ClientFile::File(path), _) | (ClientFile::Default, DefaultFile::Present(path)) => {
+            path.clone()
+        }
+        (ClientFile::Default, DefaultFile::Absent(_) | DefaultFile::NoHome) => {
+            return Ok(ClientIdentity::NoCertificate)
+        }
+    };
+    let key = match (key, &defaults.client_key) {
+        (ClientFile::File(path), _) | (ClientFile::Default, DefaultFile::Present(path)) => {
+            path.clone()
+        }
+        (ClientFile::Default, DefaultFile::Absent(path)) => {
+            return Err(TlsLoadError::ClientKeyMissing {
+                certificate,
+                key: path.clone(),
+            })
+        }
+        (ClientFile::Default, DefaultFile::NoHome) => {
+            return Err(TlsLoadError::ClientKeyNeedsHome { certificate })
+        }
+    };
+    Ok(ClientIdentity::CertificateAndKey { certificate, key })
+}
+
+/// Builds the rustls connector of a plan. Reads the chosen files.
 ///
 /// The crypto provider is *ring*, passed explicitly, so no process-wide
 /// default provider is needed or installed.
-pub(crate) fn load_tls_connector(
-    settings: &TlsSettings,
-) -> Result<MakeRustlsConnect, TlsLoadError> {
+fn build_connector(plan: &TlsPlan) -> Result<MakeRustlsConnect, TlsLoadError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = server_verifier(verification_of(&settings.policy), &provider)?;
+    let verifier = server_verifier(verification_of(&plan.policy), &provider)?;
     let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()
         .map_err(|cause| TlsLoadError::ProtocolVersionsRefused { cause })?
         .dangerous()
         .with_custom_certificate_verifier(verifier);
-    let mut config = match &settings.identity {
-        ClientIdentity::NotGiven => builder.with_no_client_auth(),
+    let mut config = match &plan.identity {
+        ClientIdentity::NoCertificate => builder.with_no_client_auth(),
         ClientIdentity::CertificateAndKey { certificate, key } => {
             let chain = read_certificates(certificate, TlsFile::ClientCertificate)?;
             let private_key = read_private_key(key)?;
@@ -687,123 +1050,82 @@ impl ServerCertVerifier for ChainOnlyVerifier {
 mod tests {
     use super::*;
 
-    fn root_file() -> RootCertificates {
-        RootCertificates::File(PathBuf::from("/certs/root.crt"))
-    }
-
-    fn resolve(
-        sslmode: SslModeSource,
-        roots: RootCertificates,
-    ) -> Result<TlsPolicy, TlsPolicyError> {
+    fn settings(sslmode: SslModeSource, roots: RootCertificates) -> TlsSettings {
         TlsSettings::resolve(
             sslmode,
             roots,
-            ClientIdentity::NotGiven,
+            ClientFile::Default,
+            ClientFile::Default,
             TlsNegotiation::Postgres,
         )
-        .map(|settings| settings.policy)
+        .expect("valid TLS settings")
     }
 
-    #[test]
-    fn default_sslmode_is_prefer_without_verification() {
-        assert_eq!(
-            resolve(SslModeSource::Default, RootCertificates::NotGiven),
-            Ok(TlsPolicy::TlsThenPlain(ServerVerification::NotVerified)),
-        );
+    fn no_default_files() -> DefaultTlsFiles {
+        DefaultTlsFiles {
+            root_certificate: DefaultFile::Absent(PathBuf::from("/h/.postgresql/root.crt")),
+            root_crl: DefaultFile::Absent(PathBuf::from("/h/.postgresql/root.crl")),
+            client_certificate: DefaultFile::Absent(PathBuf::from("/h/.postgresql/postgresql.crt")),
+            client_key: DefaultFile::Absent(PathBuf::from("/h/.postgresql/postgresql.key")),
+        }
     }
 
-    #[test]
-    fn each_sslmode_without_root_file() {
-        let cases = [
-            (SslMode::Disable, Ok(TlsPolicy::Disabled)),
-            (
-                SslMode::Allow,
-                Ok(TlsPolicy::PlainThenTls(ServerVerification::NotVerified)),
-            ),
-            (
-                SslMode::Prefer,
-                Ok(TlsPolicy::TlsThenPlain(ServerVerification::NotVerified)),
-            ),
-            (
-                SslMode::Require,
-                Ok(TlsPolicy::TlsOnly(ServerVerification::NotVerified)),
-            ),
-            (
-                SslMode::VerifyCa,
-                Err(TlsPolicyError::RootCertificateRequired {
-                    sslmode: SslMode::VerifyCa,
-                }),
-            ),
-            (
-                SslMode::VerifyFull,
-                Err(TlsPolicyError::RootCertificateRequired {
-                    sslmode: SslMode::VerifyFull,
-                }),
-            ),
-        ];
-        for (mode, expected) in cases {
-            assert_eq!(
-                resolve(SslModeSource::Given(mode), RootCertificates::NotGiven),
-                expected,
-                "{mode}"
-            );
+    fn with_default_root() -> DefaultTlsFiles {
+        DefaultTlsFiles {
+            root_certificate: DefaultFile::Present(PathBuf::from("/h/.postgresql/root.crt")),
+            ..no_default_files()
+        }
+    }
+
+    fn no_home() -> DefaultTlsFiles {
+        DefaultTlsFiles {
+            root_certificate: DefaultFile::NoHome,
+            root_crl: DefaultFile::NoHome,
+            client_certificate: DefaultFile::NoHome,
+            client_key: DefaultFile::NoHome,
+        }
+    }
+
+    fn policy(sslmode: SslMode, defaults: &DefaultTlsFiles) -> Result<TlsPolicy, TlsLoadError> {
+        plan_tls(
+            &settings(SslModeSource::Given(sslmode), RootCertificates::Default),
+            defaults,
+        )
+        .map(|plan| plan.policy)
+    }
+
+    fn planned(sslmode: SslMode, defaults: &DefaultTlsFiles) -> TlsPolicy {
+        match policy(sslmode, defaults) {
+            Ok(policy) => policy,
+            Err(error) => panic!("{sslmode}: expected a plan, got {error}"),
+        }
+    }
+
+    fn default_root_chain() -> ServerVerification {
+        ServerVerification::ChainOnly {
+            root_file: PathBuf::from("/h/.postgresql/root.crt"),
         }
     }
 
     #[test]
-    fn a_root_file_makes_weak_modes_check_the_chain() {
-        let chain = || ServerVerification::ChainOnly {
-            root_file: PathBuf::from("/certs/root.crt"),
-        };
+    fn the_default_sslmode_is_prefer_and_system_roots_mean_verify_full() {
         assert_eq!(
-            resolve(SslModeSource::Given(SslMode::Require), root_file()),
-            Ok(TlsPolicy::TlsOnly(chain())),
+            settings(SslModeSource::Default, RootCertificates::Default).mode(),
+            &TlsMode::Weak {
+                order: AttemptOrder::TlsThenPlain,
+                roots: FileRoots::Default
+            },
         );
         assert_eq!(
-            resolve(SslModeSource::Given(SslMode::Prefer), root_file()),
-            Ok(TlsPolicy::TlsThenPlain(chain())),
-        );
-        assert_eq!(
-            resolve(SslModeSource::Given(SslMode::Allow), root_file()),
-            Ok(TlsPolicy::PlainThenTls(chain())),
-        );
-        assert_eq!(
-            resolve(SslModeSource::Given(SslMode::VerifyCa), root_file()),
-            Ok(TlsPolicy::TlsOnly(chain())),
-        );
-        assert_eq!(
-            resolve(SslModeSource::Given(SslMode::Disable), root_file()),
-            Ok(TlsPolicy::Disabled),
+            settings(SslModeSource::Default, RootCertificates::System).mode(),
+            &TlsMode::VerifyChainAndHostName {
+                roots: StrictRoots::System
+            },
         );
     }
 
     #[test]
-    fn verify_full_checks_chain_and_host_name() {
-        assert_eq!(
-            resolve(SslModeSource::Given(SslMode::VerifyFull), root_file()),
-            Ok(TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(
-                RootSource::File(PathBuf::from("/certs/root.crt"))
-            ))),
-        );
-    }
-
-    #[test]
-    fn system_roots_default_to_verify_full_and_refuse_weaker_modes() {
-        assert_eq!(
-            resolve(SslModeSource::Default, RootCertificates::System),
-            Ok(TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(
-                RootSource::System
-            ))),
-        );
-        assert_eq!(
-            resolve(
-                SslModeSource::Given(SslMode::VerifyFull),
-                RootCertificates::System
-            ),
-            Ok(TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(
-                RootSource::System
-            ))),
-        );
+    fn system_roots_refuse_every_weaker_sslmode() {
         for mode in [
             SslMode::Disable,
             SslMode::Allow,
@@ -812,7 +1134,13 @@ mod tests {
             SslMode::VerifyCa,
         ] {
             assert_eq!(
-                resolve(SslModeSource::Given(mode), RootCertificates::System),
+                TlsSettings::resolve(
+                    SslModeSource::Given(mode),
+                    RootCertificates::System,
+                    ClientFile::Default,
+                    ClientFile::Default,
+                    TlsNegotiation::Postgres,
+                ),
                 Err(TlsPolicyError::WeakSslModeWithSystemRoots { sslmode: mode }),
             );
         }
@@ -820,55 +1148,211 @@ mod tests {
 
     #[test]
     fn direct_negotiation_needs_tls_only() {
-        let refused = TlsSettings::resolve(
-            SslModeSource::Default,
-            RootCertificates::NotGiven,
-            ClientIdentity::NotGiven,
-            TlsNegotiation::Direct,
-        );
         assert_eq!(
-            refused,
+            TlsSettings::resolve(
+                SslModeSource::Default,
+                RootCertificates::Default,
+                ClientFile::Default,
+                ClientFile::Default,
+                TlsNegotiation::Direct,
+            ),
             Err(TlsPolicyError::DirectNegotiationNeedsRequiredTls {
                 sslmode: SslMode::Prefer
             }),
         );
-        let accepted = TlsSettings::resolve(
+        assert!(TlsSettings::resolve(
             SslModeSource::Given(SslMode::Require),
-            RootCertificates::NotGiven,
-            ClientIdentity::NotGiven,
+            RootCertificates::Default,
+            ClientFile::Default,
+            ClientFile::Default,
             TlsNegotiation::Direct,
-        );
-        assert!(accepted.is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
-    fn client_certificate_and_key_come_as_a_pair() {
-        assert_eq!(client_identity(None, None), Ok(ClientIdentity::NotGiven));
+    fn weak_modes_without_a_root_file_check_nothing() {
         assert_eq!(
-            client_identity(Some(String::new()), Some(String::new())),
-            Ok(ClientIdentity::NotGiven),
+            planned(SslMode::Allow, &no_default_files()),
+            TlsPolicy::PlainThenTls(ServerVerification::NotVerified)
         );
         assert_eq!(
-            client_identity(Some("c.crt".to_owned()), Some("c.key".to_owned())),
-            Ok(ClientIdentity::CertificateAndKey {
-                certificate: PathBuf::from("c.crt"),
-                key: PathBuf::from("c.key"),
-            }),
+            planned(SslMode::Prefer, &no_home()),
+            TlsPolicy::TlsThenPlain(ServerVerification::NotVerified)
         );
         assert_eq!(
-            client_identity(Some("c.crt".to_owned()), None),
-            Err(TlsPolicyError::ClientIdentityIncomplete {
-                given: "sslcert",
-                missing: "sslkey"
-            }),
+            planned(SslMode::Require, &no_default_files()),
+            TlsPolicy::TlsOnly(ServerVerification::NotVerified)
         );
         assert_eq!(
-            client_identity(None, Some("c.key".to_owned())),
-            Err(TlsPolicyError::ClientIdentityIncomplete {
-                given: "sslkey",
-                missing: "sslcert"
-            }),
+            planned(SslMode::Disable, &with_default_root()),
+            TlsPolicy::Disabled
         );
+    }
+
+    #[test]
+    fn weak_modes_check_the_chain_when_the_default_root_file_exists() {
+        assert_eq!(
+            planned(SslMode::Require, &with_default_root()),
+            TlsPolicy::TlsOnly(default_root_chain())
+        );
+        assert_eq!(
+            planned(SslMode::Prefer, &with_default_root()),
+            TlsPolicy::TlsThenPlain(default_root_chain())
+        );
+        assert_eq!(
+            planned(SslMode::Allow, &with_default_root()),
+            TlsPolicy::PlainThenTls(default_root_chain())
+        );
+    }
+
+    #[test]
+    fn verify_modes_read_the_default_root_file() {
+        assert_eq!(
+            planned(SslMode::VerifyCa, &with_default_root()),
+            TlsPolicy::TlsOnly(default_root_chain())
+        );
+        assert_eq!(
+            planned(SslMode::VerifyFull, &with_default_root()),
+            TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(RootSource::File(
+                PathBuf::from("/h/.postgresql/root.crt")
+            )))
+        );
+    }
+
+    #[test]
+    fn verify_modes_refuse_a_missing_default_root_file_by_name() {
+        for mode in [SslMode::VerifyCa, SslMode::VerifyFull] {
+            match policy(mode, &no_default_files()) {
+                Err(TlsLoadError::DefaultRootCertificateMissing { sslmode, path }) => {
+                    assert_eq!(sslmode, mode);
+                    assert_eq!(path, PathBuf::from("/h/.postgresql/root.crt"));
+                }
+                other => panic!("{mode}: expected DefaultRootCertificateMissing, got {other:?}"),
+            }
+            assert!(matches!(
+                policy(mode, &no_home()),
+                Err(TlsLoadError::RootCertificateNeedsHome { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_named_root_file_is_used_in_every_mode() {
+        let named = RootCertificates::File(PathBuf::from("/certs/root.crt"));
+        let chain = ServerVerification::ChainOnly {
+            root_file: PathBuf::from("/certs/root.crt"),
+        };
+        for (mode, expected) in [
+            (SslMode::Require, TlsPolicy::TlsOnly(chain.clone())),
+            (SslMode::VerifyCa, TlsPolicy::TlsOnly(chain.clone())),
+            (
+                SslMode::VerifyFull,
+                TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(RootSource::File(
+                    PathBuf::from("/certs/root.crt"),
+                ))),
+            ),
+        ] {
+            let plan = plan_tls(
+                &settings(SslModeSource::Given(mode), named.clone()),
+                &no_home(),
+            )
+            .expect("a named root file needs no home");
+            assert_eq!(plan.policy, expected, "{mode}");
+        }
+    }
+
+    #[test]
+    fn system_roots_need_no_file() {
+        let plan = plan_tls(
+            &settings(SslModeSource::Default, RootCertificates::System),
+            &no_home(),
+        )
+        .expect("system roots");
+        assert_eq!(
+            plan.policy,
+            TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(RootSource::System)),
+        );
+    }
+
+    #[test]
+    fn a_default_crl_next_to_a_root_file_is_refused() {
+        let defaults = DefaultTlsFiles {
+            root_crl: DefaultFile::Present(PathBuf::from("/h/.postgresql/root.crl")),
+            ..with_default_root()
+        };
+        assert!(matches!(
+            policy(SslMode::Require, &defaults),
+            Err(TlsLoadError::DefaultCrlPresent { .. })
+        ));
+        let no_root = DefaultTlsFiles {
+            root_crl: DefaultFile::Present(PathBuf::from("/h/.postgresql/root.crl")),
+            ..no_default_files()
+        };
+        assert_eq!(
+            planned(SslMode::Require, &no_root),
+            TlsPolicy::TlsOnly(ServerVerification::NotVerified)
+        );
+    }
+
+    #[test]
+    fn the_default_client_certificate_is_used_with_its_key() {
+        let defaults = DefaultTlsFiles {
+            client_certificate: DefaultFile::Present(PathBuf::from(
+                "/h/.postgresql/postgresql.crt",
+            )),
+            client_key: DefaultFile::Present(PathBuf::from("/h/.postgresql/postgresql.key")),
+            ..no_default_files()
+        };
+        let plan = plan_tls(
+            &settings(
+                SslModeSource::Given(SslMode::Require),
+                RootCertificates::Default,
+            ),
+            &defaults,
+        )
+        .expect("plan");
+        assert_eq!(
+            plan.identity,
+            ClientIdentity::CertificateAndKey {
+                certificate: PathBuf::from("/h/.postgresql/postgresql.crt"),
+                key: PathBuf::from("/h/.postgresql/postgresql.key"),
+            },
+        );
+    }
+
+    #[test]
+    fn a_client_certificate_without_its_key_is_refused() {
+        let defaults = DefaultTlsFiles {
+            client_certificate: DefaultFile::Present(PathBuf::from(
+                "/h/.postgresql/postgresql.crt",
+            )),
+            ..no_default_files()
+        };
+        assert!(matches!(
+            plan_tls(
+                &settings(
+                    SslModeSource::Given(SslMode::Require),
+                    RootCertificates::Default
+                ),
+                &defaults,
+            ),
+            Err(TlsLoadError::ClientKeyMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn a_key_without_a_certificate_is_not_read() {
+        let named_key = TlsSettings::resolve(
+            SslModeSource::Given(SslMode::Require),
+            RootCertificates::Default,
+            ClientFile::Default,
+            ClientFile::File(PathBuf::from("/keys/client.key")),
+            TlsNegotiation::Postgres,
+        )
+        .expect("valid settings");
+        let plan = plan_tls(&named_key, &no_default_files()).expect("plan");
+        assert_eq!(plan.identity, ClientIdentity::NoCertificate);
     }
 
     #[test]
@@ -887,34 +1371,46 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_policy_loads_no_file() {
-        let settings = TlsSettings::resolve(
+    fn a_disabled_mode_reads_no_file() {
+        let disabled = settings(
             SslModeSource::Given(SslMode::Disable),
             RootCertificates::File(PathBuf::from("/no/such/root.crt")),
-            ClientIdentity::NotGiven,
-            TlsNegotiation::Postgres,
+        );
+        let loaded = load_tls(
+            &disabled,
+            &HomeDirectory::Known(PathBuf::from("/no/such/home")),
         )
-        .expect("disable with a root file is valid");
-        assert!(load_tls_connector(&settings).is_ok());
+        .expect("nothing is read");
+        assert_eq!(loaded.policy, TlsPolicy::Disabled);
     }
 
     #[test]
-    fn a_missing_root_file_is_a_named_read_error() {
-        let settings = TlsSettings::resolve(
+    fn a_missing_named_root_file_is_a_read_error() {
+        let named = settings(
             SslModeSource::Given(SslMode::VerifyCa),
             RootCertificates::File(PathBuf::from("/no/such/root.crt")),
-            ClientIdentity::NotGiven,
-            TlsNegotiation::Postgres,
-        )
-        .expect("verify-ca with a root file is valid");
-        match load_tls_connector(&settings) {
+        );
+        match load_tls(&named, &HomeDirectory::Unknown) {
             Err(TlsLoadError::ReadFailed {
                 file: TlsFile::RootCertificates,
                 ..
             }) => {}
-            Err(other) => panic!("expected ReadFailed for sslrootcert, got {other}"),
-            Ok(_) => panic!("expected ReadFailed for sslrootcert, got a connector"),
+            Err(other) => panic!("expected ReadFailed for the root file, got {other}"),
+            Ok(_) => panic!("expected ReadFailed for the root file, got a connector"),
         }
+    }
+
+    #[test]
+    fn probing_an_empty_home_finds_every_default_file_absent() {
+        let home = std::env::temp_dir().join(format!("stmt_home_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).expect("create temp home");
+        let probed = probe_default_tls_files(&HomeDirectory::Known(home.clone()));
+        let _removed = std::fs::remove_dir_all(&home);
+        let probed = probed.expect("probe");
+        assert!(matches!(probed.root_certificate, DefaultFile::Absent(_)));
+        assert!(matches!(probed.root_crl, DefaultFile::Absent(_)));
+        assert!(matches!(probed.client_certificate, DefaultFile::Absent(_)));
+        assert!(matches!(probed.client_key, DefaultFile::Absent(_)));
     }
 
     #[test]

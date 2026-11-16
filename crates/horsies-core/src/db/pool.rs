@@ -10,8 +10,11 @@
 //!   out. deadpool records the last checkout, not the check-in, so the
 //!   checkout guard ([`PooledConnection`]) writes the check-in time into the
 //!   pooled connection when it is dropped, and the manager's recycle reads it.
-//! - Pools on the main URL refuse PgBouncer statement pooling at their first
-//!   checkout (`pooling_check`).
+//! - Every pool refuses PgBouncer statement pooling at its first checkout
+//!   (`pooling_check`), the session pool included.
+//! - A connection that a failure discarded runs nothing more; a dropped open
+//!   transaction discards its connection (the server rolls the transaction
+//!   back when the socket closes).
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -38,9 +41,10 @@ use super::failure::{
 };
 use super::pooling_check::{run_pooling_check, PoolingCheckPassed};
 use super::statement::{
-    execute_count, query_rows, AttemptError, BoundStatement, Stage, StatementBound,
+    execute_count, query_rows, run_command, AttemptError, BoundStatement, Stage, StatementBound,
     StatementProtocol, CANCEL_GRACE,
 };
+use super::transaction::TransactionCommand;
 
 /// PostgreSQL's upper limit of `max_connections`; no pool can be larger.
 pub const POSTGRES_MAX_BACKENDS: u32 = 262_143;
@@ -88,29 +92,12 @@ impl PoolRole {
             PoolRole::RunnerHeartbeat => "runner heartbeat",
         }
     }
-
-    /// Pools on the main URL check for statement pooling at first use. The
-    /// session URL is checked by the LISTEN delivery probe of the worker boot.
-    fn statement_pooling_check(self) -> PoolingCheckRule {
-        match self {
-            PoolRole::Main | PoolRole::WorkerProfile | PoolRole::RunnerHeartbeat => {
-                PoolingCheckRule::AtFirstCheckout
-            }
-            PoolRole::Session => PoolingCheckRule::NotRequired,
-        }
-    }
 }
 
 impl fmt::Display for PoolRole {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PoolingCheckRule {
-    AtFirstCheckout,
-    NotRequired,
 }
 
 /// Connections a pool keeps free from batch checkouts.
@@ -325,13 +312,6 @@ enum GatePermit {
     Held { _permit: OwnedSemaphorePermit },
 }
 
-/// The statement-pooling check of a pool.
-enum PoolingCheck {
-    NotRequired,
-    /// Set once the check passed in this process; a failure is not kept.
-    AtFirstCheckout(OnceCell<PoolingCheckPassed>),
-}
-
 /// The status of a pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolStatus {
@@ -347,7 +327,9 @@ pub struct CorePool {
     plan: PoolPlan,
     connect: Arc<ConnectPlan>,
     gate: ReserveGate,
-    pooling_check: PoolingCheck,
+    /// Set once the statement-pooling check passed on this pool; a failure
+    /// is not kept.
+    pooling_check_passed: OnceCell<PoolingCheckPassed>,
 }
 
 impl CorePool {
@@ -381,16 +363,12 @@ impl CorePool {
                 )),
             },
         };
-        let pooling_check = match plan.role.statement_pooling_check() {
-            PoolingCheckRule::AtFirstCheckout => PoolingCheck::AtFirstCheckout(OnceCell::new()),
-            PoolingCheckRule::NotRequired => PoolingCheck::NotRequired,
-        };
         CorePool {
             pool,
             plan,
             connect,
             gate,
-            pooling_check,
+            pooling_check_passed: OnceCell::new(),
         }
     }
 
@@ -400,9 +378,9 @@ impl CorePool {
 
     /// Checks out a connection.
     ///
-    /// Waits at most `checkout_wait` (gate and pool together). On the first
-    /// checkout of a pool on the main URL, runs the statement-pooling check
-    /// on that connection. Sends nothing else.
+    /// Waits at most `checkout_wait` (gate and pool together). Until the
+    /// statement-pooling check has passed on this pool, runs it on the
+    /// checked-out connection. Sends nothing else.
     ///
     /// Errors: [`CheckoutFailure`]. After an error nothing was sent and no
     /// connection is held.
@@ -425,17 +403,13 @@ impl CorePool {
             connect: Arc::clone(&self.connect),
             _permit: permit,
         };
-        match &self.pooling_check {
-            PoolingCheck::NotRequired => {}
-            PoolingCheck::AtFirstCheckout(passed) => {
-                let role = self.plan.role;
-                let connect = &self.connect;
-                let checked = &mut connection;
-                let _passed = passed
-                    .get_or_try_init(move || run_pooling_check(checked, role, connect))
-                    .await?;
-            }
-        }
+        let role = self.plan.role;
+        let connect = &self.connect;
+        let checked = &mut connection;
+        let _passed = self
+            .pooling_check_passed
+            .get_or_try_init(move || run_pooling_check(checked, role, connect))
+            .await?;
         Ok(connection)
     }
 
@@ -584,7 +558,7 @@ impl PooledConnection {
         bound: StatementBound,
     ) -> Result<Vec<Row>, StatementFailure> {
         let name = statement.statement().name();
-        self.ensure_open(name)?;
+        self.ensure_usable(name)?;
         let bounding = self.bounding(bound);
         let outcome = run_bounded(
             query_rows(&self.object.client, self.protocol, statement),
@@ -601,7 +575,7 @@ impl PooledConnection {
         bound: StatementBound,
     ) -> Result<u64, StatementFailure> {
         let name = statement.statement().name();
-        self.ensure_open(name)?;
+        self.ensure_usable(name)?;
         let bounding = self.bounding(bound);
         let outcome = run_bounded(
             execute_count(&self.object.client, self.protocol, statement),
@@ -623,17 +597,38 @@ impl PooledConnection {
         self.disposition = Disposition::Discard;
     }
 
-    fn ensure_open(&mut self, statement: &'static str) -> Result<(), StatementFailure> {
-        match self.object.client.is_closed() {
-            false => Ok(()),
-            true => {
+    /// Refuses to send on a discarded or closed connection.
+    fn ensure_usable(&mut self, statement: &'static str) -> Result<(), StatementFailure> {
+        match (self.disposition, self.object.client.is_closed()) {
+            (Disposition::Discard, _) => Err(StatementFailure::NotSent {
+                statement,
+                cause: NotSentCause::ConnectionDiscarded,
+            }),
+            (Disposition::Reusable, true) => {
                 self.discard();
                 Err(StatementFailure::NotSent {
                     statement,
                     cause: NotSentCause::ConnectionClosed,
                 })
             }
+            (Disposition::Reusable, false) => Ok(()),
         }
+    }
+
+    /// Runs one transaction-control command (simple query protocol, no
+    /// parameters), with the same three outcomes as a statement.
+    pub(crate) async fn command(
+        &mut self,
+        command: TransactionCommand,
+    ) -> Result<(), StatementFailure> {
+        let name = command.name();
+        self.ensure_usable(name)?;
+        let outcome = run_bounded(
+            run_command(&self.object.client, command.sql()),
+            Bounding::ConnectionTimeouts,
+        )
+        .await;
+        self.settle(name, outcome)
     }
 
     fn bounding(&self, bound: StatementBound) -> Bounding {
@@ -884,26 +879,6 @@ mod tests {
             }),
         );
         assert!(PoolSizing::new(POSTGRES_MAX_BACKENDS, Reserve::NoReserve).is_ok());
-    }
-
-    #[test]
-    fn only_main_url_pools_check_for_statement_pooling() {
-        assert_eq!(
-            PoolRole::Main.statement_pooling_check(),
-            PoolingCheckRule::AtFirstCheckout
-        );
-        assert_eq!(
-            PoolRole::WorkerProfile.statement_pooling_check(),
-            PoolingCheckRule::AtFirstCheckout
-        );
-        assert_eq!(
-            PoolRole::RunnerHeartbeat.statement_pooling_check(),
-            PoolingCheckRule::AtFirstCheckout
-        );
-        assert_eq!(
-            PoolRole::Session.statement_pooling_check(),
-            PoolingCheckRule::NotRequired
-        );
     }
 
     #[tokio::test]
