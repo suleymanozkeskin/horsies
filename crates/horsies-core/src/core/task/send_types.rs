@@ -9,7 +9,8 @@ use uuid::Uuid;
 use crate::broker::BrokerError;
 
 /// Categorized task send failure codes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.

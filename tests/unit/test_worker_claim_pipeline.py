@@ -68,7 +68,7 @@ class TestClaimSqlReturningPayload:
         sql_text = CLAIM_SQL.text
         normalised = ' '.join(sql_text.split())
         assert (
-            'RETURNING t.id, t.task_name, t.args, t.kwargs, '
+            'RETURNING t.id, t.task_name, t.input, '
             't.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;'
         ) in normalised
 
