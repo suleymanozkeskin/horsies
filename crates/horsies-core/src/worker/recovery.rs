@@ -13,7 +13,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage_in_pool, CoverageOutcome, DeclaredRetentionClass,
+    ensure_partition_coverage_in_pool, CoverageOutcome,
 };
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -110,9 +110,7 @@ mod p7_maintenance_tests {
     use super::*;
     use crate::broker::terminalization::terminalize;
     use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
-    use crate::core::history::ddl::classes::{
-        finite_class_parent_name, register_finite_retention_class,
-    };
+    use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
     use crate::core::history::heartbeats::partitioning::{
         create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
@@ -123,6 +121,7 @@ mod p7_maintenance_tests {
     use crate::core::history::partitions::catalog::database_now;
     use crate::core::history::partitions::manager::create_daily_leaf;
     use crate::core::history::partitions::publication::LoaderPublication;
+    use crate::core::history::periods::RetentionDays;
     use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
     use chrono::Timelike;
     use serial_test::serial;
@@ -294,12 +293,10 @@ mod p7_maintenance_tests {
         let mut retention = RetentionConfig::default();
         retention.worker_state_retention_hours = None;
         retention.terminal_record_retention_hours = None;
-        retention
-            .retention_classes
-            .push(crate::core::config::retention::RetentionClassConfig {
-                key: "unsafe-class-key".to_owned(),
-                duration: chrono::Duration::days(7),
-            });
+        // Below the coverage floor of two future leaves: the coverage call
+        // fails before any write. Config validation refuses this value, so
+        // the pass sees it only when a config bypasses validation.
+        retention.history_leaf_horizon_days = 1;
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut next_partition_maintenance = tokio::time::Instant::now();
@@ -417,8 +414,13 @@ mod p7_maintenance_tests {
         let mut retention = RetentionConfig::default();
         retention.worker_state_retention_hours = Some(1);
         retention.terminal_record_retention_hours = Some(1);
-        let blocked_class = "p7_pass_blocked_1d";
-        let valid_class = "p7_pass_valid_1d";
+        // Two short periods that no other test of this database registers.
+        let blocked_period = RetentionDays::parse_period(chrono::Duration::days(1)).unwrap();
+        let valid_period = RetentionDays::parse_period(chrono::Duration::days(2)).unwrap();
+        let blocked_class_key = blocked_period.class_key();
+        let valid_class_key = valid_period.class_key();
+        let blocked_class = blocked_class_key.as_str();
+        let valid_class = valid_class_key.as_str();
 
         // Settle all pre-existing classes at the same horizons so the pass's
         // creation counts are attributable to the two classes introduced here.
@@ -436,10 +438,8 @@ mod p7_maintenance_tests {
         baseline.commit().await.unwrap();
 
         let mut setup = pool.begin().await.unwrap();
-        for class_key in [blocked_class, valid_class] {
-            register_finite_retention_class(&mut setup, class_key, chrono::Duration::days(1))
-                .await
-                .unwrap();
+        for period in [blocked_period, valid_period] {
+            register_period_class(&mut setup, period).await.unwrap();
         }
         let now = database_now(&mut setup).await.unwrap();
         let old_day = (now - chrono::Duration::days(6))
@@ -483,29 +483,41 @@ mod p7_maintenance_tests {
         let workflow_id = Uuid::new_v4();
         let node_id = Uuid::new_v4();
         let blocker_task_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO horsies_workflows (id, name) VALUES ($1, 'p7 pass blocker')")
-            .bind(workflow_id)
-            .execute(&mut *setup)
-            .await
-            .unwrap();
         sqlx::query(
-            "INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name)
-             VALUES ($1, $2, 0, 'p7 pass blocker')",
+            "INSERT INTO horsies_workflows (
+                 id, name, definition_key, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'p7 pass blocker', NULL, 'RUNNING', 'fail', 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
         )
-        .bind(node_id)
         .bind(workflow_id)
         .execute(&mut *setup)
         .await
         .unwrap();
         sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                 id, workflow_id, task_index, task_name, input, queue_name, priority,
+                 dependencies, allow_failed_deps, join_type, max_retries, execution,
+                 retention_class_key, status, is_subworkflow, created_at
+             ) VALUES ($1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
+                       '{}', FALSE, 'all', 0, 'ISOLATED',
+                       $3, 'RUNNING', FALSE, NOW())",
+        )
+        .bind(node_id)
+        .bind(workflow_id)
+        .bind(blocked_class)
+        .execute(&mut *setup)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO horsies_workflow_phase2_pending (
-                 task_id, workflow_id, workflow_node_row_id, terminal_status,
-                 terminal_at, terminalization_kind, recovery_source,
-                 history_class, history_anchor, history_schema_version,
-                 result_digest, phase2_generation, created_at, attempt_count
-             ) VALUES ($1, $2, $3, 'COMPLETED', $4, 'COMPLETE_LOCKED',
-                       'HISTORY', $5, $4, 1, $6, $7,
-                       NOW() - INTERVAL '2 hours', $8)",
+                 task_id, workflow_id, workflow_node_row_id, terminalization_kind,
+                 recovery_source, history_class, history_anchor, history_schema_version,
+                 result_digest, quarantine_task_id, created_at, attempt_count,
+                 last_attempt_at, last_failure_class
+             ) VALUES ($1, $2, $3, 'COMPLETE_LOCKED',
+                       'HISTORY', $5, $4, 1, $6, NULL,
+                       NOW() - INTERVAL '2 hours', $7, NULL, NULL)",
         )
         .bind(blocker_task_id)
         .bind(workflow_id)
@@ -513,7 +525,6 @@ mod p7_maintenance_tests {
         .bind(history_leaves[0].bounds().lower() + chrono::Duration::hours(1))
         .bind(blocked_class)
         .bind(vec![31_u8; 32])
-        .bind(Uuid::new_v4())
         .bind(recovery.phase2_quarantine_after_attempts as i32)
         .execute(&mut *setup)
         .await
@@ -541,16 +552,9 @@ mod p7_maintenance_tests {
         }
         setup.commit().await.unwrap();
 
-        retention.retention_classes.extend([
-            crate::core::config::retention::RetentionClassConfig {
-                key: blocked_class.to_owned(),
-                duration: chrono::Duration::days(1),
-            },
-            crate::core::config::retention::RetentionClassConfig {
-                key: valid_class.to_owned(),
-                duration: chrono::Duration::days(1),
-            },
-        ]);
+        retention
+            .retention_periods
+            .extend([blocked_period.as_duration(), valid_period.as_duration()]);
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
@@ -1190,14 +1194,7 @@ async fn run_reaper_pass(
     }
 
     if tokio::time::Instant::now() >= *next_partition_maintenance {
-        let declared: Vec<DeclaredRetentionClass> = retention
-            .registrable_classes()
-            .into_iter()
-            .map(|class| DeclaredRetentionClass {
-                class_key: class.key,
-                duration: class.duration,
-            })
-            .collect();
+        let declared = retention.registrable_periods();
         let coverage_health = match ensure_partition_coverage_in_pool(
             maintenance_pool,
             retention.history_leaf_horizon_days,

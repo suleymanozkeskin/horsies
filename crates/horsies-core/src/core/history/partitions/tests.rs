@@ -15,12 +15,11 @@ use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::commands::{
-    open_end_anchor, CollectPartitionHealth, CreateDailyHistoryLeaf, DetachEmptyForeverLeaf,
-    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf,
-    LeafBounds, LeafRef,
+    open_end_anchor, CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
+    DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::{
-    finite_class_parent_name, register_finite_retention_class, ClassRegistration, FOREVER_CLASS_KEY,
+    finite_class_parent_name, register_period_class, ClassRegistration, FOREVER_CLASS_KEY,
 };
 use crate::core::history::ddl::runtime_names::{
     daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
@@ -32,34 +31,30 @@ use crate::core::history::heartbeats::partitioning::{
 };
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage, ensure_partition_coverage_in_pool, ensure_startup_coverage,
-    ensure_startup_coverage_in_pool, CoverageOutcome, DeclaredRetentionClass,
-    StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, CoverageOutcome, StartupCoverageOutcome,
 };
-use crate::core::history::maintenance::pruning::{
-    prune_expired_partitions, sweep_empty_forever_leaves, ForeverLeafSweepOutcome,
-    ForeverLeafSwept, MAX_FOREVER_DETACHES_PER_PASS,
-};
+use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
-    TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT, TASK_LOOKUP_MANIFEST,
+    TASK_HISTORY_FOREVER, TASK_HISTORY_FOREVER_LEAF, TASK_LOOKUP_MANIFEST,
 };
 use crate::core::history::outcomes::{
     CatalogConflictKind, HealthFault, LeafCreation, LeafDrop, LeafInspection,
 };
+use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 use super::catalog::{
-    capture_partition_bound_utc, database_now, read_attached_birth_floor, read_leaf_catalog_row,
-    read_leaf_physical_state, read_manifest_leaf_rows, LeafIndexKind,
+    capture_partition_bound_utc, database_now, read_leaf_catalog_row, read_leaf_physical_state,
+    read_manifest_leaf_rows, LeafCatalogRow, LeafIndexKind, LeafLowerBound,
     LeafPartitionBoundExpectation,
 };
-use super::forever::ensure_forever_range_partitioning;
 use super::health::collect_partition_health;
 use super::manager::{
-    create_daily_leaf, detach_empty_forever_leaf, detach_expired_leaf, drop_detached_leaf,
-    ensure_leaf_coverage, inspect_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine,
-    NoQuarantine, QuarantineRefusalVerdict, QuarantineRefused, QuarantineResult,
-    TaskQuarantineRefusal,
+    create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
+    verify_static_forever_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine, NoQuarantine,
+    QuarantineRefusalVerdict, QuarantineRefused, QuarantineResult, TaskQuarantineRefusal,
+    STATIC_FOREVER_LEAF_BOUND,
 };
 use super::publication::{LoaderPublication, LoaderRepublished, UnpublishedLoader};
 
@@ -682,11 +677,16 @@ async fn pausing_proxied_pool(
 }
 
 async fn register_class(pool: &PgPool, class_key: &str, days: i64) -> String {
+    let period = RetentionDays::parse_period(Duration::days(days)).expect("retention period");
+    assert_eq!(
+        period.class_key(),
+        class_key,
+        "a class key is derived from its period"
+    );
     let mut transaction = pool.begin().await.expect("begin class registration");
-    let outcome =
-        register_finite_retention_class(&mut transaction, class_key, Duration::days(days))
-            .await
-            .expect("register finite class");
+    let outcome = register_period_class(&mut transaction, period)
+        .await
+        .expect("register finite class");
     assert!(matches!(
         outcome,
         ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
@@ -696,6 +696,35 @@ async fn register_class(pool: &PgPool, class_key: &str, days: i64) -> String {
         .await
         .expect("commit class registration");
     finite_class_parent_name(class_key).expect("finite parent name")
+}
+
+fn hours(count: u32) -> HeartbeatHorizonHours {
+    HeartbeatHorizonHours::new(count).expect("heartbeat horizon")
+}
+
+/// The catalog row of the first leaf that `predicate` selects, in
+/// `(lower_anchor, leaf_name)` order.
+async fn catalog_row_where(pool: &PgPool, predicate: &str, class_key: &str) -> LeafCatalogRow {
+    let leaf_name: String = sqlx::query_scalar(&format!(
+        "SELECT leaf_name FROM {LEAF_CATALOG} WHERE {predicate}
+         ORDER BY lower_anchor, leaf_name LIMIT 1"
+    ))
+    .bind(class_key)
+    .fetch_one(pool)
+    .await
+    .expect("select catalog leaf");
+    let mut connection = pool.acquire().await.expect("acquire catalog reader");
+    read_leaf_catalog_row(&mut connection, &leaf_name)
+        .await
+        .expect("read catalog row")
+        .expect("selected leaf has a catalog row")
+}
+
+/// The time of a bounded leaf's lower bound.
+fn bounded_lower(row: &LeafCatalogRow) -> chrono::DateTime<Utc> {
+    row.lower_anchor
+        .at()
+        .expect("a leaf that maintenance creates has a time lower bound")
 }
 
 fn leaf_ref(parent: &str, class_key: &str, lower: chrono::DateTime<Utc>) -> LeafRef {
@@ -752,8 +781,8 @@ fn heartbeat_derivation_and_command_contracts_match_the_authority() {
 #[serial]
 async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independent() {
     let database = TestDatabase::create().await;
-    let class_key = "p3_lifecycle_30d";
-    let parent = register_class(&database.pool, class_key, 30).await;
+    let class_key = "standard_31d";
+    let parent = register_class(&database.pool, class_key, 31).await;
     let mut transaction = database.pool.begin().await.expect("begin coverage");
     sqlx::query("SELECT set_config('timezone', 'Etc/GMT+12', false)")
         .execute(&mut *transaction)
@@ -788,11 +817,15 @@ async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independ
         .and_then(|value| value.with_nanosecond(0))
         .expect("truncate today");
     let leaf = leaf_ref(&parent, class_key, today);
-    let cataloged_bound = read_leaf_catalog_row(&mut transaction, leaf.leaf_name())
+    assert!(read_leaf_catalog_row(&mut transaction, leaf.leaf_name())
         .await
         .expect("read cataloged leaf")
         .expect("cataloged current leaf")
-        .partition_bound;
+        .describes(class_key, leaf.bounds()));
+    let utc_bound = capture_partition_bound_utc(&mut transaction, leaf.leaf_name())
+        .await
+        .expect("capture UTC partition bound")
+        .expect("current leaf has a partition bound");
     for timezone in ["UTC", "Etc/GMT+12", "Etc/GMT-12"] {
         sqlx::query("SELECT set_config('timezone', $1, false)")
             .bind(timezone)
@@ -804,7 +837,7 @@ async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independ
                 .await
                 .expect("capture UTC partition bound")
                 .as_deref(),
-            Some(cataloged_bound.as_str())
+            Some(utc_bound.as_str())
         );
     }
     let id_index = leaf_id_index_name(leaf.leaf_name());
@@ -822,34 +855,6 @@ async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independ
         .expect("repair task-ID index"),
         LeafCreation::IndexRepaired { .. }
     ));
-    sqlx::query(&format!(
-        "UPDATE {LEAF_CATALOG} SET partition_bound = 'wrong bound' WHERE leaf_name = $1"
-    ))
-    .bind(leaf.leaf_name())
-    .execute(&mut *transaction)
-    .await
-    .expect("corrupt cataloged partition bound");
-    assert!(matches!(
-        create_daily_leaf(
-            &mut transaction,
-            &CreateDailyHistoryLeaf::new(leaf.clone()).expect("conflict command"),
-            &UnpublishedLoader,
-        )
-        .await
-        .expect("classify physical mismatch"),
-        LeafCreation::CatalogConflict {
-            kind: crate::core::history::outcomes::CatalogConflictKind::PhysicalNonconformant,
-            ..
-        }
-    ));
-    sqlx::query(&format!(
-        "UPDATE {LEAF_CATALOG} SET partition_bound = $1 WHERE leaf_name = $2"
-    ))
-    .bind(&cataloged_bound)
-    .bind(leaf.leaf_name())
-    .execute(&mut *transaction)
-    .await
-    .expect("restore cataloged partition bound");
     let canonical_order = leaf_enqueued_index_name(leaf.leaf_name());
     sqlx::query(&format!("DROP INDEX {canonical_order}"))
         .execute(&mut *transaction)
@@ -914,8 +919,8 @@ async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independ
 #[serial]
 async fn conformant_leaf_skips_a_busy_lock_and_missing_leaf_returns_busy() {
     let database = TestDatabase::create_with_connections(3).await;
-    let class_key = "p3_nonblocking_30d";
-    let parent = register_class(&database.pool, class_key, 30).await;
+    let class_key = "standard_32d";
+    let parent = register_class(&database.pool, class_key, 32).await;
     let mut clock = database.pool.acquire().await.expect("acquire clock");
     let now = database_now(&mut clock).await.expect("database now");
     drop(clock);
@@ -1040,7 +1045,7 @@ async fn conformant_leaf_skips_a_busy_lock_and_missing_leaf_returns_busy() {
 #[serial]
 async fn detach_returns_busy_without_waiting_for_a_leaf_session_lock() {
     let database = TestDatabase::create_with_connections(3).await;
-    let class_key = "p3_nb_detach";
+    let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut clock = database.pool.acquire().await.expect("acquire clock");
     let now = database_now(&mut clock).await.expect("database now");
@@ -1121,7 +1126,7 @@ async fn detach_returns_busy_without_waiting_for_a_leaf_session_lock() {
 #[serial]
 async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() {
     let database = TestDatabase::create_with_connections(3).await;
-    let class_key = "p3_cancel_detach";
+    let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut clock = database.pool.acquire().await.expect("acquire clock");
     let now = database_now(&mut clock).await.expect("database now");
@@ -1210,10 +1215,10 @@ async fn pool_coverage_releases_each_leaf_transaction_before_returning() {
 #[serial]
 async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
     let database = TestDatabase::create_with_connections(4).await;
-    let declared: Vec<DeclaredRetentionClass> = (0..50)
-        .map(|index| DeclaredRetentionClass {
-            class_key: format!("rtt_class_{index:02}"),
-            duration: Duration::days(7 + i64::from(index)),
+    let declared: Vec<RetentionDays> = (0..50)
+        .map(|index| {
+            RetentionDays::parse_period(Duration::days(7 + i64::from(index)))
+                .expect("declared period")
         })
         .collect();
 
@@ -1402,7 +1407,7 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
         chrono::DateTime<Utc>,
         chrono::DateTime<Utc>,
     ) = sqlx::query_as(&format!(
-        "SELECT leaf_name, id_index_name, lower_anchor, upper_anchor
+        "SELECT leaf_name, leaf_name || '_probe_idx', lower_anchor, upper_anchor
          FROM {LEAF_CATALOG}
          WHERE class_key = $1
            AND lower_anchor <= statement_timestamp()
@@ -1444,20 +1449,6 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
     .execute(&database.pool)
     .await
     .expect("create conformant heartbeat index on wrong range");
-    let mut connection = database.pool.acquire().await.expect("acquire bound reader");
-    let wrong_bound = capture_partition_bound_utc(&mut connection, &leaf_name)
-        .await
-        .expect("capture wrong physical bound")
-        .expect("wrong physical bound exists");
-    drop(connection);
-    sqlx::query(&format!(
-        "UPDATE {LEAF_CATALOG} SET partition_bound = $1 WHERE leaf_name = $2"
-    ))
-    .bind(wrong_bound)
-    .bind(&leaf_name)
-    .execute(&database.pool)
-    .await
-    .expect("make stored bound match the wrong physical bound");
 
     let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
         .await
@@ -1478,79 +1469,59 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
         .expect("create index-repair coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
 
-    let heartbeat = sqlx::query_as::<_, super::catalog::LeafCatalogRow>(&format!(
-        "SELECT leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-                index_schema_version, id_index_name, partition_bound, min_birth_at,
-                min_birth_verified, created_at, detached_at, dropped_at
-         FROM {LEAF_CATALOG}
-         WHERE class_key = $1
+    let heartbeat = catalog_row_where(
+        &database.pool,
+        "class_key = $1
            AND lower_anchor <= statement_timestamp()
-           AND upper_anchor > statement_timestamp()"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("read current heartbeat catalog row");
-    sqlx::query(&format!("DROP INDEX {}", heartbeat.id_index_name))
+           AND upper_anchor > statement_timestamp()",
+        HEARTBEAT_CLASS_KEY,
+    )
+    .await;
+    let heartbeat_index = heartbeat.id_index_name().expect("heartbeat index name");
+    sqlx::query(&format!("DROP INDEX {heartbeat_index}"))
         .execute(&database.pool)
         .await
         .expect("drop heartbeat index");
     sqlx::query(&format!(
         "CREATE INDEX {} ON {} (task_id, role, sent_at ASC)",
-        heartbeat.id_index_name, heartbeat.leaf_name
+        heartbeat_index, heartbeat.leaf_name
     ))
     .execute(&database.pool)
     .await
     .expect("create same-name heartbeat index with wrong sort direction");
 
-    let history = sqlx::query_as::<_, super::catalog::LeafCatalogRow>(&format!(
-        "SELECT leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-                index_schema_version, id_index_name, partition_bound, min_birth_at,
-                min_birth_verified, created_at, detached_at, dropped_at
-         FROM {LEAF_CATALOG}
-         WHERE class_key NOT IN ($1, 'forever')
+    let history = catalog_row_where(
+        &database.pool,
+        "class_key NOT IN ($1, 'forever')
            AND detached_at IS NULL
-           AND dropped_at IS NULL
-         ORDER BY lower_anchor, leaf_name
-         LIMIT 1"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("read history catalog row");
-    let mut reader = database
-        .pool
-        .acquire()
+           AND dropped_at IS NULL",
+        HEARTBEAT_CLASS_KEY,
+    )
+    .await;
+    // The static forever leaf is install-owned and never repaired, so only
+    // a daily history leaf's index is damaged here.
+    let history_index = history.id_index_name().expect("history index name");
+    sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass($1)")
+        .bind(&history_index)
+        .execute(&database.pool)
         .await
-        .expect("acquire open leaf reader");
-    let open = super::catalog::read_open_ended_forever_leaf(&mut reader)
-        .await
-        .expect("read open-ended leaf")
-        .expect("coverage created the open-ended leaf");
-    drop(reader);
-    for index_name in [&history.id_index_name, &open.id_index_name] {
-        sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass($1)")
-            .bind(index_name)
-            .execute(&database.pool)
-            .await
-            .expect("mark history index invalid");
-    }
+        .expect("mark history index invalid");
 
     let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
         .await
         .expect("repair malformed indexes");
     assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
-    let heartbeat_bounds =
-        LeafBounds::new(heartbeat.lower_anchor, heartbeat.upper_anchor).expect("heartbeat bounds");
+    let heartbeat_bounds = LeafBounds::new(bounded_lower(&heartbeat), heartbeat.upper_anchor)
+        .expect("heartbeat bounds");
     let history_bounds =
-        LeafBounds::new(history.lower_anchor, history.upper_anchor).expect("history bounds");
+        LeafBounds::new(bounded_lower(&history), history.upper_anchor).expect("history bounds");
     let mut connection = database.pool.acquire().await.expect("acquire index reader");
     assert!(
         read_leaf_physical_state(
             &mut connection,
             &heartbeat.leaf_name,
-            &heartbeat.parent_name,
-            &heartbeat.id_index_name,
+            &heartbeat.parent_name().expect("heartbeat parent"),
+            &heartbeat_index,
             LeafPartitionBoundExpectation::Requested(&heartbeat_bounds),
             LeafIndexKind::Heartbeat,
         )
@@ -1562,28 +1533,13 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
         read_leaf_physical_state(
             &mut connection,
             &history.leaf_name,
-            &history.parent_name,
-            &history.id_index_name,
+            &history.parent_name().expect("history parent"),
+            &history_index,
             LeafPartitionBoundExpectation::Requested(&history_bounds),
             LeafIndexKind::History,
         )
         .await
         .expect("read repaired history index")
-        .id_index_conformant
-    );
-    let open_bounds =
-        LeafBounds::new(open.lower_anchor, open.upper_anchor).expect("open-ended bounds");
-    assert!(
-        read_leaf_physical_state(
-            &mut connection,
-            &open.leaf_name,
-            &open.parent_name,
-            &open.id_index_name,
-            LeafPartitionBoundExpectation::Requested(&open_bounds),
-            LeafIndexKind::History,
-        )
-        .await
-        .expect("read repaired open-ended index")
         .id_index_conformant
     );
     drop(connection);
@@ -1598,20 +1554,16 @@ async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
         .await
         .expect("create operator-class repair coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
-    let heartbeat = sqlx::query_as::<_, super::catalog::LeafCatalogRow>(&format!(
-        "SELECT leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-                index_schema_version, id_index_name, partition_bound, min_birth_at,
-                min_birth_verified, created_at, detached_at, dropped_at
-         FROM {LEAF_CATALOG}
-         WHERE class_key = $1
+    let heartbeat = catalog_row_where(
+        &database.pool,
+        "class_key = $1
            AND lower_anchor <= statement_timestamp()
-           AND upper_anchor > statement_timestamp()"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("read current heartbeat catalog row");
-    sqlx::query(&format!("DROP INDEX {}", heartbeat.id_index_name))
+           AND upper_anchor > statement_timestamp()",
+        HEARTBEAT_CLASS_KEY,
+    )
+    .await;
+    let heartbeat_index = heartbeat.id_index_name().expect("heartbeat index name");
+    sqlx::query(&format!("DROP INDEX {heartbeat_index}"))
         .execute(&database.pool)
         .await
         .expect("drop canonical heartbeat index");
@@ -1619,13 +1571,13 @@ async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
         "CREATE INDEX {} ON {} (
              task_id, role varchar_pattern_ops, sent_at DESC
          )",
-        heartbeat.id_index_name, heartbeat.leaf_name
+        heartbeat_index, heartbeat.leaf_name
     ))
     .execute(&database.pool)
     .await
     .expect("create heartbeat index with a nondefault operator class");
     let index_definition: String = sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
-        .bind(&heartbeat.id_index_name)
+        .bind(&heartbeat_index)
         .fetch_one(&database.pool)
         .await
         .expect("read nondefault heartbeat index definition");
@@ -1636,7 +1588,7 @@ async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
         .expect("repair nondefault heartbeat operator class");
     assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
     let index_definition: String = sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
-        .bind(&heartbeat.id_index_name)
+        .bind(&heartbeat_index)
         .fetch_one(&database.pool)
         .await
         .expect("read repaired heartbeat index definition");
@@ -1648,8 +1600,8 @@ async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
 #[serial]
 async fn id_index_repair_refuses_a_name_reused_after_inspection() {
     let database = TestDatabase::create_with_connections(4).await;
-    let class_key = "p3_index_reuse_30d";
-    let parent = register_class(&database.pool, class_key, 30).await;
+    let class_key = "standard_33d";
+    let parent = register_class(&database.pool, class_key, 33).await;
     let now = database_now(
         database
             .pool
@@ -1757,7 +1709,7 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
         .expect("create repair coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
     let damaged_index: String = sqlx::query_scalar(&format!(
-        "SELECT id_index_name FROM {LEAF_CATALOG}
+        "SELECT leaf_name || '_task_idx' FROM {LEAF_CATALOG}
          WHERE class_key = 'standard_30d' AND dropped_at IS NULL
          ORDER BY lower_anchor LIMIT 1"
     ))
@@ -1882,7 +1834,7 @@ async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
 #[serial]
 async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconciles_catalog() {
     let database = TestDatabase::create().await;
-    let class_key = "p3_retire_1d";
+    let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut connection = database.pool.acquire().await.expect("acquire clock");
     let now = database_now(&mut connection).await.expect("database now");
@@ -1903,29 +1855,42 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     let workflow_id = Uuid::new_v4();
     let node_row_id = Uuid::new_v4();
     let pending_task_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO horsies_workflows (id, name) VALUES ($1, 'p3 blocker')")
-        .bind(workflow_id)
-        .execute(&mut *transaction)
-        .await
-        .expect("insert blocker workflow");
     sqlx::query(
-        "INSERT INTO horsies_workflow_tasks
-             (id, workflow_id, task_index, task_name)
-         VALUES ($1, $2, 0, 'p3 blocker node')",
+        "INSERT INTO horsies_workflows (
+             id, name, definition_key, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at
+         ) VALUES ($1, 'p3 blocker', NULL, 'RUNNING', 'fail', 0, $1,
+                   NOW(), NOW(), NOW(), NOW())",
     )
-    .bind(node_row_id)
     .bind(workflow_id)
     .execute(&mut *transaction)
     .await
+    .expect("insert blocker workflow");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             id, workflow_id, task_index, task_name, input, queue_name, priority,
+             dependencies, allow_failed_deps, join_type, max_retries, execution,
+             retention_class_key, status, is_subworkflow, created_at
+         ) VALUES ($1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
+                   '{}', FALSE, 'all', 0, 'ISOLATED',
+                   $3, 'RUNNING', FALSE, NOW())",
+    )
+    .bind(node_row_id)
+    .bind(workflow_id)
+    .bind(class_key)
+    .execute(&mut *transaction)
+    .await
     .expect("insert blocker workflow node");
+    // The pending table holds only the deferred kinds, so the blocker is
+    // COMPLETE_LOCKED.
     sqlx::query(
         "INSERT INTO horsies_workflow_phase2_pending (
-             task_id, workflow_id, workflow_node_row_id, terminal_status, terminal_at,
-             terminalization_kind, recovery_source, history_class, history_anchor,
-             history_schema_version, result_digest, phase2_generation, created_at,
-             attempt_count
-         ) VALUES ($1, $2, $3, 'COMPLETED', $4, 'COMPLETE_FUSED', 'HISTORY',
-                   $5, $4, 1, $6, $7, statement_timestamp(), 0)",
+             task_id, workflow_id, workflow_node_row_id, terminalization_kind,
+             recovery_source, history_class, history_anchor, history_schema_version,
+             result_digest, quarantine_task_id, created_at, attempt_count,
+             last_attempt_at, last_failure_class
+         ) VALUES ($1, $2, $3, 'COMPLETE_LOCKED', 'HISTORY',
+                   $5, $4, 1, $6, NULL, statement_timestamp(), 0, NULL, NULL)",
     )
     .bind(pending_task_id)
     .bind(workflow_id)
@@ -1933,7 +1898,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .bind(lower + Duration::hours(1))
     .bind(class_key)
     .bind(vec![7_u8; 32])
-    .bind(Uuid::new_v4())
     .execute(&mut *transaction)
     .await
     .expect("insert pending blocker");
@@ -2076,7 +2040,7 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
 #[serial]
 async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
     let database = TestDatabase::create().await;
-    let horizon = Duration::hours(2);
+    let horizon = hours(2);
     let mut transaction = database.pool.begin().await.expect("begin heartbeat setup");
     let first = register_heartbeat_class(&mut transaction, horizon)
         .await
@@ -2094,13 +2058,13 @@ async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
         HeartbeatClassRegistration::Verified { .. }
     ));
     assert!(matches!(
-        register_heartbeat_class(&mut transaction, Duration::hours(3))
+        register_heartbeat_class(&mut transaction, hours(3))
             .await
             .expect("update heartbeat horizon"),
         HeartbeatClassRegistration::HorizonUpdated {
             previous_horizon,
             horizon: updated,
-        } if previous_horizon == horizon && updated == Duration::hours(3)
+        } if previous_horizon == horizon && updated == hours(3)
     ));
     let coverage = ensure_heartbeat_coverage(
         &mut transaction,
@@ -2156,7 +2120,7 @@ async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
         .await
         .expect("create unpartitioned heartbeat parent");
     assert_eq!(
-        register_heartbeat_class(&mut transaction, Duration::hours(2))
+        register_heartbeat_class(&mut transaction, hours(2))
             .await
             .expect("classify unpartitioned heartbeat parent"),
         HeartbeatClassRegistration::ParentUnpartitioned
@@ -2174,10 +2138,10 @@ async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
 
 #[tokio::test]
 #[serial]
-async fn manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_attached_set() {
+async fn manifest_excludes_absent_probes_and_keeps_the_complete_attached_set() {
     let database = TestDatabase::create().await;
-    let class_key = "p3_manifest_30d";
-    let parent = register_class(&database.pool, class_key, 30).await;
+    let class_key = "standard_34d";
+    let parent = register_class(&database.pool, class_key, 34).await;
     let mut transaction = database.pool.begin().await.expect("begin manifest setup");
     let now = database_now(&mut transaction).await.expect("database now");
     let today = now
@@ -2200,23 +2164,6 @@ async fn manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_atta
             LeafCreation::Created { .. }
         ));
     }
-    let gone_birth = now - Duration::hours(6);
-    sqlx::query(&format!(
-        "UPDATE {LEAF_CATALOG} SET min_birth_at = $1 WHERE leaf_name = $2"
-    ))
-    .bind(gone_birth)
-    .bind(gone.leaf_name())
-    .execute(&mut *transaction)
-    .await
-    .expect("set missing leaf birth");
-    sqlx::query(&format!(
-        "UPDATE {LEAF_CATALOG} SET min_birth_at = $1 WHERE leaf_name = $2"
-    ))
-    .bind(now + Duration::hours(6))
-    .bind(kept.leaf_name())
-    .execute(&mut *transaction)
-    .await
-    .expect("set kept leaf birth");
     sqlx::query(&format!("DROP TABLE {}", gone.leaf_name()))
         .execute(&mut *transaction)
         .await
@@ -2229,7 +2176,7 @@ async fn manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_atta
             - Duration::hours(10),
     )
     .expect("heartbeat ref");
-    let _ = register_heartbeat_class(&mut transaction, Duration::hours(2))
+    let _ = register_heartbeat_class(&mut transaction, hours(2))
         .await
         .expect("register heartbeat class");
     let _ = create_hourly_heartbeat_leaf(
@@ -2253,12 +2200,10 @@ async fn manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_atta
         selection.absent_relations,
         vec![gone.leaf_name().to_owned()]
     );
-    assert_eq!(
-        read_attached_birth_floor(&mut transaction)
-            .await
-            .expect("read attached birth floor"),
-        Some(gone_birth)
-    );
+    assert!(selection
+        .attached
+        .iter()
+        .any(|row| row.leaf_name == kept.leaf_name()));
     let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &CatalogPublisher)
         .await
         .expect("self-correcting coverage pass");
@@ -2277,14 +2222,14 @@ async fn manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_atta
 #[serial]
 async fn coverage_savepoint_contains_database_failure_and_still_serves_other_classes() {
     let database = TestDatabase::create().await;
-    let survivor = "z_p3_survivor_7d";
+    // Coverage serves classes in key order: the broken class comes first.
+    let survivor = "standard_7d";
     register_class(&database.pool, survivor, 7).await;
     let mut transaction = database.pool.begin().await.expect("begin bad class insert");
     let sql = format!(
         "INSERT INTO {RETENTION_CLASSES} (
-             class_key, duration, partition_interval, finite_parent_name, created_at
-         ) VALUES ('a_p3_broken_7d', interval '7 days', interval '1 day',
-                   'horsies_task_history_a_p3_broken_7d', statement_timestamp())"
+             class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
+         ) VALUES ('standard_10d', 'PERIOD', 10, NULL, statement_timestamp())"
     );
     sqlx::query(&sql)
         .execute(&mut *transaction)
@@ -2297,7 +2242,7 @@ async fn coverage_savepoint_contains_database_failure_and_still_serves_other_cla
         CoverageOutcome::Failed(failure) => failure,
         other => panic!("expected contained failure, got {other:?}"),
     };
-    assert!(failure.refusal.contains("a_p3_broken_7d"));
+    assert!(failure.refusal.contains("standard_10d"));
     assert!(failure.heartbeat_covered_now);
     let survivor_count: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM {LEAF_CATALOG} WHERE class_key = $1"
@@ -2318,7 +2263,7 @@ async fn coverage_savepoint_contains_database_failure_and_still_serves_other_cla
 #[serial]
 async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
     let database = TestDatabase::create_with_connections(4).await;
-    let class_key = "p3_finalize_1d";
+    let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut clock = database
         .pool
@@ -2385,7 +2330,7 @@ async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
 #[serial]
 async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going() {
     let database = TestDatabase::create().await;
-    let class_key = "p3_prune_1d";
+    let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut clock = database
         .pool
@@ -2417,42 +2362,6 @@ async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going()
     assert_eq!(pass.detached_count(), 2);
     assert_eq!(pass.dropped_count(), 1);
     assert!(pass.acted());
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_conversion_is_idempotent_and_reports_coverage_health() {
-    let database = TestDatabase::create().await;
-    let mut transaction = database.pool.begin().await.expect("begin forever check");
-    assert_eq!(
-        ensure_forever_range_partitioning(&mut transaction)
-            .await
-            .expect("ensure forever range partitioning"),
-        0
-    );
-    let creations = ensure_leaf_coverage(
-        &mut transaction,
-        &EnsureLeafCoverage::new("forever", 3).expect("forever coverage command"),
-        &UnpublishedLoader,
-    )
-    .await
-    .expect("ensure forever coverage");
-    assert!(!creations
-        .iter()
-        .any(|item| matches!(item, LeafCreation::ForeverClassLeaf { .. })));
-    let report = collect_partition_health(
-        &mut transaction,
-        &CollectPartitionHealth::new("forever", true).expect("forever health command"),
-    )
-    .await
-    .expect("forever health");
-    assert!(report.is_healthy(), "forever faults: {:?}", report.faults);
-    assert!(!report
-        .faults
-        .iter()
-        .any(|fault| matches!(fault, HealthFault::CoverageBelowFloor { .. })));
-    transaction.commit().await.expect("commit forever check");
     database.drop().await;
 }
 
@@ -2498,10 +2407,10 @@ async fn connection_coverage_publishes_once_per_changed_class_and_at_completion(
     let CoverageOutcome::Ensured(report) = result else {
         panic!("{result:?}");
     };
-    // Four standard daily leaves and the one open-ended forever leaf. The
-    // migrations already created today's daily forever leaf.
-    assert_eq!(report.created_history_leaves, 5);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    // Four standard daily leaves. The first migration creates the static
+    // forever leaf; coverage only verifies it.
+    assert_eq!(report.created_history_leaves, 4);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
     assert!(!StagedLoaderPublisher
         .needs_republication(tx.as_mut())
         .await
@@ -2513,7 +2422,7 @@ async fn connection_coverage_publishes_once_per_changed_class_and_at_completion(
         panic!("{again:?}");
     };
     assert_eq!(report.created_history_leaves, 0);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
     tx.commit().await.unwrap();
     database.drop().await;
 }
@@ -2522,13 +2431,10 @@ async fn connection_coverage_publishes_once_per_changed_class_and_at_completion(
 #[serial]
 async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_classes() {
     let database = TestDatabase::create().await;
+    // Classes are served in key order: forever (verified, nothing created),
+    // standard_30d (its publication is the first one and fails), standard_7d.
+    register_class(&database.pool, "standard_7d", 7).await;
     let mut tx = database.pool.begin().await.unwrap();
-    let before: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM horsies_task_history_leaf_catalog WHERE class_key = 'forever'",
-    )
-    .fetch_one(tx.as_mut())
-    .await
-    .unwrap();
     let publisher = FailFirstStagedPublisher::default();
     let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
         .await
@@ -2537,22 +2443,21 @@ async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_class
         panic!("{result:?}");
     };
     assert_eq!(failed.stage, "ensure_leaf_coverage");
-    assert_eq!(failed.class_key.as_deref(), Some("forever"));
+    assert_eq!(failed.class_key.as_deref(), Some("standard_30d"));
     assert!(failed.heartbeat_covered_now);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
     let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
         .fetch_all(tx.as_mut()).await.unwrap();
-    assert_eq!(
-        classes
-            .iter()
-            .find(|(class, _)| class == "forever")
-            .map(|(_, count)| *count),
-        Some(before),
-        "the failed class must retain only its pre-existing leaves",
+    assert!(
+        !classes.iter().any(|(class, _)| class == "standard_30d"),
+        "the failed class must retain only its pre-existing leaves: {classes:?}",
     );
     assert!(classes
         .iter()
-        .any(|(class, count)| class == "standard_30d" && *count == 4));
+        .any(|(class, count)| class == "standard_7d" && *count == 4));
+    assert!(classes
+        .iter()
+        .any(|(class, count)| class == "forever" && *count == 1));
     assert!(!StagedLoaderPublisher
         .needs_republication(tx.as_mut())
         .await
@@ -2576,11 +2481,9 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
     for heartbeat in [true, false] {
         for interrupted in [false, true] {
             let database = TestDatabase::create_with_connections(4).await;
-            let parent = register_class(&database.pool, "detach_guard_1d", 1).await;
+            let parent = register_class(&database.pool, "standard_1d", 1).await;
             let mut tx = database.pool.begin().await.unwrap();
-            register_heartbeat_class(&mut tx, Duration::hours(3))
-                .await
-                .unwrap();
+            register_heartbeat_class(&mut tx, hours(3)).await.unwrap();
             let now = database_now(&mut tx).await.unwrap();
             let lower = (now - Duration::days(6))
                 .with_hour(0)
@@ -2602,7 +2505,7 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
                     .unwrap();
                     leaf
                 }
-                false => leaf_ref(&parent, "detach_guard_1d", lower),
+                false => leaf_ref(&parent, "standard_1d", lower),
             };
             tx.commit().await.unwrap();
             if !heartbeat {
@@ -2687,7 +2590,7 @@ async fn finalization_retries_publication_after_detach_committed() {
     use crate::core::history::commands::FinalizeInterruptedLeafDetach;
 
     let database = TestDatabase::create_with_connections(4).await;
-    let class = "detach_retry_1d";
+    let class = "standard_1d";
     let parent = register_class(&database.pool, class, 1).await;
     let mut connection = database.pool.acquire().await.unwrap();
     let now = database_now(&mut connection).await.unwrap();
@@ -2741,57 +2644,133 @@ async fn finalization_retries_publication_after_detach_committed() {
 
 async fn forever_leaves(
     connection: &mut PgConnection,
-) -> Vec<(String, chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
-    sqlx::query_as(&format!(
-        "SELECT leaf_name, lower_anchor, upper_anchor FROM {LEAF_CATALOG}
-         WHERE class_key = 'forever' AND detached_at IS NULL AND dropped_at IS NULL
-         ORDER BY lower_anchor"
+) -> Vec<(String, LeafLowerBound, chrono::DateTime<Utc>)> {
+    let rows: Vec<(
+        String,
+        String,
+        Option<chrono::DateTime<Utc>>,
+        chrono::DateTime<Utc>,
+    )> = sqlx::query_as(&format!(
+        "SELECT leaf_name, lower_bound_kind::text, lower_anchor, upper_anchor
+             FROM {LEAF_CATALOG}
+             WHERE class_key = 'forever' AND detached_at IS NULL AND dropped_at IS NULL
+             ORDER BY lower_anchor NULLS FIRST"
     ))
     .fetch_all(connection)
     .await
-    .expect("read forever leaves")
+    .expect("read forever leaves");
+    rows.into_iter()
+        .map(|(name, kind, lower, upper)| {
+            let bound = LeafLowerBound::decode(&kind, lower).expect("stored lower bound pair");
+            (name, bound, upper)
+        })
+        .collect()
 }
 
 #[tokio::test]
 #[serial]
-async fn connection_coverage_creates_one_open_ended_forever_leaf_after_the_daily_ones() {
+async fn connection_coverage_verifies_the_static_forever_leaf_and_creates_none() {
     let database = TestDatabase::create().await;
     let mut tx = database.pool.begin().await.unwrap();
-    let daily_before = forever_leaves(tx.as_mut()).await;
-    let daily_upper = daily_before
-        .iter()
-        .map(|(_, _, upper)| *upper)
-        .max()
-        .expect("the migrations create a daily forever leaf");
-    let first = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
-        .await
-        .unwrap();
-    assert!(matches!(first, CoverageOutcome::Ensured(_)), "{first:?}");
-    let after = forever_leaves(tx.as_mut()).await;
-    let open: Vec<_> = after
-        .iter()
-        .filter(|(_, _, upper)| *upper == open_end_anchor())
-        .collect();
-    assert_eq!(open.len(), 1);
-    assert_eq!(open[0].1, daily_upper);
+    let before = forever_leaves(tx.as_mut()).await;
     assert_eq!(
-        open[0].0,
-        format!(
-            "horsies_task_history_forever_open_{}",
-            daily_upper.format("%Y_%m_%d")
-        )
+        before,
+        vec![(
+            TASK_HISTORY_FOREVER_LEAF.to_owned(),
+            LeafLowerBound::Open,
+            open_end_anchor()
+        )]
     );
-    // No new daily forever leaf.
-    assert_eq!(after.len(), daily_before.len() + 1);
+    for _ in 0..2 {
+        let coverage = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
+            .await
+            .unwrap();
+        assert!(
+            matches!(coverage, CoverageOutcome::Ensured(_)),
+            "{coverage:?}"
+        );
+        assert_eq!(forever_leaves(tx.as_mut()).await, before);
+    }
+    tx.rollback().await.unwrap();
+    database.drop().await;
+}
 
-    let second = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
+#[tokio::test]
+#[serial]
+async fn static_forever_leaf_is_conformant_on_a_fresh_baseline() {
+    let database = TestDatabase::create().await;
+    let mut connection = database.pool.acquire().await.unwrap();
+    let row = read_leaf_catalog_row(&mut connection, TASK_HISTORY_FOREVER_LEAF)
+        .await
+        .unwrap()
+        .expect("the first migration catalogs the static forever leaf");
+    assert_eq!(row.lower_anchor, LeafLowerBound::Open);
+    assert_eq!(row.upper_anchor, open_end_anchor());
+    assert_eq!(
+        capture_partition_bound_utc(&mut connection, TASK_HISTORY_FOREVER_LEAF)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(STATIC_FOREVER_LEAF_BOUND)
+    );
+    assert_eq!(
+        verify_static_forever_leaf(&mut connection).await.unwrap(),
+        LeafCreation::AlreadyConformant {
+            leaf_name: TASK_HISTORY_FOREVER_LEAF.to_owned(),
+        }
+    );
+    drop(connection);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn static_forever_leaf_missing_index_is_a_conflict_and_is_not_repaired() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let index_name = leaf_id_index_name(TASK_HISTORY_FOREVER_LEAF);
+    sqlx::query(&format!("DROP INDEX {index_name}"))
+        .execute(&database.pool)
         .await
         .unwrap();
-    let CoverageOutcome::Ensured(report) = second else {
-        panic!("{second:?}");
-    };
-    assert_eq!(report.created_history_leaves, 0);
-    assert_eq!(forever_leaves(tx.as_mut()).await, after);
+    let mut connection = database.pool.acquire().await.unwrap();
+    assert!(matches!(
+        verify_static_forever_leaf(&mut connection).await.unwrap(),
+        LeafCreation::CatalogConflict {
+            kind: CatalogConflictKind::PhysicalNonconformant,
+            ..
+        }
+    ));
+    drop(connection);
+    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CoverageOutcome::Failed(_)), "{outcome:?}");
+    let restored: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&index_name)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert!(!restored);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn static_forever_leaf_missing_catalog_row_is_a_conflict() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    sqlx::query(&format!("DELETE FROM {LEAF_CATALOG} WHERE leaf_name = $1"))
+        .bind(TASK_HISTORY_FOREVER_LEAF)
+        .execute(tx.as_mut())
+        .await
+        .unwrap();
+    assert!(matches!(
+        verify_static_forever_leaf(tx.as_mut()).await.unwrap(),
+        LeafCreation::CatalogConflict {
+            kind: CatalogConflictKind::RelationWithoutCatalog,
+            ..
+        }
+    ));
     tx.rollback().await.unwrap();
     database.drop().await;
 }
@@ -2814,7 +2793,8 @@ async fn daily_forever_leaf_inside_the_open_ended_leaf_is_refused_without_change
         .find(|(_, _, upper)| *upper == open_end_anchor())
         .expect("open-ended leaf")
         .clone();
-    let lower = open.1 + Duration::days(10);
+    let today = utc_day_start(database_now(tx.as_mut()).await.unwrap());
+    let lower = today + Duration::days(10);
     let leaf = LeafRef::new(
         daily_leaf_name(TASK_HISTORY_FOREVER, lower).unwrap(),
         FOREVER_CLASS_KEY,
@@ -2848,10 +2828,10 @@ async fn daily_forever_leaf_inside_the_open_ended_leaf_is_refused_without_change
 
 #[tokio::test]
 #[serial]
-async fn pool_coverage_creates_one_open_ended_forever_leaf_and_then_nothing() {
+async fn pool_coverage_creates_the_period_leaves_and_no_forever_leaf() {
     let database = TestDatabase::create_with_connections(4).await;
     let mut reader = database.pool.acquire().await.unwrap();
-    let daily_before = forever_leaves(&mut reader).await;
+    let before = forever_leaves(&mut reader).await;
     drop(reader);
     let first = ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &UnpublishedLoader)
         .await
@@ -2859,19 +2839,11 @@ async fn pool_coverage_creates_one_open_ended_forever_leaf_and_then_nothing() {
     let CoverageOutcome::Ensured(report) = first else {
         panic!("{first:?}");
     };
-    // Four standard daily leaves and the one open-ended forever leaf.
-    assert_eq!(report.created_history_leaves, 5);
+    // Four standard daily leaves; the static forever leaf exists from install.
+    assert_eq!(report.created_history_leaves, 4);
     let mut reader = database.pool.acquire().await.unwrap();
-    let after = forever_leaves(&mut reader).await;
+    assert_eq!(forever_leaves(&mut reader).await, before);
     drop(reader);
-    assert_eq!(after.len(), daily_before.len() + 1);
-    assert_eq!(
-        after
-            .iter()
-            .filter(|(_, _, upper)| *upper == open_end_anchor())
-            .count(),
-        1
-    );
     let second = ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &UnpublishedLoader)
         .await
         .unwrap();
@@ -2879,72 +2851,6 @@ async fn pool_coverage_creates_one_open_ended_forever_leaf_and_then_nothing() {
         panic!("{second:?}");
     };
     assert_eq!(report.created_history_leaves, 0);
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn existing_daily_forever_leaves_keep_the_probe_healthy_before_the_open_leaf_starts() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let mut tx = database.pool.begin().await.unwrap();
-    let today = database_now(&mut tx)
-        .await
-        .unwrap()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc();
-    // Daily forever leaves through the horizon, as a deployment has them today.
-    for offset in 1..=3 {
-        let lower = today + Duration::days(offset);
-        let leaf = LeafRef::new(
-            daily_leaf_name(TASK_HISTORY_FOREVER, lower).unwrap(),
-            FOREVER_CLASS_KEY,
-            LeafBounds::new(lower, lower + Duration::days(1)).unwrap(),
-        )
-        .unwrap();
-        let outcome = create_daily_leaf(
-            tx.as_mut(),
-            &CreateDailyHistoryLeaf::new(leaf).unwrap(),
-            &UnpublishedLoader,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            outcome,
-            LeafCreation::Created { .. } | LeafCreation::AlreadyConformant { .. }
-        ));
-    }
-    tx.commit().await.unwrap();
-
-    let setup =
-        ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &StagedLoaderPublisher)
-            .await
-            .unwrap();
-    assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
-    let mut reader = database.pool.acquire().await.unwrap();
-    let leaves = forever_leaves(&mut reader).await;
-    drop(reader);
-    let open = leaves
-        .iter()
-        .find(|(_, _, upper)| *upper == open_end_anchor())
-        .expect("open-ended leaf");
-    // Starts where the last daily forever leaf ends: no overlap.
-    assert_eq!(open.1, today + Duration::days(4));
-    assert!(open.1 > today);
-
-    let (proxy, pool) = proxied_pool(&database, 0, 1).await;
-    proxy.reset();
-    let healthy = ensure_partition_coverage_in_pool(&pool, 3, 2, &[], &StagedLoaderPublisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Ensured(report) = healthy else {
-        panic!("{healthy:?}");
-    };
-    assert_eq!(report.created_history_leaves, 0);
-    assert_eq!(proxy.statement_count(), 3);
-    pool.close().await;
-    proxy.stop().await;
     database.drop().await;
 }
 
@@ -2963,12 +2869,11 @@ async fn forever_floor_faults(connection: &mut PgConnection) -> Vec<HealthFault>
 
 #[tokio::test]
 #[serial]
-async fn forever_health_meets_the_floor_with_the_open_ended_leaf_only() {
+async fn forever_health_meets_the_floor_with_the_static_leaf() {
     let database = TestDatabase::create().await;
     let mut tx = database.pool.begin().await.unwrap();
-    // Only the migrations' daily forever leaf: coverage ends tomorrow.
-    let absent = forever_floor_faults(tx.as_mut()).await;
-    assert_eq!(absent.len(), 1, "{absent:?}");
+    // The static forever leaf reaches the open end from install on.
+    assert_eq!(forever_floor_faults(tx.as_mut()).await, Vec::new());
     let coverage = ensure_partition_coverage(&mut tx, 2, 2, &[], &StagedLoaderPublisher)
         .await
         .unwrap();
@@ -2985,304 +2890,9 @@ fn utc_day_start(value: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     value.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()
 }
 
-async fn create_forever_daily_leaf(pool: &PgPool, lower: chrono::DateTime<Utc>) -> LeafRef {
-    let leaf = LeafRef::new(
-        daily_leaf_name(TASK_HISTORY_FOREVER, lower).unwrap(),
-        FOREVER_CLASS_KEY,
-        LeafBounds::new(lower, lower + Duration::days(1)).unwrap(),
-    )
-    .unwrap();
-    let mut transaction = pool.begin().await.unwrap();
-    let outcome = create_daily_leaf(
-        transaction.as_mut(),
-        &CreateDailyHistoryLeaf::new(leaf.clone()).unwrap(),
-        &UnpublishedLoader,
-    )
-    .await
-    .unwrap();
-    transaction.commit().await.unwrap();
-    assert!(
-        matches!(
-            outcome,
-            LeafCreation::Created { .. } | LeafCreation::AlreadyConformant { .. }
-        ),
-        "{outcome:?}"
-    );
-    leaf
-}
-
-async fn seed_forever_row(pool: &PgPool, anchor: chrono::DateTime<Utc>) {
-    seed_forever_row_into(pool, TASK_HISTORY_PARENT, anchor).await;
-}
-
-async fn seed_forever_row_into(pool: &PgPool, relation: &str, anchor: chrono::DateTime<Utc>) {
-    sqlx::query(&format!(
-        "INSERT INTO {relation} (
-             task_id, task_name, queue_name, priority,
-             command_fingerprint_version, command_fingerprint,
-             status, terminalization_kind, terminal_at,
-             retention_anchor_at, retention_class_key,
-             enqueued_at, created_at, retry_count, max_retries,
-             result_envelope_version, result_codec, result_content_type,
-             is_workflow_task, history_schema_version,
-             attempt_archive_version, attempt_snapshot_codec,
-             attempt_snapshot_content_type, attempt_snapshot,
-             attempt_snapshot_digest, rerun_input_disposition
-         ) VALUES (
-             $1, 'forever sweep', 'default', 100,
-             1, $2, 'COMPLETED', 'COMPLETE_FUSED', $3,
-             $3, 'forever', $3, $3, 0, 0,
-             1, 'json-utf8', 'application/json', FALSE, 1,
-             1, 'json-utf8', 'application/json', $4, $5,
-             'NEVER_ELIGIBLE'
-         )"
-    ))
-    .bind(Uuid::new_v4())
-    .bind(vec![3_u8; 32])
-    .bind(anchor)
-    .bind(b"[]".as_slice())
-    .bind(vec![5_u8; 32])
-    .execute(pool)
-    .await
-    .expect("seed forever history row");
-}
-
-async fn leaf_dropped(pool: &PgPool, leaf_name: &str) -> bool {
-    let (detached, dropped, relation): (bool, bool, Option<String>) = sqlx::query_as(&format!(
-        "SELECT detached_at IS NOT NULL, dropped_at IS NOT NULL, to_regclass(leaf_name)::text
-         FROM {LEAF_CATALOG} WHERE leaf_name = $1"
-    ))
-    .bind(leaf_name)
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    detached && dropped && relation.is_none()
-}
-
-async fn database_today(pool: &PgPool) -> chrono::DateTime<Utc> {
-    let mut connection = pool.acquire().await.unwrap();
-    utc_day_start(database_now(&mut connection).await.unwrap())
-}
-
 #[tokio::test]
 #[serial]
-async fn forever_sweep_drops_closed_empty_leaves_and_keeps_the_rest() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let today = database_today(&database.pool).await;
-    let empty = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
-    let full = create_forever_daily_leaf(&database.pool, today - Duration::days(3)).await;
-    let future = create_forever_daily_leaf(&database.pool, today + Duration::days(1)).await;
-    seed_forever_row(
-        &database.pool,
-        today - Duration::days(3) + Duration::hours(1),
-    )
-    .await;
-    let coverage =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .unwrap();
-    assert!(
-        matches!(coverage, CoverageOutcome::Ensured(_)),
-        "{coverage:?}"
-    );
-    let mut reader = database.pool.acquire().await.unwrap();
-    let open = super::catalog::read_open_ended_forever_leaf(&mut reader)
-        .await
-        .unwrap()
-        .expect("open-ended leaf");
-    drop(reader);
-    // A catalog row under the legacy leaf name with closed one-day bounds.
-    sqlx::query(&format!(
-        "INSERT INTO {LEAF_CATALOG} (
-             leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-             index_schema_version, id_index_name, partition_bound,
-             min_birth_at, min_birth_verified, created_at
-         ) VALUES ($1, $2, 'forever', $3, $4, 1, $5, 'legacy', NULL, TRUE, now())"
-    ))
-    .bind(super::forever::FOREVER_LEGACY_LEAF)
-    .bind(TASK_HISTORY_FOREVER)
-    .bind(today - Duration::days(9))
-    .bind(today - Duration::days(8))
-    .bind(format!("{}_task_idx", super::forever::FOREVER_LEGACY_LEAF))
-    .execute(&database.pool)
-    .await
-    .unwrap();
-
-    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
-    assert_eq!(pass.errors, Vec::<String>::new());
-    assert_eq!(
-        pass.swept,
-        vec![ForeverLeafSwept {
-            leaf_name: empty.leaf_name().to_owned(),
-            outcome: ForeverLeafSweepOutcome::Dropped,
-        }]
-    );
-    assert_eq!(pass.kept_non_empty, vec![full.leaf_name().to_owned()]);
-    assert!(leaf_dropped(&database.pool, empty.leaf_name()).await);
-    let mut connection = database.pool.acquire().await.unwrap();
-    assert!(!StagedLoaderPublisher
-        .references_leaf(&mut connection, empty.leaf_name())
-        .await
-        .unwrap());
-    assert!(!StagedLoaderPublisher
-        .needs_republication(&mut connection)
-        .await
-        .unwrap());
-    drop(connection);
-    for kept in [
-        full.leaf_name(),
-        future.leaf_name(),
-        open.leaf_name.as_str(),
-    ] {
-        assert!(!leaf_dropped(&database.pool, kept).await, "{kept}");
-    }
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_sweep_finalizes_an_interrupted_detach_on_the_next_pass() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let today = database_today(&database.pool).await;
-    let leaf = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
-    let mut blocker = database.pool.acquire().await.unwrap();
-    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    sqlx::query(&format!("SELECT count(*) FROM {}", leaf.leaf_name()))
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    let command = DetachEmptyForeverLeaf::new(leaf.clone(), Some(100)).unwrap();
-    let timed_out = detach_empty_forever_leaf(&database.pool, &command, &UnpublishedLoader)
-        .await
-        .expect_err("the old snapshot interrupts the concurrent detach");
-    assert!(timed_out.to_string().contains("statement timeout"));
-    let mut inspector = database.pool.acquire().await.unwrap();
-    assert!(matches!(
-        inspect_leaf(
-            &mut inspector,
-            &InspectHistoryLeaf::closed_empty_forever(leaf.clone()).unwrap()
-        )
-        .await
-        .unwrap(),
-        LeafInspection::DetachInterrupted { .. }
-    ));
-    drop(inspector);
-    sqlx::query("ROLLBACK")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    drop(blocker);
-
-    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
-    assert_eq!(pass.errors, Vec::<String>::new());
-    assert!(pass.swept.contains(&ForeverLeafSwept {
-        leaf_name: leaf.leaf_name().to_owned(),
-        outcome: ForeverLeafSweepOutcome::Dropped,
-    }));
-    assert!(leaf_dropped(&database.pool, leaf.leaf_name()).await);
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_sweep_reaches_an_empty_leaf_behind_non_empty_ones() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let today = database_today(&database.pool).await;
-    let mut full = Vec::new();
-    for offset in (3..=34).rev() {
-        let lower = today - Duration::days(offset);
-        full.push(create_forever_daily_leaf(&database.pool, lower).await);
-        seed_forever_row(&database.pool, lower + Duration::hours(1)).await;
-    }
-    let empty = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
-    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
-    assert_eq!(pass.errors, Vec::<String>::new());
-    assert_eq!(pass.kept_non_empty.len(), 32);
-    assert!(pass.swept.contains(&ForeverLeafSwept {
-        leaf_name: empty.leaf_name().to_owned(),
-        outcome: ForeverLeafSweepOutcome::Dropped,
-    }));
-    assert!(leaf_dropped(&database.pool, empty.leaf_name()).await);
-    for leaf in &full {
-        assert!(!leaf_dropped(&database.pool, leaf.leaf_name()).await);
-    }
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_sweep_stops_at_its_detach_bound() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let today = database_today(&database.pool).await;
-    let total = MAX_FOREVER_DETACHES_PER_PASS + 1;
-    let mut leaves = Vec::new();
-    for offset in 2..(2 + total as i64) {
-        leaves
-            .push(create_forever_daily_leaf(&database.pool, today - Duration::days(offset)).await);
-    }
-    let first = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
-    assert_eq!(first.errors, Vec::<String>::new());
-    let dropped = first
-        .swept
-        .iter()
-        .filter(|entry| entry.outcome == ForeverLeafSweepOutcome::Dropped)
-        .count();
-    assert_eq!(dropped, MAX_FOREVER_DETACHES_PER_PASS);
-    let second = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
-    assert_eq!(second.swept.len(), 1);
-    for leaf in &leaves {
-        assert!(leaf_dropped(&database.pool, leaf.leaf_name()).await);
-    }
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_drop_keeps_a_detached_leaf_that_gained_rows() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let today = database_today(&database.pool).await;
-    let lower = today - Duration::days(2);
-    let leaf = create_forever_daily_leaf(&database.pool, lower).await;
-    let detach = detach_empty_forever_leaf(
-        &database.pool,
-        &DetachEmptyForeverLeaf::new(leaf.clone(), None).unwrap(),
-        &UnpublishedLoader,
-    )
-    .await
-    .unwrap();
-    assert!(
-        matches!(
-            detach,
-            DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
-        ),
-        "{detach:?}"
-    );
-    // A row written straight into the detached leaf after its detach.
-    seed_forever_row_into(&database.pool, leaf.leaf_name(), lower + Duration::hours(1)).await;
-    let mut transaction = database.pool.begin().await.unwrap();
-    let drop = drop_detached_leaf(
-        &mut transaction,
-        &DropDetachedHistoryLeaf::closed_empty_forever(leaf.clone()).unwrap(),
-        &UnpublishedLoader,
-    )
-    .await
-    .unwrap();
-    transaction.rollback().await.unwrap();
-    assert_eq!(
-        drop,
-        LeafDrop::Inspection(LeafInspection::KeptNonEmpty {
-            leaf_name: leaf.leaf_name().to_owned(),
-        })
-    );
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf() {
+async fn guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf() {
     let database = TestDatabase::create().await;
     let mut tx = database.pool.begin().await.unwrap();
     let coverage = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
@@ -3314,10 +2924,8 @@ async fn guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf() {
         .map(|(_, name)| name.as_str())
         .collect();
     assert_eq!(standard, 4);
-    // The open-ended leaf, plus today's daily forever leaf from the migrations
-    // until it closes and the sweep removes it.
-    assert_eq!(forever.len(), 2, "{forever:?}");
-    assert!(forever.iter().any(|name| name.contains("_open_")));
+    // The static forever leaf only.
+    assert_eq!(forever, vec![TASK_HISTORY_FOREVER_LEAF]);
     tx.rollback().await.unwrap();
     database.drop().await;
 }

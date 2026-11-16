@@ -840,9 +840,9 @@ fn push_facet_scope(
     builder.push(" WHERE TRUE");
     if let Some(window) = window {
         builder
-            .push(" AND retention_anchor_at >= ")
+            .push(" AND terminal_at >= ")
             .push_bind(window.lower())
-            .push(" AND retention_anchor_at < ")
+            .push(" AND terminal_at < ")
             .push_bind(window.upper());
     }
     if !filters.statuses.is_empty() {
