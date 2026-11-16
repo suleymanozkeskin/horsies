@@ -35,6 +35,8 @@ pub mod start;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod claim_plan_tests;
+#[cfg(test)]
 mod exit_not_seen_tests;
 #[cfg(test)]
 mod held_exits;

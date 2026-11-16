@@ -66,7 +66,7 @@ fn runs_with(seats: usize, entries: Vec<SeatRun<()>>) -> SeatRuns<()> {
 
 fn returned() -> BodyEnd {
     BodyEnd::Result(ResultEnvelopeText::new(
-        r#"{"__type":"ok","value":1}"#.to_owned(),
+        r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
     ))
 }
 

@@ -385,6 +385,100 @@ mod p7_maintenance_tests {
         );
     }
 
+    /// Python's order (`reaper.py:144-638`) requeues stale CLAIMED rows before
+    /// it expires PENDING rows, so a stale claim whose `good_until` has passed
+    /// is requeued and expired in one pass. Expiry first would leave it
+    /// PENDING after the pass.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let coverage =
+            crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
+                &pool,
+                2,
+                2,
+                &[],
+                &crate::core::history::reads::publisher::StagedLoaderPublisher,
+            )
+            .await
+            .expect("partition coverage");
+        assert!(matches!(
+            coverage,
+            crate::core::history::maintenance::coverage::CoverageOutcome::Ensured(_)
+        ));
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'reaper_order', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW() - interval '1 day', NOW() - interval '1 day',
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'CLAIMED', NOW() - interval '1 day', NOW() - interval '1 day',
+                 'gone-worker', NOW() + interval '1 hour',
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NOW() - interval '1 minute', FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("seed a stale claim past its deadline");
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = true;
+        recovery.auto_fail_stale_running = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let retention = RetentionConfig::default();
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut orphan_state = OrphanSweepState::default();
+
+        run_reaper_pass(
+            &pool,
+            &pool,
+            &WorkflowSpecRegistry::new(),
+            &recovery,
+            &PayloadPolicy::default(),
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+        )
+        .await;
+
+        let live: Option<String> =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("read the live row");
+        assert_eq!(live, None, "the expired task leaves the live table");
+        let history: String =
+            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the history row");
+        assert_eq!(history, "EXPIRED");
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("remove the history row");
+    }
+
     #[tokio::test]
     #[serial]
     async fn periodic_maintenance_runs_non_phase2_workflow_recovery() {
@@ -913,7 +1007,10 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively.
+/// as FAILED or requeuing them respectively. The caller has checked the
+/// client family of the handle that owns both pools
+/// (`Worker::start_database`); the reaper's partition maintenance writes
+/// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     runtime_pool: PgPool,
@@ -1684,31 +1781,6 @@ mod orphan_audit_schedule_tests {
         assert!(state.schedule_if_due(now + interval, interval));
     }
 
-    /// The reaper pass runs Python's order (`reaper.py:144-638`): requeue
-    /// stale CLAIMED, orphan audit, stale RUNNING, expire PENDING, then
-    /// workflow recovery.
-    #[test]
-    fn reaper_pass_runs_the_steps_in_python_order() {
-        let source = include_str!("recovery.rs");
-        let pass = &source[source
-            .find(&["async fn ", "run_reaper_pass("].concat())
-            .expect("run_reaper_pass source")..];
-        let pass = &pass[..pass.find("\n}\n").expect("end of run_reaper_pass")];
-        let position = |call: &str| {
-            pass.find(call)
-                .unwrap_or_else(|| panic!("{call} not called in run_reaper_pass"))
-        };
-        let order = [
-            position("requeue_stale_claimed(runtime_pool"),
-            position("terminate_orphaned_workflow_tasks(runtime_pool"),
-            position("mark_stale_running_as_failed("),
-            position("expire_pending_tasks(runtime_pool)"),
-            position("recover_stuck_workflows_observed("),
-        ];
-        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-        assert!(!pass.contains(&["orphan_state", ".disabled"].concat()));
-    }
-
     #[test]
     fn transient_non_lock_failure_is_an_error_in_the_health_snapshot() {
         let error = crate::broker::BrokerError::Database(sqlx::Error::PoolTimedOut);
@@ -2053,6 +2125,83 @@ mod tests {
             acquire_gate(&unavailable, advisory_key_reaper()).await,
             GatePass::Skip
         ));
+    }
+
+    /// #772: the reaper's gate and pass run on the worker reserve, so a pass
+    /// completes while every connection of the runtime pool is held.
+    #[tokio::test]
+    #[serial]
+    async fn a_reaper_pass_completes_on_the_reserve_while_the_runtime_pool_is_exhausted() {
+        let seed = test_pool().await;
+        let task_id = Uuid::new_v4();
+        insert_stale_running_task(&seed, task_id, "NULL").await;
+
+        let runtime = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_millis(500))
+            .connect_with((*seed.connect_options()).clone())
+            .await
+            .unwrap();
+        let broker = crate::broker::PostgresBroker::from_pool(runtime.clone());
+        let held = [
+            runtime.acquire().await.unwrap(),
+            runtime.acquire().await.unwrap(),
+        ];
+        assert!(
+            matches!(
+                acquire_gate(&runtime, advisory_key_reaper()).await,
+                GatePass::Skip
+            ),
+            "the exhausted runtime pool cannot take the gate",
+        );
+
+        let GatePass::Held(gate) = acquire_gate(broker.reserve_pool(), advisory_key_reaper()).await
+        else {
+            panic!("the reserve takes the reaper gate");
+        };
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        recovery.auto_fail_stale_running = true;
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut orphan_state = OrphanSweepState::default();
+        let pass = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_reaper_pass(
+                broker.reserve_pool(),
+                broker.reserve_maintenance_pool(),
+                &WorkflowSpecRegistry::new(),
+                &recovery,
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+                &health,
+                &mut next_retention_cleanup,
+                &mut next_partition_maintenance,
+                &mut orphan_state,
+            ),
+        )
+        .await;
+        assert!(pass.is_ok(), "the reaper pass completes on the reserve");
+        release_gate(gate).await;
+        drop(held);
+
+        let failed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_task_history
+             WHERE task_id = $1 AND status = 'FAILED' AND terminalization_kind = 'FAIL_STALE'",
+        )
+        .bind(task_id)
+        .fetch_one(&seed)
+        .await
+        .unwrap();
+        assert_eq!(failed, 1, "the pass failed the stale RUNNING task");
+
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&seed)
+            .await
+            .unwrap();
     }
 
     fn test_db_url() -> String {
@@ -2849,3 +2998,6 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod retention_ports;

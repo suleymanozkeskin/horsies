@@ -734,13 +734,13 @@ impl OutcomeWriter {
         };
         let mut sends: u32 = 1;
         loop {
-            let error = match release_claims(
-                self.broker.core_main_pool(),
-                self.broker.statement_log(),
-                &command,
-            )
-            .await
-            {
+            let sent = match self.broker.core_pools_for_write() {
+                Ok((open, _write)) => {
+                    release_claims(open.main(), self.broker.statement_log(), &command).await
+                }
+                Err(error) => Err(error),
+            };
+            let error = match sent {
                 Ok(outcomes) => return released(task, reason, &outcomes),
                 Err(error) => error,
             };
