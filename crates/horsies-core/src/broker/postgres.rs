@@ -1194,11 +1194,18 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction.
+    ///
+    /// The handle checks its client family before the transaction: a
+    /// database of another family, or with no family row, is
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
         let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
         transaction.commit().await?;
@@ -2924,6 +2931,25 @@ fn map_history_enqueue_error(error: HistoryError) -> BrokerError {
     }
 }
 
+/// The rerun error of a failed client-family check.
+///
+/// # Panics
+///
+/// `ensure_client_family_for_write` fails only with a database error or a
+/// family mismatch; any other error is a defect of that function.
+fn rerun_family_error(error: BrokerError) -> RerunError {
+    match error {
+        BrokerError::ClientFamilyMismatch { stored, own } => {
+            RerunError::ClientFamilyMismatch { stored, own }
+        }
+        BrokerError::Database(database) => RerunError::Database(database),
+        other => panic!(
+            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
+             error nor a family mismatch"
+        ),
+    }
+}
+
 fn map_history_read_error(error: HistoryError) -> BrokerError {
     match error {
         HistoryError::Database(error) => BrokerError::Database(error),
@@ -3098,7 +3124,7 @@ fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, Broker
         .transpose()?;
     Ok(TaskResultRow {
         id: detail.task_id,
-        status: detail.status,
+        status: detail.status.to_string(),
         result,
         failed_reason: detail.final_failed_reason,
     })
@@ -3140,8 +3166,7 @@ fn history_task_info(
     include_failed_reason: bool,
     include_attempts: bool,
 ) -> BrokerResult<TaskInfo> {
-    let status = crate::broker::row::task::parse_task_status(&detail.status)
-        .map_err(task_info_history_error)?;
+    let status = detail.status;
     let result = match include_result {
         false => None,
         true => decode_history_result_value(&detail)

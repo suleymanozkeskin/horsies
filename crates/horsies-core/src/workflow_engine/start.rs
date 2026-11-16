@@ -53,6 +53,7 @@ VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, $7::uuid, $8, $9, $10::uuid,
 
 // An engine-minted task row carries no command fingerprint, no idempotency
 // key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+// `sent_at` ($11) is the start call time of the node's workflow.
 const ENQUEUE_ROOT_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -62,7 +63,7 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $11, NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// A node's `started_at` is its enqueue time (Python `ENQUEUE_WORKFLOW_TASK_SQL`,
@@ -429,7 +430,7 @@ async fn start_workflow_inner(
     tracing::debug!(workflow_id = %wf_id, name = %spec.name, "workflow created");
 
     // Insert all workflow_task rows and enqueue roots.
-    insert_workflow_tasks(&mut tx, wf_id, &spec.tasks, registry, retention).await?;
+    insert_workflow_tasks(&mut tx, wf_id, sent_at, &spec.tasks, registry, retention).await?;
 
     tx.commit().await?;
 
@@ -589,11 +590,15 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
 /// and immediately enqueued into horsies_tasks. Root sub-workflow nodes
 /// are detected and launched as child workflows.
 ///
+/// `workflow_sent_at` is the start call time of the workflow (its stored `sent_at`); every root task row
+/// stores it as its own `sent_at`.
+///
 /// Returns a boxed future because this function is mutually recursive with
 /// `launch_root_subworkflow` → `start_child_workflow_in_tx`.
 fn insert_workflow_tasks<'a>(
     tx: &'a mut sqlx::Transaction<'_, sqlx::Postgres>,
     workflow_id: Uuid,
+    workflow_sent_at: DateTime<Utc>,
     tasks: &'a [AnyNode],
     registry: &'a WorkflowSpecRegistry,
     retention: &'a RetentionConfig,
@@ -782,12 +787,13 @@ fn insert_workflow_tasks<'a>(
                     .push_bind(p.node.input_json.clone())
                     .push_bind(p.merged_task_options.clone())
                     .push_bind(task_facts.facts.execution.as_str())
-                    .push_bind(task_facts.facts.retention_class_key.clone());
-                // sent_at, created_at, the fingerprint pair and the key digest,
-                // status, enqueued_at, retry_count as literals — NOW() is
+                    .push_bind(task_facts.facts.retention_class_key.clone())
+                    // sent_at: the start call time of the workflow.
+                    .push_bind(workflow_sent_at);
+                // created_at, the fingerprint pair and the key digest, status,
+                // enqueued_at, retry_count as literals — NOW() is
                 // transaction-stable, so claim ordering matches the per-row shape.
                 b.push("NOW()")
-                    .push("NOW()")
                     .push("NULL")
                     .push("NULL")
                     .push("NULL")
@@ -821,6 +827,7 @@ fn insert_workflow_tasks<'a>(
                     p.priority,
                     p.merged_task_options.as_deref(),
                     retention,
+                    workflow_sent_at,
                 )
                 .await?;
                 sqlx::query(LINK_WORKFLOW_TASK_SQL)
@@ -844,7 +851,8 @@ fn insert_workflow_tasks<'a>(
 }
 
 /// Create a horsies_tasks row for a root workflow task.
-/// Returns the task_id.
+/// Returns the task_id. `workflow_sent_at` is the start call time of the node's workflow, which the row
+/// stores as its `sent_at`.
 async fn enqueue_root_task(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     node: &AnyNode,
@@ -852,6 +860,7 @@ async fn enqueue_root_task(
     priority: i32,
     merged_task_options: Option<&str>,
     retention: &RetentionConfig,
+    workflow_sent_at: DateTime<Utc>,
 ) -> Result<Uuid, WorkflowError> {
     let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
@@ -869,6 +878,7 @@ async fn enqueue_root_task(
         .bind(&task_facts.facts.retention_class_key)
         .bind(task_facts.max_retries)
         .bind(task_facts.good_until)
+        .bind(workflow_sent_at)
         .execute(executor)
         .await?;
 
@@ -1002,7 +1012,7 @@ pub async fn start_child_workflow_in_tx(
     );
 
     // Insert all workflow_task rows and enqueue roots within same tx.
-    insert_workflow_tasks(tx, child_id, &spec.tasks, registry, retention).await?;
+    insert_workflow_tasks(tx, child_id, sent_at, &spec.tasks, registry, retention).await?;
 
     Ok(child_id)
 }
@@ -1424,9 +1434,17 @@ mod tests {
         )
         .await
         .expect("start workflow with fast-path root");
-        let slow_id = enqueue_root_task(&pool, &root, "bulk", 17, None, &retention)
-            .await
-            .expect("enqueue slow-path workflow root");
+        let slow_id = enqueue_root_task(
+            &pool,
+            &root,
+            "bulk",
+            17,
+            None,
+            &retention,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("enqueue slow-path workflow root");
 
         let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sqlx::query_as(
             "SELECT id::text, retention_class_key,
@@ -1447,6 +1465,79 @@ mod tests {
             assert!(!row.4);
             assert_eq!(Uuid::parse_str(&row.0).unwrap().get_version_num(), 7);
         }
+    }
+
+    /// A root task row stores the start call time of its workflow as `sent_at`, on the fast path (bulk
+    /// insert) and on the slow path (`enqueue_root_task`), not the time the engine built the row.
+    #[tokio::test]
+    #[serial]
+    async fn a_root_task_row_stores_the_start_call_time_of_its_workflow() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "sent_at_root_task";
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut root = node_with(false, Some(17));
+        root.task_name = task_name.to_owned();
+        let spec = keyed_spec(Some("tests.sent_at.root.v1"), vec![root.clone()]);
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let workflow_id = Uuid::new_v4();
+        let started = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed start call time")
+            .with_timezone(&chrono::Utc);
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow_attempt(
+            &broker,
+            &spec,
+            workflow_id,
+            started,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("start workflow with a fast-path root");
+        let slow_id = enqueue_root_task(
+            &pool,
+            &root,
+            "default",
+            17,
+            None,
+            &RetentionConfig::default(),
+            started,
+        )
+        .await
+        .expect("enqueue a slow-path workflow root");
+
+        let stored: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
+            sqlx::query_as("SELECT id, sent_at FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.len(), 2, "{stored:?}");
+        assert!(stored.iter().any(|(id, _)| *id == slow_id));
+        for (id, sent_at) in &stored {
+            assert_eq!(*sent_at, started, "task {id}");
+        }
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[test]
