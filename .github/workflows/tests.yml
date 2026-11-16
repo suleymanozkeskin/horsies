@@ -3,7 +3,11 @@ name: Unit Tests
 on:
   push:
     branches: [main]
+  # Pull requests into program/** start no run; a run there is started by hand
+  # (workflow_dispatch) when a result is needed.
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: unit-tests-${{ github.ref }}
