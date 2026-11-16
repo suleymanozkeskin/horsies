@@ -1,4 +1,6 @@
-//! Short-lived cache for task status aggregates.
+//! Short-lived shared cache for the monitoring aggregate reads: task stats,
+//! facets and breakdown (Python `horsies/web/read_cache.py:34-37`,
+//! `:170-194`). Each read has its own cache, keyed by its query text.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -11,25 +13,32 @@ use tokio::time::Instant;
 
 use crate::monitoring::StatusCount;
 
+/// How long a cached aggregate answers, for every aggregate read.
 pub const TASK_STATS_CACHE_TTL: Duration = Duration::from_secs(10);
 const TASK_STATS_CACHE_MAX_ENTRIES: usize = 256;
 const TASK_STATS_REFRESH_SHARDS: usize = 16;
 
 #[derive(Debug, Clone)]
-struct CachedTaskStats {
-    counts: Vec<StatusCount>,
+struct CachedRead<T> {
+    value: T,
     expires_at: Instant,
 }
 
+/// A cache of one aggregate read: at most 256 scopes, each answered for
+/// [`TASK_STATS_CACHE_TTL`]; concurrent misses of one scope share one load,
+/// and a failed load is not cached.
 #[derive(Debug)]
-pub(crate) struct TaskStatsCache {
+pub(crate) struct ReadCache<T> {
     ttl: Duration,
     max_entries: usize,
-    entries: RwLock<HashMap<String, CachedTaskStats>>,
+    entries: RwLock<HashMap<String, CachedRead<T>>>,
     refreshes: Box<[Mutex<()>]>,
 }
 
-impl TaskStatsCache {
+/// The cache of the task stats read.
+pub(crate) type TaskStatsCache = ReadCache<Vec<StatusCount>>;
+
+impl<T: Clone> ReadCache<T> {
     pub(crate) fn new() -> Self {
         Self::with_config(TASK_STATS_CACHE_TTL, TASK_STATS_CACHE_MAX_ENTRIES)
     }
@@ -49,13 +58,13 @@ impl TaskStatsCache {
         }
     }
 
-    async fn get(&self, key: &str, now: Instant) -> Option<Vec<StatusCount>> {
+    async fn get(&self, key: &str, now: Instant) -> Option<T> {
         self.entries
             .read()
             .await
             .get(key)
             .filter(|cached| now < cached.expires_at)
-            .map(|cached| cached.counts.clone())
+            .map(|cached| cached.value.clone())
     }
 
     fn refresh_shard(&self, key: &str) -> usize {
@@ -64,7 +73,7 @@ impl TaskStatsCache {
         hasher.finish() as usize % self.refreshes.len()
     }
 
-    async fn insert(&self, key: String, counts: Vec<StatusCount>) {
+    async fn insert(&self, key: String, value: T) {
         let now = Instant::now();
         let mut entries = self.entries.write().await;
         entries.retain(|_, cached| now < cached.expires_at);
@@ -79,35 +88,31 @@ impl TaskStatsCache {
         }
         entries.insert(
             key,
-            CachedTaskStats {
-                counts,
+            CachedRead {
+                value,
                 expires_at: now + self.ttl,
             },
         );
     }
 
-    pub(crate) async fn get_or_try_init<E, F, Fut>(
-        &self,
-        key: String,
-        load: F,
-    ) -> Result<Vec<StatusCount>, E>
+    pub(crate) async fn get_or_try_init<E, F, Fut>(&self, key: String, load: F) -> Result<T, E>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Vec<StatusCount>, E>>,
+        Fut: Future<Output = Result<T, E>>,
     {
-        if let Some(counts) = self.get(&key, Instant::now()).await {
-            return Ok(counts);
+        if let Some(value) = self.get(&key, Instant::now()).await {
+            return Ok(value);
         }
 
         let shard = self.refresh_shard(&key);
         let _refresh = self.refreshes[shard].lock().await;
-        if let Some(counts) = self.get(&key, Instant::now()).await {
-            return Ok(counts);
+        if let Some(value) = self.get(&key, Instant::now()).await {
+            return Ok(value);
         }
 
-        let counts = load().await?;
-        self.insert(key, counts.clone()).await;
-        Ok(counts)
+        let value = load().await?;
+        self.insert(key, value.clone()).await;
+        Ok(value)
     }
 }
 
@@ -125,6 +130,35 @@ mod tests {
             status: "COMPLETED".to_owned(),
             count,
         }]
+    }
+
+    /// The facets and breakdown reads use the same cache with their own value
+    /// type: a second read of a scope within the TTL does not load again.
+    #[tokio::test(start_paused = true)]
+    async fn a_cache_of_another_read_answers_a_scope_once_within_the_ttl() {
+        let cache: ReadCache<String> = ReadCache::new();
+        let loads = AtomicUsize::new(0);
+        for _ in 0..3 {
+            let value = cache
+                .get_or_try_init("status=FAILED".to_owned(), || async {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>("facets".to_owned())
+                })
+                .await
+                .expect("load");
+            assert_eq!(value, "facets");
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(TASK_STATS_CACHE_TTL).await;
+        cache
+            .get_or_try_init("status=FAILED".to_owned(), || async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>("facets".to_owned())
+            })
+            .await
+            .expect("load");
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(start_paused = true)]

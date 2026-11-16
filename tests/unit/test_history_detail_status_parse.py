@@ -1,7 +1,7 @@
 """The history detail read parses the stored status one time, into ``TaskStatus``.
 
-Schema v49 drops the status CHECK of the history parent, so a value that is
-not a member can be stored out of band. The decode raises
+The history parent has no status CHECK, so a value that is not a member can
+be stored out of band. The decode raises
 ``HistoryContractError`` for it, before any reader sees the row.
 """
 
@@ -40,7 +40,7 @@ def _history_row(status: str) -> SimpleNamespace:
         retention_class_key='default',
         enqueued_at=NOW,
         created_at=NOW,
-        sent_at=None,
+        sent_at=NOW,
         claimed_at=None,
         started_at=None,
         good_until=None,
@@ -50,10 +50,7 @@ def _history_row(status: str) -> SimpleNamespace:
         last_worker_hostname=None,
         last_worker_pid=None,
         result_envelope_version=1,
-        result_codec='json-utf8',
-        result_content_type='application/json',
         result_payload=None,
-        prior_result_payload=None,
         result_digest=None,
         error_code=None,
         final_failed_reason=None,
@@ -63,14 +60,9 @@ def _history_row(status: str) -> SimpleNamespace:
         is_workflow_task=False,
         rerun_input_disposition='DECLINED_BY_POLICY',
         rerun_input_version=None,
-        rerun_input_codec=None,
-        rerun_input_content_type=None,
         rerun_input_digest=None,
         rerun_input_inline=None,
-        rerun_input_reference=None,
         attempt_archive_version=snapshot.version,
-        attempt_snapshot_codec=snapshot.codec,
-        attempt_snapshot_content_type=snapshot.content_type,
         attempt_snapshot=snapshot.payload,
         attempt_snapshot_digest=snapshot.digest,
     )

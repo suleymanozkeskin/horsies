@@ -485,22 +485,6 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
     WHERE id IN (SELECT id FROM budgeted)
 """)
 
-# A row of the recovery limit count outlives its workflow: the table has no
-# foreign key, and a parent workflow's delete cascades to its children, so
-# DELETE_EXPIRED_WORKFLOWS_SQL cannot name every workflow that it removes.
-DELETE_ORPHANED_RECOVERY_FAILURES_SQL = text("""
-    DELETE FROM horsies_workflow_recovery_failures
-    WHERE workflow_id IN (
-        SELECT failure.workflow_id
-        FROM horsies_workflow_recovery_failures failure
-        WHERE NOT EXISTS (
-            SELECT 1 FROM horsies_workflows w
-            WHERE w.id = failure.workflow_id
-        )
-        LIMIT :batch_size
-    )
-""")
-
 UPSERT_TASK_ATTEMPT_SQL = text("""
     INSERT INTO horsies_task_attempts (
         task_id, attempt, outcome, will_retry,

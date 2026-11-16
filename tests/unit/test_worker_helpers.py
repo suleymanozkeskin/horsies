@@ -45,7 +45,6 @@ from horsies.core.worker.claiming import (
     claim_time_of,
     read_claim_rows,
 )
-from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
 from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import (
     Worker,
@@ -915,8 +914,11 @@ class TestReaperRetentionPass:
         assert any(
             stmt is DELETE_EXPIRED_WORKFLOWS_SQL for stmt in executed
         )
-        assert any(
-            stmt is DELETE_ORPHANED_RECOVERY_FAILURES_SQL for stmt in executed
+        # The foreign key removes a recovery failure count with its
+        # workflow, so the pass sends no delete of its own for the counts.
+        assert not any(
+            'DELETE FROM horsies_workflow_recovery_failures' in str(stmt)
+            for stmt in executed
         )
         assert recover_mock.await_args is not None
         assert recover_mock.await_args.kwargs['failure_limit'] == 7

@@ -19,7 +19,6 @@ use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
@@ -264,9 +263,12 @@ impl IsolatedTerminalizationTestDatabase {
     async fn create() -> Self {
         let database = Self::create_empty().await;
         let pool = &database.pool;
-        run_horsies_migrations(pool)
-            .await
-            .expect("migrate isolated terminalization database");
+        crate::broker::migrations::install_schema(
+            pool,
+            crate::broker::client_family::ClientFamily::Rust,
+        )
+        .await
+        .expect("migrate isolated terminalization database");
         let mut transaction = pool.begin().await.expect("coverage transaction");
         let coverage =
             ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -356,9 +358,12 @@ pub(crate) async fn migrated_pool() -> PgPool {
                     .await
                     .expect("unlock P5 database setup");
             assert!(unlocked, "P5 database setup lock was held");
-            run_horsies_migrations(&anchor)
-                .await
-                .expect("migrate P5 database");
+            crate::broker::migrations::install_schema(
+                &anchor,
+                crate::broker::client_family::ClientFamily::Rust,
+            )
+            .await
+            .expect("migrate P5 database");
             let mut transaction = anchor.begin().await.expect("coverage transaction");
             let coverage =
                 ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -494,7 +499,7 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'matrix_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            $1, 'matrix_task', 'default', 100, 'null', NULL, 'ISOLATED',
             'forever', NOW(), NOW(),
             CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END, $9,
             $2, NOW(), $5, $4, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -541,15 +546,15 @@ async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
 async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, task_args,
-            task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-            join_type, status, is_subworkflow, task_id, created_at
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+            created_at, max_retries, execution, retention_class_key
         ) VALUES (
             $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
-            'node_' || $1, 'matrix_task', '[]', '{}',
-            'default', 100, '{}', FALSE, 'all', $3, FALSE, $4, NOW()
+            'node_' || $1, 'matrix_task', 'null', 'default', 100, '{}', FALSE, 'all', $3,
+            FALSE, $4, NOW(), 0, 'ISOLATED', 'standard_30d'
         )",
     )
     .bind(Uuid::new_v4())
@@ -1947,7 +1952,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
              updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          )
-         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, '{}', NULL,
+         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, 'null', NULL,
                 'ISOLATED', 'forever', NOW(), NOW(),
                 NULL, NULL, NULL,
                 'PENDING', NOW(), NULL, NULL, NULL,
@@ -1970,13 +1975,15 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50000) AS g
          )
          INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name,
+             id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps,
-             join_type, status, is_subworkflow, task_id, created_at
+             join_type, status, is_subworkflow, max_retries, execution,
+             retention_class_key, task_id, created_at
          )
-         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task',
+         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
                 'default', 100, '{}'::integer[], FALSE,
-                'all', 'PENDING', FALSE, task_id, NOW()
+                'all', 'PENDING', FALSE, 3, 'ISOLATED',
+                'standard_30d', task_id, NOW()
          FROM generated",
     )
     .bind(workflow_id)
