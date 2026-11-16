@@ -465,7 +465,6 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
 
 fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
     IsolatedPoolConfig {
-        children: NonZeroUsize::MIN,
         command,
         init: init_frame(),
         worker_id: "worker-1".to_owned(),
@@ -479,8 +478,14 @@ fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
 async fn run_through_pool(after_run: &str, deadline: IsolatedDeadline) -> AttemptEnd {
     let claimed = task(ExecutionClass::Isolated, "{}");
     let spawner = Spawner::start().unwrap();
+    let board = std::sync::Arc::new(PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    }));
     let pool = IsolatedPool::start(
         pool_config(scripted_child(&claimed, after_run)),
+        board,
         spawner.handle(),
         LiveDispatches::default(),
     );
