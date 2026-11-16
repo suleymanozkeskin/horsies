@@ -1220,6 +1220,20 @@ mod tests {
         }
     }
 
+    /// Python `OperationalErrorCode` names the two codes of a blocked event
+    /// loop this way.
+    #[test]
+    fn the_blocked_loop_codes_have_python_names() {
+        assert_eq!(
+            serde_json::to_string(&OperationalErrorCode::TaskBlockedLoop).unwrap(),
+            "\"TASK_BLOCKED_LOOP\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationalErrorCode::NeighbourBlockedLoop).unwrap(),
+            "\"NEIGHBOUR_BLOCKED_LOOP\""
+        );
+    }
+
     #[test]
     fn all_outcome_codes_round_trip() {
         for code in OutcomeCode::ALL {

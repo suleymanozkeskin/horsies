@@ -3,7 +3,11 @@ name: Unit Tests
 on:
   push:
     branches: [main]
+  # Pull requests into program/** start no run; a run there is started by hand
+  # (workflow_dispatch) when a result is needed.
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: unit-tests-${{ github.ref }}
@@ -13,6 +17,8 @@ permissions: {}
 
 jobs:
   unit:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,6 +54,8 @@ jobs:
         run: uv run pytest tests/dualrun/ -m unit -v --tb=short
 
   dualrun:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
     # The snapshot tests that need PostgreSQL. Each test creates and drops
     # its own dualrun_<32 hex> databases on this server.
     runs-on: ubuntu-latest
@@ -84,6 +92,8 @@ jobs:
         run: uv run pytest tests/dualrun/ -m integration -v --tb=short
 
   newest-pydantic:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
     # The definition check reads core schema keys that pydantic owns, and the
     # dependency has no upper bound. A user can install a newer pydantic than
     # the lock file holds.
@@ -105,6 +115,8 @@ jobs:
         run: uv run --no-sync pytest tests/unit/test_wire_shape.py tests/unit/test_strict_codec.py tests/unit/test_workflow_node_wire_kwargs.py tests/unit/test_signature_check.py tests/unit/test_type_contract_send_return.py -v --tb=short
 
   showcase:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -152,6 +164,8 @@ jobs:
         run: uv run pyright showcase/
 
   webui:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -216,6 +230,7 @@ jobs:
       contents: read
     outputs:
       run_rust: ${{ steps.decide.outputs.run_rust }}
+      run_python: ${{ steps.decide.outputs.run_python }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -230,6 +245,7 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "program/0.8.0" ]; then
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+            echo 'run_python=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           base="$(git merge-base "$BASE_SHA" HEAD)"
@@ -242,6 +258,14 @@ jobs:
             echo 'run_rust=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+          fi
+          # A PR that changes only Rust files (crates/, rust/, the Cargo and
+          # toolchain files) cannot change a Python result: the Python jobs
+          # are skipped for it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)crates/' ':(exclude)rust/' ':(exclude)Cargo.toml' ':(exclude)Cargo.lock' ':(exclude)rust-toolchain.toml' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+            echo 'run_python=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run_python=true' >> "$GITHUB_OUTPUT"
           fi
 
   rust-fmt:

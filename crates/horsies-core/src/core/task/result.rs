@@ -1,8 +1,14 @@
+use std::collections::BTreeMap;
+
 use serde::de::Error as _;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 
-use super::error::{BuiltInTaskCode, OperationalErrorCode, TaskError, TaskErrorCode};
+use super::error::{
+    BuiltInTaskCode, OperationalErrorCode, StoredErrorRefused, TaskError, TaskErrorCode,
+};
+use crate::core::codec::{JsonReadError, StrictJsonError};
 
 /// Outcome of a task or workflow result retrieval.
 ///
@@ -97,6 +103,91 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TaskResult<T> {
             )),
         }
     }
+}
+
+/// A task result envelope read from its text. The `ok` slot keeps the JSON
+/// text it was written with, `null` included; the `err` slot is read as a
+/// [`TaskError`].
+#[derive(Debug)]
+pub enum TaskResultText<'a> {
+    Ok(&'a RawValue),
+    Err(TaskError),
+}
+
+/// Why a text does not read as a task result envelope. The rules are those
+/// of the reader of [`TaskResult`] (Python `validate_task_result_envelope`,
+/// `core/codec/typed.py:1133-1180`).
+#[derive(Debug, thiserror::Error)]
+pub enum TaskResultTextRefused {
+    /// The text breaks the strict read rule: syntax, depth, a repeated key,
+    /// a non-finite number.
+    #[error("TaskResult envelope is not strict JSON: {0}")]
+    NotStrictJson(#[from] StrictJsonError),
+    #[error("TaskResult envelope must be a JSON object")]
+    NotAnObject,
+    /// Strict JSON that serde_json does not decode as an object of raw
+    /// values: the two readers disagree on the text.
+    #[error("TaskResult envelope does not decode: {0}")]
+    Undecodable(serde_json::Error),
+    #[error("TaskResult envelope missing \"__h_task_result__\" marker (or marker is not true)")]
+    MarkerMissing,
+    #[error("unexpected key {key:?} in TaskResult envelope")]
+    ExtraKey { key: String },
+    #[error("TaskResult envelope missing a required key (ok, err)")]
+    MissingSlot,
+    #[error("TaskResult envelope has both ok and err populated; exactly one must be set")]
+    BothSlotsSet,
+    /// The `err` slot does not decode as a JSON value: the two readers
+    /// disagree on the text.
+    #[error("the err slot of the TaskResult envelope does not decode: {0}")]
+    ErrorSlotUndecodable(JsonReadError),
+    #[error("the err slot of the TaskResult envelope is not a task error: {0}")]
+    ErrorRefused(#[from] StoredErrorRefused),
+}
+
+/// Read a task result envelope from its text, with the refusal rules of the
+/// reader of [`TaskResult`]: strict JSON, an object, the marker `true`, the
+/// keys `ok` and `err` and no other, not both slots set. A non-null `err` is
+/// the error; otherwise `ok` is the value, as its text. Pure.
+pub fn read_task_result_text(text: &str) -> Result<TaskResultText<'_>, TaskResultTextRefused> {
+    crate::core::codec::check_json_text(text)?;
+    if !text.trim_start().starts_with('{') {
+        return Err(TaskResultTextRefused::NotAnObject);
+    }
+    let mut slots = envelope_slots(text).map_err(TaskResultTextRefused::Undecodable)?;
+    match slots.remove(TASK_RESULT_ENVELOPE_KEY).map(RawValue::get) {
+        Some("true") => {}
+        Some(_) | None => return Err(TaskResultTextRefused::MarkerMissing),
+    }
+    if let Some(key) = slots
+        .keys()
+        .find(|key| !matches!(key.as_str(), OK_SLOT | ERR_SLOT))
+    {
+        return Err(TaskResultTextRefused::ExtraKey { key: key.clone() });
+    }
+    let (Some(ok_slot), Some(err_slot)) = (slots.remove(OK_SLOT), slots.remove(ERR_SLOT)) else {
+        return Err(TaskResultTextRefused::MissingSlot);
+    };
+    match (ok_slot.get(), err_slot.get()) {
+        (_, "null") => Ok(TaskResultText::Ok(ok_slot)),
+        ("null", err_text) => {
+            let stored: serde_json::Value = crate::core::codec::from_json_str(err_text)
+                .map_err(TaskResultTextRefused::ErrorSlotUndecodable)?;
+            Ok(TaskResultText::Err(TaskError::from_stored_value(stored)?))
+        }
+        (_, _) => Err(TaskResultTextRefused::BothSlotsSet),
+    }
+}
+
+/// The keys of an envelope object and the raw text of each value. The
+/// strict reader has bounded the depth, so serde_json's own recursion limit
+/// is off, as in `crate::core::codec::from_json_str`.
+fn envelope_slots(text: &str) -> Result<BTreeMap<String, &RawValue>, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    let slots = BTreeMap::<String, &RawValue>::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(slots)
 }
 
 impl<T> TaskResult<T> {
@@ -383,6 +474,87 @@ mod tests {
         let text = serde_json::to_string(&TaskResult::Ok(value.clone())).unwrap();
         let back: TaskResult<serde_json::Value> = serde_json::from_str(&text).unwrap();
         assert_eq!(back.unwrap(), value);
+    }
+
+    // The envelope texts below are Python 0.7.0 `dumps_json(encode_task_result(..))`.
+
+    /// The `ok` slot keeps the text it was written with; a `null` value is a
+    /// value.
+    #[test]
+    fn the_text_reader_keeps_the_text_of_the_value() {
+        match read_task_result_text(r#"{"__h_task_result__":true,"ok":{"b":1,"a":[2]},"err":null}"#)
+        {
+            Ok(TaskResultText::Ok(value)) => assert_eq!(value.get(), r#"{"b":1,"a":[2]}"#),
+            other => panic!("expected a value, got {other:?}"),
+        }
+        match read_task_result_text(r#"{"__h_task_result__":true,"ok":null,"err":null}"#) {
+            Ok(TaskResultText::Ok(value)) => assert_eq!(value.get(), "null"),
+            other => panic!("expected the null value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_text_reader_reads_the_error_slot_as_a_task_error() {
+        let read = read_task_result_text(
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_TIMEOUT"},"data":null,"message":"late"}}"#,
+        );
+        match read {
+            Ok(TaskResultText::Err(error)) => {
+                assert_eq!(
+                    error.error_code,
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Outcome(
+                        crate::core::task::error::OutcomeCode::TaskTimeout
+                    ))
+                );
+                assert_eq!(error.message.as_deref(), Some("late"));
+            }
+            other => panic!("expected a task error, got {other:?}"),
+        }
+    }
+
+    /// One text per refusal of the text reader. `Undecodable` and
+    /// `ErrorSlotUndecodable` have no text: strict JSON always decodes.
+    #[test]
+    fn the_text_reader_refuses_what_the_value_reader_refuses() {
+        let refusal = |text: &str| match read_task_result_text(text) {
+            Ok(read) => panic!("{text} must be refused, read {read:?}"),
+            Err(refused) => refused,
+        };
+        assert!(matches!(
+            refusal(r#"{"__h_task_result__":true,"ok":1,"ok":2,"err":null}"#),
+            TaskResultTextRefused::NotStrictJson(_)
+        ));
+        assert!(matches!(
+            refusal(r#"{"__h_task_result__":true,"ok":NaN,"err":null}"#),
+            TaskResultTextRefused::NotStrictJson(_)
+        ));
+        assert!(matches!(refusal("[1]"), TaskResultTextRefused::NotAnObject));
+        for text in [
+            r#"{"__type":"ok","value":1}"#,
+            r#"{"__h_task_result__":false,"ok":1,"err":null}"#,
+            r#"{"ok":1,"err":null}"#,
+        ] {
+            assert!(
+                matches!(refusal(text), TaskResultTextRefused::MarkerMissing),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            refusal(r#"{"__h_task_result__":true,"ok":1,"err":null,"extra":1}"#),
+            TaskResultTextRefused::ExtraKey { ref key } if key == "extra"
+        ));
+        assert!(matches!(
+            refusal(r#"{"__h_task_result__":true,"ok":1}"#),
+            TaskResultTextRefused::MissingSlot
+        ));
+        assert!(matches!(
+            refusal(r#"{"__h_task_result__":true,"ok":1,"err":{"error_code":"X","message":"m"}}"#),
+            TaskResultTextRefused::BothSlotsSet
+        ));
+        assert!(matches!(
+            refusal(r#"{"__h_task_result__":true,"ok":null,"err":{"message":"m"}}"#),
+            TaskResultTextRefused::ErrorRefused(_)
+        ));
     }
 
     #[test]
