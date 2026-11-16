@@ -2,6 +2,7 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod claims;
 pub mod class_budgets;
 pub mod class_coverage;
 #[cfg(test)]
@@ -56,14 +57,15 @@ pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-pub use listener::NotifyListener;
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode,
     UPSERT_TASK_ATTEMPT_SQL,
 };
-pub use process_listener::{ListenError, ListenerPlanError};
+pub use process_listener::{
+    CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
+};
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
