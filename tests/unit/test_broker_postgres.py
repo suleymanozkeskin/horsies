@@ -20,7 +20,12 @@ import pytest
 
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
-from horsies.core.brokers.postgres import SyncSendRoute
+from horsies.core.brokers.postgres import (
+    REQUEUE_STALE_CLAIMS_BATCH_SIZE,
+    REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS,
+    REQUEUE_STALE_CLAIMS_SQL,
+    SyncSendRoute,
+)
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -2822,62 +2827,84 @@ class TestTerminateOrphanedWorkflowTasks:
 
 @pytest.mark.unit
 class TestRequeueStaleClaimed:
-    """Tests for requeue_stale_claimed."""
+    """Tests for requeue_stale_claimed: bounded batches of horsies_requeue_stale_claims."""
 
-    @pytest.mark.asyncio
-    async def test_returns_rowcount(self) -> None:
-        """Should return rowcount from the update result."""
-        broker = _make_broker()
-        mock_result = MagicMock()
-        mock_result.rowcount = 5
-
+    @staticmethod
+    def _session(batches: list[int] | Exception) -> AsyncMock:
+        """A session whose autocommit connection returns one batch count per call."""
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
+        session.connection = AsyncMock(return_value=session)
+        match batches:
+            case Exception():
+                session.execute = AsyncMock(side_effect=batches)
+            case list():
+                session.execute = AsyncMock(
+                    side_effect=[
+                        MagicMock(scalar_one=MagicMock(return_value=count))
+                        for count in batches
+                    ],
+                )
+        return session
+
+    @pytest.mark.asyncio
+    async def test_a_short_batch_ends_the_pass(self) -> None:
+        broker = _make_broker()
+        session = self._session([5])
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
 
-        assert is_ok(result)
-        assert result.ok_value == 5
-        session.commit.assert_awaited_once()
+        assert result == Ok(5)
+        session.execute.assert_awaited_once_with(
+            REQUEUE_STALE_CLAIMS_SQL,
+            {
+                'stale_after_ms': 120_000,
+                'batch_size': REQUEUE_STALE_CLAIMS_BATCH_SIZE,
+            },
+        )
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_returns_zero_when_no_rowcount(self) -> None:
-        """Should fall back to Ok(0) when rowcount attribute is missing."""
+    async def test_full_batches_repeat_until_a_short_one(self) -> None:
         broker = _make_broker()
-        mock_result = object()  # no rowcount attribute
+        full = REQUEUE_STALE_CLAIMS_BATCH_SIZE
+        session = self._session([full, full, 3])
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
+        result = await broker.requeue_stale_claimed(stale_threshold_ms=60_000)
+
+        assert result == Ok(2 * full + 3)
+        assert session.execute.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_the_pass_stops_at_the_batch_cap_with_a_warning(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        broker = _make_broker()
+        full = REQUEUE_STALE_CLAIMS_BATCH_SIZE
+        session = self._session([full] * REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        with caplog.at_level('WARNING'):
+            result = await broker.requeue_stale_claimed()
+
+        assert result == Ok(full * REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS)
+        assert session.execute.await_count == REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS
+        assert 'reached the per-pass batch cap' in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_database_error_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        session = self._session(SAOperationalError('stmt', {}, Exception('lost')))
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.requeue_stale_claimed()
 
-        assert is_ok(result)
-        assert result.ok_value == 0
-
-    @pytest.mark.asyncio
-    async def test_threshold_converted_to_seconds(self) -> None:
-        """stale_threshold_ms should be converted to seconds for the SQL parameter."""
-        broker = _make_broker()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        await broker.requeue_stale_claimed(stale_threshold_ms=60_000)
-
-        execute_args = session.execute.call_args[0]
-        params = execute_args[1]
-        assert params['stale_threshold'] == 60.0
+        assert is_err(result)
+        assert result.err_value.code is BrokerErrorCode.CLEANUP_FAILED
 
 
 # ---------------------------------------------------------------------------
