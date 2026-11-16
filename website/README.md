@@ -44,4 +44,4 @@ Create a new `.md` file in the appropriate `src/content/docs/` subdirectory. Sta
 bun run build
 ```
 
-Output goes to `./dist/`.
+Output goes to `./dist/`. The build then runs `scripts/check-links.mjs`, which fails the build on an internal link or `#anchor` that no page of `./dist/` serves. Run the check again on an existing build with `bun run links:check`, and its tests with `bun run test`.

@@ -193,50 +193,85 @@ pub struct TaskOptions {
 }
 
 impl TaskOptions {
-    /// Serialize the execution-relevant options (auto_retry_for, retry_policy,
-    /// timeout_ms) into a JSON string suitable for `AnyNode::task_options_json`.
+    /// The stored `task_options` text of this task, in Python's layout
+    /// (`horsies/core/codec/task_options.py`, `serialize_task_options`), the
+    /// one layout the core reads at enqueue and at dispatch:
     ///
-    /// Excludes `task_name`, `queue_name`, and `good_until` to avoid conflicts
-    /// with the corresponding `AnyNode` fields that are authoritative for those.
+    /// ```json
+    /// {"retry_policy": {"max_retries": 3, "intervals": [60, 300, 900],
+    ///                   "backoff_strategy": "fixed", "jitter": true,
+    ///                   "auto_retry_for": ["STORAGE_ERROR"]},
+    ///  "good_until": null, "timeout_ms": 2000, "execution": "ISOLATED",
+    ///  "cancel_grace_ms": null}
+    /// ```
     ///
-    /// Returns `None` if none of the carried fields is set. Every carried field
-    /// must be emitted here — a field on `TaskOptions` that is not added to this
-    /// map silently never reaches the DB (the bug horsies PR #102 fixed for
-    /// timeout_ms).
+    /// - `retry_policy` holds the policy with `auto_retry_for` inside it, and
+    ///   `max_delay_seconds` only when set; it is `null` with no policy. Codes
+    ///   without a policy are not stored: with no policy a task has no retry.
+    /// - `good_until` is `null`: the deadline of a send or a workflow node is
+    ///   its own column, not a task option.
+    /// - `execution` is `ISOLATED` and `cancel_grace_ms` is `null`: a Rust task
+    ///   declares no other class yet.
+    ///
+    /// Returns `None` when neither a retry policy nor a timeout is set, so the
+    /// row stores no options; enqueue and dispatch read that as no retry, no
+    /// timeout and `ISOLATED`, the same as the full text with nulls.
     pub fn serialize_retry_options(&self) -> Option<String> {
-        if self.auto_retry_for.is_none() && self.retry_policy.is_none() && self.timeout_ms.is_none()
-        {
+        if self.retry_policy.is_none() && self.timeout_ms.is_none() {
             return None;
         }
-
-        let mut map = serde_json::Map::new();
-
-        if let Some(ref codes) = self.auto_retry_for {
-            let codes_json: Vec<serde_json::Value> = codes
-                .iter()
-                .map(|c| serde_json::Value::String(c.to_string()))
-                .collect();
-            map.insert(
-                "auto_retry_for".to_owned(),
-                serde_json::Value::Array(codes_json),
-            );
-        }
-
-        if let Some(ref policy) = self.retry_policy {
-            if let Ok(policy_val) = serde_json::to_value(policy) {
-                map.insert("retry_policy".to_owned(), policy_val);
-            }
-        }
-
-        if let Some(timeout_ms) = self.timeout_ms {
-            map.insert(
-                "timeout_ms".to_owned(),
-                serde_json::Value::Number(timeout_ms.into()),
-            );
-        }
-
-        serde_json::to_string(&map).ok()
+        let stored = StoredTaskOptions {
+            retry_policy: self.retry_policy.as_ref().map(|policy| StoredRetryPolicy {
+                max_retries: policy.max_retries,
+                intervals: &policy.intervals,
+                backoff_strategy: policy.backoff_strategy,
+                jitter: policy.jitter,
+                max_delay_seconds: policy.max_delay_seconds,
+                // Python stores each code as its plain name; the tagged serde
+                // form of a built-in code is refused by the reader.
+                auto_retry_for: self
+                    .auto_retry_for
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            }),
+            good_until: None,
+            timeout_ms: self.timeout_ms,
+            execution: STORED_EXECUTION_ISOLATED,
+            cancel_grace_ms: None,
+        };
+        // Every field is a plain number, string, bool or list of them, so the
+        // encode cannot fail.
+        Some(serde_json::to_string(&stored).expect("stored task options encode to JSON"))
     }
+}
+
+/// The `execution` value of a task that declares no class (Python
+/// `Execution.ISOLATED`).
+const STORED_EXECUTION_ISOLATED: &str = "ISOLATED";
+
+/// Python's stored task options, in its key order.
+#[derive(Serialize)]
+struct StoredTaskOptions<'a> {
+    retry_policy: Option<StoredRetryPolicy<'a>>,
+    good_until: Option<chrono::DateTime<chrono::Utc>>,
+    timeout_ms: Option<u32>,
+    execution: &'static str,
+    cancel_grace_ms: Option<u32>,
+}
+
+/// Python's `RetryPolicy.model_dump(mode="json", exclude_none=True)`.
+#[derive(Serialize)]
+struct StoredRetryPolicy<'a> {
+    max_retries: u32,
+    intervals: &'a [u32],
+    backoff_strategy: BackoffStrategy,
+    jitter: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_delay_seconds: Option<u32>,
+    auto_retry_for: Vec<String>,
 }
 
 #[cfg(test)]
@@ -319,16 +354,80 @@ mod tests {
         let json = opts.serialize_retry_options().expect("should produce JSON");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        // Must include retry fields.
-        assert!(parsed.get("retry_policy").is_some());
-        assert!(parsed.get("auto_retry_for").is_some());
-        assert_eq!(parsed["auto_retry_for"][0], "STORAGE_ERROR");
-        assert_eq!(parsed["retry_policy"]["max_retries"], 3);
+        // Python's layout: auto_retry_for inside retry_policy, the five keys of
+        // serialize_task_options, and no identity fields.
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "retry_policy": {
+                    "max_retries": 3,
+                    "intervals": [60, 300, 900],
+                    "backoff_strategy": "fixed",
+                    "jitter": true,
+                    "auto_retry_for": ["STORAGE_ERROR"],
+                },
+                "good_until": null,
+                "timeout_ms": null,
+                "execution": "ISOLATED",
+                "cancel_grace_ms": null,
+            })
+        );
+    }
 
-        // Must NOT include task_name, queue_name, good_until.
-        assert!(parsed.get("task_name").is_none());
-        assert!(parsed.get("queue_name").is_none());
-        assert!(parsed.get("good_until").is_none());
+    /// A built-in code is stored as its plain name, as Python stores it.
+    #[test]
+    fn a_builtin_retry_code_is_stored_as_its_name() {
+        use super::super::error::{BuiltInTaskCode, OutcomeCode, TaskErrorCode};
+
+        let opts = TaskOptions {
+            task_name: "my_task".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![TaskErrorCode::BuiltIn(BuiltInTaskCode::Outcome(
+                OutcomeCode::TaskTimeout,
+            ))]),
+            retry_policy: Some(RetryPolicy::exponential(30, 2, false).unwrap()),
+            timeout_ms: Some(5_000),
+        };
+        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed["retry_policy"]["auto_retry_for"],
+            serde_json::json!(["TASK_TIMEOUT"])
+        );
+    }
+
+    /// The core writes the layout its worker reads: the dispatch reader takes
+    /// the stored text as a policy and a timeout, not as a refusal.
+    #[test]
+    fn the_stored_text_is_what_the_dispatch_reader_accepts() {
+        use super::super::error::TaskErrorCode;
+        use crate::worker::retry::{
+            read_stored_options, StoredOptions, StoredRetry, StoredTimeout,
+        };
+
+        let opts = TaskOptions {
+            task_name: "my_task".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            retry_policy: Some(
+                RetryPolicy::fixed(vec![60, 300], true)
+                    .unwrap()
+                    .with_max_delay_seconds(600),
+            ),
+            timeout_ms: Some(2_000),
+        };
+        let json = opts.serialize_retry_options().expect("should produce JSON");
+
+        match read_stored_options(Some(&json)) {
+            StoredOptions::Readable {
+                timeout: StoredTimeout::Limit(limit),
+                retry: StoredRetry::Policy(_),
+            } => assert_eq!(limit, std::time::Duration::from_millis(2_000)),
+            other => panic!("the dispatch reader refused the stored options: {other:?}"),
+        }
     }
 
     #[test]

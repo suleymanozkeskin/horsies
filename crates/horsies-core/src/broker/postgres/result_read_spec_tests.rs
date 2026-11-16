@@ -10,7 +10,6 @@ use crate::core::task::result::TaskResult;
 /// A CANCELLED task reads as `TASK_CANCELLED` with its task id in `data`
 /// (Python: `result.err.data['task_id'] == task_id`).
 #[test]
-#[ignore = "waits on #701: the CANCELLED read leaves the task id out of TaskError.data"]
 fn a_cancelled_task_reads_task_cancelled_with_its_id_in_data() {
     let task_id = Uuid::new_v4();
     let row = TaskResultRow {
