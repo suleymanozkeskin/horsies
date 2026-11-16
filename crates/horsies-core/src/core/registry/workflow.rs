@@ -517,24 +517,18 @@ impl WorkflowSpecRegistry {
                 .any(|r| r.definition_key == key)
     }
 
+    /// Resolves a child workflow by its definition key only, as Python does
+    /// (`core/workflows/engine.py:4091-4097`): a name never selects a child.
     pub(crate) fn resolve_child_registration<'a>(
         &'a self,
-        name: &str,
-        definition_key: Option<&str>,
+        definition_key: &str,
     ) -> Option<ResolvedChildWorkflow<'a>> {
-        if let Some(key) = definition_key {
-            if let Some(registered) = self.get_definition_by_definition_key(key) {
-                return Some(ResolvedChildWorkflow::Dynamic(registered));
-            }
-            if let Some(registered) = self.get_by_definition_key(key) {
-                return Some(ResolvedChildWorkflow::Static(registered));
-            }
+        match self.get_definition_by_definition_key(definition_key) {
+            Some(registered) => Some(ResolvedChildWorkflow::Dynamic(registered)),
+            None => self
+                .get_by_definition_key(definition_key)
+                .map(ResolvedChildWorkflow::Static),
         }
-
-        if let Some(registered) = self.get_definition(name) {
-            return Some(ResolvedChildWorkflow::Dynamic(registered));
-        }
-        self.get(name).map(ResolvedChildWorkflow::Static)
     }
 
     /// Iterate over registered workflow spec names.
@@ -628,10 +622,21 @@ impl WorkflowSpecRegistry {
                     || node.kwargs_json.is_some()
                     || !node.args_from.is_empty();
 
-                let resolved =
-                    self.resolve_child_registration(spec_name, node.sub_definition_key.as_deref());
+                let Some(child_key) = node.sub_definition_key.as_deref() else {
+                    return Err(HorsiesError::new(format!(
+                        "workflow '{}' node '{}' has no definition_key of its child workflow '{}'",
+                        spec.name,
+                        node.node_id.as_deref().unwrap_or("?"),
+                        spec_name,
+                    ))
+                    .with_code(ErrorCode::WorkflowNoDefinitionKey)
+                    .with_help(
+                        "build the sub-workflow node from a registered workflow definition; \
+                         a child workflow is resolved only by its definition_key",
+                    ));
+                };
 
-                match resolved {
+                match self.resolve_child_registration(child_key) {
                     None => {
                         return Err(HorsiesError::new(format!(
                             "workflow '{}' node '{}' references unregistered child workflow '{}'",
@@ -941,14 +946,53 @@ mod tests {
         assert!(registry.contains("wf_a"));
     }
 
+    fn make_keyed_registered(name: &str, definition_key: &str) -> RegisteredWorkflowSpec {
+        let mut builder = WorkflowSpecBuilder::new(name);
+        builder.definition_key(definition_key);
+        builder.task(TaskNode::<()>::raw("my_task"));
+        RegisteredWorkflowSpec {
+            spec: builder.build().unwrap(),
+            spec_builder: None,
+        }
+    }
+
     #[test]
-    fn subworkflow_explicit_input_requires_spec_builder() {
+    fn a_child_is_resolved_by_its_definition_key_only() {
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register(make_keyed_registered("child", "tests.child.v1"))
+            .unwrap();
+        assert!(matches!(
+            registry.resolve_child_registration("tests.child.v1"),
+            Some(ResolvedChildWorkflow::Static(_))
+        ));
+        assert!(registry.resolve_child_registration("child").is_none());
+    }
+
+    #[test]
+    fn a_subworkflow_node_with_no_definition_key_is_refused() {
         let mut registry = WorkflowSpecRegistry::new();
         registry.register(make_registered("child")).unwrap();
 
         let mut builder = WorkflowSpecBuilder::new("parent");
+        builder.sub_workflow(SubWorkflowNode::new("child").node_id("child_node"));
+        let mut spec = builder.build().unwrap();
+
+        let err = registry.resolve_and_validate_spec(&mut spec).unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowNoDefinitionKey));
+    }
+
+    #[test]
+    fn subworkflow_explicit_input_requires_spec_builder() {
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register(make_keyed_registered("child", "tests.child.v1"))
+            .unwrap();
+
+        let mut builder = WorkflowSpecBuilder::new("parent");
         builder.sub_workflow(
             SubWorkflowNode::<ChildParams, ()>::typed("child")
+                .definition_key("tests.child.v1")
                 .set_input(ChildParams {
                     region: "eu".to_owned(),
                 })

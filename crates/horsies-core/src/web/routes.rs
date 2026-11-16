@@ -27,7 +27,7 @@ use crate::monitoring::{
 use super::app::WebState;
 use super::common::{
     pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool, parse_group_by,
-    parse_i64, parse_sort_by, parse_sort_direction, parse_statuses, query_failed,
+    parse_i64, parse_path_uuid, parse_sort_by, parse_sort_direction, parse_statuses, query_failed,
     validate_f64_range, validate_i64_range, ApiError, QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
@@ -352,9 +352,7 @@ async fn read_task(
     State(state): State<WebState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<crate::monitoring::TaskDetail>, ApiError> {
-    let Ok(task_id) = Uuid::parse_str(&task_id) else {
-        return Err(ApiError::detail(StatusCode::NOT_FOUND, "Task not found."));
-    };
+    let task_id = parse_path_uuid("task_id", &task_id)?;
     get_task_detail(&state.broker, task_id)
         .await
         .map_err(|error| query_failed("Task detail", error))?
@@ -408,12 +406,7 @@ async fn read_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<crate::monitoring::WorkflowRunDetail>, ApiError> {
-    let Ok(workflow_id) = Uuid::parse_str(&workflow_id) else {
-        return Err(ApiError::detail(
-            StatusCode::NOT_FOUND,
-            "Workflow run not found.",
-        ));
-    };
+    let workflow_id = parse_path_uuid("workflow_id", &workflow_id)?;
     get_workflow_run(&state.broker, workflow_id)
         .await
         .map_err(|error| query_failed("Workflow run", error))?
@@ -425,19 +418,20 @@ async fn read_workflow_task(
     State(state): State<WebState>,
     Path((workflow_id, task_index)): Path<(String, String)>,
 ) -> Result<Json<crate::monitoring::WorkflowTaskDetail>, ApiError> {
+    // FastAPI lists every refused path parameter, in parameter order.
+    let mut refused = Vec::new();
+    let workflow_id = Uuid::parse_str(&workflow_id)
+        .map_err(|error| refused.push(ApiError::path_uuid("workflow_id", &workflow_id, &error)));
     let task_index = task_index.parse::<i32>().map_err(|_| {
-        ApiError::path_validation(
+        refused.push(ApiError::path_issue(
             "task_index",
             "int_parsing",
             "Input should be a valid integer, unable to parse string as an integer",
-            task_index,
-        )
-    })?;
-    let Ok(workflow_id) = Uuid::parse_str(&workflow_id) else {
-        return Err(ApiError::detail(
-            StatusCode::NOT_FOUND,
-            "Workflow task not found.",
+            task_index.as_str(),
         ));
+    });
+    let (Ok(workflow_id), Ok(task_index)) = (workflow_id, task_index) else {
+        return Err(ApiError::Validation(refused));
     };
     get_workflow_node(&state.broker, workflow_id, task_index)
         .await
@@ -660,21 +654,15 @@ async fn cancel_task(
                 .into_response();
         }
     };
-    let Ok(task_uuid) = Uuid::parse_str(&task_id) else {
-        return ApiError::detail(
-            StatusCode::NOT_FOUND,
-            format!("Task {task_id} does not exist."),
-        )
-        .into_response();
+    let task_uuid = match parse_path_uuid("task_id", &task_id) {
+        Ok(task_uuid) => task_uuid,
+        Err(refused) => return refused.into_response(),
     };
     action_response(cancel_task_action(&state.broker, task_uuid, body.include_running).await)
 }
 
 fn workflow_action_id(workflow_id: &str) -> Result<Uuid, Response> {
-    Uuid::parse_str(workflow_id).map_err(|error| {
-        ApiError::unavailable(format!("invalid workflow identity {workflow_id}: {error}"))
-            .into_response()
-    })
+    parse_path_uuid("workflow_id", workflow_id).map_err(IntoResponse::into_response)
 }
 
 async fn pause_workflow(

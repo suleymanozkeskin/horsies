@@ -18,8 +18,7 @@ pub enum LeafAttachment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// `eligible_at` is when the leaf may leave its parent: the upper bound plus
-/// the class duration under `LeafLifecycle::Retention`, the upper bound under
-/// `LeafLifecycle::ClosedEmptyForever`.
+/// the retention of its class.
 pub enum LeafInspection {
     Detachable {
         leaf_name: String,
@@ -56,10 +55,6 @@ pub enum LeafInspection {
     },
     ForeverClassLeaf {
         class_key: String,
-    },
-    /// A closed daily `forever` leaf that holds rows: never detached.
-    KeptNonEmpty {
-        leaf_name: String,
     },
     CatalogConflict {
         leaf_name: String,

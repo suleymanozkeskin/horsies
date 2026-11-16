@@ -8,11 +8,12 @@
 //! leaving `_sqlx_migrations` untouched for the host application.
 //!
 //! The embedded chain:
-//! - Version 1000 is the baseline schema: the files of `migrations/1000_baseline/`
-//!   in name order (tables, indexes, interim functions), concatenated with no
-//!   separator, with one SHA-384 checksum over the result. It creates
-//!   [`MIGRATIONS_TABLE`] itself. The Python package installs the same three
-//!   files as its migration 1000, so both write the same bookkeeping row.
+//! - Version 1000 is the baseline schema: the package files of
+//!   `horsies/core/baseline/sql/` in name order (tables, indexes, interim
+//!   functions), concatenated with no separator, with one SHA-384 checksum
+//!   over the result. It creates [`MIGRATIONS_TABLE`] itself. The Python
+//!   package installs the same three files as its migration 1000 with the same
+//!   checksum rule, so both write the same bookkeeping row.
 //! - Version 1001 holds the claim functions of the copied Rust worker, which
 //!   have no counterpart in migration 1000. It goes when the worker claims
 //!   through the functions of migration 1000.
@@ -38,17 +39,27 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 /// Version of the baseline schema migration.
 pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
 
-/// The baseline schema: the three source files in name order, as one migration.
-///
-/// The files are byte-for-byte copies of `horsies/core/baseline/sql/` on the
-/// `program/python-onto-baseline` branch at commit
-/// f47be8f5cf55db880f5075f9ce7bb8eaf38f7eed. Change them there and copy them
-/// again; never edit the copies here.
+/// The baseline schema: the three package files in name order, as one
+/// migration. The files of `horsies/core/baseline/sql/` are the single source;
+/// the core includes them by relative path and keeps no copy.
 const BASELINE_SQL: &str = concat!(
-    include_str!("../../migrations/1000_baseline/0001_tables.sql"),
-    include_str!("../../migrations/1000_baseline/0002_indexes.sql"),
-    include_str!("../../migrations/1000_baseline/0003_interim_functions.sql"),
+    include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql"),
+    include_str!("../../../../horsies/core/baseline/sql/0002_indexes.sql"),
+    include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql"),
 );
+
+/// The tables file of the baseline.
+#[cfg(test)]
+pub(crate) const BASELINE_TABLES_SQL: &str =
+    include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql");
+/// The indexes file of the baseline.
+#[cfg(test)]
+pub(crate) const BASELINE_INDEXES_SQL: &str =
+    include_str!("../../../../horsies/core/baseline/sql/0002_indexes.sql");
+/// The interim functions file of the baseline.
+#[cfg(test)]
+pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
+    include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql");
 
 /// Version, description and SQL of each embedded migration, in apply order.
 const MIGRATION_SOURCES: [(i64, &str, &str); 2] = [
@@ -408,9 +419,9 @@ mod tests {
         let baseline = &embedded_migrations()[0];
         assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
         assert_eq!(baseline.description.as_ref(), "baseline");
-        let tables = include_str!("../../migrations/1000_baseline/0001_tables.sql");
-        let indexes = include_str!("../../migrations/1000_baseline/0002_indexes.sql");
-        let functions = include_str!("../../migrations/1000_baseline/0003_interim_functions.sql");
+        let tables = BASELINE_TABLES_SQL;
+        let indexes = BASELINE_INDEXES_SQL;
+        let functions = BASELINE_INTERIM_FUNCTIONS_SQL;
         assert_eq!(
             baseline.sql.as_ref(),
             format!("{tables}{indexes}{functions}")

@@ -5,7 +5,6 @@ import {
   NO_SCHEMA_MESSAGE,
   SCHEMA_UNREACHABLE_MESSAGE,
   schemaBannerMessage,
-  schemaCutoverMessage,
   schemaMismatchMessage,
   schemaState,
 } from '@/lib/schema-state';
@@ -28,7 +27,6 @@ describe('schema state', () => {
   const cases: ReadonlyArray<[MonitoringMeta['schema_state'], string]> = [
     ['MATCH', 'match'],
     ['MISMATCH', 'mismatch'],
-    ['CUTOVER_REQUIRED', 'cutover_required'],
     ['ABSENT', 'absent'],
     ['UNKNOWN', 'unknown'],
   ];
@@ -37,20 +35,19 @@ describe('schema state', () => {
     expect(schemaState(meta({ schema_state: serverState }))).toBe(expected);
   });
 
-  // Regression: the state used to be derived from the version numbers, which
-  // are equal in CUTOVER_REQUIRED and null in ABSENT and UNKNOWN. The server
-  // state decides, whatever the numbers say.
+  // Regression: the state used to be derived from the version numbers. The
+  // server state decides, whatever the numbers say.
   it('takes the server state over any version the payload carries', () => {
     expect(
       schemaState(
         meta({
-          schema_state: 'CUTOVER_REQUIRED',
+          schema_state: 'MISMATCH',
           schema_version: 14,
           expected_schema_version: 14,
           schema_compatible: false,
         })
       )
-    ).toBe('cutover_required');
+    ).toBe('mismatch');
     expect(
       schemaState(meta({ schema_state: 'UNKNOWN', schema_version: 14 }))
     ).toBe('unknown');
@@ -64,38 +61,17 @@ describe('schema state', () => {
 
 describe('schema copy', () => {
   it('names both versions and states the remedy', () => {
-    expect(
-      schemaMismatchMessage(
-        meta({
-          schema_version: 13,
-          expected_schema_version: 14,
-          schema_compatible: false,
-        })
-      )
-    ).toBe(
+    const mismatched = meta({
+      schema_version: 13,
+      expected_schema_version: 14,
+      schema_compatible: false,
+    });
+    expect(schemaMismatchMessage(mismatched)).toBe(
       'Schema v13; this UI expects v14. Read-only mode: actions are disabled. ' +
         'Upgrade horsies (workers apply migrations) or use the matching UI version.'
     );
-  });
-
-  it('does not claim a version mismatch in the cutover state', () => {
-    const cutover = meta({
-      schema_version: 35,
-      expected_schema_version: 35,
-      schema_compatible: false,
-      actions_disabled_reason: 'SCHEMA_INCOMPATIBLE',
-    });
-    const text = schemaCutoverMessage(cutover);
-    expect(text).toBe(
-      'Schema v35 is current, but the offline task-history cutover is not ' +
-        'complete. Read-only mode: actions are disabled. ' +
-        'Run the cutover stages through tighten and validation. ' +
-        'See the 0.5.0 migration guide.'
-    );
-    expect(text).not.toContain('expects');
-    expect(schemaBannerMessage(cutover, 'cutover_required')).toBe(text);
-    expect(schemaBannerMessage(cutover, 'mismatch')).toBe(
-      schemaMismatchMessage(cutover)
+    expect(schemaBannerMessage(mismatched, 'mismatch')).toBe(
+      schemaMismatchMessage(mismatched)
     );
   });
 
