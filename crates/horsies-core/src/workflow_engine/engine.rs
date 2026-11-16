@@ -173,7 +173,7 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
 /// Every dependency row, with its task name and definition key for the `args_from` wrap; a dependency that is
 /// not terminal is classified by its status (`args_merge::dependency_result`).
 const GET_DEP_RESULTS_SQL: &str = "\
-SELECT task_index, task_name, sub_definition_key, status, result
+SELECT task_index, node_id, task_name, sub_definition_key, status, result
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = ANY($2)";
 
@@ -387,6 +387,7 @@ struct StatusCount {
 #[derive(Debug, sqlx::FromRow)]
 struct DepResult {
     task_index: i32,
+    node_id: Option<String>,
     task_name: String,
     sub_definition_key: Option<String>,
     status: String,
@@ -704,6 +705,7 @@ async fn enqueue_phase2_dependent_in_tx(
             (
                 row.task_index,
                 DepResultValue {
+                    node_id: row.node_id,
                     task_name: row.task_name,
                     sub_definition_key: row.sub_definition_key,
                     status: row.status,
@@ -3330,6 +3332,7 @@ async fn get_dependency_results(
         map.insert(
             row.task_index,
             DepResultValue {
+                node_id: row.node_id,
                 task_name: row.task_name,
                 sub_definition_key: row.sub_definition_key,
                 status: row.status,
@@ -3383,16 +3386,18 @@ impl WorkflowContextData {
             let Some(node_id) = row.node_id.clone() else {
                 continue;
             };
-            // Python: `get_dependency_results_with_names` (`core/workflows/engine.py:2856-2916`), with the
-            // decided entry for a terminal node with no stored result.
+            // Python: `get_dependency_results_with_names` (`core/workflows/engine.py`), with the decided entry
+            // for a terminal node whose stored result is NULL or empty.
             let entry = match (row.status.as_str(), row.result.as_deref()) {
                 ("SKIPPED", _) => TaskResult::Err(
                     crate::workflow_engine::args_merge::upstream_skipped_error(row.task_index),
                 ),
-                (_, Some(text)) => stored_ctx_entry(workflow_id, &row, text),
-                (status, None) => {
+                (_, Some(text)) if !text.is_empty() => stored_ctx_entry(workflow_id, &row, text),
+                (status, _) => {
                     TaskResult::Err(crate::workflow_engine::args_merge::missing_result_error(
                         row.task_index,
+                        Some(node_id.as_str()),
+                        &row.task_name,
                         status,
                     ))
                 }
@@ -5690,6 +5695,37 @@ mod completion_rule_tests {
         match stored {
             TaskResult::Err(error) => error,
             TaskResult::Ok(value) => panic!("expected an error envelope, got ok {value}"),
+        }
+    }
+
+    /// A context node whose stored result is NULL or empty gets the entry of `horsies_workflow_source_value`
+    /// (0005) and Python `_missing_result_entry`.
+    #[test]
+    fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
+        for status in ["COMPLETED", "FAILED"] {
+            for result in [None, Some(String::new())] {
+                let row = CtxResultRow {
+                    node_id: Some("source".to_owned()),
+                    task_index: 1,
+                    task_name: "produce".to_owned(),
+                    sub_definition_key: None,
+                    status: status.to_owned(),
+                    result: result.clone(),
+                    sub_workflow_summary: None,
+                };
+                let context = WorkflowContextData::from_rows(Uuid::nil(), 2, "receive", vec![row]);
+                let Some(TaskResult::Err(error)) = context.results_by_id.get("source") else {
+                    panic!(
+                        "a {status} context node with result {result:?} must give an error entry"
+                    );
+                };
+                let expected = format!(
+                    "Dependency node source (index 1, task produce) is {status} with no stored result"
+                );
+                assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+                assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+                assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 1})));
+            }
         }
     }
 
