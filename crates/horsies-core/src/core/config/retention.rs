@@ -95,8 +95,10 @@ impl Default for RetentionConfig {
 /// The refusal of the named classes that periods replaced.
 const RETENTION_CLASSES_REMOVED: &str = "retention_classes was removed: a retention class is identified by its period in whole days. Map a queue to the period in queue_retention, or list a period that sends choose explicitly in retention_periods";
 
-/// Every field of `RetentionConfig`.
+/// Every field of `RetentionConfig`. An unknown key is refused, as Python's
+/// config models refuse extra keys.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetentionConfigWire {
     #[serde(default = "default_worker_state_retention_hours")]
     worker_state_retention_hours: Option<u32>,
@@ -578,6 +580,18 @@ mod tests {
             vec![2, 7, 30]
         );
         assert_eq!(config.registrable_periods(), vec![days(2), days(7)]);
+    }
+
+    #[test]
+    fn unknown_keys_are_refused_when_the_config_is_read() {
+        let refused = serde_json::from_value::<RetentionConfig>(serde_json::json!({
+            "history_leaf_horizon_dayz": 3,
+        }))
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("history_leaf_horizon_dayz"),
+            "{refused}"
+        );
     }
 
     #[test]
