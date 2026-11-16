@@ -21,6 +21,8 @@ use crate::TaskStatus;
 
 use super::*;
 
+mod history_detail_ports;
+
 #[test]
 fn monitoring_window_defaults_and_refusals_match_the_contract() {
     let now = Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap();
