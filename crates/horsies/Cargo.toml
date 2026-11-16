@@ -61,7 +61,7 @@ gethostname = "0.4"
 clap = { version = "4", features = ["derive"] }
 owo-colors = "4"
 toml = "0.8"
-sysinfo = "0.32"
+sysinfo = "0.40"
 tempfile = "3"
 
 [lints]
