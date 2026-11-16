@@ -572,16 +572,13 @@ impl ChildChannel {
             Ok(()) => self.wait_exit(CHILD_STOP_TIMEOUT).await,
             Err(_) => ChildExit::ExitUnknown,
         };
-        match exit {
-            ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => {}
-            ChildExit::ExitUnknown => {
-                tracing::warn!(
-                    pid = self.pid.get(),
-                    "a child did not exit {}s after the stop frame; killing it",
-                    CHILD_STOP_TIMEOUT.as_secs()
-                );
-                let _ = self.kill_group().await;
-            }
+        if exit == ChildExit::ExitUnknown {
+            tracing::warn!(
+                pid = self.pid.get(),
+                "a child did not exit {}s after the stop frame; killing it",
+                CHILD_STOP_TIMEOUT.as_secs()
+            );
+            let _ = self.kill_group().await;
         }
         self.dispose().await
     }

@@ -96,16 +96,13 @@ impl ExitWatch {
         }];
         let mut pids = Vec::new();
         for (pid, watch) in children {
-            match watch {
-                ChildWatch::PidFd(fd) => {
-                    fds.push(libc::pollfd {
-                        fd: fd.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    });
-                    pids.push(pid);
-                }
-                ChildWatch::Polled => {}
+            if let ChildWatch::PidFd(fd) = watch {
+                fds.push(libc::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                pids.push(pid);
             }
         }
         let count = libc::nfds_t::try_from(fds.len())
