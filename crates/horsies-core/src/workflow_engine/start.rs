@@ -1221,42 +1221,6 @@ mod tests {
         assert!(message.contains(&format!("{parent}:4")));
     }
 
-    fn keyed_spec(definition_key: Option<&str>, tasks: Vec<AnyNode>) -> WorkflowSpec {
-        WorkflowSpec {
-            name: "keyed".to_owned(),
-            definition_key: definition_key.map(str::to_owned),
-            tasks,
-            on_error: OnError::Fail,
-            output_index: None,
-            success_policy: None,
-        }
-    }
-
-    #[test]
-    fn a_spec_with_no_definition_key_is_refused() {
-        let task = node_with(false, Some(10));
-        for key in [None, Some(""), Some("   ")] {
-            let message = require_definition_key(&keyed_spec(key, vec![task.clone()])).unwrap_err();
-            assert!(message.contains("missing definition_key"), "{message}");
-        }
-        assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![task])).is_ok());
-    }
-
-    #[test]
-    fn a_subworkflow_node_with_no_definition_key_is_refused() {
-        let unkeyed = node_with(true, None);
-        let message =
-            require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![unkeyed.clone()]))
-                .unwrap_err();
-        assert!(
-            message.contains("has no definition_key of its child workflow"),
-            "{message}"
-        );
-        let mut keyed = unkeyed;
-        keyed.sub_definition_key = Some("tests.child.v1".to_owned());
-        assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
-    }
-
     /// A start through a handle of the other client family is refused before its first write:
     /// `ENQUEUE_FAILED`, not retryable, and no workflow row.
     #[tokio::test]
@@ -1298,6 +1262,42 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(written, 0);
+    }
+
+    fn keyed_spec(definition_key: Option<&str>, tasks: Vec<AnyNode>) -> WorkflowSpec {
+        WorkflowSpec {
+            name: "keyed".to_owned(),
+            definition_key: definition_key.map(str::to_owned),
+            tasks,
+            on_error: OnError::Fail,
+            output_index: None,
+            success_policy: None,
+        }
+    }
+
+    #[test]
+    fn a_spec_with_no_definition_key_is_refused() {
+        let task = node_with(false, Some(10));
+        for key in [None, Some(""), Some("   ")] {
+            let message = require_definition_key(&keyed_spec(key, vec![task.clone()])).unwrap_err();
+            assert!(message.contains("missing definition_key"), "{message}");
+        }
+        assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![task])).is_ok());
+    }
+
+    #[test]
+    fn a_subworkflow_node_with_no_definition_key_is_refused() {
+        let unkeyed = node_with(true, None);
+        let message =
+            require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![unkeyed.clone()]))
+                .unwrap_err();
+        assert!(
+            message.contains("has no definition_key of its child workflow"),
+            "{message}"
+        );
+        let mut keyed = unkeyed;
+        keyed.sub_definition_key = Some("tests.child.v1".to_owned());
+        assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
     }
 
     #[tokio::test]
