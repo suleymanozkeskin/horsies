@@ -54,7 +54,7 @@ miette = { version = "7", features = ["fancy"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sha2 = "0.10"
+sha2 = "0.11"
 log = "0.4"
 rand = "0.8"
 gethostname = "0.4"
