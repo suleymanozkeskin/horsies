@@ -16,6 +16,7 @@ pub mod shared_listener;
 pub mod terminalization;
 #[cfg(test)]
 pub(crate) mod terminalization_matrix;
+pub mod wait_limit;
 
 pub use bound_handle::TaskHandle;
 pub use error::{is_retryable_sqlx_error, BrokerError};
