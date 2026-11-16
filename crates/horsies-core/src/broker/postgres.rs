@@ -558,10 +558,11 @@ LIMIT $1";
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
-// Separate session/direct endpoints usually have much tighter connection
-// limits than a transaction pool. Horsies needs only migrations plus a small
-// number of long-lived LISTEN connections.
-const SESSION_POOL_MAX_CONNECTIONS: u32 = 4;
+/// A pooled connection that waited in the pool for longer than this is
+/// pinged before use when `pool_pre_ping` is on (Python
+/// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
+/// again within this time, and a new connection, are used with no ping.
+pub(crate) const PRE_PING_AFTER_IDLE: Duration = Duration::from_secs(1);
 
 /// Connect options for every broker pool, including the runtime pool in
 /// PgBouncer transaction mode.
@@ -625,27 +626,51 @@ fn with_session_settings(options: PgPoolOptions, settings: SessionSettings) -> P
     }
 }
 
-fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(
+/// With `pool_pre_ping` on, ping a pooled connection at checkout when it
+/// waited in the pool for longer than [`PRE_PING_AFTER_IDLE`]. A ping that
+/// fails closes that connection, and the checkout takes another one or opens
+/// a new one (Python `register_idle_ping`, `horsies/core/utils/db.py:165-222`).
+/// With it off, a dead pooled connection shows at its first statement as a
+/// retryable error.
+fn with_idle_ping(options: PgPoolOptions, pool_pre_ping: bool) -> PgPoolOptions {
+    let options = options.test_before_acquire(false);
+    match pool_pre_ping {
+        false => options,
+        true => options.before_acquire(|connection, metadata| {
+            Box::pin(async move {
+                if metadata.idle_for > PRE_PING_AFTER_IDLE {
+                    sqlx::Connection::ping(connection).await?;
+                }
+                Ok(true)
+            })
+        }),
+    }
+}
+
+/// The options shared by the runtime and the session pool, as Python builds
+/// both engines from one engine config (`horsies/core/brokers/postgres.py:
+/// 1343-1376`): `pool_size + max_overflow` connections, `pool_timeout` for a
+/// checkout, `pool_recycle` as the age at which a connection is retired, and
+/// the idle ping.
+fn pooled_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_idle_ping(
         PgPoolOptions::new()
             .max_connections(config.pool_size + config.max_overflow)
             .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping),
-        session_settings(config),
+            .max_lifetime(Duration::from_secs(config.pool_recycle as u64))
+            .idle_timeout(None),
+        config.pool_pre_ping,
     )
 }
 
+fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_session_settings(pooled_options(config), session_settings(config))
+}
+
 /// The session pool's URL is direct or session-capable (it carries LISTEN).
+/// It is sized as the runtime pool, as Python's session engine.
 fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(
-        PgPoolOptions::new()
-            .max_connections(SESSION_POOL_MAX_CONNECTIONS)
-            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping),
-        SessionSettings::Kept,
-    )
+    with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
 fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
@@ -5839,5 +5864,124 @@ mod stale_and_expired_list_tests {
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;
+    }
+}
+
+#[cfg(test)]
+mod pool_options_tests {
+    //! Python's pool rules (`horsies/core/brokers/postgres.py:1343-1404`,
+    //! `horsies/core/utils/db.py:165-222`): `pool_recycle` retires a
+    //! connection by age, the session pool is sized as the runtime pool, and
+    //! a connection idle for more than 1 s is pinged at checkout.
+    use super::*;
+    use serial_test::serial;
+
+    fn config(pool_pre_ping: bool) -> PostgresConfig {
+        let mut config = PostgresConfig::from_url("postgresql://horsies@127.0.0.1/horsies");
+        config.pool_size = 3;
+        config.max_overflow = 2;
+        config.pool_timeout = 7;
+        config.pool_recycle = 1_800;
+        config.pool_pre_ping = pool_pre_ping;
+        config
+    }
+
+    #[test]
+    fn pool_recycle_is_the_age_at_which_a_connection_retires() {
+        let options = pg_pool_options(&config(true));
+
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
+        assert_eq!(options.get_idle_timeout(), None);
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_acquire_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn the_session_pool_is_sized_as_the_runtime_pool() {
+        let options = pg_session_pool_options(&config(true));
+
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
+    }
+
+    /// The ping at every checkout is gone in both settings; with
+    /// `pool_pre_ping` on, the idle ping replaces it.
+    #[test]
+    fn no_pool_pings_at_every_checkout() {
+        assert!(!pg_pool_options(&config(true)).get_test_before_acquire());
+        assert!(!pg_pool_options(&config(false)).get_test_before_acquire());
+        assert!(!pg_session_pool_options(&config(true)).get_test_before_acquire());
+    }
+
+    async fn pool_on_test_database(pool_pre_ping: bool) -> PgPool {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let mut config = PostgresConfig::from_url(url.clone());
+        config.pool_size = 1;
+        config.max_overflow = 0;
+        config.pool_pre_ping = pool_pre_ping;
+        pg_pool_options(&config)
+            .connect_with(pg_connect_options(&url, false).expect("parse test URL"))
+            .await
+            .expect("connect test pool")
+    }
+
+    async fn terminate(backend_pid: i32) {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect admin pool");
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(backend_pid)
+            .fetch_one(&admin)
+            .await
+            .expect("terminate the pooled backend");
+        assert!(terminated);
+        admin.close().await;
+    }
+
+    /// Python `test_idle_ping.py`: a pooled connection that died while it
+    /// waited more than 1 s is found by the ping and replaced at checkout,
+    /// so the statement runs on a new connection.
+    #[tokio::test]
+    #[serial]
+    async fn a_dead_connection_idle_over_one_second_is_replaced_at_checkout() {
+        let pool = pool_on_test_database(true).await;
+        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("first statement");
+        terminate(first).await;
+        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
+
+        let second: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("the idle ping replaces the dead connection");
+
+        assert_ne!(second, first);
+        pool.close().await;
+    }
+
+    /// With `pool_pre_ping` off, nothing checks the connection at checkout:
+    /// the first statement on the dead connection fails.
+    #[tokio::test]
+    #[serial]
+    async fn without_the_idle_ping_the_first_statement_meets_the_dead_connection() {
+        let pool = pool_on_test_database(false).await;
+        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("first statement");
+        terminate(first).await;
+        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
+
+        let failed = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await;
+
+        assert!(failed.is_err(), "the dead connection serves the statement");
+        pool.close().await;
     }
 }
