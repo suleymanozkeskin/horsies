@@ -1320,11 +1320,18 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction.
+    ///
+    /// The handle checks its client family before the transaction: a
+    /// database of another family, or with no family row, is
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
         let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
         transaction.commit().await?;
@@ -3085,6 +3092,19 @@ fn idempotency_reservation_window_seconds(
     validate_reservation_window(window)
         .map_err(|error| BrokerError::InvalidIdempotencyReservationWindow(error.to_string()))?;
     Ok(window.num_seconds())
+}
+
+/// The rerun error of a failed client-family check: a family mismatch is
+/// `RerunError::ClientFamilyMismatch`; any other failure of the family read
+/// (a statement failure, a row of another shape, refused pool settings) is
+/// `RerunError::FamilyCheckFailed`. Nothing was read or written in either.
+fn rerun_family_error(error: BrokerError) -> RerunError {
+    match error {
+        BrokerError::ClientFamilyMismatch { stored, own } => {
+            RerunError::ClientFamilyMismatch { stored, own }
+        }
+        other => RerunError::FamilyCheckFailed(Box::new(other)),
+    }
 }
 
 /// The task info code of a read error, by Python's rule
