@@ -1,10 +1,13 @@
 # core/types/status.py
 """
 Core types and enums used throughout the application.
-This module should not import from other application modules.
+This module imports no other application module but the generated catalogs
+(`horsies._catalog`), which import nothing from the package.
 """
 
 from enum import Enum
+
+from horsies._catalog.status import TaskAttemptOutcome as TaskAttemptOutcome
 
 
 class TaskStatus(Enum):
@@ -39,11 +42,3 @@ TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
         TaskStatus.EXPIRED,
     }
 )
-
-
-class TaskAttemptOutcome(str, Enum):
-    """Outcome of a single task execution attempt."""
-
-    COMPLETED = 'COMPLETED'
-    FAILED = 'FAILED'
-    WORKER_FAILURE = 'WORKER_FAILURE'

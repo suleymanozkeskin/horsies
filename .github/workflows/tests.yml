@@ -259,6 +259,34 @@ jobs:
       - name: Check formatting of every crate, the core included
         run: cargo fmt --all --check
 
+  # horsies-codegen renders the catalog modules under horsies/_catalog/ and
+  # the stubs horsies/_core.pyi from horsies-core; the rendered files are
+  # committed. This job renders them again and fails when a committed file
+  # differs, is missing, or is a retired generated file. The fix is
+  # `cargo run -p horsies-codegen -- write horsies`. It builds horsies-core,
+  # so PRs into program/0.8.0 run it under the rule of the other Rust jobs.
+  generated-files:
+    needs: scope
+    if: needs.scope.outputs.run_rust == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check the generated Python files
+        run: cargo run -p horsies-codegen -- check horsies
+
   rust:
     needs: scope
     if: needs.scope.outputs.run_rust == 'true'
