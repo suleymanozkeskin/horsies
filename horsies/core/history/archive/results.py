@@ -1,11 +1,8 @@
 """Result-envelope codec, version 1.
 
-A history row stores at most one result-domain value: the canonical result,
-or — only for administrative cancellation — the prior result the cancelled
-task had produced. Both travel under the same version, codec, content-type,
-and digest columns, so the decoder is one function regardless of which
-column held the bytes; which column it was is the caller's fact, not the
-payload's.
+A history row stores at most one result: its payload under the row's
+result envelope version and digest. An administrative cancellation stores
+none.
 
 The SQL terminalization functions write these bytes, and this module decodes
 them.
@@ -23,7 +20,7 @@ from .versions import (
     ArchiveDomain,
     CorruptArchiveValue,
     DecodedArchiveValue,
-    validate_envelope_contract,
+    validate_archive_version,
     verify_payload_digest,
 )
 
@@ -31,20 +28,16 @@ from .versions import (
 def decode_result_envelope(
     *,
     version: int,
-    codec: str,
-    content_type: str,
     payload: bytes,
     digest: bytes,
 ) -> ArchiveDecodeResult[Any]:
     """Decode one stored result payload to its JSON value, failing closed."""
-    contract_failure = validate_envelope_contract(
+    version_failure = validate_archive_version(
         domain=ArchiveDomain.RESULT,
         version=version,
-        codec=codec,
-        content_type=content_type,
     )
-    if contract_failure is not None:
-        return contract_failure
+    if version_failure is not None:
+        return version_failure
     digest_failure = verify_payload_digest(
         domain=ArchiveDomain.RESULT, payload=payload, digest=digest
     )

@@ -111,10 +111,9 @@ def record_skewed_ids_sql(*, ids_sql: str, terminal_at_sql: str) -> str:
     terminal instant. A re-recorded id keeps its first row.
     """
     return f"""INSERT INTO {CLOCK_SKEW_EXCEPTIONS} (
-        task_id, retention_class_key, terminal_at, birth_at, recorded_at
+        task_id, retention_class_key, terminal_at
     )
-    SELECT t.id, t.retention_class_key, {terminal_at_sql},
-           {UUID7_BIRTH_FUNCTION}(t.id), statement_timestamp()
+    SELECT t.id, t.retention_class_key, {terminal_at_sql}
     {ids_sql}
       AND {UUID7_BIRTH_FUNCTION}(t.id)
           - INTERVAL '{CLOCK_BOUND_SECONDS} seconds' > {terminal_at_sql}

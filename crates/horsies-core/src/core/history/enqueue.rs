@@ -1,46 +1,52 @@
-//! Canonical v27 facts prepared for every live-task enqueue.
+//! Facts prepared in process for every new live task row.
+//!
+//! A task row stores its input as one JSON value in the `input` column, exactly
+//! as the client encoded it. These functions check that text and derive the
+//! other facts of the row; they do no I/O.
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::archive::rerun_input::RerunInputDisposition;
 use super::ddl::classes::resolve_retention_class_key;
 use super::identity::fingerprint::{
     EnqueueCommandV1, FingerprintError, COMMAND_FINGERPRINT_VERSION,
 };
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
-use super::rerun::input_envelope::{
-    encode_input_envelope_v1, validate_integer_domain, INPUT_ENVELOPE_CODEC,
-    INPUT_ENVELOPE_CONTENT_TYPE, INPUT_ENVELOPE_INLINE_MAX_BYTES, INPUT_ENVELOPE_VERSION,
-};
+use super::rerun::input_envelope::validate_integer_domain;
+use crate::core::codec::{check_json_text, StrictJsonError};
+use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnqueueInputEligibility {
-    Ordinary,
-    NeverEligible,
-}
-
+/// Facts of a task row that a send, a schedule slot or a rerun writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedEnqueueFacts {
     pub command_fingerprint_version: i16,
     pub command_fingerprint: [u8; 32],
     pub retention_class_key: String,
-    pub input_digest: [u8; 32],
     pub idempotency_key_digest: Option<[u8; 32]>,
     pub retain_rerun_input: bool,
-    pub prepared_rerun_input_disposition: RerunInputDisposition,
-    pub prepared_rerun_input_version: Option<i16>,
-    pub prepared_rerun_input_codec: Option<&'static str>,
-    pub prepared_rerun_input_content_type: Option<&'static str>,
-    pub prepared_rerun_input_digest: Option<[u8; 32]>,
-    pub prepared_rerun_input_inline: Option<Vec<u8>>,
-    pub prepared_rerun_input_reference: Option<String>,
+    pub execution: Execution,
+}
+
+/// Facts of a task node that workflow start stores on the node row, and that the
+/// task row minted from the node carries.
+///
+/// An engine-minted task row has no command fingerprint, no idempotency key and
+/// no retained input (`horsies_tasks_command_fingerprint_by_origin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowTaskFacts {
+    pub retention_class_key: String,
+    pub execution: Execution,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueuePreparationError {
+    /// The text breaks the core's strict JSON read rule (`check_json_text`).
+    #[error("{field} JSON is refused: {source}")]
+    StrictJson {
+        field: &'static str,
+        source: StrictJsonError,
+    },
     #[error("{field} JSON is corrupt: {source}")]
     Json {
         field: &'static str,
@@ -48,86 +54,79 @@ pub enum EnqueuePreparationError {
     },
     #[error("{field} JSON carries a number outside the supported domain: {detail}")]
     NumberDomain { field: &'static str, detail: String },
-    #[error("args JSON must encode positional values")]
-    InvalidArgs,
-    #[error("kwargs JSON must encode an object")]
-    InvalidKwargs,
     #[error("task_options JSON must encode an object")]
     InvalidTaskOptions,
-    #[error("input envelope serialization failed: {0}")]
-    Envelope(#[from] serde_json::Error),
+    #[error("task_options refused: {0}")]
+    InvalidExecution(#[from] InvalidExecution),
     #[error("command fingerprint failed: {0}")]
     Fingerprint(#[from] FingerprintError),
     #[error("idempotency key is invalid: {0}")]
     Idempotency(#[from] IdempotencyKeyError),
 }
 
+/// Facts of a first-run send.
+///
+/// `input_json` is the encoded input as one JSON value. Any JSON value that
+/// passes the strict read rule is accepted; the text is stored and
+/// fingerprinted byte for byte.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_enqueue_facts(
     task_name: &str,
     queue_name: &str,
     priority: i32,
-    args_json: Option<&str>,
-    kwargs_json: Option<&str>,
+    input_json: &str,
     good_until: Option<DateTime<Utc>>,
     enqueue_delay_seconds: Option<i64>,
     task_options_json: Option<&str>,
     retention_class_key: Option<&str>,
     retain_rerun_input: bool,
     idempotency_key: Option<&str>,
-    eligibility: EnqueueInputEligibility,
 ) -> Result<PreparedEnqueueFacts, EnqueuePreparationError> {
     prepare_enqueue_facts_with_lineage(
         task_name,
         queue_name,
         priority,
-        args_json,
-        kwargs_json,
+        input_json,
         good_until,
         enqueue_delay_seconds,
         task_options_json,
         retention_class_key,
         retain_rerun_input,
         idempotency_key,
-        eligibility,
         None,
         None,
     )
 }
 
+/// Facts of a send with an optional rerun lineage (source and root together).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_enqueue_facts_with_lineage(
     task_name: &str,
     queue_name: &str,
     priority: i32,
-    args_json: Option<&str>,
-    kwargs_json: Option<&str>,
+    input_json: &str,
     good_until: Option<DateTime<Utc>>,
     enqueue_delay_seconds: Option<i64>,
     task_options_json: Option<&str>,
     retention_class_key: Option<&str>,
     retain_rerun_input: bool,
     idempotency_key: Option<&str>,
-    eligibility: EnqueueInputEligibility,
     rerun_of_task_id: Option<Uuid>,
     rerun_root_task_id: Option<Uuid>,
 ) -> Result<PreparedEnqueueFacts, EnqueuePreparationError> {
-    let args = parse_args(args_json)?;
-    let kwargs = parse_object(
-        "kwargs",
-        kwargs_json,
-        EnqueuePreparationError::InvalidKwargs,
-    )?;
+    check_input(input_json)?;
     let options = parse_optional_object(task_options_json)?;
-    let payload = encode_input_envelope_v1(&args, &kwargs, options.as_ref())?;
-    let input_digest: [u8; 32] = Sha256::digest(&payload).into();
+    let execution = stored_execution(options.as_ref())?;
     let retention_class_key = resolve_retention_class_key(retention_class_key).to_owned();
+    // The version-1 command fingerprint keeps Python's field list. The one
+    // input text takes the keyword slot and the positional slot is null: the
+    // field values a Python send fingerprints for its keyword input.
     let command = EnqueueCommandV1::new(
         task_name,
         queue_name,
         priority,
-        args_json.map(str::to_owned),
-        kwargs_json.map(str::to_owned),
+        None,
+        Some(input_json.to_owned()),
         good_until,
         enqueue_delay_seconds,
         task_options_json.map(str::to_owned),
@@ -140,96 +139,39 @@ pub(crate) fn prepare_enqueue_facts_with_lineage(
         .map(|key| ScopedIdempotencyKey::new(task_name, key).map(|scoped| scoped.digest()))
         .transpose()?;
 
-    let (disposition, version, codec, content_type, digest, inline) = match eligibility {
-        EnqueueInputEligibility::NeverEligible => (
-            RerunInputDisposition::NeverEligible,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        EnqueueInputEligibility::Ordinary if !retain_rerun_input => (
-            RerunInputDisposition::DeclinedByPolicy,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        EnqueueInputEligibility::Ordinary if payload.len() > INPUT_ENVELOPE_INLINE_MAX_BYTES => (
-            RerunInputDisposition::OverBound,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        EnqueueInputEligibility::Ordinary => (
-            RerunInputDisposition::Inline,
-            Some(INPUT_ENVELOPE_VERSION),
-            Some(INPUT_ENVELOPE_CODEC),
-            Some(INPUT_ENVELOPE_CONTENT_TYPE),
-            Some(input_digest),
-            Some(payload),
-        ),
-    };
-
     Ok(PreparedEnqueueFacts {
         command_fingerprint_version: COMMAND_FINGERPRINT_VERSION,
         command_fingerprint: command.fingerprint()?,
         retention_class_key,
-        input_digest,
         idempotency_key_digest,
         retain_rerun_input,
-        prepared_rerun_input_disposition: disposition,
-        prepared_rerun_input_version: version,
-        prepared_rerun_input_codec: codec,
-        prepared_rerun_input_content_type: content_type,
-        prepared_rerun_input_digest: digest,
-        prepared_rerun_input_inline: inline,
-        prepared_rerun_input_reference: None,
+        execution,
     })
 }
 
-fn parse_args(value: Option<&str>) -> Result<Vec<Value>, EnqueuePreparationError> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let parsed: Value =
-        serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
-            field: "args",
-            source,
-        })?;
-    validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
-        field: "args",
-        detail,
-    })?;
-    Ok(match parsed {
-        Value::Array(values) => values,
-        Value::Null => Vec::new(),
-        scalar @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => vec![scalar],
-        Value::Object(_) => return Err(EnqueuePreparationError::InvalidArgs),
+/// Facts of a task node and of the task row that the engine mints from it.
+pub fn prepare_workflow_task_facts(
+    input_json: &str,
+    task_options_json: Option<&str>,
+    retention_class_key: Option<&str>,
+) -> Result<WorkflowTaskFacts, EnqueuePreparationError> {
+    check_input(input_json)?;
+    let options = parse_optional_object(task_options_json)?;
+    let execution = stored_execution(options.as_ref())?;
+    Ok(WorkflowTaskFacts {
+        retention_class_key: resolve_retention_class_key(retention_class_key).to_owned(),
+        execution,
     })
 }
 
-fn parse_object(
-    field: &'static str,
-    value: Option<&str>,
-    shape_error: EnqueuePreparationError,
-) -> Result<Map<String, Value>, EnqueuePreparationError> {
-    let Some(value) = value else {
-        return Ok(Map::new());
-    };
-    let parsed: Value = serde_json::from_str(value)
-        .map_err(|source| EnqueuePreparationError::Json { field, source })?;
-    validate_integer_domain(value)
-        .map_err(|detail| EnqueuePreparationError::NumberDomain { field, detail })?;
-    match parsed {
-        Value::Object(object) => Ok(object),
-        Value::Null => Ok(Map::new()),
-        _ => Err(shape_error),
-    }
+/// Refuse input text that breaks the strict read rule, so a refused text
+/// never reaches storage. The text is stored as written, so integers keep
+/// every digit.
+fn check_input(input_json: &str) -> Result<(), EnqueuePreparationError> {
+    check_json_text(input_json).map_err(|source| EnqueuePreparationError::StrictJson {
+        field: "input",
+        source,
+    })
 }
 
 fn parse_optional_object(
@@ -238,6 +180,12 @@ fn parse_optional_object(
     let Some(value) = value else {
         return Ok(None);
     };
+    check_json_text(value).map_err(|source| EnqueuePreparationError::StrictJson {
+        field: "task_options",
+        source,
+    })?;
+    // The options are parsed to read the execution class, so an integer that
+    // the parse would round is refused.
     let parsed: Value =
         serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
             field: "task_options",
@@ -260,145 +208,168 @@ mod tests {
 
     #[cfg(not(feature = "arbitrary-precision"))]
     #[test]
-    fn out_of_domain_integers_are_rejected_per_input_field() {
+    fn a_long_integer_is_kept_in_input_and_refused_in_options() {
+        // The input is stored as written, so every digit is kept (Python's
+        // limit is 4300 digits). The options are parsed to read the
+        // execution class, so an integer the parse would round is refused.
         let big = "123456789012345678901234567890";
-        for (args, kwargs, options, field) in [
-            (format!("[{big}]"), "{}".to_owned(), "{}".to_owned(), "args"),
-            (
-                "[]".to_owned(),
-                format!("{{\"k\":{big}}}"),
-                "{}".to_owned(),
-                "kwargs",
-            ),
-            (
-                "[]".to_owned(),
-                "{}".to_owned(),
-                format!("{{\"k\":{big}}}"),
-                "task_options",
-            ),
-        ] {
-            let error = prepare_enqueue_facts(
-                "task",
-                "default",
-                50,
-                Some(&args),
-                Some(&kwargs),
-                None,
-                None,
-                Some(&options),
-                Some("standard_30d"),
-                true,
-                None,
-                EnqueueInputEligibility::Ordinary,
-            )
-            .expect_err("an out-of-domain integer must not be rounded silently");
-            assert!(
-                matches!(
-                    error,
-                    EnqueuePreparationError::NumberDomain { field: got, .. } if got == field
-                ),
-                "{field}: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn ordinary_facts_pin_inline_declined_over_bound_and_forever() {
-        let inline = prepare_enqueue_facts(
+        let input = format!("{{\"k\":{big}}}");
+        prepare_enqueue_facts(
             "task",
             "default",
             50,
-            Some("[1]"),
-            Some("{\"z\":1}"),
+            &input,
+            None,
+            None,
+            Some("{}"),
+            Some("standard_30d"),
+            true,
+            None,
+        )
+        .expect("a long integer in the input is stored as written");
+        let options = format!("{{\"k\":{big}}}");
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
+            None,
+            None,
+            Some(&options),
+            Some("standard_30d"),
+            true,
+            None,
+        )
+        .expect_err("an out-of-domain integer in the options must not be rounded");
+        assert!(
+            matches!(
+                error,
+                EnqueuePreparationError::NumberDomain {
+                    field: "task_options",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ordinary_facts_pin_fingerprint_key_class_and_forever() {
+        let keyed = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{\"z\":1}",
             None,
             None,
             Some("{}"),
             Some("standard_30d"),
             true,
             Some("request-1"),
-            EnqueueInputEligibility::Ordinary,
         )
         .unwrap();
-        assert_eq!(inline.prepared_rerun_input_disposition.as_str(), "INLINE");
-        assert_eq!(inline.command_fingerprint_version, 1);
-        assert_eq!(inline.retention_class_key, "standard_30d");
-        assert_eq!(inline.command_fingerprint.len(), 32);
-        assert_eq!(
-            inline.input_digest,
-            inline.prepared_rerun_input_digest.unwrap()
-        );
-        assert!(inline.idempotency_key_digest.is_some());
+        assert_eq!(keyed.command_fingerprint_version, 1);
+        assert_eq!(keyed.retention_class_key, "standard_30d");
+        assert_eq!(keyed.command_fingerprint.len(), 32);
+        assert!(keyed.idempotency_key_digest.is_some());
+        assert!(keyed.retain_rerun_input);
+        assert_eq!(keyed.execution, Execution::Isolated);
 
-        let declined = prepare_enqueue_facts(
-            "task",
-            "default",
-            50,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            EnqueueInputEligibility::Ordinary,
+        let forever = prepare_enqueue_facts(
+            "task", "default", 50, "null", None, None, None, None, false, None,
         )
         .unwrap();
-        assert_eq!(declined.retention_class_key, "forever");
-        assert_eq!(
-            declined.prepared_rerun_input_disposition,
-            RerunInputDisposition::DeclinedByPolicy
-        );
-        assert!(declined.prepared_rerun_input_inline.is_none());
-
-        let oversized_args =
-            serde_json::to_string(&vec!["x".repeat(INPUT_ENVELOPE_INLINE_MAX_BYTES)]).unwrap();
-        let over_bound = prepare_enqueue_facts(
-            "task",
-            "default",
-            50,
-            Some(&oversized_args),
-            None,
-            None,
-            None,
-            None,
-            Some("standard_30d"),
-            true,
-            None,
-            EnqueueInputEligibility::Ordinary,
-        )
-        .unwrap();
-        assert_eq!(
-            over_bound.prepared_rerun_input_disposition,
-            RerunInputDisposition::OverBound
-        );
-        assert!(over_bound.prepared_rerun_input_version.is_none());
-        assert!(over_bound.prepared_rerun_input_digest.is_none());
-        assert!(over_bound.prepared_rerun_input_inline.is_none());
+        assert_eq!(forever.retention_class_key, "forever");
+        assert!(!forever.retain_rerun_input);
     }
 
     #[test]
-    fn workflow_facts_are_never_eligible_but_still_fingerprinted() {
-        let facts = prepare_enqueue_facts(
-            "node",
-            "bulk",
-            10,
-            Some("[1]"),
+    fn input_text_that_breaks_the_strict_read_rule_is_refused() {
+        for input in ["", "{", "[1] [2]", "NaN", "{\"a\":1,\"a\":2}", "[1e400]"] {
+            let error = prepare_enqueue_facts(
+                "task", "default", 50, input, None, None, None, None, false, None,
+            )
+            .expect_err("refused input text must not reach storage");
+            assert!(
+                matches!(
+                    error,
+                    EnqueuePreparationError::StrictJson { field: "input", .. }
+                ),
+                "{input:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_options_that_break_the_strict_read_rule_are_refused() {
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
             None,
             None,
+            Some("{\"execution\":\"ISOLATED\",\"execution\":\"SHARED_THREAD\"}"),
             None,
-            None,
-            Some("q_bulk_7d"),
             false,
             None,
-            EnqueueInputEligibility::NeverEligible,
+        )
+        .expect_err("a repeated options key must be refused");
+        assert!(matches!(
+            error,
+            EnqueuePreparationError::StrictJson {
+                field: "task_options",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn null_and_empty_object_inputs_fingerprint_differently() {
+        let null_input = prepare_enqueue_facts(
+            "task", "default", 50, "null", None, None, None, None, false, None,
         )
         .unwrap();
-        assert_eq!(
-            facts.prepared_rerun_input_disposition,
-            RerunInputDisposition::NeverEligible
+        let empty_object = prepare_enqueue_facts(
+            "task", "default", 50, "{}", None, None, None, None, false, None,
+        )
+        .unwrap();
+        assert_ne!(
+            null_input.command_fingerprint,
+            empty_object.command_fingerprint
         );
-        assert_eq!(facts.command_fingerprint.len(), 32);
-        assert_eq!(facts.input_digest.len(), 32);
+    }
+
+    #[test]
+    fn workflow_facts_carry_class_and_execution() {
+        let facts = prepare_workflow_task_facts(
+            "[1]",
+            Some("{\"execution\":\"SHARED_THREAD\"}"),
+            Some("standard_7d"),
+        )
+        .unwrap();
+        assert_eq!(facts.retention_class_key, "standard_7d");
+        assert_eq!(facts.execution, Execution::SharedThread);
+    }
+
+    #[test]
+    fn an_unknown_execution_class_is_refused() {
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
+            None,
+            None,
+            Some("{\"execution\":\"PARALLEL\"}"),
+            None,
+            false,
+            None,
+        )
+        .expect_err("an unknown execution class must be refused");
+        assert!(matches!(
+            error,
+            EnqueuePreparationError::InvalidExecution(_)
+        ));
     }
 }

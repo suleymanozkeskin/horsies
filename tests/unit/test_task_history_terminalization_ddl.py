@@ -306,16 +306,9 @@ class TestFailureFamily:
 
 
 class TestCodecCrossPins:
-    """The DDL's codec literals are M3's constants, not free spellings."""
+    """The DDL's codec literals, with their exact spellings."""
 
-    def test_move_codec_literals_match_the_archive_constants(self) -> None:
-        from horsies.core.history.archive.versions import (
-            JSON_CONTENT_TYPE,
-            JSON_UTF8_CODEC,
-        )
-
-        assert f"'{JSON_UTF8_CODEC}'" in MOVE_BODY
-        assert f"'{JSON_CONTENT_TYPE}'" in MOVE_BODY
+    def test_move_codec_literal_spellings(self) -> None:
         assert "'json-utf8'" in MOVE_BODY
         assert MOVE_BODY.count("'json-utf8'") == 2
         assert MOVE_BODY.count("'application/json'") == 2
@@ -491,14 +484,8 @@ class TestWorkflowNodeFamily:
             TerminalizationKind.EXPIRE_PENDING,
             TerminalizationKind.CANCEL_ORPHAN_SWEEP,
         }
-        # Written only by the cutover relocation; no wire family, and
-        # the single-row move's ELSE arm rejects it.
-        relocation_only = {TerminalizationKind.LEGACY_TERMINAL}
-        assert (
-            classified | batch_only | relocation_only
-            == set(TerminalizationKind)
-        )
-        assert not classified & (batch_only | relocation_only)
+        assert classified | batch_only == set(TerminalizationKind)
+        assert not classified & batch_only
 
     @pytest.mark.parametrize(
         'batch', [*workflow_node_family_fragments()[2:4]]

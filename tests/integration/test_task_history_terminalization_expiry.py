@@ -15,7 +15,6 @@ from __future__ import annotations
 from datetime import timedelta, timezone
 from hashlib import sha256
 from typing import Any
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -27,7 +26,9 @@ from horsies.core.history.archive.versions import DecodedArchiveValue
 
 from tests.integration.task_history_harness import (
     HistorySchema,
+    create_workflow,
     insert_live_task,
+    link_workflow_node,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
@@ -173,14 +174,11 @@ class TestDiscoveryBatch:
                     status='PENDING',
                     worker=None,
                     good_until_offset=timedelta(minutes=-(index + 1)),
-                    # The first plain task carries a prepared inline input,
-                    # so the batch proves policy-eligible carriage; the
-                    # workflow task below proves NEVER_ELIGIBLE despite the
-                    # same preparation (eligibility precedes policy).
+                    # The first plain task retains its input, so the batch
+                    # proves policy-eligible carriage; the workflow task
+                    # below proves NEVER_ELIGIBLE despite the same policy
+                    # (eligibility precedes policy).
                     retain=(index == 0),
-                    prepared_disposition=(
-                        'INLINE' if index == 0 else 'DECLINED_BY_POLICY'
-                    ),
                 )
                 for index in range(3)
             ]
@@ -191,23 +189,14 @@ class TestDiscoveryBatch:
                 worker=None,
                 is_workflow_task=True,
                 retain=True,
-                prepared_disposition='INLINE',
                 good_until_offset=timedelta(minutes=-10),
             )
-            workflow_id = str(uuid4())
-            node_row_id = str(uuid4())
-            await connection.execute(
-                text(
-                    'INSERT INTO horsies_workflow_tasks '
-                    '(id, workflow_id, task_id, task_index) VALUES '
-                    '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-                    'CAST(:task_id AS uuid), 0)'
-                ),
-                {
-                    'node_id': node_row_id,
-                    'workflow_id': workflow_id,
-                    'task_id': wf_task,
-                },
+            workflow_id = await create_workflow(connection, status='RUNNING')
+            _ = await link_workflow_node(
+                connection,
+                wf_task,
+                workflow_id=workflow_id,
+                node_status='ENQUEUED',
             )
             not_expired = await insert_live_task(
                 connection,
@@ -257,8 +246,6 @@ class TestDiscoveryBatch:
             ).one()
             decoded = decode_attempt_snapshot(
                 version=1,
-                codec='json-utf8',
-                content_type='application/json',
                 payload=bytes(snapshot.attempt_snapshot),
                 digest=bytes(snapshot.attempt_snapshot_digest),
             )
@@ -269,7 +256,7 @@ class TestDiscoveryBatch:
                 await connection.execute(
                     text(
                         'SELECT workflow_id, recovery_source, '
-                        'terminal_status, result_digest '
+                        'terminalization_kind, result_digest '
                         'FROM horsies_workflow_phase2_pending '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
@@ -278,7 +265,7 @@ class TestDiscoveryBatch:
             ).one()
             assert str(pending.workflow_id) == workflow_id
             assert pending.recovery_source == 'HISTORY'
-            assert pending.terminal_status == 'EXPIRED'
+            assert pending.terminalization_kind == 'EXPIRE_PENDING'
             assert bytes(pending.result_digest) == sha256(
                 b'{"error":{"code":"TASK_EXPIRED"}}'
             ).digest()
@@ -430,18 +417,13 @@ class TestDiscoveryBatch:
                 is_workflow_task=True,
                 good_until_offset=timedelta(minutes=-10),
             )
-            await connection.execute(
-                text(
-                    'INSERT INTO horsies_workflow_tasks '
-                    '(id, workflow_id, task_id, task_index) VALUES '
-                    '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-                    'CAST(:task_id AS uuid), 0)'
+            _ = await link_workflow_node(
+                connection,
+                wf_task,
+                workflow_id=await create_workflow(
+                    connection, status='RUNNING'
                 ),
-                {
-                    'node_id': str(uuid4()),
-                    'workflow_id': str(uuid4()),
-                    'task_id': wf_task,
-                },
+                node_status='ENQUEUED',
             )
             with pytest.raises(
                 DBAPIError, match='requires a result payload'

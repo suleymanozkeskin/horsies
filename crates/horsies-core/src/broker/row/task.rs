@@ -3,7 +3,7 @@ use serde::Serialize;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::core::{TaskInfo, TaskStatus};
+use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
 
@@ -64,8 +64,8 @@ pub struct SetRunningRow {
 pub struct ClaimedTaskRow {
     pub id: Uuid,
     pub task_name: String,
-    pub args: Option<String>,
-    pub kwargs: Option<String>,
+    /// The encoded task input as one JSON value, as the send wrote it.
+    pub input: String,
     pub queue_name: String,
     pub is_workflow_task: bool,
     pub task_options: Option<String>,
@@ -104,12 +104,21 @@ pub struct TaskInfoRow {
     pub error_code: Option<String>,
     pub failed_reason: Option<String>,
     pub result: Option<String>,
+    /// The live row's `execution` column.
+    pub execution: String,
 }
 
 impl TaskInfoRow {
     /// Convert into the core `TaskInfo` type.
+    ///
+    /// The task is live, so its info reports the stored execution class. A
+    /// stored class outside the three class names is refused with
+    /// `BrokerError::InvalidExecutionClass`; the column's CHECK holds the
+    /// domain, so that refusal means the row was written past it.
     pub fn into_task_info(self) -> Result<TaskInfo, BrokerError> {
         let status = parse_task_status(&self.status)?;
+        let execution = Execution::from_stored(&self.execution)
+            .ok_or_else(|| BrokerError::InvalidExecutionClass(self.execution.clone()))?;
         // Propagate (not swallow) a present-but-unparseable stored result so it
         // is not reported identically to a genuinely null result. Matches the
         // retrieval path in `parse_task_result_row`.
@@ -139,6 +148,7 @@ impl TaskInfoRow {
             failed_reason: self.failed_reason,
             result,
             attempts: None,
+            execution: ExecutionClass::Live(execution),
         })
     }
 }
@@ -255,5 +265,52 @@ mod tests {
         assert!(parse_task_status("UNKNOWN").is_err());
         assert!(parse_task_status("pending").is_err());
         assert!(parse_task_status("").is_err());
+    }
+
+    fn task_info_row(execution: &str) -> TaskInfoRow {
+        TaskInfoRow {
+            id: Uuid::nil(),
+            task_name: "row_task".to_owned(),
+            status: "PENDING".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 100,
+            retry_count: 0,
+            max_retries: 0,
+            next_retry_at: None,
+            sent_at: None,
+            enqueued_at: Utc::now(),
+            claimed_at: None,
+            started_at: None,
+            completed_at: None,
+            failed_at: None,
+            worker_hostname: None,
+            worker_pid: None,
+            worker_process_name: None,
+            error_code: None,
+            failed_reason: None,
+            result: None,
+            execution: execution.to_owned(),
+        }
+    }
+
+    #[test]
+    fn live_task_info_reports_the_stored_execution_class() {
+        for (stored, execution) in [
+            ("ISOLATED", Execution::Isolated),
+            ("SHARED_ASYNC", Execution::SharedAsync),
+            ("SHARED_THREAD", Execution::SharedThread),
+        ] {
+            let info = task_info_row(stored).into_task_info().unwrap();
+            assert_eq!(info.execution, ExecutionClass::Live(execution));
+        }
+    }
+
+    #[test]
+    fn live_task_info_refuses_an_unknown_execution_class() {
+        let refused = task_info_row("PARALLEL").into_task_info().unwrap_err();
+        assert!(
+            matches!(&refused, BrokerError::InvalidExecutionClass(value) if value == "PARALLEL"),
+            "{refused:?}"
+        );
     }
 }

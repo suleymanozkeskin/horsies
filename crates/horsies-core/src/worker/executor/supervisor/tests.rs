@@ -1,0 +1,549 @@
+//! Tests of the supervisor: the pure rules, then real child processes
+//! started through the spawner thread (`/bin/sh` scripts).
+
+use std::io::Read;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::os::fd::AsRawFd;
+use std::time::Duration;
+
+use super::*;
+use crate::worker::executor::protocol::{
+    encode_child_frame, BootDetail, BootErrorName, BootFailedFrame, ChildExitCode, ChildFrame,
+    ProcessId, ReadyFrame, ReceivedProtocol, ReportedBootCause, RssReading, ShortageErrno,
+};
+
+fn pid() -> ProcessId {
+    ProcessId::new(4242).unwrap()
+}
+
+fn lost(cause: LossCause, exit: ChildExit) -> ChildLost {
+    ChildLost {
+        cause,
+        exit,
+        partial: PartialFrame::NoneAtHand,
+        pid: pid(),
+    }
+}
+
+fn exited(code: i32) -> ChildExit {
+    ChildExit::Reaped(ReapedExit::ExitedWith(code))
+}
+
+fn killed() -> ChildExit {
+    ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGKILL))
+}
+
+fn cause_of(end: BootEnd) -> BootFailureCause {
+    match end {
+        BootEnd::Failed(failure) => failure.cause,
+        BootEnd::ChildHookFailed => panic!("expected a boot failure, got a hook failure"),
+    }
+}
+
+const POOL_ALONE_AT_START: PoolAtFailure = PoolAtFailure {
+    first_generation_in: false,
+    another_child_serves: false,
+    every_other_slot_down: true,
+};
+
+const POOL_SERVING: PoolAtFailure = PoolAtFailure {
+    first_generation_in: true,
+    another_child_serves: true,
+    every_other_slot_down: false,
+};
+
+// ---------------------------------------------------------------------------
+// Exits
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exit_codes_are_read_in_the_protocol() {
+    assert_eq!(ReapedExit::ExitedWith(0).meaning(), ExitMeaning::Clean);
+    assert_eq!(
+        ReapedExit::ExitedWith(173).meaning(),
+        ExitMeaning::Protocol(ChildExitCode::ChildHookFailed)
+    );
+    assert_eq!(
+        ReapedExit::ExitedWith(78).meaning(),
+        ExitMeaning::Protocol(ChildExitCode::ProtocolMismatch)
+    );
+    assert_eq!(
+        ReapedExit::ExitedWith(3).meaning(),
+        ExitMeaning::OtherCode(3)
+    );
+    assert_eq!(
+        ReapedExit::KilledBySignal(libc::SIGSEGV).meaning(),
+        ExitMeaning::Signal(libc::SIGSEGV)
+    );
+    assert_eq!(
+        ReapedExit::KilledBySignal(libc::SIGKILL).to_string(),
+        format!("signal {} (SIGKILL)", libc::SIGKILL)
+    );
+    assert!(ReapedExit::KilledBySignal(libc::SIGKILL).is_sigkill());
+    assert!(!ReapedExit::ExitedWith(libc::SIGKILL).is_sigkill());
+}
+
+// ---------------------------------------------------------------------------
+// Boot causes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_boot_failure_frame_names_its_cause() {
+    let end = boot_end_of(BootReply::BootFailed(BootFailedFrame {
+        cause: ReportedBootCause::ResourceShortage(ShortageErrno::Emfile),
+        error_name: BootErrorName::new("OSError".to_owned()).unwrap(),
+        detail: BootDetail::new("too many open files".to_owned()).unwrap(),
+    }));
+    match end {
+        BootEnd::Failed(failure) => {
+            assert_eq!(
+                failure.cause,
+                BootFailureCause::ResourceShortage(ShortageErrno::Emfile)
+            );
+            assert_eq!(failure.detail.as_str(), "OSError: too many open files");
+            assert_eq!(failure.cause.kind(), CauseKind::CanClear);
+        }
+        BootEnd::ChildHookFailed => panic!("expected a boot failure"),
+    }
+}
+
+#[test]
+fn a_child_without_a_frame_is_read_by_its_exit() {
+    assert_eq!(
+        boot_end_of(BootReply::Lost(lost(LossCause::ChildDied, exited(173)))),
+        BootEnd::ChildHookFailed
+    );
+    assert_eq!(
+        cause_of(boot_end_of(BootReply::Lost(lost(
+            LossCause::ChildDied,
+            exited(76)
+        )))),
+        BootFailureCause::SpawnFailed
+    );
+    assert_eq!(
+        cause_of(boot_end_of(BootReply::Lost(lost(
+            LossCause::ChildDied,
+            exited(78)
+        )))),
+        BootFailureCause::ProtocolMismatch(MismatchSeen::ChildRefusedInit)
+    );
+    assert_eq!(
+        cause_of(boot_end_of(BootReply::Lost(lost(
+            LossCause::ChildDied,
+            exited(1)
+        )))),
+        BootFailureCause::LostBeforeReady {
+            loss: LossCause::ChildDied,
+            exit: exited(1),
+        }
+    );
+    assert_eq!(
+        cause_of(boot_end_of(BootReply::NotReadyInTime)),
+        BootFailureCause::NotReadyInTime
+    );
+}
+
+#[test]
+fn a_ready_frame_of_another_version_is_a_protocol_mismatch() {
+    let reply = BootReply::Lost(lost(
+        LossCause::ProtocolMismatch(ReceivedProtocol::Named(3)),
+        killed(),
+    ));
+    assert_eq!(
+        cause_of(boot_end_of(reply)),
+        BootFailureCause::ProtocolMismatch(MismatchSeen::ReadyNamed(ReceivedProtocol::Named(3)))
+    );
+    assert_eq!(
+        BootFailureCause::ProtocolMismatch(MismatchSeen::ChildRefusedInit).kind(),
+        CauseKind::Repeats
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Restart rules
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_cause_that_repeats_counts_up_to_the_bound() {
+    let mut counts = BootCounts::default();
+    let cause = BootFailureCause::AppLoadFailed;
+    assert_eq!(
+        counts.after_failure(cause, POOL_ALONE_AT_START, 0),
+        BootDecision::Retry {
+            counted: 1,
+            wait: Duration::from_millis(500)
+        }
+    );
+    assert_eq!(
+        counts.after_failure(cause, POOL_ALONE_AT_START, 0),
+        BootDecision::Retry {
+            counted: 2,
+            wait: Duration::from_secs(1)
+        }
+    );
+    assert_eq!(
+        counts.after_failure(cause, POOL_ALONE_AT_START, 0),
+        BootDecision::Exhausted {
+            attempts: CHILD_BOOT_ATTEMPTS
+        }
+    );
+}
+
+#[test]
+fn a_cause_that_can_clear_is_spared_while_another_slot_serves() {
+    let mut counts = BootCounts::default();
+    let cause = BootFailureCause::ThreadStartRefused;
+    for failed_before in 0..10_u32 {
+        let failed_boots = NonZeroU32::new(failed_before + 1).unwrap();
+        assert_eq!(
+            counts.after_failure(cause, POOL_SERVING, failed_before),
+            BootDecision::SlotDown {
+                counted: 0,
+                failed_boots,
+                wait: slot_down_delay(failed_boots),
+            }
+        );
+    }
+}
+
+#[test]
+fn a_cause_that_can_clear_counts_when_every_other_slot_is_down() {
+    let mut counts = BootCounts::default();
+    let cause = BootFailureCause::ResourceShortage(ShortageErrno::Enomem);
+    assert!(matches!(
+        counts.after_failure(cause, POOL_ALONE_AT_START, 0),
+        BootDecision::SlotDown { counted: 1, .. }
+    ));
+    assert!(matches!(
+        counts.after_failure(cause, POOL_ALONE_AT_START, 1),
+        BootDecision::SlotDown { counted: 2, .. }
+    ));
+    assert_eq!(
+        counts.after_failure(cause, POOL_ALONE_AT_START, 2),
+        BootDecision::Exhausted { attempts: 3 }
+    );
+}
+
+#[test]
+fn a_spared_attempt_starts_the_count_again() {
+    let mut counts = BootCounts::default();
+    assert!(matches!(
+        counts.after_failure(BootFailureCause::NotReadyInTime, POOL_SERVING, 0),
+        BootDecision::Retry { counted: 1, .. }
+    ));
+    assert!(matches!(
+        counts.after_failure(BootFailureCause::ThreadStartRefused, POOL_SERVING, 0),
+        BootDecision::SlotDown { counted: 0, .. }
+    ));
+    assert!(matches!(
+        counts.after_failure(BootFailureCause::NotReadyInTime, POOL_SERVING, 0),
+        BootDecision::Retry { counted: 1, .. }
+    ));
+}
+
+#[test]
+fn an_outside_kill_is_spared_only_while_another_child_serves() {
+    let killed_before_ready = BootFailureCause::LostBeforeReady {
+        loss: LossCause::ChildDied,
+        exit: killed(),
+    };
+    let mut counts = BootCounts::default();
+    for kills in 1..=12_u32 {
+        assert_eq!(
+            counts.after_failure(killed_before_ready, POOL_SERVING, 0),
+            BootDecision::OutsideKillSpared {
+                kills_in_a_row: kills,
+                wait: outside_kill_delay(kills),
+            }
+        );
+    }
+    let mut at_start = BootCounts::default();
+    assert!(matches!(
+        at_start.after_failure(killed_before_ready, POOL_ALONE_AT_START, 0),
+        BootDecision::Retry { counted: 1, .. }
+    ));
+    let mut no_other = BootCounts::default();
+    let no_other_child = PoolAtFailure {
+        first_generation_in: true,
+        another_child_serves: false,
+        every_other_slot_down: true,
+    };
+    assert!(matches!(
+        no_other.after_failure(killed_before_ready, no_other_child, 0),
+        BootDecision::Retry { counted: 1, .. }
+    ));
+}
+
+#[test]
+fn waits_grow_and_stay_bounded() {
+    let down: Vec<u64> = (1..=9_u32)
+        .map(|boots| slot_down_delay(NonZeroU32::new(boots).unwrap()).as_secs())
+        .collect();
+    assert_eq!(down, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    assert_eq!(outside_kill_delay(1), Duration::from_millis(500));
+    assert_eq!(outside_kill_delay(4), Duration::from_secs(2));
+    assert_eq!(outside_kill_delay(10), Duration::from_secs(5));
+    assert_eq!(outside_kill_delay(u32::MAX), Duration::from_secs(5));
+}
+
+#[test]
+fn the_mailbox_holds_four_frames_per_seat_and_two() {
+    assert_eq!(MailboxBound::for_seats(NonZeroUsize::MIN).get(), 6);
+    assert_eq!(
+        MailboxBound::for_seats(NonZeroUsize::new(1000).unwrap()).get(),
+        4002
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Real children through the spawner thread
+// ---------------------------------------------------------------------------
+
+/// A `/bin/sh` child. The spawner appends the socket descriptor and the
+/// worker pid, so the script reads the descriptor as `$0`.
+fn shell(script: &str) -> ChildCommand {
+    ChildCommand {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), script.into()],
+    }
+}
+
+const TEST_WAIT: Duration = Duration::from_secs(10);
+
+fn stop(spawner: Spawner) {
+    assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
+}
+
+#[tokio::test]
+async fn the_spawner_reaps_a_child_and_publishes_its_exit() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = spawner.handle().spawn(shell("exit 3")).await.unwrap();
+    assert_eq!(
+        wait_for_exit(&mut child.exit, TEST_WAIT).await,
+        ChildExit::Reaped(ReapedExit::ExitedWith(3))
+    );
+    assert_eq!(
+        spawner.handle().kill_session(child.id).await,
+        KillOutcome::AlreadyReaped
+    );
+    stop(spawner);
+}
+
+#[tokio::test]
+async fn the_child_gets_its_socket_end_and_the_buffer_sizes() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = spawner
+        .handle()
+        .spawn(shell(r#"printf hi >&"$0""#))
+        .await
+        .unwrap();
+    for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        let size = socket::buffer_size(child.socket.as_raw_fd(), option).unwrap();
+        assert!(size >= SOCKET_BUFFER_BYTES, "option {option}: {size}");
+    }
+    child.socket.set_read_timeout(Some(TEST_WAIT)).unwrap();
+    let mut text = String::new();
+    child.socket.read_to_string(&mut text).unwrap();
+    assert_eq!(text, "hi");
+    assert_eq!(
+        wait_for_exit(&mut child.exit, TEST_WAIT).await,
+        ChildExit::Reaped(ReapedExit::ExitedWith(0))
+    );
+    stop(spawner);
+}
+
+#[tokio::test]
+async fn a_program_that_does_not_exist_is_a_spawn_failure() {
+    let spawner = Spawner::start().unwrap();
+    let command = ChildCommand {
+        program: "/nonexistent/horsies-child".into(),
+        args: Vec::new(),
+    };
+    assert!(matches!(
+        spawner.handle().spawn(command).await,
+        Err(SpawnError::SpawnFailed { .. })
+    ));
+    stop(spawner);
+}
+
+/// Whether `pid` is gone or a zombie that no one reaps yet.
+fn process_ended(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 checks the process and sends nothing.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    match alive {
+        false => true,
+        true => std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|stat| {
+                stat.rsplit(')')
+                    .next()
+                    .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+            })
+            .unwrap_or(false),
+    }
+}
+
+#[tokio::test]
+async fn a_kill_reaches_the_subprocesses_of_the_child() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = spawner
+        .handle()
+        .spawn(shell(r#"sleep 60 & echo $! >&"$0"; wait"#))
+        .await
+        .unwrap();
+    child.socket.set_read_timeout(Some(TEST_WAIT)).unwrap();
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    while byte[0] != b'\n' {
+        assert_eq!(child.socket.read(&mut byte).unwrap(), 1);
+        line.push(byte[0]);
+    }
+    let grandchild: libc::pid_t = String::from_utf8(line).unwrap().trim().parse().unwrap();
+    assert_eq!(
+        spawner.handle().kill_session(child.id).await,
+        KillOutcome::Sent
+    );
+    assert_eq!(
+        wait_for_exit(&mut child.exit, TEST_WAIT).await,
+        ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGKILL))
+    );
+    let mut ended = false;
+    for _ in 0..100 {
+        ended = process_ended(grandchild);
+        if ended {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ended, "the subprocess {grandchild} outlived the kill");
+    stop(spawner);
+}
+
+async fn channel(spawner: &Spawner, script: &str) -> ChildChannel {
+    let spawned = spawner.handle().spawn(shell(script)).await.unwrap();
+    ChildChannel::attach(
+        spawned,
+        spawner.handle(),
+        MailboxBound::for_seats(NonZeroUsize::MIN),
+    )
+    .unwrap()
+}
+
+fn ready_frame() -> ChildFrame {
+    ChildFrame::Ready(ReadyFrame {
+        pid: pid(),
+        rss: RssReading::Unreadable,
+    })
+}
+
+#[tokio::test]
+async fn a_frame_from_the_child_is_delivered() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = channel(&spawner, r#"exec cat <&"$0" >&"$0""#).await;
+    let bytes = encode_child_frame(&ready_frame()).unwrap().to_bytes();
+    child.send_raw(&bytes).await.unwrap();
+    assert_eq!(
+        child.await_frame(Some(TEST_WAIT)).await,
+        FrameWait::Frame(ready_frame())
+    );
+    assert_eq!(
+        child.await_frame(Some(Duration::from_millis(50))).await,
+        FrameWait::Expired
+    );
+    assert_eq!(child.kill_for_caller().await, KillOutcome::Sent);
+    assert_eq!(
+        child.await_frame(Some(TEST_WAIT)).await,
+        FrameWait::Lost(ChildLost {
+            cause: LossCause::KilledByParent,
+            exit: killed(),
+            partial: PartialFrame::NoneAtHand,
+            pid: child.pid(),
+        })
+    );
+    let _ = child.dispose().await;
+    stop(spawner);
+}
+
+/// A complete frame wins over the death that follows it.
+#[tokio::test]
+async fn a_frame_written_before_the_exit_wins() {
+    let spawner = Spawner::start().unwrap();
+    let bytes = encode_child_frame(&ready_frame()).unwrap().to_bytes();
+    let script = format!(r#"head -c {} <&"$0" >&"$0"; exit 0"#, bytes.len());
+    let mut child = channel(&spawner, &script).await;
+    child.send_raw(&bytes).await.unwrap();
+    assert_eq!(
+        child.await_frame(Some(TEST_WAIT)).await,
+        FrameWait::Frame(ready_frame())
+    );
+    assert_eq!(
+        child.await_frame(Some(TEST_WAIT)).await,
+        FrameWait::Lost(ChildLost {
+            cause: LossCause::ChildDied,
+            exit: exited(0),
+            partial: PartialFrame::NoneAtHand,
+            pid: child.pid(),
+        })
+    );
+    let _ = child.dispose().await;
+    stop(spawner);
+}
+
+#[tokio::test]
+async fn a_death_with_no_frame_is_a_loss() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = channel(&spawner, "exit 5").await;
+    assert_eq!(
+        child.await_frame(Some(TEST_WAIT)).await,
+        FrameWait::Lost(ChildLost {
+            cause: LossCause::ChildDied,
+            exit: exited(5),
+            partial: PartialFrame::NoneAtHand,
+            pid: child.pid(),
+        })
+    );
+    let _ = child.dispose().await;
+    stop(spawner);
+}
+
+#[tokio::test]
+async fn a_header_over_the_bounds_kills_the_child() {
+    let spawner = Spawner::start().unwrap();
+    let script =
+        r#"printf '\000\000\000\001\000\000\000\000\000\000\000\000x' >&"$0"; exec sleep 60"#;
+    let mut child = channel(&spawner, script).await;
+    match child.await_frame(Some(TEST_WAIT)).await {
+        FrameWait::Lost(lost) => {
+            assert_eq!(lost.cause, LossCause::ProtocolViolation);
+            assert_eq!(lost.exit, killed());
+        }
+        other => panic!("expected a loss, got {other:?}"),
+    }
+    let _ = child.dispose().await;
+    stop(spawner);
+}
+
+#[tokio::test]
+async fn an_eof_with_a_live_child_kills_it_after_the_grace() {
+    let spawner = Spawner::start().unwrap();
+    let mut child = channel(&spawner, r#"eval "exec $0>&-"; exec sleep 60"#).await;
+    assert_eq!(
+        child.await_frame(Some(TEST_WAIT)).await,
+        FrameWait::Lost(ChildLost {
+            cause: LossCause::ChannelLost,
+            exit: killed(),
+            partial: PartialFrame::NoneAtHand,
+            pid: child.pid(),
+        })
+    );
+    let _ = child.dispose().await;
+    stop(spawner);
+}
+
+#[tokio::test]
+async fn retire_sends_the_stop_frame_and_waits_for_the_exit() {
+    let spawner = Spawner::start().unwrap();
+    // Reads the stop frame, then exits by itself.
+    let obeys = channel(&spawner, r#"head -c 27 <&"$0" >/dev/null; exit 0"#).await;
+    assert_eq!(obeys.retire().await, exited(0));
+    stop(spawner);
+}

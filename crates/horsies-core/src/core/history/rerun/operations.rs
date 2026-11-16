@@ -4,11 +4,8 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::broker::postgres::compute_enqueue_sha;
 use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
-use crate::core::history::enqueue::{
-    prepare_enqueue_facts_with_lineage, EnqueueInputEligibility, EnqueuePreparationError,
-};
+use crate::core::history::enqueue::{prepare_enqueue_facts_with_lineage, EnqueuePreparationError};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::core::history::identity::keys::{
@@ -19,8 +16,9 @@ use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 use crate::core::history::names::{LIVE_TASKS, RETENTION_CLASSES};
 use crate::core::history::reads::detail::{read_task_detail, TaskAbsenceReason, TaskDetailResult};
 use crate::core::history::rerun::input_envelope::{
-    canonical_json_bytes, decode_input_envelope, InputEnvelopeDecodeError,
+    decode_framed_rerun_input, InputEnvelopeDecodeError,
 };
+use crate::core::types::status::TaskStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunTask {
@@ -123,6 +121,14 @@ pub enum RerunOutcome {
         task_id: Uuid,
         reason: TaskAbsenceReason,
     },
+    /// The source history row does not decode: a stored status that is not a
+    /// task status, an attempt snapshot that fails its check, or a location
+    /// the staged read does not define. Nothing is written; a repeat gives the
+    /// same outcome until the stored row or the server changes.
+    SourceCorrupt {
+        task_id: Uuid,
+        detail: String,
+    },
     NotEligible {
         task_id: Uuid,
         reason: NotEligibleReason,
@@ -164,6 +170,16 @@ pub enum RerunError {
     Identity(#[from] Uuid7Error),
     #[error("rerun JSON serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// The database records another client family, or none. Nothing was
+    /// read or written. Not retryable: the database stays of its family.
+    #[error(
+        "rerun refused: this database was installed by {stored}; this is the {} client",
+        own.as_str()
+    )]
+    ClientFamilyMismatch {
+        stored: crate::broker::client_family::RecordedFamily,
+        own: crate::broker::client_family::ClientFamily,
+    },
 }
 
 pub async fn rerun_task_in_tx(
@@ -183,12 +199,24 @@ pub async fn rerun_task_in_tx(
         ));
     }
 
-    let detail = match read_task_detail(connection, command.source_task_id).await? {
-        TaskDetailResult::Live { task_id } => return Ok(RerunOutcome::SourceLive { task_id }),
-        TaskDetailResult::Absent { task_id, reason } => {
+    let detail = match read_task_detail(connection, command.source_task_id).await {
+        Ok(TaskDetailResult::Live { task_id }) => return Ok(RerunOutcome::SourceLive { task_id }),
+        Ok(TaskDetailResult::Absent { task_id, reason }) => {
             return Ok(RerunOutcome::SourceAbsent { task_id, reason });
         }
-        TaskDetailResult::History(detail) => detail,
+        Ok(TaskDetailResult::History(detail)) => detail,
+        Err(error @ (HistoryError::Contract(_) | HistoryError::ArchiveDecode(_))) => {
+            return Ok(RerunOutcome::SourceCorrupt {
+                task_id: command.source_task_id,
+                detail: error.to_string(),
+            });
+        }
+        Err(
+            error @ (HistoryError::Database(_)
+            | HistoryError::LeafLockNotHeld
+            | HistoryError::LeafLockBusy { .. }
+            | HistoryError::HistoryParentAbsent(_)),
+        ) => return Err(error.into()),
     };
 
     if detail.is_workflow_task {
@@ -197,7 +225,7 @@ pub async fn rerun_task_in_tx(
             reason: NotEligibleReason::WorkflowTask,
         });
     }
-    if detail.status == "COMPLETED" {
+    if detail.status == TaskStatus::Completed {
         return Ok(RerunOutcome::NotEligible {
             task_id: command.source_task_id,
             reason: NotEligibleReason::CompletedSource,
@@ -219,7 +247,7 @@ pub async fn rerun_task_in_tx(
             detail: "inline disposition with an incomplete envelope".to_owned(),
         });
     };
-    let decoded = match decode_input_envelope(version, payload, digest) {
+    let framed = match decode_framed_rerun_input(version, payload, digest) {
         Ok(decoded) => decoded,
         Err(InputEnvelopeDecodeError::VersionUnknown(version)) => {
             return Ok(RerunOutcome::InputCorrupt {
@@ -237,38 +265,31 @@ pub async fn rerun_task_in_tx(
 
     let new_task_id = mint_task_id()?;
     let root_task_id = detail.rerun_root_task_id.unwrap_or(detail.task_id);
-    let args_json = String::from_utf8(canonical_json_bytes(&serde_json::Value::Array(
-        decoded.args.clone(),
-    ))?)
-    .expect("canonical JSON is UTF-8");
-    let kwargs_json = String::from_utf8(canonical_json_bytes(&serde_json::Value::Object(
-        decoded.kwargs.clone(),
-    ))?)
-    .expect("canonical JSON is UTF-8");
-    let options_json = decoded
-        .options
-        .as_ref()
-        .map(|options| {
-            canonical_json_bytes(&serde_json::Value::Object(options.clone()))
-                .map(|bytes| String::from_utf8(bytes).expect("canonical JSON is UTF-8"))
-        })
-        .transpose()?;
-    let facts = prepare_enqueue_facts_with_lineage(
+    // The rerun runs with the execution class of the stored request; a stored
+    // class that does not parse is corrupt input.
+    let facts = match prepare_enqueue_facts_with_lineage(
         &detail.task_name,
         &detail.queue_name,
         detail.priority,
-        Some(&args_json),
-        Some(&kwargs_json),
+        &framed.input,
         command.deadline,
         None,
-        options_json.as_deref(),
+        framed.options.as_deref(),
         Some(policy.retention_class_key()),
         policy.retain_rerun_input,
         command.caller_key(),
-        EnqueueInputEligibility::Ordinary,
         Some(detail.task_id),
         Some(root_task_id),
-    )?;
+    ) {
+        Ok(facts) => facts,
+        Err(EnqueuePreparationError::InvalidExecution(invalid)) => {
+            return Ok(RerunOutcome::InputCorrupt {
+                task_id: command.source_task_id,
+                detail: format!("stored task options: {}", invalid.detail),
+            });
+        }
+        Err(other) => return Err(other.into()),
+    };
 
     if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
         match claim_key_reservation(
@@ -298,34 +319,20 @@ pub async fn rerun_task_in_tx(
     }
 
     let sent_at = Utc::now();
-    let enqueue_sha = compute_enqueue_sha(
-        &detail.task_name,
-        &detail.queue_name,
-        detail.priority,
-        Some(&args_json),
-        Some(&kwargs_json),
-        sent_at,
-        command.deadline,
-        None,
-        options_json.as_deref(),
-    );
+    // Every NOT NULL column is named: the baseline schema has no column
+    // defaults. The rerun carries the source's exact input and options texts.
     let insert_sql = format!(
         "INSERT INTO {LIVE_TASKS} (
-             id, task_name, queue_name, priority, args, kwargs,
-             task_options, status, sent_at, enqueued_at, created_at,
-             retry_count, max_retries, good_until, is_workflow_task,
-             enqueue_sha, command_fingerprint_version, command_fingerprint,
-             retention_class_key, input_digest, rerun_of_task_id,
-             rerun_root_task_id, idempotency_key_digest,
-             retain_rerun_input, prepared_rerun_input_disposition,
-             prepared_rerun_input_version, prepared_rerun_input_codec,
-             prepared_rerun_input_content_type, prepared_rerun_input_digest,
-             prepared_rerun_input_inline, prepared_rerun_input_reference
+             id, task_name, queue_name, priority, input, task_options, execution,
+             retention_class_key, sent_at, created_at,
+             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+             status, enqueued_at, retry_count, max_retries, good_until,
+             is_workflow_task, updated_at,
+             retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, 'PENDING', $8,
-             statement_timestamp(), statement_timestamp(), 0, $9, $10,
-             FALSE, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-             $21, $22, $23, $24, $25, NULL
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, statement_timestamp(), $10, $11, $12,
+             'PENDING', statement_timestamp(), 0, $13, $14, FALSE, statement_timestamp(),
+             $15, $16, $17
          )"
     );
     sqlx::query(&insert_sql)
@@ -333,37 +340,24 @@ pub async fn rerun_task_in_tx(
         .bind(&detail.task_name)
         .bind(&detail.queue_name)
         .bind(detail.priority)
-        .bind(&args_json)
-        .bind(&kwargs_json)
-        .bind(options_json.as_deref())
+        .bind(&framed.input)
+        .bind(framed.options.as_deref())
+        .bind(facts.execution.as_str())
+        .bind(&facts.retention_class_key)
         .bind(sent_at)
-        .bind(detail.max_retries)
-        .bind(command.deadline)
-        .bind(enqueue_sha)
         .bind(facts.command_fingerprint_version)
         .bind(facts.command_fingerprint.as_slice())
-        .bind(&facts.retention_class_key)
-        .bind(facts.input_digest.as_slice())
-        .bind(detail.task_id)
-        .bind(root_task_id)
         .bind(
             facts
                 .idempotency_key_digest
                 .as_ref()
                 .map(<[u8; 32]>::as_slice),
         )
+        .bind(detail.max_retries)
+        .bind(command.deadline)
         .bind(facts.retain_rerun_input)
-        .bind(facts.prepared_rerun_input_disposition.as_str())
-        .bind(facts.prepared_rerun_input_version)
-        .bind(facts.prepared_rerun_input_codec)
-        .bind(facts.prepared_rerun_input_content_type)
-        .bind(
-            facts
-                .prepared_rerun_input_digest
-                .as_ref()
-                .map(<[u8; 32]>::as_slice),
-        )
-        .bind(facts.prepared_rerun_input_inline.as_deref())
+        .bind(detail.task_id)
+        .bind(root_task_id)
         .execute(&mut *connection)
         .await?;
 

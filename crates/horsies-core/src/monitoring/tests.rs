@@ -493,13 +493,21 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 uptime_s: Some(0),
                 processes: 1,
                 queues: vec![],
-                queue_max_concurrency: None,
+                queue_max_concurrency: BTreeMap::new(),
                 tasks_running: 0,
                 tasks_claimed: 0,
                 cluster_wide_cap: None,
                 memory_usage_mb: None,
                 memory_percent: None,
                 cpu_percent: None,
+                slot_health: SlotHealthKind::SlotsDown,
+                down_slots: vec![DownSlotInfo {
+                    slot: 1,
+                    cause: "the OS ran short of a resource (EMFILE)".to_owned(),
+                    detail: "d".to_owned(),
+                    down_since: now,
+                    failed_boots: 2,
+                }],
             }),
             vec![
                 "worker_id",
@@ -519,7 +527,19 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "memory_usage_mb",
                 "memory_percent",
                 "cpu_percent",
+                "slot_health",
+                "down_slots",
             ],
+        ),
+        (
+            keys(DownSlotInfo {
+                slot: 1,
+                cause: "c".to_owned(),
+                detail: "d".to_owned(),
+                down_since: now,
+                failed_boots: 1,
+            }),
+            vec!["slot", "cause", "detail", "down_since", "failed_boots"],
         ),
         (
             keys(WorkerPingInfo {
@@ -591,6 +611,10 @@ struct TaskSeed {
     queue: String,
     status: &'static str,
     worker: Option<String>,
+    /// Not written by `seed_task`: the baseline live task row has no
+    /// `error_code` column. The reads that classify by error code need a
+    /// history row instead.
+    #[allow(dead_code)]
     error_code: Option<String>,
     retry_count: i32,
     enqueued_seconds_ago: i64,
@@ -675,21 +699,20 @@ impl TaskSeed {
 async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, started_at, claimed, claimed_at,
-             claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
-             enqueue_sha, command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, error_code, created_at, updated_at
-         ) VALUES (
-             $1, $2, $3, 100, '[]', '{}', $4, NOW(),
-             NOW() - make_interval(secs => $5),
-             CASE WHEN $6::bigint IS NULL THEN NULL
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
+            max_retries, command_fingerprint_version, command_fingerprint, retention_class_key,
+            retain_rerun_input, created_at, updated_at, execution, claim_expires_at
+        ) VALUES (
+            $1, $2, $3, 100, 'null', $4, NOW(), NOW() - make_interval(secs => $5),
+            CASE WHEN $6::bigint IS NULL THEN NULL
                   ELSE NOW() - make_interval(secs => $6) END,
-             $7::text IS NOT NULL, CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END,
-             $7, $8, $9, 3, $1::text, 1, decode(repeat('0a', 32), 'hex'),
-             'forever', FALSE, 'DECLINED_BY_POLICY', $10, NOW(), NOW()
-         )",
+            CASE WHEN $7::text IS NULL THEN NULL ELSE NOW() END, $7, $8, $9, 3,
+            CASE WHEN $8 THEN NULL ELSE 1 END,
+            CASE WHEN $8 THEN NULL ELSE decode(repeat('0a', 32), 'hex') END, 'forever', FALSE,
+            NOW(), NOW(), 'ISOLATED',
+            CASE WHEN $4 = 'CLAIMED' THEN NOW() + interval '1 hour' END
+        )",
     )
     .bind(seed.id)
     .bind(&seed.name)
@@ -700,7 +723,6 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     .bind(&seed.worker)
     .bind(seed.workflow_task)
     .bind(seed.retry_count)
-    .bind(&seed.error_code)
     .execute(pool)
     .await
     .expect("seed W2 task");
@@ -799,18 +821,17 @@ async fn live_and_history_aggregates_merge_before_caps() {
 
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, claimed, is_workflow_task,
-             retry_count, max_retries, enqueue_sha,
+             id, task_name, queue_name, priority, input, execution, status,
+             sent_at, enqueued_at, is_workflow_task,
+             retry_count, max_retries,
              command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
+             retention_class_key, retain_rerun_input, created_at, updated_at
          )
          SELECT gen_random_uuid(), $1 || lpad((g % 50)::text, 3, '0'),
-                $2, 100, '[]', '{}', 'PENDING', NOW(),
-                NOW() - make_interval(secs => g), FALSE, FALSE, 0, 3,
-                gen_random_uuid()::text, 1, decode(repeat('0b', 32), 'hex'),
-                'forever', FALSE, 'DECLINED_BY_POLICY', NOW(), NOW()
+                $2, 100, 'null', 'ISOLATED', 'PENDING', NOW(),
+                NOW() - make_interval(secs => g), FALSE, 0, 3,
+                1, decode(repeat('0b', 32), 'hex'),
+                'forever', FALSE, NOW(), NOW()
          FROM generate_series(1, 100) AS g",
     )
     .bind(scope.task("competitor_"))
@@ -1306,18 +1327,22 @@ async fn seed_node(
 ) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, queue_name,
-             priority, dependencies, allow_failed_deps, join_type, status,
-             task_id, is_subworkflow, sub_workflow_id, created_at,
-             started_at, completed_at
-         ) VALUES (
-             $1, $2, $3, $8 || $3, $8 || 'node_task', $9,
-             100, $4, FALSE, 'all', $5, $6, $7 IS NOT NULL, $7, NOW(),
-             CASE WHEN $5 IN ('RUNNING', 'COMPLETED', 'FAILED')
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
+            sub_workflow_params, sub_workflow_id, created_at, started_at, completed_at,
+            max_retries, execution,
+            retention_class_key
+        ) VALUES (
+            $1, $2, $3, $8 || $3, $8 || 'node_task', 'null', $9, 100, $4, FALSE, 'all', $5, $6,
+            $7 IS NOT NULL, CASE WHEN $7 IS NOT NULL THEN 'NOT_GIVEN' END, $7, NOW(),
+            CASE WHEN $5 IN ('RUNNING', 'COMPLETED', 'FAILED')
                   THEN NOW() - INTERVAL '30 seconds' ELSE NULL END,
-             CASE WHEN $5 IN ('COMPLETED', 'FAILED')
-                  THEN NOW() - INTERVAL '10 seconds' ELSE NULL END
-         )",
+            CASE WHEN $5 IN ('COMPLETED', 'FAILED')
+                  THEN NOW() - INTERVAL '10 seconds' ELSE NULL END,
+            CASE WHEN $7 IS NOT NULL THEN NULL ELSE 0 END,
+            CASE WHEN $7 IS NOT NULL THEN NULL ELSE 'ISOLATED' END,
+            CASE WHEN $7 IS NOT NULL THEN NULL ELSE 'standard_30d' END
+        )",
     )
     .bind(Uuid::new_v4())
     .bind(workflow_id)

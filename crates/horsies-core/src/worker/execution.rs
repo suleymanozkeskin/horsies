@@ -4,7 +4,7 @@
 //! and phase-aware error recovery:
 //!
 //! - **Phase 0** — `confirm_ownership_and_set_running`: CLAIMED → RUNNING
-//! - **Phase 1a** — `build_task_envelope`: arg/kwargs deserialization
+//! - **Phase 1a** — `build_task_input`: the stored input, with workflow context
 //! - **Phase 1b** — `execute_task`: async/blocking invocation with panic isolation
 //! - **Phase 2a** — `schedule_retry_for_task`: atomic requeue + attempt record
 //! - **Finalize Phase 1** — `persist_terminal_state`: terminal DB write
@@ -37,7 +37,9 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
+use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::workflow_engine::phase2_recovery::terminal_status_of_pending_kind;
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -137,7 +139,7 @@ impl std::fmt::Display for FinalizeError {
 // ---------------------------------------------------------------------------
 
 /// Phase 1 finalize gets 3 retries (matches Python `_FINALIZE_PHASE1_MAX_RETRIES`).
-const PHASE1_MAX_RETRIES: u32 = 3;
+pub(crate) const PHASE1_MAX_RETRIES: u32 = 3;
 /// Phase 2 finalize gets 5 retries (matches Python `_FINALIZE_PHASE2_MAX_RETRIES`).
 const PHASE2_MAX_RETRIES: u32 = 5;
 /// Base delay for phase-level retry backoff.
@@ -417,74 +419,68 @@ pub(crate) async fn unclaim_task_with_retry(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1a: Build task envelope (arg deserialization)
+// Phase 1a: Build the task input from the one stored input value
 // ---------------------------------------------------------------------------
 
-/// Deserialize args/kwargs from the claimed row and build the task invocation envelope.
-///
-/// Handles workflow context injection if the task function accepts it.
-pub(crate) fn build_task_envelope(
+/// The bytes that the task decodes with its declared input type: the claimed
+/// row's stored input, with the workflow context member renamed when the task
+/// takes it.
+pub(crate) fn build_claimed_task_input(
     row: &ClaimedTaskRow,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
-    build_envelope_from_parts(
-        row.args.as_deref(),
-        row.kwargs.as_deref(),
-        accepts_workflow_ctx,
-    )
+    build_task_input(&row.input, accepts_workflow_ctx)
 }
 
-/// Build the worker args/kwargs envelope from raw args/kwargs JSON strings.
+/// Build the task input bytes from one encoded input value.
 ///
-/// Shared by [`build_task_envelope`] (execution) and `app.check()`'s
-/// payload validation (schedules and workflow nodes) so check-time dry-runs
-/// use the exact same args-coercion and kwargs-object rejection as execution.
+/// Shared by [`build_claimed_task_input`] (execution) and `app.check()`'s input
+/// validation (schedules and workflow nodes), so check-time dry-runs read the
+/// input exactly as execution does.
 ///
-/// `accepts_workflow_ctx` controls the `__horsies_workflow_ctx__` →
-/// `workflow_ctx` rename; check-time callers pass `false` (no runtime context).
-pub(crate) fn build_envelope_from_parts(
-    args: Option<&str>,
-    kwargs: Option<&str>,
+/// The input must pass the core's strict JSON read rule; a refused text fails
+/// the task before user code runs. The input is then passed as stored. Only
+/// an object that carries the engine's `__horsies_workflow_ctx__` member
+/// changes: the member becomes `workflow_ctx` when `accepts_workflow_ctx` is
+/// true, and is removed otherwise. Check-time callers pass `false` (no
+/// runtime context).
+pub(crate) fn build_task_input(
+    input: &str,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
-    let args_value: serde_json::Value = match args {
-        Some(json) => serde_json::from_str(json).map_err(|e| {
+    crate::core::codec::check_json_text(input).map_err(|e| {
+        TaskError::builtin(
+            OperationalErrorCode::WorkerSerializationError,
+            format!("stored input refused: {e}"),
+        )
+    })?;
+    // Any input without the context member passes byte for byte.
+    if !input.contains(WORKFLOW_CTX_KWARG) {
+        return Ok(input.as_bytes().to_vec());
+    }
+    // The context member is rewritten, which re-encodes the whole object: an
+    // integer that the parse would round is refused instead of changed.
+    crate::core::history::rerun::input_envelope::validate_integer_domain(input).map_err(
+        |detail| {
             TaskError::builtin(
                 OperationalErrorCode::WorkerSerializationError,
-                format!("failed to parse args JSON: {}", e),
+                format!("stored input holds a number that a rewrite would round: {detail}"),
             )
-        })?,
-        None => serde_json::Value::Null,
+        },
+    )?;
+    let value: serde_json::Value = serde_json::from_str(input).map_err(|e| {
+        TaskError::builtin(
+            OperationalErrorCode::WorkerSerializationError,
+            format!("failed to parse input JSON: {}", e),
+        )
+    })?;
+
+    let mut object = match value {
+        serde_json::Value::Object(object) if object.contains_key(WORKFLOW_CTX_KWARG) => object,
+        _ => return Ok(input.as_bytes().to_vec()),
     };
 
-    let args_array = match args_value {
-        serde_json::Value::Null => Vec::new(),
-        serde_json::Value::Array(arr) => arr,
-        other => vec![other],
-    };
-
-    let kwargs_value: serde_json::Value = match kwargs {
-        Some(json) => serde_json::from_str(json).map_err(|e| {
-            TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                format!("failed to parse kwargs JSON: {}", e),
-            )
-        })?,
-        None => serde_json::Value::Null,
-    };
-
-    let mut kwargs_object = match kwargs_value {
-        serde_json::Value::Null => serde_json::Map::new(),
-        serde_json::Value::Object(map) => map,
-        _ => {
-            return Err(TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                "kwargs payload is not a JSON object",
-            ));
-        }
-    };
-
-    if let Some(ctx_value) = kwargs_object.remove(WORKFLOW_CTX_KWARG) {
+    if let Some(ctx_value) = object.remove(WORKFLOW_CTX_KWARG) {
         if accepts_workflow_ctx {
             let workflow_ctx = parse_workflow_ctx(ctx_value)?;
             let ctx_json = serde_json::to_value(&workflow_ctx).map_err(|e| {
@@ -493,19 +489,14 @@ pub(crate) fn build_envelope_from_parts(
                     format!("failed to serialize workflow context: {}", e),
                 )
             })?;
-            kwargs_object.insert("workflow_ctx".to_owned(), ctx_json);
+            object.insert("workflow_ctx".to_owned(), ctx_json);
         }
     }
 
-    let envelope = serde_json::json!({
-        "args": args_array,
-        "kwargs": kwargs_object,
-    });
-
-    serde_json::to_vec(&envelope).map_err(|e| {
+    serde_json::to_vec(&serde_json::Value::Object(object)).map_err(|e| {
         TaskError::builtin(
             OperationalErrorCode::WorkerSerializationError,
-            format!("failed to serialize args/kwargs envelope: {}", e),
+            format!("failed to serialize task input: {}", e),
         )
     })
 }
@@ -526,12 +517,12 @@ pub(crate) fn build_envelope_from_parts(
 /// run to completion with their result discarded (see `TaskOptions::timeout_ms`).
 pub(crate) async fn execute_task(
     task_fn: RegisteredTask,
-    envelope: Vec<u8>,
+    task_input: Vec<u8>,
     timeout: Option<Duration>,
 ) -> TaskResult<Vec<u8>> {
     match task_fn {
         RegisteredTask::Async { task: f, .. } => {
-            let mut handle = tokio::spawn(async move { f.execute(&envelope).await });
+            let mut handle = tokio::spawn(async move { f.execute(&task_input).await });
             let join = match timeout {
                 Some(dur) => {
                     tokio::select! {
@@ -559,7 +550,7 @@ pub(crate) async fn execute_task(
         }
         RegisteredTask::Blocking { task: f, .. } => {
             let handle = tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.execute(&envelope)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.execute(&task_input)))
             });
             let join = match timeout {
                 Some(dur) => {
@@ -653,7 +644,18 @@ pub(crate) async fn persist_terminal_state(
             .await
         }
         TaskResult::Err(ref task_error) => {
-            let error_code = task_error.error_code.as_ref().map(ToString::to_string);
+            // The stored error keeps its code when its `data` cannot be stored:
+            // the serializer stores `{"data_refused": <cause>}` in its place
+            // (Python `reportable_error`, `core/codec/typed.py:885-934`).
+            if let Some(refusal) = task_error.storage_refusal() {
+                tracing::error!(
+                    task_id = %task_id,
+                    error_code = %task_error.error_code,
+                    cause = %refusal,
+                    "data of a TaskError cannot be stored; it is stored as data_refused",
+                );
+            }
+            let error_code = Some(task_error.error_code.to_string());
             let retry = retry_request_for(running, stored_options, error_code.as_deref());
             let result_json =
                 serde_json::to_string(&TaskResult::<serde_json::Value>::Err(task_error.clone()))
@@ -710,7 +712,7 @@ fn retry_request_for(
 }
 
 /// Persist a success, or fail a result that is not valid JSON.
-async fn persist_ok_result(
+pub(crate) async fn persist_ok_result(
     broker: &PostgresBroker,
     task_id: Uuid,
     result_bytes: &[u8],
@@ -815,7 +817,7 @@ async fn persist_workflow_success(
 /// A result that is not valid JSON fails the task with
 /// `WORKER_SERIALIZATION_ERROR`, never retried, with the decode diagnosis as
 /// the attempt message (Python `ResultUndecodable`).
-async fn persist_undecodable_result(
+pub(crate) async fn persist_undecodable_result(
     broker: &PostgresBroker,
     task_id: Uuid,
     fence: OwnedClaim,
@@ -850,7 +852,7 @@ async fn persist_undecodable_result(
 /// wake in the statement; a workflow task's failure owes phase 2; a retry
 /// wakes the queue when it is due; a replay owes what the committed write
 /// owed; a refusal owes nothing.
-async fn persist_failed_attempt(
+pub(crate) async fn persist_failed_attempt(
     broker: &PostgresBroker,
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
@@ -923,20 +925,20 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 }
 
 /// A replay of a committed write (`AlreadyApplied`). A workflow task owes
-/// phase 2 while its durable phase-2 record exists; a plain task owes
-/// nothing.
+/// phase 2 while its durable phase-2 record exists, with the outcome of the
+/// status that the record's kind stands for; a plain task owes nothing.
 async fn replay_of_committed_write(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
-        true => match load_pending_terminal_success(pool, task_id).await? {
-            Some(is_success) => Ok(FinalizeOutcome::Terminal {
-                is_success,
+        true => match load_pending_phase_two(pool, task_id).await? {
+            PendingPhaseTwo::Owed(status) => Ok(FinalizeOutcome::Terminal {
+                is_success: status == TaskStatus::Completed,
                 capacity_notified: false,
             }),
-            None => Ok(FinalizeOutcome::Finalized),
+            PendingPhaseTwo::Consumed => Ok(FinalizeOutcome::Finalized),
         },
         false => Ok(FinalizeOutcome::Finalized),
     }
@@ -1033,39 +1035,59 @@ pub(crate) async fn finalize_workflow_phase(
     Ok(())
 }
 
-/// Read the durable phase-2 terminal status after a Phase-1 replay.
+/// The kind of a task's phase-2 record. The record has no status column: the
+/// status follows from the kind (`terminal_status_of_pending_kind`).
+const LOAD_PENDING_KIND_SQL: &str =
+    "SELECT terminalization_kind FROM horsies_workflow_phase2_pending WHERE task_id = $1";
+
+/// What the phase-2 record of a committed workflow write owes, as a replay
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPhaseTwo {
+    /// The record exists: phase 2 is owed for a task that ended with this
+    /// status (COMPLETED, FAILED or EXPIRED).
+    Owed(TaskStatus),
+    /// No record: phase 2 consumed it, so the replay owes nothing.
+    Consumed,
+}
+
+/// Read the phase-2 record of a workflow task after a phase-1 replay.
 ///
-/// `None` means the outbox evidence has already been durably consumed. The
-/// moved terminal row is deliberately not queried: v35 live rows are live-only.
-async fn load_pending_terminal_success(
+/// One statement; writes nothing. The moved history row is not read: the
+/// record is the evidence that phase 2 is still owed.
+///
+/// Errors:
+/// - the read fails: retryable;
+/// - the record names a kind that writes no phase-2 record: not retryable.
+async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
-) -> Result<Option<bool>, FinalizeError> {
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT terminal_status FROM horsies_workflow_phase2_pending WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| FinalizeError {
-        stage: FinalizeStage::Phase2Workflow,
-        task_id,
-        message: format!("failed to load phase-2 terminal status: {}", e),
-        retryable: true,
-    })?;
-    status
-        .map(|status| match status.as_str() {
-            "COMPLETED" => Ok(true),
-            "FAILED" | "CANCELLED" | "EXPIRED" => Ok(false),
-            other => Err(FinalizeError {
+) -> Result<PendingPhaseTwo, FinalizeError> {
+    let kind: Option<String> = sqlx::query_scalar(LOAD_PENDING_KIND_SQL)
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase2Workflow,
+            task_id,
+            message: format!("failed to load the phase-2 record: {error}"),
+            retryable: true,
+        })?;
+    match kind {
+        None => Ok(PendingPhaseTwo::Consumed),
+        Some(kind) => terminal_status_of_pending_kind(&kind)
+            .map(PendingPhaseTwo::Owed)
+            .map_err(|refusal| FinalizeError {
                 stage: FinalizeStage::Phase2Workflow,
                 task_id,
-                message: format!("phase-2 outbox has non-terminal status {other:?}"),
+                message: refusal.to_string(),
                 retryable: false,
             }),
-        })
-        .transpose()
+    }
 }
+
+#[cfg(test)]
+mod replay_read_tests;
 
 pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
     // Wake workers of this queue to re-check capacity/backlog. The capacity
@@ -1197,7 +1219,7 @@ WHERE t.id = target.id
 
 /// Stamp the finalization handoff only for the current owner and claim
 /// generation. One statement in autocommit: its row lock ends with it.
-async fn mark_task_finalizing(
+pub(crate) async fn mark_task_finalizing(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     worker_id: &str,
@@ -1223,7 +1245,7 @@ async fn mark_task_finalizing(
 ///
 /// Orchestrates:
 /// 1. Confirm ownership (CLAIMED → RUNNING)
-/// 2. Start heartbeat → build envelope → execute task → stop heartbeat
+/// 2. Start heartbeat → build task input → execute task → stop heartbeat
 /// 3. Phase 1 finalize: persist terminal state (with bounded retries)
 ///
 /// Returns `Some(Phase2Work)` when the task reached a terminal state that
@@ -1280,7 +1302,7 @@ pub(crate) async fn execute_and_finalize(
     // the dispatch holds it (`runner_beats::LiveDispatches`); the first beat
     // is written with the RUNNING transition above.
 
-    // Phase 1: Build envelope + execute task. The deadline (if any) is measured
+    // Phase 1: Build the task input + execute task. The deadline (if any) is measured
     // around user-code execution; on expiry the result is TASK_TIMEOUT and the
     // finalize path below decides fail-vs-retry via auto_retry_for. Stored
     // options that do not fit the rule that wrote them fail the task here,
@@ -1295,10 +1317,10 @@ pub(crate) async fn execute_and_finalize(
         )),
     };
     let prepared = timeout.and_then(|timeout| {
-        build_task_envelope(&row, accepts_workflow_ctx).map(|envelope| (envelope, timeout))
+        build_claimed_task_input(&row, accepts_workflow_ctx).map(|task_input| (task_input, timeout))
     });
     let result = match prepared {
-        Ok((envelope, timeout)) => execute_task(task_fn, envelope, timeout).await,
+        Ok((task_input, timeout)) => execute_task(task_fn, task_input, timeout).await,
         Err(err) => TaskResult::Err(err),
     };
 
@@ -1545,7 +1567,7 @@ async fn retry_phase2(
 }
 
 /// Compute phase-level retry delay with exponential backoff.
-fn phase_retry_delay(attempt: u32) -> f64 {
+pub(crate) fn phase_retry_delay(attempt: u32) -> f64 {
     (PHASE_RETRY_BASE_DELAY_S * 2.0f64.powi(attempt as i32 - 1)).min(PHASE_RETRY_MAX_DELAY_S)
 }
 
@@ -1642,7 +1664,8 @@ mod result_wrap_tests {
         let wrapped_json = serde_json::to_string(&TaskResult::Ok(raw)).expect("wrap serializes");
 
         assert_eq!(
-            wrapped_json, r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
+            wrapped_json,
+            r#"{"__h_task_result__":true,"ok":{"amount": 1.2300, "id": 7},"err":null}"#,
             "result bytes must be embedded verbatim",
         );
 
@@ -1662,50 +1685,51 @@ mod result_wrap_tests {
 }
 
 #[cfg(test)]
-mod envelope_tests {
-    use super::build_envelope_from_parts;
+mod task_input_tests {
+    use super::build_task_input;
+    use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 
-    /// Parse the envelope bytes back into a Value for shape assertions.
-    fn envelope(args: Option<&str>, kwargs: Option<&str>) -> serde_json::Value {
-        let bytes = build_envelope_from_parts(args, kwargs, false).expect("envelope built");
-        serde_json::from_slice(&bytes).expect("envelope is JSON")
+    fn task_input(input: &str) -> String {
+        let bytes = build_task_input(input, false).expect("task input built");
+        String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
     #[test]
-    fn null_args_and_kwargs_yield_empty_envelope() {
-        assert_eq!(
-            envelope(None, None),
-            serde_json::json!({"args": [], "kwargs": {}}),
-        );
+    fn null_input_passes_as_null() {
+        assert_eq!(task_input("null"), "null");
     }
 
     #[test]
-    fn array_args_passed_through_object_kwargs_passed_through() {
-        assert_eq!(
-            envelope(Some("[1, 2]"), Some(r#"{"a": 1}"#)),
-            serde_json::json!({"args": [1, 2], "kwargs": {"a": 1}}),
-        );
+    fn array_and_object_inputs_pass_as_written() {
+        assert_eq!(task_input("[1, 2]"), "[1, 2]");
+        assert_eq!(task_input(r#"{"a": 1}"#), r#"{"a": 1}"#);
+        assert_eq!(task_input("{}"), "{}");
     }
 
     #[test]
-    fn scalar_args_coerced_to_single_element_array() {
-        assert_eq!(
-            envelope(Some("5"), None),
-            serde_json::json!({"args": [5], "kwargs": {}}),
-        );
+    fn the_context_member_is_removed_for_a_task_without_context() {
+        let input = format!(r#"{{"a":1,"{WORKFLOW_CTX_KWARG}":{{"ignored":true}}}}"#);
+        let value: serde_json::Value = serde_json::from_str(&task_input(&input)).unwrap();
+        assert_eq!(value, serde_json::json!({"a": 1}));
     }
 
-    /// The reviewer-flagged divergence: a non-object kwargs is rejected here,
-    /// where `decode_task_input` alone would silently fall through to the args
-    /// branch. Routing check-time validation through this helper makes the
-    /// dry-run reject the same malformed payloads execution rejects.
     #[test]
-    fn non_object_kwargs_rejected() {
-        let err = build_envelope_from_parts(None, Some(r#""bad""#), false).unwrap_err();
-        assert!(err
-            .message
-            .unwrap_or_default()
-            .contains("kwargs payload is not a JSON object"));
+    fn input_text_that_breaks_the_strict_read_rule_is_refused() {
+        for input in ["{", "NaN", r#"{"a":1,"a":2}"#] {
+            let err = build_task_input(input, false).unwrap_err();
+            assert!(
+                err.message
+                    .unwrap_or_default()
+                    .contains("stored input refused"),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_integer_passes_byte_for_byte() {
+        let input = r#"{"k":123456789012345678901234567890}"#;
+        assert_eq!(task_input(input), input);
     }
 }
 
@@ -1736,7 +1760,7 @@ mod set_running_gate_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'p1_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'p1_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 CASE WHEN $2 THEN NULL ELSE 1 END, CASE WHEN $2 THEN NULL ELSE decode(repeat('00', 32), 'hex') END, NULL,
                 'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
@@ -1783,11 +1807,13 @@ mod set_running_gate_tests {
         .expect("insert workflow");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'p1_task', '[]', '{}',
-                      'default', 100, '{}', FALSE, 'all', 'ENQUEUED', FALSE, $3, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'p1_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(test_uuid(&wf_id))
@@ -1870,11 +1896,13 @@ mod set_running_gate_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, started_at, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'p1_task', '[]', '{}',
-                      'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE, $3, $4, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                started_at, created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'node_0', 'p1_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'RUNNING', FALSE, $3, $4, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(wf_id)
@@ -1989,9 +2017,9 @@ mod set_running_gate_tests {
             let wf = Uuid::new_v4();
             let task = Uuid::new_v4();
             let node = Uuid::new_v4();
-            sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key) VALUES($1,'handoff_contract','RUNNING','handoff_contract')").bind(wf).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key,on_error,depth,root_workflow_id,sent_at,created_at,updated_at) VALUES($1,'handoff_contract','RUNNING','handoff_contract','fail',0,$1,NOW(),NOW(),NOW())").bind(wf).execute(&pool).await.unwrap();
             if let Some(status) = status {
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id,started_at) VALUES($1,$2,0,'handoff_contract',$3,$4,timestamptz '2026-01-01')").bind(node).bind(wf).bind(status).bind(task).execute(&pool).await.unwrap();
+                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,status,task_id,started_at,queue_name,priority,dependencies,allow_failed_deps,join_type,is_subworkflow,created_at,max_retries,execution,retention_class_key) VALUES($1,$2,0,'handoff_contract','null',$3,$4,timestamptz '2026-01-01','default',100,'{}',FALSE,'all',FALSE,NOW(),0,'ISOLATED','standard_30d')").bind(node).bind(wf).bind(status).bind(task).execute(&pool).await.unwrap();
             }
             seed_claimed(&pool, &task.to_string(), true).await;
             let claimed_at = generation(&pool, task).await;
@@ -2041,8 +2069,8 @@ mod set_running_gate_tests {
         let wf = Uuid::new_v4();
         let task = Uuid::new_v4();
         let node = Uuid::new_v4();
-        sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key) VALUES($1,'handoff_race','RUNNING','handoff_contract')").bind(wf).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id) VALUES($1,$2,0,'handoff_race','ENQUEUED',$3)").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key,on_error,depth,root_workflow_id,sent_at,created_at,updated_at) VALUES($1,'handoff_race','RUNNING','handoff_contract','fail',0,$1,NOW(),NOW(),NOW())").bind(wf).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,status,task_id,queue_name,priority,dependencies,allow_failed_deps,join_type,is_subworkflow,created_at,max_retries,execution,retention_class_key) VALUES($1,$2,0,'handoff_race','null','ENQUEUED',$3,'default',100,'{}',FALSE,'all',FALSE,NOW(),0,'ISOLATED','standard_30d')").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
         seed_claimed(&pool, &task.to_string(), true).await;
         let claimed_at = generation(&pool, task).await;
         let mut held = pool.begin().await.unwrap();
@@ -2114,3 +2142,6 @@ mod set_running_gate_tests {
 #[cfg(test)]
 #[path = "finalizing_tests.rs"]
 mod finalizing_tests;
+
+#[cfg(test)]
+mod finalize_spec_tests;

@@ -3,8 +3,8 @@
 The failure family carries the envelope-eligible branch: FAILED is not
 NEVER_ELIGIBLE, so this suite proves the full disposition ladder against
 the confirmed gate semantics — workflow-backing archives NEVER_ELIGIBLE,
-a declined snapshot archives DECLINED_BY_POLICY, and a retained prepared
-envelope carries byte-identically with its copied digest. It is also the
+a declined snapshot archives DECLINED_BY_POLICY, and a retained input
+is framed byte-identically with its digest. It is also the
 first family to exercise deferred phase-2 pending creation, and the
 staleness guard's single-capture evidence contract.
 """
@@ -31,10 +31,13 @@ from horsies.core.history.outcomes import LeafCreated
 from horsies.core.history.partitions.catalog import database_now
 from tests.integration.task_history_harness import (
     HistorySchema,
+    create_workflow,
     insert_live_task,
+    link_workflow_node,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.rerun_envelope_support import frame_rerun_envelope
 
 pytestmark = [pytest.mark.integration]
 
@@ -125,7 +128,6 @@ class TestDispositionLadder:
                 class_key=CLASS_KEY,
                 worker=WORKER,
                 retain=False,
-                prepared_disposition='DECLINED_BY_POLICY',
             )
             outcome = await fail_locked(connection, task_id)
             assert outcome.outcome == 'APPLIED'
@@ -135,10 +137,11 @@ class TestDispositionLadder:
             assert row.rerun_input_inline is None
 
     @pytest.mark.asyncio
-    async def test_retained_prepared_envelope_carries_byte_identically(
+    async def test_retained_input_is_framed_byte_identically(
         self, terminalization_schema: HistorySchema
     ) -> None:
-        payload = b'{"precious":"failure input"}'
+        input_text = '{"precious":"failure input"}'
+        payload = frame_rerun_envelope(input_text, None)
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
             task_id = await insert_live_task(
@@ -146,8 +149,7 @@ class TestDispositionLadder:
                 class_key=CLASS_KEY,
                 worker=WORKER,
                 retain=True,
-                prepared_disposition='INLINE',
-                prepared_inline=payload,
+                input_text=input_text,
             )
             await fail_locked(connection, task_id)
             row = await history_disposition(connection, task_id)
@@ -166,23 +168,14 @@ class TestDispositionLadder:
                 class_key=CLASS_KEY,
                 worker=WORKER,
                 retain=True,
-                prepared_disposition='INLINE',
                 is_workflow_task=True,
             )
-            workflow_id = str(uuid4())
-            node_row_id = str(uuid4())
-            await connection.execute(
-                text(
-                    'INSERT INTO horsies_workflow_tasks '
-                    '(id, workflow_id, task_id, task_index) VALUES '
-                    '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-                    'CAST(:task_id AS uuid), 0)'
-                ),
-                {
-                    'node_id': node_row_id,
-                    'workflow_id': workflow_id,
-                    'task_id': task_id,
-                },
+            workflow_id = await create_workflow(connection, status='RUNNING')
+            node_row_id = await link_workflow_node(
+                connection,
+                task_id,
+                workflow_id=workflow_id,
+                node_status='RUNNING',
             )
             outcome = await fail_locked(connection, task_id)
             assert outcome.outcome == 'APPLIED'
@@ -195,7 +188,7 @@ class TestDispositionLadder:
                     text(
                         'SELECT workflow_id, workflow_node_row_id, '
                         'recovery_source, history_class, history_anchor, '
-                        'result_digest, terminal_status '
+                        'result_digest, terminalization_kind '
                         'FROM horsies_workflow_phase2_pending '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
@@ -206,7 +199,7 @@ class TestDispositionLadder:
             assert str(pending.workflow_node_row_id) == node_row_id
             assert pending.recovery_source == 'HISTORY'
             assert pending.history_class == CLASS_KEY
-            assert pending.terminal_status == 'FAILED'
+            assert pending.terminalization_kind == 'FAIL_RUNNING'
             assert bytes(pending.result_digest) == sha256(
                 b'{"error":{"code":"BOOM"}}'
             ).digest()
@@ -240,18 +233,13 @@ class TestDeferredResultFence:
                 worker=WORKER,
                 is_workflow_task=True,
             )
-            await connection.execute(
-                text(
-                    'INSERT INTO horsies_workflow_tasks '
-                    '(id, workflow_id, task_id, task_index) VALUES '
-                    '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-                    'CAST(:task_id AS uuid), 0)'
+            _ = await link_workflow_node(
+                connection,
+                task_id,
+                workflow_id=await create_workflow(
+                    connection, status='RUNNING'
                 ),
-                {
-                    'node_id': str(uuid4()),
-                    'workflow_id': str(uuid4()),
-                    'task_id': task_id,
-                },
+                node_status='RUNNING',
             )
             with pytest.raises(
                 DBAPIError, match='requires a result payload'

@@ -5,8 +5,8 @@
 - A snapshot older than the live window does not serve anything.
 - An isolated retry of a shared task is unserved when no live worker has
   isolated children.
-- A live snapshot without budgets, or with unreadable ones, fails the read
-  and names the worker.
+- A live snapshot with unreadable budgets fails the read and names the
+  worker.
 - The report gives the wait of each stream's oldest due row and the load of
   each budget of each live worker, counted as the claim counts it.
 - The reaper pass logs an unserved stream: the test enters at
@@ -46,7 +46,6 @@ from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.cli import execution_settings
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    ClassesNotRecorded,
     NoneDue,
     OldestWaiting,
     StreamCoverage,
@@ -124,9 +123,7 @@ async def _snapshot(
             'worker_id': worker_id,
             'age': age_s,
             'queues': queues,
-            'class_capacity': None
-            if class_capacity is None
-            else json.dumps(class_capacity),
+            'class_capacity': json.dumps(class_capacity),
         },
     )
     await session.commit()
@@ -149,24 +146,28 @@ async def _task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-              (id, task_name, queue_name, priority, status, enqueued_at,
-               claimed, claimed_by_worker_id, claimed_at, claim_expires_at,
-               started_at, is_workflow_task, enqueue_sha, created_at,
-               updated_at, retry_count, max_retries, retention_class_key,
-               command_fingerprint_version, command_fingerprint,
-               retain_rerun_input, prepared_rerun_input_disposition,
-               execution)
-            VALUES
-              (:id, 'class_task', :queue, :priority, CAST(:status AS varchar),
-               now() + make_interval(secs => CAST(:due_in AS integer)),
-               :claimed, CAST(:owner AS varchar),
-               CASE WHEN CAST(:owner AS varchar) IS NULL THEN NULL ELSE now() END,
-               CASE WHEN CAST(:lease AS integer) IS NULL THEN NULL
+              (
+                  id, task_name, queue_name, priority, input, status, enqueued_at,
+                  claimed_by_worker_id, claimed_at, claim_expires_at, started_at,
+                  is_workflow_task, created_at, updated_at, retry_count, max_retries,
+                  retention_class_key, command_fingerprint_version,
+                  command_fingerprint, retain_rerun_input, execution, sent_at,
+                  worker_pid, worker_hostname, worker_process_name
+              ) VALUES (
+                  :id, 'class_task', :queue, :priority, '{}', CAST(:status AS varchar),
+                  now() + make_interval(secs => CAST(:due_in AS integer)),
+                  CAST(:owner AS varchar),
+                  CASE WHEN CAST(:owner AS varchar) IS NULL THEN NULL ELSE now() END,
+                  CASE WHEN CAST(:lease AS integer) IS NULL THEN NULL
                     ELSE now() + make_interval(secs => CAST(:lease AS integer)) END,
-               CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN now() ELSE NULL END,
-               false, :sha, now(), now(), 0, 0, 'standard_30d', 1,
-               sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-               false, 'DECLINED_BY_POLICY', :execution)
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN now() ELSE NULL END,
+                  false, now(), now(), 0, 0, 'standard_30d', 1,
+                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')), false,
+                  :execution, NOW(),
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+              )
         """),
         {
             'id': task_id,
@@ -174,10 +175,8 @@ async def _task(
             'priority': priority,
             'status': status,
             'due_in': due_in_s,
-            'claimed': owner is not None,
             'owner': owner,
             'lease': lease_s,
-            'sha': '0' * 64,
             'execution': execution.value,
         },
     )
@@ -342,32 +341,6 @@ class TestClassCoverage:
             case Ok(coverage):
                 raise AssertionError(coverage)
 
-    async def test_a_live_snapshot_without_budgets_is_left_out_and_named(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-    ) -> None:
-        """A worker version that does not record its budgets wrote one live
-        snapshot. The check still reads: that worker serves no stream and is
-        named, and the recorded worker decides each stream."""
-        await _snapshot(session, 'w-old', None, queues=['a', 'b'])
-        await _snapshot(session, 'w-new', ASYNC_CHILDREN_ONLY, queues=['a'])
-        await _task(session, queue='a', execution=ISOLATED)
-        await _task(session, queue='a', execution=ASYNC)
-
-        match await broker.get_class_coverage_async():
-            case Ok(coverage):
-                pass
-            case Err(error):
-                raise AssertionError(error.message)
-
-        assert coverage.live_workers == 1
-        assert [worker.worker_id for worker in coverage.not_recorded] == ['w-old']
-        assert coverage.streams == (
-            StreamCoverage('a', ISOLATED, StreamUnserved()),
-            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=40)),
-        )
-
 
 @pytest.mark.usefixtures('empty_fleet')
 class TestClassReport:
@@ -411,33 +384,6 @@ class TestClassReport:
         assert report.checked_at - oldest >= timedelta(seconds=300)
         assert isolated.state == StreamServed(workers=1, capacity=4)
         assert shared.wait == NoneDue(next_due)
-
-    async def test_a_live_snapshot_without_budgets_is_left_out_of_the_report(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-    ) -> None:
-        """The worker that did not record its budgets holds a RUNNING row; the
-        report reads, names it, and shows no load for it."""
-        await _snapshot(session, 'w-old', None, queues=['a'])
-        await _snapshot(session, 'w-new', ISOLATED_CHILDREN, queues=['a'])
-        await _task(session, queue='a', execution=ISOLATED)
-        await _task(
-            session, queue='a', execution=ISOLATED, status='RUNNING', owner='w-old'
-        )
-
-        match await broker.get_class_report_async():
-            case Ok(report):
-                pass
-            case Err(error):
-                raise AssertionError(error.message)
-
-        assert [worker.worker_id for worker in report.workers] == ['w-new']
-        assert report.not_recorded == (
-            ClassesNotRecorded('w-old', report.not_recorded[0].snapshot_at),
-        )
-        (stream,) = report.streams
-        assert stream.state == StreamServed(workers=1, capacity=4)
 
     async def test_budget_load_counts_rows_as_the_claim_does(
         self,
@@ -652,7 +598,7 @@ async def _plan(session: AsyncSession, statement: Any, params: dict[str, Any]) -
 
 @pytest.mark.usefixtures('empty_fleet')
 class TestClassReadsUseTheClaimIndex:
-    """Both skip scans probe idx_horsies_tasks_claim_pending_class.
+    """Both skip scans probe horsies_tasks_claim_pending.
 
     20,000 PENDING rows over 4 queues, 3 classes and 100 priorities, so the
     planner picks on its own, without ``enable_seqscan = off``.
@@ -666,20 +612,19 @@ class TestClassReadsUseTheClaimIndex:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
-                  (id, task_name, queue_name, priority, status, enqueued_at,
-                   claimed, is_workflow_task, enqueue_sha, created_at,
-                   updated_at, retry_count, max_retries, retention_class_key,
-                   command_fingerprint_version, command_fingerprint,
-                   retain_rerun_input, prepared_rerun_input_disposition,
-                   execution)
-                SELECT gen_random_uuid(), 'class_task', 'q' || (g % 4),
-                       1 + (g % 100), 'PENDING', now() - g * interval '1 ms',
-                       false, false, repeat('0', 64), now(), now(), 0, 0,
-                       'standard_30d', 1,
-                       sha256(convert_to(CAST(g AS text), 'UTF8')), false,
-                       'DECLINED_BY_POLICY',
-                       (ARRAY['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'])[1 + g % 3]
-                FROM generate_series(1, 20000) AS g
+                  (
+                      id, task_name, queue_name, priority, input, status, enqueued_at,
+                      is_workflow_task, created_at, updated_at, retry_count,
+                      max_retries, retention_class_key, command_fingerprint_version,
+                      command_fingerprint, retain_rerun_input, execution, sent_at
+                  )
+                  SELECT gen_random_uuid(), 'class_task', 'q' || (g % 4), 1 + (g % 100),
+                      '{}', 'PENDING', now() - g * interval '1 ms', false, now(),
+                      now(), 0, 0, 'standard_30d', 1,
+                      sha256(convert_to(CAST(g AS text), 'UTF8')), false,
+                      (ARRAY['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'])[1 + g % 3],
+                      NOW()
+                  FROM generate_series(1, 20000) AS g
             """),
         )
         await session.commit()
@@ -690,5 +635,5 @@ class TestClassReadsUseTheClaimIndex:
         heads = await _plan(session, _PENDING_HEADS_SQL, {'head_limit': 10})
 
         for plan in (streams, heads):
-            assert 'idx_horsies_tasks_claim_pending_class' in plan
+            assert 'horsies_tasks_claim_pending' in plan
             assert '"Seq Scan"' not in plan
