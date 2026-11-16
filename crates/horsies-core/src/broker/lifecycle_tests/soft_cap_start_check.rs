@@ -5,16 +5,19 @@
 //! queue while the rows that they claimed before are still CLAIMED. Each pass
 //! submits a claimed row of a capped queue only while the queue's RUNNING
 //! rows, plus the claims that this worker admitted that are not RUNNING yet,
-//! stay under the cap. The other rows stay CLAIMED, held by the worker.
+//! stay under the cap, and while a child of the row's route is free at that
+//! moment. The other rows stay CLAIMED, held by the worker.
 //!
 //! A pass here is the one of `Worker::claim_and_dispatch` without the
-//! children: the 0004 claim of a worker with one isolated slot and
-//! `prefetch_buffer = 2` (a claim takes up to 3 rows), the hold of the rows
-//! of the capped queue, then the start check (`admit_held_rows`). The
-//! submitted rows are recorded; the test holds the guard of each admitted
-//! claim, as its outcome write does, and drops it to end the write.
+//! children: the 0004 claim of a worker with one isolated slot (unless a test
+//! says more) and `prefetch_buffer = 2` (a claim takes up to 3 rows), the
+//! hold of the rows of the capped queue, then the start check
+//! (`admit_held_rows`) with the free slots of the worker. The submitted rows
+//! are recorded; each one holds a slot until the test ends it. The test holds
+//! the guard of each admitted claim, as its outcome write does, and drops it
+//! to end the write.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
 use serial_test::serial;
@@ -27,6 +30,7 @@ use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::PostgresBroker;
 use crate::core::task::Execution;
+use crate::worker::executor::slots::FreeCapacity;
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartedClaim};
 
 /// The prefetch buffer of the test worker: soft-cap mode.
@@ -46,6 +50,16 @@ impl Names {
         Names {
             capped: format!("soft_cap_capped_{suffix}"),
             free: format!("soft_cap_free_{suffix}"),
+            worker_id: format!("soft-cap-worker-{suffix}"),
+        }
+    }
+
+    /// The same queues, for another worker.
+    fn other_worker(&self) -> Names {
+        let suffix = &Uuid::new_v4().simple().to_string()[..8];
+        Names {
+            capped: self.capped.clone(),
+            free: self.free.clone(),
             worker_id: format!("soft-cap-worker-{suffix}"),
         }
     }
@@ -148,8 +162,12 @@ struct SoftCapWorker {
     names: Names,
     request: ClaimPassRequest,
     hold: QueueCapHold,
+    /// The isolated slots of the worker.
+    slots: u32,
     /// The submitted rows, in submit order.
     started: Vec<Uuid>,
+    /// The submitted rows whose write has not ended: each holds a slot.
+    in_flight: HashSet<Uuid>,
     /// The guard of each admitted claim whose write has not ended.
     writes: HashMap<Uuid, StartedClaim>,
 }
@@ -170,13 +188,31 @@ impl SoftCapWorker {
             names,
             request,
             hold,
+            slots: budget,
             started: Vec::new(),
+            in_flight: HashSet::new(),
             writes: HashMap::new(),
         }
     }
 
+    /// The slots that no submitted row holds (Python
+    /// `_RecordedDispatch.free_children`).
+    fn free_capacity(&self) -> FreeCapacity {
+        let held = u32::try_from(self.in_flight.len()).expect("a few test rows");
+        FreeCapacity {
+            isolated: self.slots.saturating_sub(held),
+            ..FreeCapacity::default()
+        }
+    }
+
+    fn submit(&mut self, task_id: Uuid) {
+        self.started.push(task_id);
+        let _new = self.in_flight.insert(task_id);
+    }
+
     /// One pass: the claim, each row of an uncapped queue submitted, each
-    /// row of the capped queue held, then the start check.
+    /// row of the capped queue held, then the start check with the free
+    /// slots after the submits.
     async fn pass(&mut self, pool: &PgPool) {
         let claimed = claim_pass(
             &core_pool_for_test_pool(pool),
@@ -187,16 +223,18 @@ impl SoftCapWorker {
         .expect("claim pass");
         for row in claimed.claimed {
             match self.hold.holds(&row.queue_name) {
-                true => self.hold.hold(row),
-                false => self.started.push(row.id),
+                // Every class routes to the ISOLATED budget of this worker.
+                true => self.hold.hold(row, Execution::Isolated),
+                false => self.submit(row.id),
             }
         }
         let broker = PostgresBroker::from_pool(pool.clone());
-        let admitted = admit_held_rows(&broker, &self.names.worker_id, &mut self.hold)
+        let free = self.free_capacity();
+        let admitted = admit_held_rows(&broker, &self.names.worker_id, &mut self.hold, || free)
             .await
             .expect("start check");
         for admitted in admitted {
-            self.started.push(admitted.row.id);
+            self.submit(admitted.row.id);
             let _earlier = self.writes.insert(admitted.row.id, admitted.started);
         }
     }
@@ -207,12 +245,14 @@ impl SoftCapWorker {
         }
     }
 
-    /// The outcome write of `task_id` ended (Python `_RecordedDispatch.end`).
+    /// The outcome write of `task_id` ended (Python `_RecordedDispatch.end`):
+    /// its slot is free, and an admitted claim leaves the start check.
     fn end(&mut self, task_id: Uuid) {
-        let ended = self
-            .writes
-            .remove(&task_id)
-            .expect("the test ends only an admitted claim");
+        assert!(
+            self.in_flight.remove(&task_id),
+            "the test ends only a submitted row"
+        );
+        let ended = self.writes.remove(&task_id);
         drop(ended);
     }
 }
@@ -311,7 +351,7 @@ async fn rows_of_an_uncapped_queue_start_while_a_capped_queue_waits() {
         seed_pending(&pool, &names.capped, 49).await,
     ];
     let free = seed_pending(&pool, &names.free, 10).await;
-    let mut worker = SoftCapWorker::new(names, 1);
+    let mut worker = SoftCapWorker::with_budget(names, 2, PREFETCH_BUFFER, 1);
 
     worker.passes(&pool, 2).await;
 
@@ -368,4 +408,83 @@ async fn buffered_dispatch_respects_queue_cap_in_soft_mode() {
         );
     }
     cleanup_tasks(&pool, &seeded).await;
+}
+
+/// Python `test_a_row_under_the_cap_waits_for_a_free_child`: cap 1 and one
+/// slot: a row of an uncapped queue takes the slot, so the row of the capped
+/// queue stays held while its queue has room; it starts on the first pass
+/// after the slot frees.
+#[tokio::test]
+#[serial]
+async fn a_row_under_the_cap_waits_for_a_free_child() {
+    let pool = pool().await;
+    let names = Names::fresh();
+    let busy = seed_pending(&pool, &names.free, 100).await;
+    let capped = seed_pending(&pool, &names.capped, 50).await;
+    let mut worker = SoftCapWorker::new(names, 1);
+
+    worker.passes(&pool, 2).await;
+    assert_eq!(worker.started, vec![busy]);
+    assert_eq!(
+        statuses(&pool, &[capped]).await[&capped],
+        ("CLAIMED".to_owned(), Some(worker.names.worker_id.clone()))
+    );
+
+    cleanup_tasks(&pool, &[busy]).await;
+    worker.end(busy);
+    worker.passes(&pool, 1).await;
+    assert_eq!(worker.started, vec![busy, capped]);
+    cleanup_tasks(&pool, &[busy, capped]).await;
+}
+
+/// Python `test_a_row_that_waits_for_a_child_lets_no_other_worker_pass_the_cap`
+/// (#1138): cap 1; workers A and B have one slot each. A's slot runs a long
+/// row of an uncapped queue, so A holds its row of the capped queue: no
+/// child of its route is free. B admits its row of the capped queue, and the
+/// row runs. When A's slot frees, A counts B's RUNNING row and keeps its row
+/// held: one row of the queue starts on the two workers, never two.
+#[tokio::test]
+#[serial]
+async fn a_row_that_waits_for_a_child_lets_no_other_worker_pass_the_cap() {
+    let pool = pool().await;
+    let names_a = Names::fresh();
+    let names_b = names_a.other_worker();
+    let long_row = seed_pending(&pool, &names_a.free, 100).await;
+    let capped = vec![
+        seed_pending(&pool, &names_a.capped, 50).await,
+        seed_pending(&pool, &names_a.capped, 49).await,
+    ];
+    let mut worker_a = SoftCapWorker::new(names_a, 1);
+    let mut worker_b = SoftCapWorker::new(names_b, 1);
+    let worker_a_id = worker_a.names.worker_id.clone();
+    let worker_b_id = worker_b.names.worker_id.clone();
+
+    worker_a.passes(&pool, 1).await;
+    assert_eq!(worker_a.started, vec![long_row]);
+    assert_eq!(
+        statuses(&pool, &capped).await[&capped[0]],
+        ("CLAIMED".to_owned(), Some(worker_a_id.clone()))
+    );
+
+    worker_b.passes(&pool, 1).await;
+    assert_eq!(worker_b.started, vec![capped[1]]);
+    set_running(&pool, capped[1], &worker_b_id).await;
+
+    cleanup_tasks(&pool, &[long_row]).await;
+    worker_a.end(long_row);
+    worker_a.passes(&pool, 1).await;
+
+    assert_eq!(worker_a.started, vec![long_row]);
+    let statuses = statuses(&pool, &capped).await;
+    assert_eq!(
+        statuses[&capped[0]],
+        ("CLAIMED".to_owned(), Some(worker_a_id))
+    );
+    assert_eq!(
+        statuses[&capped[1]],
+        ("RUNNING".to_owned(), Some(worker_b_id))
+    );
+    let mut all = capped.clone();
+    all.push(long_row);
+    cleanup_tasks(&pool, &all).await;
 }

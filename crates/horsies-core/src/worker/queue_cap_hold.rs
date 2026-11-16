@@ -13,9 +13,14 @@
 //!   CLAIMED, because their child has not set them RUNNING yet.
 //!
 //! The pass then submits held rows in claim order while that count stays
-//! under the cap. A held row stays CLAIMED, counts in the worker's claim
-//! budget, and the claimer heartbeat renews its lease, until a later pass
-//! submits it or the worker stops and returns it to the queue.
+//! under the cap and a child of the row's route has a free slot or seat at
+//! that moment (the [`FreeCapacity`] of the row's budget, read after the
+//! count). An admitted row therefore goes to a child at once and does not
+//! wait in the pool's queue. Another worker counts the row once its child
+//! sets it RUNNING, so the time in which another worker does not count it is
+//! one start. A held row stays CLAIMED, counts in the worker's claim budget,
+//! and the claimer heartbeat renews its lease, until a later pass submits it
+//! or the worker stops and returns it to the queue.
 //!
 //! A submitted claim counts until its outcome write ends: the write holds
 //! its [`StartedClaim`]. The claim is the task id with its claim
@@ -32,6 +37,7 @@ use uuid::Uuid;
 
 use crate::broker::claims::{count_queue_starts, ClaimedRow, QueueStartCheck, QueueStarts};
 use crate::broker::{BrokerError, PostgresBroker};
+use crate::worker::executor::slots::{ExecutionClass, FreeCapacity};
 
 #[cfg(test)]
 mod tests;
@@ -132,6 +138,14 @@ pub struct AdmittedRow {
     pub started: StartedClaim,
 }
 
+/// A held row and the budget whose children run it: the budget that the
+/// claim plan routes the row's class to.
+#[derive(Debug)]
+struct HeldRow {
+    row: ClaimedRow,
+    budget: ExecutionClass,
+}
+
 /// The held rows of the capped queues of one worker, and the claims that it
 /// admitted and whose outcome write has not ended.
 ///
@@ -141,7 +155,7 @@ pub struct AdmittedRow {
 #[derive(Debug)]
 pub struct QueueCapHold {
     caps: StartCheckCaps,
-    held: VecDeque<ClaimedRow>,
+    held: VecDeque<HeldRow>,
     started: StartedClaims,
 }
 
@@ -159,24 +173,26 @@ impl QueueCapHold {
         self.caps.cap_of(queue_name).is_some()
     }
 
-    /// Hold `row` until a pass admits it. A row of a queue that the check
-    /// does not hold is a defect of the caller.
-    pub fn hold(&mut self, row: ClaimedRow) {
+    /// Hold `row` until a pass admits it. `budget` is the budget that the
+    /// claim plan routes the row's class to: a child of that budget runs the
+    /// row. A row of a queue that the check does not hold is a defect of the
+    /// caller.
+    pub fn hold(&mut self, row: ClaimedRow, budget: ExecutionClass) {
         assert!(
             self.holds(&row.queue_name),
             "task {} of queue {:?} is not held by the start check",
             row.id,
             row.queue_name
         );
-        self.held.push_back(row);
+        self.held.push_back(HeldRow { row, budget });
     }
 
     /// The queues that have held rows, in the order of their first row.
     pub fn held_queues(&self) -> Vec<String> {
         let mut queues: Vec<String> = Vec::new();
-        for row in &self.held {
-            if !queues.contains(&row.queue_name) {
-                queues.push(row.queue_name.clone());
+        for held in &self.held {
+            if !queues.contains(&held.row.queue_name) {
+                queues.push(held.row.queue_name.clone());
             }
         }
         queues
@@ -210,13 +226,17 @@ impl QueueCapHold {
     /// started.
     ///
     /// A row starts while its queue's count in `starts` plus the rows that
-    /// this call admitted of the queue stays under the cap. The other rows
-    /// stay held, in their order.
-    pub fn admit(&mut self, starts: &QueueStarts) -> Vec<AdmittedRow> {
+    /// this call admitted of the queue stays under the cap, and the free
+    /// capacity of its budget in `free` less the rows that this call
+    /// admitted of the budget stays above 0. The other rows stay held, in
+    /// their order.
+    pub fn admit(&mut self, starts: &QueueStarts, free: &FreeCapacity) -> Vec<AdmittedRow> {
         let held = std::mem::take(&mut self.held);
         let mut admitted = Vec::new();
         let mut taken: HashMap<String, u64> = HashMap::new();
-        for row in held {
+        let mut seated: HashMap<ExecutionClass, u32> = HashMap::new();
+        for held_row in held {
+            let HeldRow { row, budget } = &held_row;
             let Some(cap) = self.caps.cap_of(&row.queue_name) else {
                 panic!(
                     "task {} of queue {:?} was held with no cap",
@@ -225,13 +245,17 @@ impl QueueCapHold {
             };
             let taken_of_queue = taken.entry(row.queue_name.clone()).or_insert(0);
             let count = starts.of(&row.queue_name).saturating_add(*taken_of_queue);
-            match count < u64::from(cap) {
-                true => {
+            let seated_of_budget = seated.entry(*budget).or_insert(0);
+            let room = free.of(*budget).saturating_sub(*seated_of_budget);
+            match (count < u64::from(cap), room > 0) {
+                (true, true) => {
                     *taken_of_queue += 1;
+                    *seated_of_budget += 1;
+                    let HeldRow { row, budget: _ } = held_row;
                     let started = self.started.start((row.id, row.claimed_at));
                     admitted.push(AdmittedRow { row, started });
                 }
-                false => self.held.push_back(row),
+                (false, _) | (true, false) => self.held.push_back(held_row),
             }
         }
         admitted
@@ -239,14 +263,17 @@ impl QueueCapHold {
 
     /// Take every held row, in claim order, at the stop of the worker.
     pub fn drain(&mut self) -> Vec<ClaimedRow> {
-        self.held.drain(..).collect()
+        self.held.drain(..).map(|held| held.row).collect()
     }
 }
 
 /// The start check of one claim pass: when rows are held, one statement
 /// (`count_queue_starts`) on the main core pool of `broker` (the pool of
 /// the claim pass), then the held rows that their queue's count leaves room
-/// for. No statement when no row is held.
+/// for and that a free child of their budget takes now. `free` reads the
+/// free capacity of each budget; it runs after the count, so the admitted
+/// rows meet the children that are free at their submit. No statement when
+/// no row is held.
 ///
 /// Errors: the [`BrokerError`] of the core pools or of the count. The held
 /// rows stay held, and nothing is admitted.
@@ -254,11 +281,12 @@ pub async fn admit_held_rows(
     broker: &PostgresBroker,
     worker_id: &str,
     hold: &mut QueueCapHold,
+    free: impl FnOnce() -> FreeCapacity,
 ) -> Result<Vec<AdmittedRow>, BrokerError> {
     let Some(check) = hold.check(worker_id) else {
         return Ok(Vec::new());
     };
     let (open, _write) = broker.core_pools_for_write()?;
     let starts = count_queue_starts(open.main(), broker.statement_log(), &check).await?;
-    Ok(hold.admit(&starts))
+    Ok(hold.admit(&starts, &free()))
 }

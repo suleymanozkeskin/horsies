@@ -1,7 +1,10 @@
 //! The soft-cap start check: which held rows of a capped queue may start
-//! (Python `tests/unit/test_queue_cap_hold.py`). The count statement runs in
+//! (Python `tests/unit/test_queue_cap_hold.py`). A held row starts while its
+//! queue's count is under the cap and a child of its budget is free at that
+//! moment. The count statement runs in
 //! `broker::lifecycle_tests::soft_cap_start_check`; its row contract in
-//! `broker::claims::tests`.
+//! `broker::claims::tests`; the free capacity of the pools in
+//! `worker::executor::slots::tests` and `shared_pool_tests`.
 
 use chrono::TimeZone;
 
@@ -48,11 +51,31 @@ fn caps(queues: &[(&str, u32)]) -> StartCheckCaps {
 }
 
 fn hold(queues: &[(&str, u32)], rows: Vec<ClaimedRow>) -> QueueCapHold {
+    held_on(queues, rows, ExecutionClass::Isolated)
+}
+
+/// A hold of `rows`, each routed to `budget`.
+fn held_on(queues: &[(&str, u32)], rows: Vec<ClaimedRow>, budget: ExecutionClass) -> QueueCapHold {
     let mut hold = QueueCapHold::new(caps(queues));
     for row in rows {
-        hold.hold(row);
+        hold.hold(row, budget);
     }
     hold
+}
+
+/// Free capacity that never limits the rows of these tests.
+fn many_free() -> FreeCapacity {
+    FreeCapacity {
+        isolated: 100,
+        ..FreeCapacity::default()
+    }
+}
+
+fn free_isolated(slots: u32) -> FreeCapacity {
+    FreeCapacity {
+        isolated: slots,
+        ..FreeCapacity::default()
+    }
 }
 
 fn starts(counts: &[(&str, u64)]) -> QueueStarts {
@@ -109,7 +132,7 @@ mod holds {
     #[test]
     #[should_panic(expected = "is not held by the start check")]
     fn holding_a_row_of_an_uncapped_queue_is_a_defect() {
-        QueueCapHold::new(caps(&[("capped", 1)])).hold(row("t1", "free"));
+        QueueCapHold::new(caps(&[("capped", 1)])).hold(row("t1", "free"), ExecutionClass::Isolated);
     }
 
     /// A pass with no held row sends no statement.
@@ -129,7 +152,7 @@ mod holds {
             &[("a", 1), ("b", 2)],
             vec![row("a1", "a"), row("b1", "b"), row("a2", "a")],
         );
-        let admitted = hold.admit(&starts(&[("b", 2)]));
+        let admitted = hold.admit(&starts(&[("b", 2)]), &many_free());
 
         let check = hold.check("worker-1").expect("rows are held");
 
@@ -148,7 +171,7 @@ mod admit {
     fn a_queue_under_its_cap_starts_its_row() {
         let mut hold = hold(&[("capped", 2)], vec![capped("t1")]);
 
-        let admitted = hold.admit(&starts(&[("capped", 1)]));
+        let admitted = hold.admit(&starts(&[("capped", 1)]), &many_free());
 
         assert_eq!(ids(&admitted), vec![task("t1")]);
         assert_eq!(hold.held_count(), 0);
@@ -160,7 +183,7 @@ mod admit {
     fn a_queue_at_its_cap_keeps_its_row() {
         let mut hold = hold(&[("capped", 2)], vec![capped("t1")]);
 
-        let admitted = hold.admit(&starts(&[("capped", 2)]));
+        let admitted = hold.admit(&starts(&[("capped", 2)]), &many_free());
 
         assert!(admitted.is_empty());
         assert_eq!(hold.held_count(), 1);
@@ -172,7 +195,10 @@ mod admit {
     fn a_queue_with_no_count_has_0() {
         let mut hold = hold(&[("capped", 1)], vec![capped("t1")]);
 
-        assert_eq!(ids(&hold.admit(&starts(&[]))), vec![task("t1")]);
+        assert_eq!(
+            ids(&hold.admit(&starts(&[]), &many_free())),
+            vec![task("t1")]
+        );
     }
 
     /// Python `test_rows_start_in_claim_order_up_to_the_room`.
@@ -183,7 +209,7 @@ mod admit {
             vec![capped("t1"), capped("t2"), capped("t3")],
         );
 
-        let admitted = hold.admit(&starts(&[("capped", 1)]));
+        let admitted = hold.admit(&starts(&[("capped", 1)]), &many_free());
 
         assert_eq!(ids(&admitted), vec![task("t1"), task("t2")]);
         assert_eq!(hold.drain(), vec![capped("t3")]);
@@ -197,7 +223,7 @@ mod admit {
             vec![row("a1", "a"), row("a2", "a"), row("b1", "b")],
         );
 
-        let admitted = hold.admit(&starts(&[]));
+        let admitted = hold.admit(&starts(&[]), &many_free());
 
         assert_eq!(ids(&admitted), vec![task("a1"), task("b1")]);
         assert_eq!(hold.held_queues(), vec!["a".to_owned()]);
@@ -208,7 +234,7 @@ mod admit {
     fn a_cap_of_0_starts_nothing() {
         let mut hold = hold(&[("capped", 0)], vec![capped("t1")]);
 
-        assert!(hold.admit(&starts(&[])).is_empty());
+        assert!(hold.admit(&starts(&[]), &many_free()).is_empty());
     }
 
     /// A row that a pass kept is admitted by a later pass whose count has
@@ -216,12 +242,108 @@ mod admit {
     #[test]
     fn a_kept_row_starts_on_a_later_pass_with_room() {
         let mut hold = hold(&[("capped", 1)], vec![capped("t1")]);
-        assert!(hold.admit(&starts(&[("capped", 1)])).is_empty());
+        assert!(hold
+            .admit(&starts(&[("capped", 1)]), &many_free())
+            .is_empty());
 
         assert_eq!(
-            ids(&hold.admit(&starts(&[("capped", 0)]))),
+            ids(&hold.admit(&starts(&[("capped", 0)]), &many_free())),
             vec![task("t1")]
         );
+    }
+}
+
+/// A held row under its cap starts only while a child of its route is free,
+/// so it goes to a child at once and never waits in a pool's queue (#1138).
+mod admit_only_with_a_free_child {
+    use super::*;
+
+    /// Python `test_a_row_under_its_cap_with_no_free_child_stays_held`.
+    #[test]
+    fn a_row_under_its_cap_with_no_free_child_stays_held() {
+        let mut hold = hold(&[("capped", 1)], vec![capped("t1")]);
+
+        assert!(hold.admit(&starts(&[]), &free_isolated(0)).is_empty());
+        assert_eq!(hold.held_count(), 1);
+        assert!(hold.started_claims().is_empty());
+    }
+
+    /// Python `test_a_budget_with_no_free_capacity_entry_has_0`: a row of
+    /// the shared async budget does not take a free isolated slot.
+    #[test]
+    fn a_free_child_of_another_budget_does_not_take_the_row() {
+        let mut hold = held_on(
+            &[("capped", 1)],
+            vec![capped("t1")],
+            ExecutionClass::SharedAsync,
+        );
+
+        assert!(hold.admit(&starts(&[]), &free_isolated(3)).is_empty());
+        assert_eq!(hold.held_count(), 1);
+    }
+
+    /// Python `test_the_free_capacity_bounds_the_rows_started_in_one_pass`.
+    #[test]
+    fn the_free_capacity_bounds_the_rows_started_in_one_pass() {
+        let mut hold = hold(
+            &[("capped", 5)],
+            vec![capped("t1"), capped("t2"), capped("t3")],
+        );
+
+        let admitted = hold.admit(&starts(&[]), &free_isolated(2));
+
+        assert_eq!(ids(&admitted), vec![task("t1"), task("t2")]);
+        assert_eq!(hold.drain(), vec![capped("t3")]);
+    }
+
+    /// Python `test_queues_that_share_a_budget_share_its_free_capacity`.
+    #[test]
+    fn queues_that_share_a_budget_share_its_free_capacity() {
+        let mut hold = hold(&[("a", 1), ("b", 1)], vec![row("a1", "a"), row("b1", "b")]);
+
+        let admitted = hold.admit(&starts(&[]), &free_isolated(1));
+
+        assert_eq!(ids(&admitted), vec![task("a1")]);
+        assert_eq!(hold.held_queues(), vec!["b".to_owned()]);
+    }
+
+    /// Python `test_a_row_of_a_budget_with_room_starts_while_another_budget_is_full`.
+    #[test]
+    fn a_row_of_a_budget_with_room_starts_while_another_budget_is_full() {
+        let mut hold = hold(&[("capped", 2)], vec![capped("t1")]);
+        hold.hold(capped("t2"), ExecutionClass::SharedThread);
+        let free = FreeCapacity {
+            isolated: 0,
+            shared_async: 0,
+            shared_thread: 1,
+        };
+
+        let admitted = hold.admit(&starts(&[]), &free);
+
+        assert_eq!(ids(&admitted), vec![task("t2")]);
+        assert_eq!(hold.drain(), vec![capped("t1")]);
+    }
+
+    /// Python `test_a_queue_at_its_cap_keeps_its_row_with_a_free_child`.
+    #[test]
+    fn a_queue_at_its_cap_keeps_its_row_with_a_free_child() {
+        let mut hold = hold(&[("capped", 1)], vec![capped("t1")]);
+
+        assert!(hold
+            .admit(&starts(&[("capped", 1)]), &free_isolated(1))
+            .is_empty());
+    }
+
+    /// Python `test_a_kept_row_starts_on_a_later_pass_with_a_free_child`.
+    #[test]
+    fn a_kept_row_starts_on_a_later_pass_with_a_free_child() {
+        let mut hold = hold(&[("capped", 1)], vec![capped("t1")]);
+        assert!(hold.admit(&starts(&[]), &free_isolated(0)).is_empty());
+
+        let admitted = hold.admit(&starts(&[]), &free_isolated(1));
+
+        assert_eq!(ids(&admitted), vec![task("t1")]);
+        assert_eq!(hold.started_claims(), vec![(task("t1"), generation())]);
     }
 }
 
@@ -233,7 +355,7 @@ mod end_and_drain {
     #[test]
     fn a_dropped_guard_forgets_its_claim() {
         let mut hold = hold(&[("capped", 1)], vec![capped("t1")]);
-        let admitted = hold.admit(&starts(&[]));
+        let admitted = hold.admit(&starts(&[]), &many_free());
         assert_eq!(hold.started_claims().len(), 1);
 
         drop(admitted);
@@ -250,7 +372,7 @@ mod end_and_drain {
             ..capped("t1")
         };
         let mut hold = hold(&[("capped", 2)], vec![capped("t1"), later]);
-        let mut admitted = hold.admit(&starts(&[]));
+        let mut admitted = hold.admit(&starts(&[]), &many_free());
         assert_eq!(hold.started_claims().len(), 2);
 
         let first = admitted.remove(0);

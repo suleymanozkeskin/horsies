@@ -82,7 +82,8 @@ pub use board::{
     SlotPhase, StartEnd,
 };
 pub use budgets::{
-    isolated_capacity, shared_capacity, BudgetCapacity, PoolService, SharedSlotService, SlotService,
+    isolated_capacity, shared_capacity, BudgetCapacity, FreeCapacity, PoolService,
+    SharedSlotService, SlotService,
 };
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
