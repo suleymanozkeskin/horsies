@@ -1,16 +1,14 @@
 //! P4 staged-read parity and disposable-database tests.
 
 use std::collections::HashSet;
-use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool, Row};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::archive::attempts::{
     encode_attempt_snapshot, AttemptRecord, StoredAttemptSnapshot,
 };
@@ -449,79 +447,28 @@ fn every_facet_sort_and_aggregate_variant_has_a_bounded_statement() {
     );
 }
 
+/// A copy of the installed test template (`crate::test_support`) with a
+/// sqlx pool for the history reads that still take a sqlx connection.
 struct TestDatabase {
     pool: PgPool,
-    database_name: String,
-    admin_options: PgConnectOptions,
+    database: crate::test_support::TestDatabase,
 }
 
 impl TestDatabase {
     async fn create() -> Self {
-        let base = database_url();
-        let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
-        let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("core_p4_{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect to postgres admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create P4 test database");
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect(database.url())
             .await
             .expect("connect to P4 test database");
-        run_horsies_migrations(&pool)
-            .await
-            .expect("migrate P4 test database");
-        Self {
-            pool,
-            database_name,
-            admin_options,
-        }
+        Self { pool, database }
     }
 
     async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect for P4 database cleanup");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.database_name)
-        .execute(&mut admin)
-        .await
-        .expect("terminate P4 test database sessions");
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\"",
-            self.database_name
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("drop P4 test database");
+        self.database.drop().await;
     }
-}
-
-fn database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let contents = std::fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 fn utc_day(value: DateTime<Utc>) -> DateTime<Utc> {

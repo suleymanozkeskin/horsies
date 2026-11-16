@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,8 +9,8 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1079,57 +1078,9 @@ async fn sse_route_emits_idle_heartbeat_comments() {
 #[tokio::test]
 #[serial]
 async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
-    let base_url = migrated_database_url().await;
-    let base_options = PgConnectOptions::from_str(&base_url).unwrap();
-    let admin_options = base_options.clone().database("postgres");
-    let mut admin = PgConnection::connect_with(&admin_options).await.unwrap();
-    sqlx::query("SELECT pg_advisory_lock(hashtext('core_w4_noddl_setup'))")
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let stale: Vec<String> = sqlx::query_scalar(
-        "SELECT d.datname
-         FROM pg_database d
-         WHERE left(d.datname, length('core_w4_noddl_')) = 'core_w4_noddl_'
-           AND NOT EXISTS (
-               SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
-           )
-         ORDER BY d.datname",
-    )
-    .fetch_all(&mut admin)
-    .await
-    .unwrap();
-    for stale_name in stale {
-        let suffix = stale_name.strip_prefix("core_w4_noddl_").unwrap();
-        assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        sqlx::query(&format!("DROP DATABASE \"{stale_name}\""))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-    }
-    let name = format!("core_w4_noddl_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let options = base_options.database(&name);
-    let anchor = PgPoolOptions::new()
-        .min_connections(1)
-        .max_connections(1)
-        .max_lifetime(None)
-        .idle_timeout(None)
-        .connect_with(options.clone())
-        .await
-        .unwrap();
-    let unlocked: bool =
-        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_w4_noddl_setup'))")
-            .fetch_one(&mut admin)
-            .await
-            .unwrap();
-    assert!(unlocked);
-    let url = crate::broker::pools::test_url_of(&options);
+    let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
-        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
+        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(database.url()).broker)
             .await
             .unwrap(),
     );
@@ -1139,25 +1090,21 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     );
     broker.ensure_schema_initialized().await.unwrap();
     broker.migrate().await.unwrap();
-    let relations: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT to_regclass('horsies_tasks')::text, to_regclass('horsies_migrations')::text",
-    )
-    .fetch_one(broker.pool())
-    .await
-    .unwrap();
+    let row = database
+        .client()
+        .query_one(
+            "SELECT to_regclass('horsies_tasks')::text, to_regclass('horsies_migrations')::text",
+            &[],
+        )
+        .await
+        .unwrap();
+    let relations: (Option<String>, Option<String>) = (row.get(0), row.get(1));
     assert_eq!(relations, (None, None));
     let schema = SchemaProbe::new(Arc::clone(&broker)).status().await;
     assert_eq!(schema.state, SchemaState::Absent);
-    broker.pool().close().await;
-    broker.session_pool().close().await;
-    anchor.close().await;
+    broker.close().await;
     drop(broker);
-    let suffix = name.strip_prefix("core_w4_noddl_").unwrap();
-    assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
+    database.drop().await;
 }
 
 #[tokio::test]
