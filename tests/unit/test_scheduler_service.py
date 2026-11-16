@@ -1,23 +1,26 @@
+# pyright: reportPrivateUsage=false
 """Tests for Scheduler service-level methods (mock-based, no DB)."""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time, timezone
 from typing import Annotated
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import AfterValidator
+import psycopg.errors
+from pydantic import AfterValidator, SecretStr
+from sqlalchemy.exc import DBAPIError, OperationalError
 
-from horsies.core.codec.json_io import SerializationError, dumps_json
+from horsies.core.codec.json_io import Json, SerializationError, dumps_json
 from horsies.core.codec.kwargs import encode_kwargs_read_back
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.brokers.postgres import PostgresBroker, SendCommand
 from horsies.core.brokers.result_types import (
-    BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerInvalidTaskOptions,
+    BrokerInvalidInput,
     BrokerListenerDisabled,
-    BrokerOperationError,
     BrokerOperationFailed,
 )
 from horsies.core.types.error_detail import NoCause
@@ -32,16 +35,33 @@ from horsies.core.models.schedule import (
     WeeklySchedule,
 )
 from horsies.core.models.payload import PayloadPolicy
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
-from horsies.core.scheduler.service import ScheduleLockDatabase, Scheduler
+from horsies.core.scheduler.calculator import calculate_next_run
+from horsies.core.scheduler.service import Scheduler
+from horsies.core.scheduler.state import (
+    DueSchedule,
+    DueScheduleRead,
+    FiredSlot,
+    ScheduleAdvanced,
+    ScheduleFire,
+    ScheduleFireOutcomeUnknown,
+    ScheduleFireRefused,
+    ScheduleStateMissing,
+    ScheduleStateMoved,
+    ScheduleStateWrite,
+    SlotOutcome,
+    StartStateRead,
+    StoredConfigHash,
+)
 from horsies.core.scheduler.validation import (
     PreparedSchedule,
     _encode_schedule_kwargs,
     _signature_error,
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint
+from horsies.core.utils.fingerprint import schedule_slot_task_id
 from tests.broker_resources_support import (
     attach_loop_limit,
     attach_resources,
@@ -64,10 +84,60 @@ def _not_expired(value: str) -> str:
 # A 32-byte config hash that no schedule of these tests produces.
 STALE_CONFIG_HASH = bytes(32)
 
+# A database time far from the host clock: a first run or a slot computed
+# from the host clock cannot equal one computed from this time.
+DATABASE_NOW = datetime(2020, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _start_read(*rows: tuple[str, bytes]) -> StartStateRead:
+    """The start read at DATABASE_NOW with these stored digests."""
+    return StartStateRead(
+        database_now=DATABASE_NOW,
+        rows=tuple(StoredConfigHash(name, digest) for name, digest in rows),
+    )
+
+
+def _due_read(*names: str) -> DueScheduleRead:
+    """The due read at DATABASE_NOW with these rows due."""
+    return DueScheduleRead(
+        database_now=DATABASE_NOW,
+        due=tuple(DueSchedule(name, DATABASE_NOW) for name in names),
+    )
+
+
+def _written_names(store: AsyncMock) -> list[str]:
+    """The schedule names of the one start write or heal call."""
+    assert store.await_args is not None, 'the write was not called'
+    writes: list[ScheduleStateWrite] = store.await_args.args[0]
+    return [write.schedule_name for write in writes]
+
+
+def _fail_on_call(failing_call: int) -> object:
+    """A calculate_next_run that raises on its ``failing_call``-th call."""
+    calls = 0
+
+    def _next_run(pattern: object, from_time: datetime, tz: str = 'UTC') -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls == failing_call:
+            raise RuntimeError('simulated calculator failure')
+        return calculate_next_run(pattern, from_time, tz)  # type: ignore[arg-type]
+
+    return _next_run
+
 
 def _deadline_task(*, deadline: Annotated[str, AfterValidator(_not_expired)]) -> None:
     """A parameter whose validator can refuse later what it accepted at boot."""
     return None
+
+
+def _json_text(value: Json) -> str:
+    """The JSON text of a value that the strict encoder takes."""
+    match dumps_json(value):
+        case Ok(text):
+            return text
+        case Err(error):
+            raise AssertionError(f'value does not encode: {error}')
 
 
 def _utc(
@@ -114,12 +184,67 @@ def _make_task_mock(fn: object) -> MagicMock:
     return task
 
 
-def _lock_database_for(broker: MagicMock) -> ScheduleLockDatabase:
-    """Route the scheduler's lock sessions through the broker mock's factory."""
-    return ScheduleLockDatabase(
-        engine=MagicMock(dispose=AsyncMock()),
-        session_factory=broker.session_factory,
+# A send command that no test reads the values of.
+COMMAND = SendCommand(
+    task_name='my_task',
+    queue_name='default',
+    priority=100,
+    stored_input='{}',
+    task_options=None,
+    execution=Execution.ISOLATED,
+    max_retries=0,
+    retention_class_key='standard_30d',
+    retain_rerun_input=False,
+    fingerprint_version=1,
+    fingerprint=bytes(32),
+)
+
+# A broker that builds real send commands; it opens no connection.
+REAL_BROKER_URL = 'postgresql+psycopg://user:pass@localhost/db'
+
+
+def _fire_harness(
+    schedule: TaskSchedule,
+    *answers: object,
+) -> tuple[Scheduler, MagicMock]:
+    """A started scheduler with one schedule; each fire answers the next of ``answers``.
+
+    The prepared text and the send command are set as ``start()`` sets them.
+    The state manager double records the fires and the heals.
+    """
+    app = _make_app(schedule_config=ScheduleConfig(schedules=[schedule]))
+    scheduler = Scheduler(app)
+    scheduler.broker = MagicMock()
+    scheduler._prepared_schedules = {
+        schedule.name: PreparedSchedule(kwargs_json=None, task_options_json=None),
+    }
+    scheduler._commands = {schedule.name: COMMAND}
+    state_manager = MagicMock()
+    state_manager.fire_schedule = AsyncMock(side_effect=list(answers))
+    state_manager.heal_missing_states = AsyncMock(return_value=(schedule.name,))
+    scheduler.state_manager = state_manager
+    return scheduler, state_manager
+
+
+def _fires(state_manager: MagicMock) -> list[ScheduleFire]:
+    """Every fire the state manager double was sent, in order."""
+    return [call.args[0] for call in state_manager.fire_schedule.await_args_list]
+
+
+def _advanced(*slots: datetime) -> Ok[ScheduleAdvanced]:
+    """An advanced fire whose slots are all new rows."""
+    return Ok(
+        ScheduleAdvanced(
+            slots=tuple(
+                FiredSlot(slot, schedule_slot_task_id('s', slot), SlotOutcome.INSERTED)
+                for slot in slots
+            ),
+        ),
     )
+
+
+def _real_broker() -> PostgresBroker:
+    return PostgresBroker(PostgresConfig(database_url=SecretStr(REAL_BROKER_URL)))
 
 
 # =============================================================================
@@ -360,7 +485,7 @@ class TestEncodeScheduleKwargs:
         assert result.err_value.notes == ['serialization error: bad kwargs']
 
     def test_kwargs_over_the_limit_rejected_with_size_and_limit(self) -> None:
-        wire_text = dumps_json({'blob': 'x' * 2048}).ok_value
+        wire_text = _json_text({'blob': 'x' * 2048})
         app = self._blob_app(reject_bytes=256)
 
         result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
@@ -374,7 +499,7 @@ class TestEncodeScheduleKwargs:
         ]
 
     def test_kwargs_equal_to_the_limit_pass(self) -> None:
-        wire_text = dumps_json({'blob': 'x' * 2048}).ok_value
+        wire_text = _json_text({'blob': 'x' * 2048})
         app = self._blob_app(reject_bytes=len(wire_text))
 
         result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
@@ -382,7 +507,7 @@ class TestEncodeScheduleKwargs:
         assert result == Ok(wire_text)
 
     def test_one_character_over_the_limit_is_rejected(self) -> None:
-        wire_text = dumps_json({'blob': 'x' * 2048}).ok_value
+        wire_text = _json_text({'blob': 'x' * 2048})
         app = self._blob_app(reject_bytes=len(wire_text) - 1)
 
         result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
@@ -495,55 +620,6 @@ class TestComputeConfigHash:
             name='t', task_name='my_task', pattern=DailySchedule(time=time(3, 0)),
         )
         assert scheduler._compute_config_hash(schedule) == scheduler._compute_config_hash(schedule)
-
-
-# =============================================================================
-# _schedule_advisory_key
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestScheduleAdvisoryKey:
-    """Tests for Scheduler._schedule_advisory_key."""
-
-    def _make_scheduler(self) -> Scheduler:
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config)
-        return Scheduler(app)
-
-    def test_deterministic(self) -> None:
-        """Same name produces same key."""
-        scheduler = self._make_scheduler()
-
-        key1 = scheduler._schedule_advisory_key('test_schedule')
-        key2 = scheduler._schedule_advisory_key('test_schedule')
-
-        assert key1 == key2
-
-    def test_different_names_produce_different_keys(self) -> None:
-        """Different schedule names produce different keys."""
-        scheduler = self._make_scheduler()
-
-        key_a = scheduler._schedule_advisory_key('schedule_a')
-        key_b = scheduler._schedule_advisory_key('schedule_b')
-
-        assert key_a != key_b
-
-    def test_returns_int(self) -> None:
-        """Advisory key is an integer (for pg_advisory_xact_lock)."""
-        scheduler = self._make_scheduler()
-
-        key = scheduler._schedule_advisory_key('test')
-
-        assert isinstance(key, int)
 
 
 # =============================================================================
@@ -727,76 +803,37 @@ class TestAdvanceToLatestDueSlot:
 class TestCheckScheduleSkipsMissedRuns:
     """catch_up_missed=False fires at most one run after downtime."""
 
-    def _make_harness(
-        self,
-        *,
-        pattern: IntervalSchedule,
-        next_run_at: datetime,
-    ) -> tuple[Scheduler, TaskSchedule, AsyncMock, MagicMock]:
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(name='s', task_name='my_task', pattern=pattern),
-            ],
-        )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session = AsyncMock()
-        broker = MagicMock()
-        broker.session_factory.return_value.__aenter__ = AsyncMock(
-            return_value=session,
-        )
-        broker.session_factory.return_value.__aexit__ = AsyncMock(
-            return_value=False,
-        )
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = next_run_at
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        enqueue_mock = AsyncMock(return_value=Ok('task-1'))
-        scheduler._enqueue_scheduled_task = enqueue_mock  # type: ignore[method-assign]
-        return scheduler, config.schedules[0], enqueue_mock, state_manager
-
     async def test_downtime_backlog_fires_latest_slot_once(self) -> None:
-        """10h-stale hourly-equivalent state enqueues exactly one run."""
-        scheduler, schedule, enqueue_mock, state_manager = self._make_harness(
-            pattern=IntervalSchedule(seconds=5),
-            next_run_at=_utc(2025, 6, 1, 12, 0, 0),
-        )
+        """A backlog of ten 5-second slots sends one fire with the latest slot."""
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
+        latest = _utc(2025, 6, 1, 12, 0, 50)
+        scheduler, state_manager = _fire_harness(schedule, _advanced(latest))
         now = _utc(2025, 6, 1, 12, 0, 52)
 
-        await scheduler._check_schedule(schedule, now)
-
-        enqueue_mock.assert_awaited_once()
-        assert enqueue_mock.await_args.kwargs['slot_time'] == _utc(
-            2025, 6, 1, 12, 0, 50,
+        await scheduler._check_schedule(
+            schedule, DueSchedule('s', _utc(2025, 6, 1, 12, 0, 0)), now,
         )
-        update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 55)
-        assert update_kwargs['next_run_at'] > now
+
+        [fire] = _fires(state_manager)
+        assert fire.slot_ats == (latest,)
+        assert fire.expected_next_run_at == _utc(2025, 6, 1, 12, 0, 0)
+        assert fire.next_run_at == _utc(2025, 6, 1, 12, 0, 55)
+        assert fire.next_run_at > now
 
     async def test_deep_backlog_persists_progress_without_firing(self) -> None:
-        """Scan-cap path advances state without enqueuing a stale slot."""
-        scheduler, schedule, enqueue_mock, state_manager = self._make_harness(
-            pattern=IntervalSchedule(seconds=1),
-            next_run_at=_utc(2025, 6, 1, 12, 0, 0),
-        )
+        """The scan bound moves the row with a fire of no slots."""
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=1))
+        scheduler, state_manager = _fire_harness(schedule, _advanced())
         now = _utc(2025, 6, 1, 12, 0, 30)
 
         with patch.object(Scheduler, '_MAX_SKIP_SCAN_PER_TICK', 3):
-            await scheduler._check_schedule(schedule, now)
+            await scheduler._check_schedule(
+                schedule, DueSchedule('s', _utc(2025, 6, 1, 12, 0, 0)), now,
+            )
 
-        enqueue_mock.assert_not_awaited()
-        state_manager.update_after_run.assert_not_awaited()
-        update_kwargs = state_manager.update_next_run.await_args.kwargs
-        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 4)
+        [fire] = _fires(state_manager)
+        assert fire.slot_ats == ()
+        assert fire.next_run_at == _utc(2025, 6, 1, 12, 0, 4)
 
 
 # =============================================================================
@@ -905,7 +942,7 @@ class TestValidateSchedules:
 
         assert scheduler._prepared_schedules == {
             's': PreparedSchedule(
-                kwargs_json=dumps_json({'value': 5}).ok_value,
+                kwargs_json=_json_text({'value': 5}),
                 task_options_json=None,
             ),
         }
@@ -996,23 +1033,44 @@ class TestInitializeSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        foreign_state = MagicMock()
-        foreign_state.schedule_name = 'other_schedulers_row'
-        kept_state = MagicMock()
-        kept_state.schedule_name = 'kept'
-
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(
-            return_value=[foreign_state, kept_state],
+        state_manager.read_start_states = AsyncMock(
+            return_value=_start_read(('other_schedulers_row', STALE_CONFIG_HASH)),
         )
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
+        state_manager.store_start_states = AsyncMock(return_value=('kept',))
         scheduler.state_manager = state_manager
 
         await scheduler._initialize_schedules()
 
-        state_manager.get_all_states.assert_awaited_once()
+        state_manager.read_start_states.assert_awaited_once()
+        assert _written_names(state_manager.store_start_states) == ['kept']
+
+    @pytest.mark.asyncio
+    async def test_first_runs_come_from_the_database_time(self) -> None:
+        """A new schedule's first run is computed from the start read's
+        database time, not from the host clock."""
+        pattern = IntervalSchedule(seconds=10)
+        config = ScheduleConfig(
+            schedules=[TaskSchedule(name='s', task_name='my_task', pattern=pattern)],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(return_value=('s',))
+        scheduler.state_manager = state_manager
+
+        await scheduler._initialize_schedules()
+
+        writes: list[ScheduleStateWrite] = state_manager.store_start_states.await_args.args[0]
+        assert writes == [
+            ScheduleStateWrite(
+                schedule_name='s',
+                next_run_at=calculate_next_run(pattern, DATABASE_NOW, 'UTC'),
+                config_hash=scheduler._compute_config_hash(config.schedules[0]),
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_one_bad_schedule_does_not_block_others(self) -> None:
@@ -1040,108 +1098,87 @@ class TestInitializeSchedules:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(return_value=[])
-        state_manager.get_state = AsyncMock(return_value=None)
-
-        call_count = 0
-
-        async def _init_side_effect(
-            name: str, next_run: datetime, config_hash: bytes, **kwargs: object,
-        ) -> None:
-            nonlocal call_count
-            call_count += 1
-            if name == 'bad':
-                raise RuntimeError('simulated calculator failure')
-
-        state_manager.initialize_state = AsyncMock(side_effect=_init_side_effect)
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(return_value=('good_first', 'good_last'))
         scheduler.state_manager = state_manager
 
         # Should not raise — bad schedule is isolated
+        with patch(
+            'horsies.core.scheduler.service.calculate_next_run',
+            side_effect=_fail_on_call(2),
+        ):
+            await scheduler._initialize_schedules()
+
+        assert _written_names(state_manager.store_start_states) == ['good_first', 'good_last']
+
+    @pytest.mark.asyncio
+    async def test_store_failure_is_logged_and_start_goes_on(self) -> None:
+        """A database error of the start write does not raise: the tick's
+        existence heal creates the missing rows."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5)),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(side_effect=RuntimeError('db error'))
+        scheduler.state_manager = state_manager
+
         await scheduler._initialize_schedules()
 
-        # Both good schedules initialized; bad one attempted but failed
-        assert call_count == 3
-        assert state_manager.initialize_state.await_count == 3
+        state_manager.store_start_states.assert_awaited_once()
 
 
 # =============================================================================
-# _check_schedule transactional session usage
+# _check_schedule: one statement per due schedule
 # =============================================================================
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestCheckScheduleSessionUsage:
-    """Ensure lock-protected checks use one DB session for state read/write."""
+class TestCheckScheduleOneStatement:
+    """A due schedule sends one fire; no lock session, no per-slot enqueue."""
 
-    async def test_state_reads_and_updates_use_lock_session(self) -> None:
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
+    async def test_a_due_slot_sends_one_fire_from_the_due_read(self) -> None:
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
+        slot = _utc(2025, 6, 1, 11, 59, 59)
+        scheduler, state_manager = _fire_harness(schedule, _advanced(slot))
+
+        await scheduler._check_schedule(schedule, DueSchedule('s', slot), _utc(2025, 6, 1, 12, 0, 0))
+
+        assert _fires(state_manager) == [
+            ScheduleFire(
+                schedule_name='s',
+                expected_next_run_at=slot,
+                next_run_at=_utc(2025, 6, 1, 12, 0, 4),
+                slot_ats=(slot,),
+                command=COMMAND,
+            ),
+        ]
+        state_manager.heal_missing_states.assert_not_awaited()
+        assert isinstance(scheduler.broker, MagicMock)
+        scheduler.broker.enqueue_async.assert_not_called()
+
+    async def test_a_missing_state_row_is_healed_from_the_database_time(self) -> None:
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
+        scheduler, state_manager = _fire_harness(schedule, Ok(ScheduleStateMissing()))
+
+        await scheduler._check_schedule(
+            schedule, DueSchedule('s', _utc(2020, 1, 1, 11, 59, 59)), DATABASE_NOW,
         )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
 
-        session = AsyncMock()
-        broker = MagicMock()
-        broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
-        broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        now = _utc(2025, 6, 1, 12, 0, 0)
-        state.next_run_at = _utc(2025, 6, 1, 11, 59, 59)
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        scheduler._enqueue_scheduled_task = AsyncMock(return_value=Ok('task-1'))  # type: ignore[method-assign]
-
-        await scheduler._check_schedule(config.schedules[0], now)
-
-        state_manager.get_state.assert_awaited_once_with('s', session=session)
-        assert state_manager.update_after_run.await_count == 1
-        update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['session'] is session
-
-    async def test_missing_state_initializes_using_lock_session(self) -> None:
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
+        assert _written_names(state_manager.heal_missing_states) == ['s']
+        [write] = state_manager.heal_missing_states.await_args.args[0]
+        assert write == ScheduleStateWrite(
+            schedule_name='s',
+            next_run_at=calculate_next_run(schedule.pattern, DATABASE_NOW, 'UTC'),
+            config_hash=scheduler._compute_config_hash(schedule),
         )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session = AsyncMock()
-        broker = MagicMock()
-        broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
-        broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        await scheduler._check_schedule(config.schedules[0], _utc(2025, 6, 1, 12, 0, 0))
-
-        state_manager.get_state.assert_awaited_once()
-        assert state_manager.initialize_state.await_count == 1
-        init_kwargs = state_manager.initialize_state.await_args.kwargs
-        assert init_kwargs['session'] is session
+        state_manager.fire_schedule.assert_awaited_once()
 
 
 # =============================================================================
@@ -1183,9 +1220,6 @@ def _make_broker_mock(
     # reads through ``select_resources()``. Tests configure it through this name.
     broker.session_factory = MagicMock()
     attach_resources(broker, fake_resources(session_factory=broker.session_factory))
-    broker.create_single_connection_engine = MagicMock(
-        return_value=MagicMock(dispose=AsyncMock()),
-    )
     return broker
 
 
@@ -1368,6 +1402,32 @@ class TestSchedulerStart:
 
         assert call_order == ['preload', 'validate', 'init']
 
+    async def test_start_builds_the_command_of_each_schedule(self) -> None:
+        """start() builds each enabled schedule's command once, after validation."""
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
+        app = _make_app(
+            schedule_config=ScheduleConfig(schedules=[schedule]),
+            tasks={'my_task': _make_task_mock(lambda: 'ok')},
+        )
+        broker = _make_broker_mock()
+        broker.prepare_send_command = MagicMock(return_value=Ok(COMMAND))
+        app.get_broker = MagicMock(return_value=broker)
+        scheduler = Scheduler(app)
+        scheduler._preload_task_modules = MagicMock()  # type: ignore[method-assign]
+        scheduler._initialize_schedules = AsyncMock()  # type: ignore[method-assign]
+
+        await scheduler.start()
+
+        assert scheduler._commands == {'s': COMMAND}
+        assert broker.prepare_send_command.call_args.kwargs == {
+            'task_name': 'my_task',
+            'queue_name': 'default',
+            'priority': 100,
+            'kwargs_json': None,
+            'task_options': None,
+            'retention_class_key': 'standard_30d',
+        }
+
 
 # =============================================================================
 # Scheduler.stop
@@ -1419,32 +1479,6 @@ class TestSchedulerStop:
 
         assert scheduler._stop.is_set()
         scheduler.broker.close_async.assert_awaited_once()
-
-    async def test_stop_disposes_the_lock_engine(self) -> None:
-        """The private lock engine is disposed and released on stop."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-        broker = _make_broker_mock(close_ok=True)
-        scheduler.broker = broker
-        dispose = AsyncMock()
-        scheduler._lock_database = ScheduleLockDatabase(
-            engine=MagicMock(dispose=dispose),
-            session_factory=broker.session_factory,
-        )
-
-        await scheduler.stop()
-
-        dispose.assert_awaited_once()
-        assert scheduler._lock_database is None
 
     async def test_stop_no_broker_only_sets_event(self) -> None:
         """No broker → just sets stop event, no crash."""
@@ -1629,8 +1663,9 @@ class TestInitializeSchedulesAdditionalPaths:
         with pytest.raises(RuntimeError, match='State manager not initialized'):
             await scheduler._initialize_schedules()
 
-    async def test_prune_exception_logs_warning_continues(self) -> None:
-        """get_all_states raises → logs warning, initialization still runs."""
+    async def test_start_read_failure_is_logged_and_writes_nothing(self) -> None:
+        """read_start_states raises → logged, no write; the tick's existence
+        heal creates the missing rows."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -1644,19 +1679,17 @@ class TestInitializeSchedulesAdditionalPaths:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(side_effect=RuntimeError('db error'))
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
+        state_manager.read_start_states = AsyncMock(side_effect=RuntimeError('db error'))
+        state_manager.store_start_states = AsyncMock()
         scheduler.state_manager = state_manager
 
         # Should not raise
         await scheduler._initialize_schedules()
 
-        # Schedule 's' should still initialize despite prune failure
-        state_manager.initialize_state.assert_awaited_once()
+        state_manager.store_start_states.assert_not_awaited()
 
     async def test_disabled_schedule_skipped_during_init(self) -> None:
-        """Disabled schedules are not passed to _initialize_single_schedule."""
+        """Disabled schedules get no state row."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -1676,84 +1709,60 @@ class TestInitializeSchedulesAdditionalPaths:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(return_value=[])
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(return_value=('enabled_one',))
         scheduler.state_manager = state_manager
 
         await scheduler._initialize_schedules()
 
-        # Only 'enabled_one' should be initialized
-        assert state_manager.initialize_state.await_count == 1
-        init_args = state_manager.initialize_state.await_args
-        assert init_args[0][0] == 'enabled_one'
-
-
-# =============================================================================
-# _initialize_single_schedule — additional paths
-# =============================================================================
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestInitializeSingleScheduleAdditionalPaths:
-    """Additional tests for Scheduler._initialize_single_schedule."""
-
-    async def test_no_state_manager_raises_runtime_error(self) -> None:
-        """state_manager=None → RuntimeError."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-        scheduler.state_manager = None
-
-        with pytest.raises(RuntimeError, match='State manager not initialized'):
-            await scheduler._initialize_single_schedule(
-                config.schedules[0],
-                _utc(2025, 6, 1, 12, 0, 0),
-            )
+        assert _written_names(state_manager.store_start_states) == ['enabled_one']
 
     async def test_config_hash_changed_recalculates_next_run(self) -> None:
-        """Existing state with stale hash → update_next_run called with new hash."""
+        """A stored digest that differs → the row is written with the new
+        digest and a next run from the database time."""
+        pattern = IntervalSchedule(seconds=10)
         config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=10),
-                ),
-            ],
+            schedules=[TaskSchedule(name='s', task_name='my_task', pattern=pattern)],
         )
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        # Existing state with old hash
-        old_state = MagicMock()
-        old_state.config_hash = STALE_CONFIG_HASH
-        old_state.next_run_at = _utc(2025, 6, 1, 11, 0, 0)
-
         state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=old_state)
-        state_manager.update_next_run = AsyncMock()
+        state_manager.read_start_states = AsyncMock(
+            return_value=_start_read(('s', STALE_CONFIG_HASH)),
+        )
+        state_manager.store_start_states = AsyncMock(return_value=('s',))
         scheduler.state_manager = state_manager
 
-        now = _utc(2025, 6, 1, 12, 0, 0)
-        await scheduler._initialize_single_schedule(config.schedules[0], now)
+        await scheduler._initialize_schedules()
 
-        # Should have called update_next_run with new hash
-        state_manager.update_next_run.assert_awaited_once()
-        update_args = state_manager.update_next_run.await_args
-        assert update_args[0][0] == 's'  # schedule_name
-        # The new config_hash should differ from the stale one
-        new_hash = update_args[0][2]
-        assert new_hash != STALE_CONFIG_HASH
+        writes: list[ScheduleStateWrite] = state_manager.store_start_states.await_args.args[0]
+        assert len(writes) == 1
+        assert writes[0].config_hash != STALE_CONFIG_HASH
+        assert writes[0].config_hash == scheduler._compute_config_hash(config.schedules[0])
+        assert writes[0].next_run_at == calculate_next_run(pattern, DATABASE_NOW, 'UTC')
+
+    async def test_unchanged_digest_is_not_written(self) -> None:
+        """A stored digest that matches → no write."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=10),
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.read_start_states = AsyncMock(
+            return_value=_start_read(('s', scheduler._compute_config_hash(schedule))),
+        )
+        state_manager.store_start_states = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        await scheduler._initialize_schedules()
+
+        state_manager.store_start_states.assert_not_awaited()
 
 
 # =============================================================================
@@ -1801,14 +1810,14 @@ class TestCheckAndRunSchedules:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_due_states = AsyncMock()
+        state_manager.read_due_schedules = AsyncMock()
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
         await scheduler._check_and_run_schedules()
 
-        # get_due_states should not be called since no enabled schedules
-        state_manager.get_due_states.assert_not_awaited()
+        # The due read is not sent since no schedule is enabled
+        state_manager.read_due_schedules.assert_not_awaited()
 
     async def test_iterates_due_states_and_checks_each(self) -> None:
         """Two due states → _check_schedule called for each."""
@@ -1829,29 +1838,26 @@ class TestCheckAndRunSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        due_a = MagicMock()
-        due_a.schedule_name = 'sched_a'
-        due_b = MagicMock()
-        due_b.schedule_name = 'sched_b'
-
         state_manager = MagicMock()
-        state_manager.get_existing_names = AsyncMock(
-            return_value={'sched_a', 'sched_b'},
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(
+            return_value=_due_read('sched_a', 'sched_b'),
         )
-        state_manager.get_due_states = AsyncMock(return_value=[due_a, due_b])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
-        checked: list[str] = []
+        checked: list[tuple[str, object]] = []
 
-        async def _track_check(schedule: object, now: object) -> None:
-            checked.append(schedule.name)  # type: ignore[union-attr]
+        async def _track_check(schedule: object, due: object, now: object) -> None:
+            checked.append((schedule.name, now))  # type: ignore[union-attr]
+            assert due == DueSchedule(schedule.name, DATABASE_NOW)  # type: ignore[union-attr]
 
         scheduler._check_schedule = AsyncMock(side_effect=_track_check)  # type: ignore[method-assign]
 
         await scheduler._check_and_run_schedules()
 
-        assert checked == ['sched_a', 'sched_b']
+        # Each due schedule is checked at the due read's database time.
+        assert checked == [('sched_a', DATABASE_NOW), ('sched_b', DATABASE_NOW)]
 
     async def test_check_schedule_error_does_not_block_others(self) -> None:
         """First _check_schedule raises → second still called."""
@@ -1872,23 +1878,18 @@ class TestCheckAndRunSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        due_a = MagicMock()
-        due_a.schedule_name = 'sched_a'
-        due_b = MagicMock()
-        due_b.schedule_name = 'sched_b'
-
         state_manager = MagicMock()
-        state_manager.get_existing_names = AsyncMock(
-            return_value={'sched_a', 'sched_b'},
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(
+            return_value=_due_read('sched_a', 'sched_b'),
         )
-        state_manager.get_due_states = AsyncMock(return_value=[due_a, due_b])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
         checked: list[str] = []
 
-        async def _fail_first(schedule: object, now: object) -> None:
-            name = schedule.name  # type: ignore[union-attr]
+        async def _fail_first(schedule: TaskSchedule, due: object, now: object) -> None:
+            name = schedule.name
             checked.append(name)
             if name == 'sched_a':
                 raise RuntimeError('simulated failure')
@@ -1932,507 +1933,182 @@ class TestComputeConfigHashSerializationFailure:
 
 
 # =============================================================================
-# _check_schedule — additional paths
+# _check_schedule — the outcomes of one fire
 # =============================================================================
 
 
-def _make_session_and_broker() -> tuple[AsyncMock, MagicMock]:
-    """Create a mock session + broker wired through session_factory context manager."""
-    session = AsyncMock()
-    session.commit = AsyncMock()
-    session.rollback = AsyncMock()
-    broker = MagicMock()
-    broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
-    broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-    return session, broker
+_FIVE_SECONDS = IntervalSchedule(seconds=5)
+
+
+def _schedule(*, catch_up_missed: bool = False, max_catch_up_runs: int = 100) -> TaskSchedule:
+    return TaskSchedule(
+        name='s',
+        task_name='my_task',
+        pattern=_FIVE_SECONDS,
+        catch_up_missed=catch_up_missed,
+        max_catch_up_runs=max_catch_up_runs,
+    )
+
+
+_DUE = DueSchedule('s', _utc(2025, 6, 1, 12, 0, 0))
+
+
+def _refusal() -> Err[ScheduleFireRefused]:
+    return Err(
+        ScheduleFireRefused(
+            schedule_name='s',
+            cause=DBAPIError('SELECT', {}, psycopg.errors.CheckViolation('check')),
+        ),
+    )
+
+
+def _unknown() -> Err[ScheduleFireOutcomeUnknown]:
+    return Err(
+        ScheduleFireOutcomeUnknown(
+            schedule_name='s',
+            cause=OperationalError('SELECT', {}, Exception('connection lost')),
+        ),
+    )
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestCheckScheduleAdditionalPaths:
-    """Additional tests for Scheduler._check_schedule."""
+class TestCheckScheduleOutcomes:
+    """One test per outcome of the fire, and the slots it is sent."""
 
     async def test_not_initialized_raises_runtime_error(self) -> None:
         """state_manager=None → RuntimeError."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
+        schedule = _schedule()
+        scheduler = Scheduler(_make_app(schedule_config=ScheduleConfig(schedules=[schedule])))
         scheduler.state_manager = None
         scheduler.broker = None
 
         with pytest.raises(RuntimeError, match='not properly initialized'):
-            await scheduler._check_schedule(config.schedules[0], _utc(2025, 6, 1, 12, 0, 0))
+            await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 0))
 
-    async def test_not_due_commits_and_returns(self) -> None:
-        """should_run_now returns False → commit, no enqueue."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+    async def test_a_tick_before_start_raises_with_the_schedule_name(self) -> None:
+        """A tick before start() is a defect, not a refused slot."""
+        schedule = _schedule()
+        scheduler, state_manager = _fire_harness(schedule)
+        scheduler._prepared_schedules = {}
+        scheduler._commands = {}
+
+        with pytest.raises(RuntimeError, match="Schedule 's' has no prepared wire text"):
+            await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
+
+        state_manager.fire_schedule.assert_not_awaited()
+
+    async def test_a_catch_up_sends_every_due_slot_in_one_fire(self) -> None:
+        schedule = _schedule(catch_up_missed=True)
+        slots = (_utc(2025, 6, 1, 12, 0, 0), _utc(2025, 6, 1, 12, 0, 5), _utc(2025, 6, 1, 12, 0, 10))
+        scheduler, state_manager = _fire_harness(schedule, _advanced(*slots))
+
+        await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 12))
+
+        [fire] = _fires(state_manager)
+        assert fire.slot_ats == slots
+        assert fire.next_run_at == _utc(2025, 6, 1, 12, 0, 15)
+
+    async def test_a_catch_up_sends_at_most_max_catch_up_runs_slots(self) -> None:
+        schedule = _schedule(catch_up_missed=True, max_catch_up_runs=2)
+        slots = (_utc(2025, 6, 1, 12, 0, 0), _utc(2025, 6, 1, 12, 0, 5))
+        scheduler, state_manager = _fire_harness(schedule, _advanced(*slots))
+
+        await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 12))
+
+        [fire] = _fires(state_manager)
+        assert fire.slot_ats == slots
+        # The rest stays due: the row moves to the slot after the last one sent.
+        assert fire.next_run_at == _utc(2025, 6, 1, 12, 0, 10)
+
+    async def test_each_slot_of_an_advanced_fire_is_logged_by_its_outcome(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        schedule = _schedule(catch_up_missed=True)
+        slots = (_utc(2025, 6, 1, 12, 0, 0), _utc(2025, 6, 1, 12, 0, 5), _utc(2025, 6, 1, 12, 0, 10))
+        answer = Ok(
+            ScheduleAdvanced(
+                slots=(
+                    FiredSlot(slots[0], 'id-0', SlotOutcome.SAME_COMMAND),
+                    FiredSlot(slots[1], 'id-1', SlotOutcome.CONFLICT_UNVERIFIABLE),
+                    FiredSlot(slots[2], 'id-2', SlotOutcome.INSERTED),
                 ),
-            ],
+            ),
         )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
+        scheduler, _ = _fire_harness(schedule, answer)
 
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
+        with caplog.at_level(logging.INFO, logger='horsies.scheduler'):
+            await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 12))
 
-        # State exists but not due yet
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 13, 0, 0)  # future
+        by_level = [(record.levelno, record.getMessage()) for record in caplog.records]
+        assert any(level == logging.INFO and 'already has its task id-0' in m for level, m in by_level)
+        assert any(level == logging.ERROR and 'not recorded as a run' in m for level, m in by_level)
+        assert any(level == logging.INFO and 'enqueued task id-2' in m for level, m in by_level)
 
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        scheduler.state_manager = state_manager
+    async def test_a_moved_row_writes_nothing_more(self) -> None:
+        scheduler, state_manager = _fire_harness(_schedule(), Ok(ScheduleStateMoved()))
 
-        now = _utc(2025, 6, 1, 12, 0, 0)  # before next_run_at
+        await scheduler._check_schedule(_schedule(), _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=False,
-        ):
-            await scheduler._check_schedule(config.schedules[0], now)
+        state_manager.fire_schedule.assert_awaited_once()
+        state_manager.heal_missing_states.assert_not_awaited()
 
-        session.commit.assert_awaited_once()
-        # No enqueue should have been attempted
-        assert not hasattr(scheduler, '_enqueue_scheduled_task_called')
+    async def test_an_unknown_outcome_is_logged_and_left_to_the_next_tick(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        scheduler, state_manager = _fire_harness(_schedule(), _unknown())
 
-    async def test_catch_up_multiple_runs_all_succeed(self) -> None:
-        """Catch-up with 3 due runs, all succeed → state updated with last slot."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=True,
-            max_catch_up_runs=10,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
+        with caplog.at_level(logging.WARNING, logger='horsies.scheduler'):
+            await scheduler._check_schedule(_schedule(), _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
+        state_manager.fire_schedule.assert_awaited_once()
+        assert any('transient' in record.getMessage() for record in caplog.records)
 
-        # State: due since 12:00:00, now is 12:00:17 → 4 slots
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-        state.config_hash = scheduler._compute_config_hash(schedule)
+    async def test_a_refused_latest_slot_moves_the_row_past_it_with_no_run(self) -> None:
+        scheduler, state_manager = _fire_harness(_schedule(), _refusal(), _advanced())
 
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        scheduler.state_manager = state_manager
+        await scheduler._check_schedule(_schedule(), _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        enqueue_ids: list[str] = []
-
-        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[str]:
-            task_id = f'task-{len(enqueue_ids)}'
-            enqueue_ids.append(task_id)
-            return Ok(task_id)
-
-        scheduler._enqueue_scheduled_task = AsyncMock(side_effect=_mock_enqueue)  # type: ignore[method-assign]
-
-        now = _utc(2025, 6, 1, 12, 0, 17)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
-
-        # Multiple runs enqueued
-        assert len(enqueue_ids) >= 3
-        # State updated after run
-        state_manager.update_after_run.assert_awaited_once()
-        update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == enqueue_ids[-1]
-        session.commit.assert_awaited_once()
-
-    async def test_catch_up_partial_failure_commits_progress(self) -> None:
-        """Catch-up: 2nd run fails → 1st saved, warning logged."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=True,
-            max_catch_up_runs=10,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        call_idx = 0
-
-        async def _fail_second(sched: object, *, slot_time: datetime) -> Ok[str] | Err[BrokerOperationError]:
-            nonlocal call_idx
-            call_idx += 1
-            if call_idx == 1:
-                return Ok('task-0')
-            return Err(BrokerEnqueueFailed(
-                message='transient error',
-                retryable=True,
-                exception=NoCause(),
-            ))
-
-        scheduler._enqueue_scheduled_task = AsyncMock(side_effect=_fail_second)  # type: ignore[method-assign]
-
-        now = _utc(2025, 6, 1, 12, 0, 17)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
-
-        # State should still be updated for the one that succeeded
-        state_manager.update_after_run.assert_awaited_once()
-        update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == 'task-0'
-        session.commit.assert_awaited_once()
-
-    async def test_catch_up_all_failed_rolls_back(self) -> None:
-        """Catch-up: 1st enqueue fails → rollback, no state update."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=True,
-            max_catch_up_runs=10,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerEnqueueFailed(
-                message='permanent error',
-                retryable=False,
-                exception=NoCause(),
-            )),
+        first, skip = _fires(state_manager)
+        assert first.slot_ats == (_utc(2025, 6, 1, 12, 0, 0),)
+        assert (skip.slot_ats, skip.expected_next_run_at, skip.next_run_at) == (
+            (),
+            _utc(2025, 6, 1, 12, 0, 0),
+            _utc(2025, 6, 1, 12, 0, 5),
         )
 
-        now = _utc(2025, 6, 1, 12, 0, 17)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
+    async def test_a_refused_catch_up_moves_the_row_past_its_first_slot(self) -> None:
+        """Python moved past the slot it was refused at; one statement is
+        refused for all its slots, so the row moves past the first one and
+        the next tick tries the rest."""
+        schedule = _schedule(catch_up_missed=True)
+        scheduler, state_manager = _fire_harness(schedule, _refusal(), _advanced())
 
-        # No state update — all failed
-        state_manager.update_after_run.assert_not_awaited()
-        session.rollback.assert_awaited_once()
+        await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 12))
 
-    async def test_normal_run_transient_failure_rollback(self) -> None:
-        """Normal run (no catch-up): retryable Err → warning, rollback."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=False,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
+        first, skip = _fires(state_manager)
+        assert len(first.slot_ats) == 3
+        assert (skip.slot_ats, skip.next_run_at) == ((), _utc(2025, 6, 1, 12, 0, 5))
 
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
+    async def test_a_failed_move_past_a_refusal_is_logged_for_the_next_tick(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        scheduler, state_manager = _fire_harness(_schedule(), _refusal(), _unknown())
 
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
+        with caplog.at_level(logging.ERROR, logger='horsies.scheduler'):
+            await scheduler._check_schedule(_schedule(), _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        scheduler.state_manager = state_manager
+        assert state_manager.fire_schedule.await_count == 2
+        assert any('could not move past' in record.getMessage() for record in caplog.records)
 
-        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerEnqueueFailed(
-                message='connection reset',
-                retryable=True,
-                exception=NoCause(),
-            )),
-        )
+    async def test_a_broken_precondition_raises_to_the_tick_seam(self) -> None:
+        cause = DBAPIError('SELECT', {}, psycopg.errors.InvalidParameterValue('slots'))
+        scheduler, _ = _fire_harness(_schedule(), cause)
 
-        now = _utc(2025, 6, 1, 12, 0, 5)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
+        with pytest.raises(DBAPIError) as raised:
+            await scheduler._check_schedule(_schedule(), _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        state_manager.update_after_run.assert_not_awaited()
-        session.rollback.assert_awaited_once()
-
-    async def test_normal_run_advances_next_run_from_slot_time(self) -> None:
-        """A late tick fires the latest due slot, keeping slot alignment.
-
-        catch_up_missed=False (spec change, 0.1.7): older missed slots are
-        dropped instead of replayed one per tick; the fired slot and the new
-        next_run_at stay aligned to the original anchor.
-        """
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=False,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        due_slot = _utc(2025, 6, 1, 12, 0, 0)
-        state = MagicMock()
-        state.next_run_at = due_slot
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        slot_times: list[datetime] = []
-
-        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[str]:
-            slot_times.append(slot_time)
-            return Ok('task-0')
-
-        scheduler._enqueue_scheduled_task = AsyncMock(side_effect=_mock_enqueue)  # type: ignore[method-assign]
-
-        now = _utc(2025, 6, 1, 12, 0, 17)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
-
-        # Slots 12:00:00..12:00:15 were due; only the latest fires, and the
-        # anchor is preserved (12:00:15 is still a multiple of the period).
-        assert slot_times == [_utc(2025, 6, 1, 12, 0, 15)]
-        state_manager.update_after_run.assert_awaited_once()
-        update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 20)
-        assert update_kwargs['next_run_at'] > now
-        session.commit.assert_awaited_once()
-
-    async def test_normal_run_permanent_failure_skips_slot(self) -> None:
-        """Non-retryable Err advances past the doomed slot (no wedge).
-
-        Spec change (0.1.7): a permanent enqueue error (e.g.
-        PAYLOAD_MISMATCH after a deploy changed kwargs) used to roll back
-        without advancing next_run_at, so the same slot was retried every
-        tick forever.
-        """
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=False,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerEnqueueFailed(
-                message='permanent failure',
-                retryable=False,
-                exception=NoCause(),
-            )),
-        )
-
-        now = _utc(2025, 6, 1, 12, 0, 5)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
-
-        state_manager.update_after_run.assert_not_awaited()
-        update_kwargs = state_manager.update_next_run.await_args.kwargs
-        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
-        session.commit.assert_awaited_once()
-
-    async def test_normal_run_transient_failure_rollback(self) -> None:
-        """Retryable Err → rollback, slot retried next tick."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=False,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerEnqueueFailed(
-                message='transient failure',
-                retryable=True,
-                exception=NoCause(),
-            )),
-        )
-
-        now = _utc(2025, 6, 1, 12, 0, 5)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
-
-        state_manager.update_after_run.assert_not_awaited()
-        state_manager.update_next_run.assert_not_awaited()
-        session.rollback.assert_awaited_once()
-
-    async def test_catch_up_permanent_failure_skips_doomed_slot(self) -> None:
-        """Catch-up: a permanently failing slot is consumed, not retried."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=True,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        state_manager.update_after_run = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        # First slot enqueues, second fails permanently, third never tried.
-        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            side_effect=[
-                Ok('task-0'),
-                Err(BrokerInvalidTaskOptions(
-                    message='task_options refused',
-                    exception=NoCause(),
-                )),
-            ],
-        )
-
-        now = _utc(2025, 6, 1, 12, 0, 12)  # due slots: 0, 5, 10
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            await scheduler._check_schedule(schedule, now)
-
-        # Progress recorded past the doomed slot (12:00:05) → next 12:00:10.
-        update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == 'task-0'
-        assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
-        session.commit.assert_awaited_once()
-
-    async def test_unexpected_exception_rollback(self) -> None:
-        """Unexpected exception during enqueue → error logged, rollback."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-            catch_up_missed=False,
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        session, broker = _make_session_and_broker()
-        scheduler.broker = broker
-        scheduler._lock_database = _lock_database_for(broker)
-
-        state = MagicMock()
-        state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=state)
-        scheduler.state_manager = state_manager
-
-        scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            side_effect=RuntimeError('unexpected boom'),
-        )
-
-        now = _utc(2025, 6, 1, 12, 0, 5)
-        with patch(
-            'horsies.core.scheduler.service.should_run_now',
-            return_value=True,
-        ):
-            # Should not raise — caught inside _check_schedule
-            await scheduler._check_schedule(schedule, now)
-
-        session.rollback.assert_awaited_once()
+        assert raised.value is cause
 
 
 # =============================================================================
@@ -2615,101 +2291,34 @@ class TestSignatureErrorNoOriginalFn:
 
 
 # =============================================================================
-# _enqueue_scheduled_task
+# _build_commands: the send command of each schedule, built at start
 # =============================================================================
+
+
+def _started_with_real_broker(
+    schedule: TaskSchedule,
+    fn: object,
+) -> tuple[Scheduler, MagicMock]:
+    """A scheduler whose start-time text and command come from a real broker (no connection)."""
+    app = _make_app(
+        schedule_config=ScheduleConfig(schedules=[schedule]),
+        tasks={'my_task': _make_task_mock(fn)},
+    )
+    scheduler = Scheduler(app)
+    broker = _real_broker()
+    scheduler.broker = broker
+    scheduler._validate_schedules()
+    scheduler._build_commands(broker)
+    state_manager = MagicMock()
+    state_manager.fire_schedule = AsyncMock(return_value=_advanced())
+    scheduler.state_manager = state_manager
+    return scheduler, state_manager
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestEnqueueScheduledTask:
-    """Tests for Scheduler._enqueue_scheduled_task."""
-
-    def _make_scheduler_with_task(
-        self,
-        *,
-        task_name: str = 'my_task',
-    ) -> Scheduler:
-        """Build scheduler with a registered task and mock broker."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name=task_name,
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        task_mock = _make_task_mock(lambda: 'ok')
-        app = _make_app(schedule_config=config, tasks={task_name: task_mock})
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('enqueued-id'))
-        return scheduler
-
-    async def test_no_broker_raises_runtime_error(self) -> None:
-        """broker=None → RuntimeError."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config, tasks={'my_task': MagicMock()})
-        scheduler = Scheduler(app)
-        scheduler.broker = None
-
-        with pytest.raises(RuntimeError, match='Broker not initialized'):
-            await scheduler._enqueue_scheduled_task(
-                config.schedules[0],
-                slot_time=_utc(2025, 6, 1, 12, 0, 0),
-            )
-
-    async def test_unregistered_task_raises_value_error(self) -> None:
-        """Task not in app.tasks → ValueError."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='nonexistent',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config, tasks={})
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-
-        with pytest.raises(ValueError, match='not registered'):
-            await scheduler._enqueue_scheduled_task(
-                config.schedules[0],
-                slot_time=_utc(2025, 6, 1, 12, 0, 0),
-            )
-
-    async def test_start_not_run_raises_with_the_schedule_name(self) -> None:
-        """A tick before start() is a defect, not a refused slot."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(
-            schedule_config=config,
-            tasks={'my_task': _make_task_mock(lambda: 'ok')},
-        )
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-
-        with pytest.raises(RuntimeError, match="Schedule 's' has no prepared wire text"):
-            await scheduler._enqueue_scheduled_task(
-                schedule,
-                slot_time=_utc(2025, 6, 1, 12, 0, 0),
-            )
-
-        scheduler.broker.enqueue_async.assert_not_called()
+class TestScheduleCommand:
+    """The command that every fire of a schedule sends."""
 
     async def test_a_value_refused_after_boot_is_sent_as_boot_encoded_it(
         self,
@@ -2724,28 +2333,16 @@ class TestEnqueueScheduledTask:
             pattern=IntervalSchedule(seconds=5),
             kwargs={'deadline': 'soon'},
         )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(
-            schedule_config=config,
-            tasks={'my_task': _make_task_mock(_deadline_task)},
-        )
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
-        scheduler._validate_schedules()
+        scheduler, state_manager = _started_with_real_broker(schedule, _deadline_task)
 
         monkeypatch.setattr(_Deadline, 'passed', True)
         with pytest.raises(ValueValidationError, match='deadline has passed'):
             encode_kwargs_read_back(_deadline_task, schedule.kwargs)
 
-        result = await scheduler._enqueue_scheduled_task(
-            schedule,
-            slot_time=_utc(2025, 6, 1, 12, 0, 0),
-        )
+        await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        assert result == Ok('task-1')
-        enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
-        assert enqueue_kwargs['kwargs_json'] == dumps_json({'deadline': 'soon'}).ok_value
+        [fire] = _fires(state_manager)
+        assert fire.command.stored_input == _json_text({'deadline': 'soon'})
 
     async def test_a_fired_slot_stamps_the_class_of_the_queue_period(self) -> None:
         """A cron fire resolves through the queue mapping, like a send."""
@@ -2753,36 +2350,24 @@ class TestEnqueueScheduledTask:
 
         from horsies.core.models.retention import RetentionConfig
 
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
-        )
-        config = ScheduleConfig(schedules=[schedule])
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
 
         def no_kwargs_fn() -> None:
             return None
 
         app = _make_app(
-            schedule_config=config,
+            schedule_config=ScheduleConfig(schedules=[schedule]),
             tasks={'my_task': _make_task_mock(no_kwargs_fn)},
         )
         app.config.retention = RetentionConfig(
             queue_retention={'default': timedelta(days=7)},
         )
         scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        broker = _real_broker()
         scheduler._validate_schedules()
+        scheduler._build_commands(broker)
 
-        result = await scheduler._enqueue_scheduled_task(
-            schedule,
-            slot_time=_utc(2025, 6, 1, 12, 0, 0),
-        )
-
-        assert result == Ok('task-1')
-        enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
-        assert enqueue_kwargs['retention_class_key'] == 'standard_7d'
+        assert scheduler._commands['s'].retention_class_key == 'standard_7d'
 
     async def test_the_fingerprint_covers_the_text_boot_encoded(self) -> None:
         schedule = TaskSchedule(
@@ -2791,32 +2376,25 @@ class TestEnqueueScheduledTask:
             pattern=IntervalSchedule(seconds=5),
             kwargs={'value': 5},
         )
-        config = ScheduleConfig(schedules=[schedule])
 
         def value_fn(*, value: int) -> None:
             return None
 
-        app = _make_app(
-            schedule_config=config,
-            tasks={'my_task': _make_task_mock(value_fn)},
-        )
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
-        scheduler._validate_schedules()
+        scheduler, _ = _started_with_real_broker(schedule, value_fn)
+        wire_text = _json_text({'value': 5})
+        match _real_broker().prepare_send_command(
+            task_name='my_task',
+            queue_name='default',
+            priority=100,
+            kwargs_json=wire_text,
+            task_options=None,
+        ):
+            case Ok(expected):
+                pass
+            case Err(refused):
+                pytest.fail(f'the command was refused: {refused}')
 
-        with patch(
-            'horsies.core.scheduler.service.enqueue_fingerprint',
-            wraps=enqueue_fingerprint,
-        ) as fingerprint:
-            result = await scheduler._enqueue_scheduled_task(
-                schedule,
-                slot_time=_utc(2025, 6, 1, 12, 0, 0),
-            )
-
-        assert result == Ok('task-1')
-        wire_text = dumps_json({'value': 5}).ok_value
-        assert fingerprint.call_args.kwargs['kwargs_json'] == wire_text
+        assert scheduler._commands['s'] == expected
 
     async def test_stored_kwargs_warn_at_the_tick(self) -> None:
         schedule = TaskSchedule(
@@ -2825,139 +2403,79 @@ class TestEnqueueScheduledTask:
             pattern=IntervalSchedule(seconds=5),
             kwargs={'value': 5},
         )
-        config = ScheduleConfig(schedules=[schedule])
 
         def value_fn(*, value: int) -> None:
             return None
 
-        app = _make_app(
-            schedule_config=config,
-            tasks={'my_task': _make_task_mock(value_fn)},
-        )
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
-        scheduler._validate_schedules()
+        scheduler, _ = _started_with_real_broker(schedule, value_fn)
 
-        with patch(
-            'horsies.core.scheduler.service.warn_if_payload_large',
-        ) as warn:
-            await scheduler._enqueue_scheduled_task(
-                schedule,
-                slot_time=_utc(2025, 6, 1, 12, 0, 0),
-            )
+        with patch('horsies.core.scheduler.service.warn_if_payload_large') as warn:
+            await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
         warn.assert_called_once_with(
-            app.config.payload,
+            scheduler.app.config.payload,
             task_name='my_task',
             kind='kwargs',
-            encoded_len=len(dumps_json({'value': 5}).ok_value),
+            payload_text=_json_text({'value': 5}),
         )
 
-    async def test_happy_path_calls_broker_with_correct_params(self) -> None:
-        """Full success: broker.enqueue_async called with deterministic task_id and sent_at=slot_time."""
-        # Strict-serde: positional args are rejected by the scheduler;
-        # kwargs-only is the documented usage.
+    async def test_a_fire_sends_the_command_of_the_schedule(self) -> None:
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
             pattern=IntervalSchedule(seconds=5),
             kwargs={'a': 1, 'b': 2, 'key': 'val'},
         )
-        config = ScheduleConfig(schedules=[schedule])
 
         def scheduled(*, a: int, b: int, key: str) -> None:
             _ = a, b, key
 
-        task_mock = _make_task_mock(scheduled)
-        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-abc'))
-        scheduler._validate_schedules()
+        scheduler, state_manager = _started_with_real_broker(schedule, scheduled)
 
-        slot = _utc(2025, 6, 1, 12, 0, 0)
-        result = await scheduler._enqueue_scheduled_task(schedule, slot_time=slot)
+        await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
-        assert not is_err(result)
-        assert result.ok_value == 'task-abc'
-
-        # Verify broker was called with sent_at = slot_time
-        enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
-        assert enqueue_kwargs['sent_at'] == slot
-        assert enqueue_kwargs['task_name'] == 'my_task'
-        assert enqueue_kwargs['task_id'] is not None
-
-    async def test_no_args_skips_serialization(self) -> None:
-        """Schedule with no args/kwargs → args_json=None, kwargs_json=None."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=5),
+        [fire] = _fires(state_manager)
+        assert fire.slot_ats == (_utc(2025, 6, 1, 12, 0, 0),)
+        assert (fire.command.task_name, fire.command.queue_name, fire.command.priority) == (
+            'my_task', 'default', 100,
         )
-        config = ScheduleConfig(schedules=[schedule])
-        task_mock = _make_task_mock(lambda: 'ok')
-        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-xyz'))
-        scheduler._validate_schedules()
+        assert fire.command.stored_input == _json_text({'a': 1, 'b': 2, 'key': 'val'})
 
-        slot = _utc(2025, 6, 1, 12, 0, 0)
-        with patch(
-            'horsies.core.scheduler.service.warn_if_payload_large',
-        ) as warn:
-            result = await scheduler._enqueue_scheduled_task(schedule, slot_time=slot)
+    async def test_no_kwargs_store_an_empty_object_and_do_not_warn(self) -> None:
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
+        scheduler, state_manager = _started_with_real_broker(schedule, lambda: 'ok')
 
-        assert not is_err(result)
-        enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
-        assert enqueue_kwargs['args_json'] is None
-        assert enqueue_kwargs['kwargs_json'] is None
+        with patch('horsies.core.scheduler.service.warn_if_payload_large') as warn:
+            await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
+
+        [fire] = _fires(state_manager)
+        assert fire.command.stored_input == '{}'
         warn.assert_not_called()
+
+    async def test_a_command_the_broker_refuses_fails_start_with_the_schedule_name(self) -> None:
+        schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
+        app = _make_app(
+            schedule_config=ScheduleConfig(schedules=[schedule]),
+            tasks={'my_task': _make_task_mock(lambda: 'ok')},
+        )
+        scheduler = Scheduler(app)
+        scheduler._validate_schedules()
+        broker = MagicMock()
+        broker.prepare_send_command = MagicMock(
+            return_value=Err(BrokerInvalidInput(message='input refused', exception=NoCause())),
+        )
+
+        with pytest.raises(ConfigurationError) as raised:
+            scheduler._build_commands(broker)
+
+        assert raised.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert "schedule 's'" in raised.value.message
+        assert raised.value.notes == ['input refused']
 
 
 # =============================================================================
 # Remaining coverage gap tests
 # =============================================================================
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestInitializeSingleScheduleAlreadyInitialized:
-    """Cover the else branch when config hash matches (L234)."""
-
-    async def test_state_exists_hash_matches_no_update(self) -> None:
-        """Existing state with matching hash → no-op (debug log only)."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=10),
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        # Compute the real hash to simulate matching state
-        real_hash = scheduler._compute_config_hash(schedule)
-
-        existing_state = MagicMock()
-        existing_state.config_hash = real_hash
-        existing_state.next_run_at = _utc(2025, 6, 1, 13, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=existing_state)
-        state_manager.initialize_state = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        await scheduler._initialize_single_schedule(
-            schedule,
-            _utc(2025, 6, 1, 12, 0, 0),
-        )
-
-        # Neither initialize nor update should be called
-        state_manager.initialize_state.assert_not_awaited()
-        state_manager.update_next_run.assert_not_awaited()
 
 
 @pytest.mark.unit
@@ -2979,20 +2497,17 @@ class TestCheckAndRunSchedulesOrphanDueState:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        orphan_state = MagicMock()
-        orphan_state.schedule_name = 'deleted_schedule'
-        real_state = MagicMock()
-        real_state.schedule_name = 'real'
-
         state_manager = MagicMock()
-        state_manager.get_existing_names = AsyncMock(return_value={'real'})
-        state_manager.get_due_states = AsyncMock(return_value=[orphan_state, real_state])
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(
+            return_value=_due_read('deleted_schedule', 'real'),
+        )
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
         checked: list[str] = []
 
-        async def _track(schedule: object, now: object) -> None:
+        async def _track(schedule: object, due: object, now: object) -> None:
             checked.append(schedule.name)  # type: ignore[union-attr]
 
         scheduler._check_schedule = AsyncMock(side_effect=_track)  # type: ignore[method-assign]
@@ -3009,7 +2524,7 @@ class TestEnsureStatesExist:
     """Tick-loop self-heal: missing state rows are re-initialized.
 
     Regression for the startup-init liveness gap: a schedule whose row
-    creation failed at start() was invisible to get_due_states and stayed
+    creation failed at start() was invisible to the due read and stayed
     dormant until restart.
     """
 
@@ -3033,100 +2548,95 @@ class TestEnsureStatesExist:
         scheduler.broker = _make_broker_mock()
         return scheduler, state_manager
 
-    async def test_missing_row_reinitialized_on_tick(self) -> None:
-        """A schedule without a state row gets initialized by the tick."""
+    async def test_missing_row_created_by_the_tick(self) -> None:
+        """The heal sends one row per enabled schedule; the statement
+        creates the missing ones."""
         scheduler, state_manager = self._scheduler_with_mock_manager(
             ['healthy', 'dormant'],
         )
-        state_manager.get_existing_names = AsyncMock(return_value={'healthy'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        inited: list[str] = []
-
-        async def _track_init(schedule: object, now: object) -> None:
-            inited.append(schedule.name)  # type: ignore[union-attr]
-
-        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_track_init,
-        )
+        state_manager.heal_missing_states = AsyncMock(return_value=('dormant',))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         await scheduler._check_and_run_schedules()
 
-        assert inited == ['dormant']
-        state_manager.get_due_states.assert_awaited_once()
+        assert _written_names(state_manager.heal_missing_states) == ['dormant', 'healthy']
+        state_manager.read_due_schedules.assert_awaited_once()
 
-    async def test_init_failure_logged_and_tick_proceeds(self) -> None:
-        """A failing re-init neither raises nor blocks the rest of the tick."""
+    async def test_first_runs_come_from_the_due_read_database_time(self) -> None:
+        """Each row of the heal gets the first run after the due read's
+        database time, not after the host clock."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
+        state_manager.heal_missing_states = AsyncMock(return_value=('a',))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
+
+        await scheduler._check_and_run_schedules()
+
+        writes: list[ScheduleStateWrite] = state_manager.heal_missing_states.await_args.args[0]
+        schedule = scheduler.schedule_config.schedules[0]
+        assert writes == [
+            ScheduleStateWrite(
+                schedule_name='a',
+                next_run_at=calculate_next_run(schedule.pattern, DATABASE_NOW, 'UTC'),
+                config_hash=scheduler._compute_config_hash(schedule),
+            ),
+        ]
+
+    async def test_calculation_failure_logged_and_tick_proceeds(self) -> None:
+        """A schedule whose first run cannot be computed is left out; the
+        others are healed and the tick goes on to its due schedules."""
         scheduler, state_manager = self._scheduler_with_mock_manager(
             ['bad', 'also_missing'],
         )
-        state_manager.get_existing_names = AsyncMock(return_value=set())
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        attempted: list[str] = []
+        state_manager.heal_missing_states = AsyncMock(return_value=('bad',))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
-        async def _flaky_init(schedule: object, now: object) -> None:
-            attempted.append(schedule.name)  # type: ignore[union-attr]
-            if schedule.name == 'also_missing':  # type: ignore[union-attr]
-                raise RuntimeError('db error')
+        with patch(
+            'horsies.core.scheduler.service.calculate_next_run',
+            side_effect=_fail_on_call(1),
+        ):
+            await scheduler._check_and_run_schedules()
 
-        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_flaky_init,
-        )
+        # Sorted order: 'also_missing' failed, 'bad' was sent.
+        assert _written_names(state_manager.heal_missing_states) == ['bad']
+        assert scheduler._ticks_until_existence_check == 0
 
-        await scheduler._check_and_run_schedules()
-
-        # Both missing schedules attempted (sorted order), failure contained,
-        # and the tick still reached the due-states read.
-        assert attempted == ['also_missing', 'bad']
-        state_manager.get_due_states.assert_awaited_once()
-
-    async def test_no_missing_rows_no_init(self) -> None:
-        """All rows present: no initialization happens."""
-        scheduler, state_manager = self._scheduler_with_mock_manager(['a', 'b'])
-        state_manager.get_existing_names = AsyncMock(return_value={'a', 'b'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        scheduler._initialize_single_schedule = AsyncMock()  # type: ignore[method-assign]
-
-        await scheduler._check_and_run_schedules()
-
-        scheduler._initialize_single_schedule.assert_not_awaited()
-
-    async def test_existence_read_failure_raises_to_tick_seam(self) -> None:
-        """A DB error on the existence read escapes to run_forever's
-        per-tick handler (the whole tick is retried next interval)."""
+    async def test_heal_failure_raises_to_tick_seam(self) -> None:
+        """A DB error of the heal escapes to run_forever's per-tick handler
+        (the whole tick is retried next interval). The due read ran first."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(
-            side_effect=RuntimeError('db down'),
-        )
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.heal_missing_states = AsyncMock(side_effect=RuntimeError('db down'))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read('a'))
+        scheduler._check_schedule = AsyncMock()  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match='db down'):
             await scheduler._check_and_run_schedules()
 
-        state_manager.get_due_states.assert_not_awaited()
+        state_manager.read_due_schedules.assert_awaited_once()
+        scheduler._check_schedule.assert_not_awaited()
 
     async def test_healthy_check_skipped_until_interval_elapses(self) -> None:
-        """While healthy, only the first tick reads existence; subsequent
-        ticks inside the interval skip it. Due states are read every tick."""
+        """While healthy, only the first tick heals; subsequent ticks inside
+        the interval skip it. The due read runs every tick."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(return_value={'a'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         for _tick in range(5):
             await scheduler._check_and_run_schedules()
 
-        assert state_manager.get_existing_names.await_count == 1
-        assert state_manager.get_due_states.await_count == 5
+        assert state_manager.heal_missing_states.await_count == 1
+        assert state_manager.read_due_schedules.await_count == 5
 
     async def test_healthy_check_reruns_after_interval(self) -> None:
-        """The existence check runs again once the tick interval elapses."""
+        """The heal runs again once the tick interval elapses."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(return_value={'a'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         for _tick in range(scheduler._existence_check_interval_ticks + 1):
             await scheduler._check_and_run_schedules()
 
-        assert state_manager.get_existing_names.await_count == 2
+        assert state_manager.heal_missing_states.await_count == 2
 
     async def test_interval_ticks_derived_from_check_interval(self) -> None:
         """The tick count preserves the ~60 s wall-clock cadence across
@@ -3149,51 +2659,41 @@ class TestEnsureStatesExist:
             ), f'check_interval_seconds={seconds}'
 
     async def test_unhealthy_pass_rechecks_next_tick(self) -> None:
-        """A failed re-init keeps the check running every tick until a
-        fully healthy pass, then the interval cadence resumes."""
+        """A failed first-run calculation keeps the heal running every tick
+        until a fully healthy pass, then the interval cadence resumes."""
         scheduler, state_manager = self._scheduler_with_mock_manager(
             ['flaky', 'ok'],
         )
-        state_manager.get_existing_names = AsyncMock(
-            side_effect=[{'ok'}, {'ok'}, {'ok', 'flaky'}, {'ok', 'flaky'}],
-        )
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        init_attempts = 0
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
-        async def _fail_once_then_succeed(schedule: object, now: object) -> None:
-            nonlocal init_attempts
-            init_attempts += 1
-            if init_attempts == 1:
-                raise RuntimeError('db error')
+        # Tick 1: one calculation fails -> unhealthy, heal again next tick.
+        # Tick 2: every calculation succeeds -> healthy, cadence resumes.
+        # Ticks 3-4: inside the interval -> no heal.
+        with patch(
+            'horsies.core.scheduler.service.calculate_next_run',
+            side_effect=_fail_on_call(1),
+        ):
+            for _tick in range(4):
+                await scheduler._check_and_run_schedules()
 
-        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_fail_once_then_succeed,
-        )
+        assert state_manager.heal_missing_states.await_count == 2
 
-        # Tick 1: missing + init fails -> unhealthy, recheck next tick.
-        # Tick 2: missing + init succeeds -> healthy, cadence resumes.
-        # Ticks 3-4: inside the interval -> no existence reads.
-        for _tick in range(4):
-            await scheduler._check_and_run_schedules()
-
-        assert state_manager.get_existing_names.await_count == 2
-        assert init_attempts == 2
-
-    async def test_existence_read_failure_rechecks_on_retried_tick(self) -> None:
-        """A raise on the existence read leaves the countdown armed: the
-        retried tick runs the check again instead of skipping it."""
+    async def test_heal_failure_reruns_on_retried_tick(self) -> None:
+        """A raise in the heal leaves the countdown armed: the retried tick
+        runs the heal again instead of skipping it."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(
-            side_effect=[RuntimeError('db down'), {'a'}],
+        state_manager.heal_missing_states = AsyncMock(
+            side_effect=[RuntimeError('db down'), ()],
         )
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         with pytest.raises(RuntimeError, match='db down'):
             await scheduler._check_and_run_schedules()
         await scheduler._check_and_run_schedules()
 
-        assert state_manager.get_existing_names.await_count == 2
-        state_manager.get_due_states.assert_awaited_once()
+        assert state_manager.heal_missing_states.await_count == 2
+        assert state_manager.read_due_schedules.await_count == 2
 
 
 @pytest.mark.unit
@@ -3276,6 +2776,9 @@ class TestPreloadTaskModulesAdditionalPaths:
 
         import_calls: list[str] = []
 
+        def _record_import(name: str) -> None:
+            import_calls.append(name)
+
         with (
             patch(
                 'horsies.core.scheduler.service.import_by_path',
@@ -3283,7 +2786,7 @@ class TestPreloadTaskModulesAdditionalPaths:
             ),
             patch(
                 'horsies.core.scheduler.service.importlib.import_module',
-                side_effect=lambda name: import_calls.append(name),
+                side_effect=_record_import,
             ),
         ):
             scheduler._preload_task_modules()

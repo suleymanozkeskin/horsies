@@ -242,6 +242,15 @@ enum Absence<'a> {
     Statement(&'a str),
 }
 
+/// The one staged skeleton every rendered reader comes from.
+///
+/// The function runs with `enable_seqscan = off`, as Python renders it
+/// (`horsies/core/history/reads/lookup_generation.py:487-493`). PL/pgSQL keeps
+/// a generic plan of each probe; on a new leaf that statistics show as empty,
+/// that plan is a sequential scan, kept until an ANALYZE of the leaf. Every
+/// probe has an index: the `task_id` index of each leaf and the primary keys
+/// of the live table and the clock exceptions. The setting is part of the
+/// `CREATE` statement because each publication replaces the function.
 #[allow(clippy::too_many_arguments)]
 fn staged_function(
     function_name: &str,
@@ -302,7 +311,7 @@ fn staged_function(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "\n    CREATE OR REPLACE FUNCTION {function_name}(p_task_id uuid{extra_parameters})\n    RETURNS {return_type}\n    LANGUAGE plpgsql\n    STABLE\n    AS $function$\n    DECLARE\n{declare_block}\n        v_uuid_bytes bytea;\n        v_birth_milliseconds bigint;\n        v_birth_at timestamptz;\n        v_effective_birth timestamptz;\n    BEGIN\n{live_probe}\n{finite_section}\n        {absence}\n    END\n    $function$\n    "
+        "\n    CREATE OR REPLACE FUNCTION {function_name}(p_task_id uuid{extra_parameters})\n    RETURNS {return_type}\n    LANGUAGE plpgsql\n    STABLE\n    SET enable_seqscan = off\n    AS $function$\n    DECLARE\n{declare_block}\n        v_uuid_bytes bytea;\n        v_birth_milliseconds bigint;\n        v_birth_at timestamptz;\n        v_effective_birth timestamptz;\n    BEGIN\n{live_probe}\n{finite_section}\n        {absence}\n    END\n    $function$\n    "
     )
 }
 

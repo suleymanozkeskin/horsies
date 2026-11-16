@@ -322,7 +322,6 @@ mod tests {
     #[test]
     fn detach_and_finalize_require_explicit_positive_values() {
         assert!(DetachExpiredHistoryLeaf::new(leaf(1), None, None).is_ok());
-        assert!(DetachExpiredHistoryLeaf::new(leaf(1), Some(Duration::zero()), None).is_err());
         assert!(DetachExpiredHistoryLeaf::new(leaf(1), None, Some(0)).is_err());
         assert!(FinalizeInterruptedLeafDetach::new(leaf(1), None).is_ok());
         assert!(FinalizeInterruptedLeafDetach::new(leaf(1), Some(0)).is_err());

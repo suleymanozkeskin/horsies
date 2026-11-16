@@ -494,3 +494,119 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
         )
     );
 }
+
+// --- the fit at worker boot ---------------------------------------------------
+//
+// Python `tests/unit/test_cli.py::TestBootConnectionFit` and
+// `horsies/core/cli.py:691-745`: the worker reads the limit before it starts,
+// logs the fit of its profile, and starts in every case.
+
+/// `test_a_profile_above_the_limit_warns_and_the_worker_starts`, with the
+/// core's one listener connection: 5 + 1 + 1 + 20 = 27 against 26 usable.
+#[test]
+fn a_profile_above_the_limit_is_one_warning_with_the_formula_and_the_help() {
+    let profile = isolated_only(20);
+    let fit =
+        BootConnectionFit::Compared(compare_connections(&profile, &direct(), limit(29, 3, 0)));
+
+    let record = boot_connection_log("default", &fit);
+
+    assert_eq!(record.level, BootLogLevel::Warning);
+    assert!(
+        record.message.starts_with(
+            "Worker profile 'default': one worker opens up to 27 Postgres connections itself, \
+             not counting task code; the server has 26 usable slots"
+        ),
+        "{}",
+        record.message
+    );
+    assert!(
+        record
+            .message
+            .contains("20 isolated children x isolated.task_send_pool 2 = 40 more, 67 in all"),
+        "{}",
+        record.message
+    );
+    assert!(
+        record
+            .message
+            .ends_with(&format!("To fix: {CONNECTIONS_HELP}")),
+        "{}",
+        record.message
+    );
+}
+
+/// `test_a_profile_within_the_limit_does_not_warn`.
+#[test]
+fn a_profile_within_the_limit_is_info() {
+    let profile = isolated_only(1);
+    let compared = compare_connections(&profile, &direct(), limit(100, 3, 0));
+    let expected = format!("Worker profile 'default': {}", compared.describe());
+
+    let record = boot_connection_log("default", &BootConnectionFit::Compared(compared));
+
+    assert_eq!(record.level, BootLogLevel::Info);
+    assert_eq!(record.message, expected);
+}
+
+/// Through a transaction pooler the boot reads nothing: the broker cannot
+/// connect, so a read would be the unreadable outcome.
+#[tokio::test]
+async fn boot_through_a_transaction_pooler_reads_nothing() {
+    let broker = unreachable_broker();
+    let mut config = direct();
+    config.pgbouncer_transaction_mode = true;
+    config.session_database_url = Some("postgresql://postgres:none@127.0.0.1:2/none".to_owned());
+
+    let fit = boot_connection_fit(&isolated_only(1), &config, &broker).await;
+
+    assert!(
+        matches!(fit, BootConnectionFit::NotComparedThroughPooler),
+        "{fit:?}"
+    );
+    assert_eq!(
+        boot_connection_log("default", &fit),
+        BootConnectionLog {
+            level: BootLogLevel::Info,
+            message: "Worker profile 'default': connections go through a transaction pooler; \
+                      the server connection limit is not compared"
+                .to_owned(),
+        }
+    );
+}
+
+/// `test_an_unreadable_limit_warns_and_the_worker_starts`.
+#[tokio::test]
+async fn boot_with_an_unreadable_limit_is_one_warning() {
+    let broker = unreachable_broker();
+
+    let fit = boot_connection_fit(&isolated_only(1), &direct(), &broker).await;
+
+    assert!(
+        matches!(fit, BootConnectionFit::LimitUnreadable(_)),
+        "{fit:?}"
+    );
+    let record = boot_connection_log("batch", &fit);
+    assert_eq!(record.level, BootLogLevel::Warning);
+    assert!(
+        record.message.starts_with(
+            "Worker profile 'batch': the server connection limit could not be read \
+             (reading the server connection limit failed: "
+        ),
+        "{}",
+        record.message
+    );
+    assert!(
+        record
+            .message
+            .ends_with("; the connections of this worker were not compared with it"),
+        "{}",
+        record.message
+    );
+}
+
+#[test]
+fn a_name_is_quoted_as_python_s_repr() {
+    assert_eq!(quoted_profile_name("default"), "'default'");
+    assert_eq!(quoted_profile_name(r"a\b"), r"'a\\b'");
+}

@@ -295,16 +295,33 @@ impl SpawnerHandle {
     /// Send `SIGKILL` to the session of `child`, so the subprocesses of its
     /// task end with it, except one that left the session itself.
     pub async fn kill_session(&self, child: ChildId) -> KillOutcome {
+        match self.request_kill(child) {
+            Ok(answer) => answer.await.unwrap_or(KillOutcome::SpawnerStopped),
+            Err(refused) => refused,
+        }
+    }
+
+    /// Queue the kill of `child`'s session without waiting for it, for a
+    /// thread outside the core runtime (the runner heartbeat watchdog). The
+    /// spawner thread sends the answer on the receiver; a closed receiver
+    /// means the spawner thread ended.
+    ///
+    /// `Err(KillOutcome::QueueFull)`: [`MAX_QUEUED_REQUESTS`] requests wait
+    /// already, and nothing was queued.
+    pub fn request_kill(
+        &self,
+        child: ChildId,
+    ) -> Result<oneshot::Receiver<KillOutcome>, KillOutcome> {
         let (reply, answer) = oneshot::channel();
         {
             let mut queue = self.shared.lock();
             match queue.requests.len() >= MAX_QUEUED_REQUESTS {
-                true => return KillOutcome::QueueFull,
+                true => return Err(KillOutcome::QueueFull),
                 false => queue.requests.push_back(Request::Kill { child, reply }),
             }
         }
         self.shared.waker.wake();
-        answer.await.unwrap_or(KillOutcome::SpawnerStopped)
+        Ok(answer)
     }
 }
 

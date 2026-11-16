@@ -548,11 +548,8 @@ impl WorkflowSpecBuilder {
             let has_args_from = !task.args_from.is_empty();
             let has_ctx_from = task.workflow_ctx_from.is_some();
             let input_json = &task.input_json;
-            let checked = crate::core::codec::check_json_text(input_json)
-                .map_err(|e| e.to_string())
-                .and_then(|()| {
-                    serde_json::from_str::<serde_json::Value>(input_json).map_err(|e| e.to_string())
-                });
+            let checked = crate::core::codec::from_json_str::<serde_json::Value>(input_json)
+                .map_err(|e| e.to_string());
             match checked {
                 Ok(serde_json::Value::Object(map)) => {
                     // Reserved key must not be provided explicitly.
@@ -567,30 +564,41 @@ impl WorkflowSpecBuilder {
                         );
                     }
 
-                    // Detect collisions between input fields and args_from keys.
-                    let mut collisions: Vec<String> = task
+                    // Python: WorkflowSpec._collect_kwargs_args_from_overlap_errors
+                    // (core/models/workflow/spec.py:1063-1081).
+                    let mut overlap: Vec<String> = task
                         .args_from
                         .keys()
                         .filter(|k| map.contains_key(*k))
                         .cloned()
                         .collect();
-                    collisions.sort();
-                    if !collisions.is_empty() {
+                    overlap.sort();
+                    if !overlap.is_empty() {
                         report.add(
-                            HorsiesError::new("input and args_from contain overlapping keys")
-                                .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                .with_note(format!("overlapping keys: {:?}", collisions))
+                            HorsiesError::new("kwargs and args_from keys must be disjoint")
+                                .with_code(ErrorCode::WorkflowKwargsArgsFromOverlap)
+                                .with_note(format!(
+                                    "node '{}' has overlapping key(s): {:?}",
+                                    task.task_name, overlap,
+                                ))
+                                .with_note(
+                                    "args_from would silently overwrite the static kwarg value at runtime",
+                                )
                                 .with_help(
-                                    "use distinct keys; args_from values override input fields",
+                                    "remove the overlapping key from either kwargs or args_from",
                                 ),
                         );
                     }
                 }
+                // A non-object input is positional input: task parameters are
+                // keyword-only, so Python refuses it with HRS-026
+                // (WorkflowSpec._collect_positional_args_not_supported_errors,
+                // core/models/workflow/spec.py:987-1006).
                 Ok(_) if has_args_from || has_ctx_from => {
                     let mut err = HorsiesError::new(
                         "a non-object input is not allowed when using args_from or workflow_ctx_from",
                     )
-                    .with_code(ErrorCode::WorkflowArgsWithInjection)
+                    .with_code(ErrorCode::WorkflowPositionalArgsNotSupported)
                     .with_help(
                         "use an object input when using args_from/workflow_ctx_from",
                     );
@@ -1124,7 +1132,10 @@ mod tests {
                 .raw_arg_from("input", a.into()),
         );
         let err = b.build().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::WorkflowArgsWithInjection));
+        assert_eq!(
+            err.code,
+            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+        );
     }
 
     #[test]
@@ -1138,7 +1149,10 @@ mod tests {
                 .workflow_ctx_from([a]),
         );
         let err = b.build().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::WorkflowArgsWithInjection));
+        assert_eq!(
+            err.code,
+            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+        );
     }
 
     #[test]
@@ -1148,7 +1162,10 @@ mod tests {
         let a = b.task(simple_node("a"));
         b.task(TaskNode::<()>::raw("b", "null").raw_arg_from("data", a.into()));
         let err = b.build().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::WorkflowArgsWithInjection));
+        assert_eq!(
+            err.code,
+            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+        );
     }
 
     #[test]
@@ -1171,7 +1188,6 @@ mod tests {
     /// an input member that an `args_from` key also names is refused with
     /// `HRS-021` (`WORKFLOW_KWARGS_ARGS_FROM_OVERLAP`).
     #[test]
-    #[ignore = "waits on #1019"]
     fn e021_kwargs_args_from_overlap() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));

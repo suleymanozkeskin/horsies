@@ -179,8 +179,8 @@ class TestDefaultSortPlan:
     ) -> None:
         """No Sort node above the append; backward index scans below it.
 
-        Seeds two populated leaves — one forever leaf and one daily
-        finite leaf — so ordered consumption across leaves (Merge
+        Seeds two populated leaves — the static forever leaf and one
+        daily finite leaf — so ordered consumption across leaves (Merge
         Append) is required, not just a single-partition special case.
         ANALYZE is committed before the EXPLAIN so the plan reflects
         the seeded statistics (the retention plan tests' precedent).
@@ -190,12 +190,7 @@ class TestDefaultSortPlan:
         async with history_schema.engine.begin() as connection:
             parent_name = await register_class(connection, CLASS_KEY)
             ref = await _create_leaf(connection, parent_name, lower)
-            forever_ref = await _create_leaf(
-                connection,
-                'horsies_task_history_forever',
-                lower,
-                class_key='forever',
-            )
+            forever_leaf = await current_forever_leaf(connection)
             for offset_minutes in range(200):
                 anchor = lower + timedelta(minutes=offset_minutes)
                 await connection.execute(
@@ -217,7 +212,7 @@ class TestDefaultSortPlan:
             await connection.execute(
                 text(
                     'ANALYZE horsies_task_history, '
-                    f'{forever_ref.leaf_name}, {ref.leaf_name}'
+                    f'{forever_leaf}, {ref.leaf_name}'
                 )
             )
 
