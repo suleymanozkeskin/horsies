@@ -379,6 +379,89 @@ BEGIN
                       'start refusals of the tree check write nothing');
 END $$;
 
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000001b1';
+    v_child uuid := '00000000-0000-7000-8000-0000000001b2';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- on_error pause; root 0 has a pre-built child (a task root and its dependent), root 1 a failed record. The roots
+    -- go in index order: the child and the task row of its root go in before root 1 fails and pauses the tree.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'pause'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('idx', 1, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'deps', jsonb_build_array(0))),
+        jsonb_build_array(jsonb_build_object('idx', 1, 'result', v_error))
+    );
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'RUNNING' AND (wft_node(v_wf, 0)).sub_workflow_id = v_child,
+                      'start, root order: root 0 is linked to its child before root 1 fails');
+    PERFORM wft_check((wft_node(v_child, 0)).status = 'ENQUEUED'
+                      AND EXISTS (SELECT 1 FROM horsies_tasks t
+                                  WHERE t.id = (wft_node(v_child, 0)).task_id AND t.status = 'PENDING'),
+                      'start, root order: the task root of the child is ENQUEUED with a PENDING task row');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'FAILED' AND (wft_workflow(v_wf)).status = 'PAUSED'
+                      AND (wft_workflow(v_child)).status = 'PAUSED',
+                      'start, root order: the failed root 1 pauses the workflow and the child');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000001c1';
+    v_failing uuid := '00000000-0000-7000-8000-0000000001c2';
+    v_later uuid := '00000000-0000-7000-8000-0000000001c3';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- on_error pause; root 0 has a pre-built child (on_error fail) whose only root has a failed record, root 1 a
+    -- pre-built child. Child 0 ends FAILED, its advance fails root 0 and pauses the workflow before root 1 is taken.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'pause'),
+            jsonb_build_object('id', v_failing, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1),
+            jsonb_build_object('id', v_later, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 1, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('idx', 1, 'sub', true),
+            jsonb_build_object('wf', v_failing, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_later, 'idx', 0)),
+        jsonb_build_array(jsonb_build_object('wf', v_failing, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check((wft_workflow(v_failing)).status = 'FAILED' AND (wft_node(v_wf, 0)).status = 'FAILED'
+                      AND (wft_workflow(v_wf)).status = 'PAUSED',
+                      'start, root order: the ended child 0 fails root 0 and pauses the workflow');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'READY' AND (wft_node(v_wf, 1)).sub_workflow_id IS NULL
+                      AND (wft_node(v_wf, 1)).started_at IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = v_later),
+                      'start, root order: root 1 stays READY and its child is not written');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000001d1';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- on_error pause; roots 0 and 1 both have a failed record. Root 0 fails and pauses the workflow; root 1 is not
+    -- taken.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(jsonb_build_object('id', v_wf, 'on_error', 'pause')),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('idx', 1, 'sub', true)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'result', v_error),
+            jsonb_build_object('idx', 1, 'result', v_error))
+    );
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED' AND (wft_workflow(v_wf)).status = 'PAUSED',
+                      'start, root order: the failed root 0 pauses the workflow');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'READY' AND (wft_node(v_wf, 1)).result IS NULL
+                      AND (wft_node(v_wf, 1)).started_at IS NULL,
+                      'start, root order: root 1 stays READY with no error and no started_at');
+END $$;
+
 -- Phase 2: promotion, task minting, input splice ----------------------------------------------------------------------
 
 DO $$

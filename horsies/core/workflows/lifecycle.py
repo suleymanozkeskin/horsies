@@ -318,10 +318,11 @@ async def start_workflow_async(
     ``build_with`` runs here, also when the id exists already, so it must
     have no side effects), and a failed-node record for each sub-workflow
     root whose child cannot be built. Then one call of
-    ``horsies_workflow_start`` writes it and enqueues the root nodes. A
-    pre-built child whose parent workflow a failed-node record pauses is not
-    written: its node stays READY, and the resume builds the child again.
-    The call:
+    ``horsies_workflow_start`` writes it and enqueues the root nodes. The
+    sub-workflow roots of each workflow are taken in index order, each child
+    tree before the next root. A pre-built child of a root that comes after a
+    failure that pauses its parent workflow is not written: its node stays
+    READY, and the resume builds the child again. The call:
 
     - no failed-node record: one statement in autocommit;
     - failed-node records: ``BEGIN``, the start, one
