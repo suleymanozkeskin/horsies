@@ -160,9 +160,16 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_list_expired_tasks',
         'horsies_list_stale_tasks',
         'horsies_monitoring_check_scope',
+        'horsies_monitoring_schedules',
+        'horsies_monitoring_task_breakdown',
         'horsies_monitoring_task_detail',
         'horsies_monitoring_task_facets',
         'horsies_monitoring_task_list',
+        'horsies_monitoring_task_stats',
+        'horsies_monitoring_workflow_names',
+        'horsies_monitoring_workflow_node',
+        'horsies_monitoring_workflow_run',
+        'horsies_monitoring_workflow_runs',
         'horsies_schedule_slot_task_id',
     }
 )

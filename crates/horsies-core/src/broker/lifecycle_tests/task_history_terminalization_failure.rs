@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
 };
 use crate::core::history::rerun::input_envelope::decode_framed_rerun_input;
 use crate::core::lifecycle::FailedAttemptOutcome;
@@ -34,7 +34,7 @@ fn failure(task_id: Uuid) -> FinishFailedAttempt {
 }
 
 async fn fail(pool: &sqlx::PgPool, task_id: Uuid) {
-    let outcome = finish_failed_attempt(pool, &failure(task_id))
+    let outcome = write_failed_attempt(pool, &failure(task_id))
         .await
         .expect("failure write");
     assert!(
