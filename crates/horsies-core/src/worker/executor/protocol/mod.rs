@@ -45,6 +45,7 @@ mod metadata;
 mod parent_frames;
 mod preload_frames;
 mod reader;
+mod timing;
 mod values;
 
 #[cfg(test)]
@@ -88,6 +89,7 @@ pub use reader::{
     next_step, plan_read, FrameReader, FrameStep, RawFrame, ReadPlan, DIRECT_BODY_BYTES,
     FRAME_READ_BUFFER_BYTES, READ_BUFFER_BOUND,
 };
+pub use timing::{LOOP_BLOCK_LIMIT, STUCK_REPORT_DELAY};
 pub use values::{
     BlockedWhere, BootDetail, BootErrorName, BoundedCount, BoundedText, DispatchNumber,
     FailureDetail, LeftoverName, LoopHoldsTasks, NameCountMismatch, PreloadReason, ProcessId,

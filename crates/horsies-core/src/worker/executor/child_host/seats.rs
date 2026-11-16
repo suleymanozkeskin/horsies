@@ -43,15 +43,10 @@ use crate::worker::executor::protocol::{
     BlockedWhere, CancelGraceMs, ChildFrame, DispatchNumber, FailureDetail, IsolatedWork,
     LeftoverName, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, ResultFrame, RunEnd,
     RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, SharedRunFrame, SharedWork,
-    StoredOptionsRefusal, StuckWork, TaskInputText, TaskTimeoutMs,
+    StoredOptionsRefusal, StuckWork, TaskInputText, TaskTimeoutMs, LOOP_BLOCK_LIMIT,
+    STUCK_REPORT_DELAY,
 };
 
-/// After `second_cancel`, the wait before `run_stuck`: two more cancel
-/// rounds 0.1 s apart and one interval (Python `STUCK_REPORT_DELAY_S`).
-const STUCK_REPORT_DELAY: Duration = Duration::from_millis(300);
-/// A poll longer than this blocks a runtime thread (Python
-/// `LOOP_BLOCK_LIMIT_MS`).
-const LOOP_BLOCK_LIMIT: Duration = Duration::from_millis(5_000);
 /// How often the poll watch reads the polls in progress.
 const POLL_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_WATCH_THREAD_NAME: &str = "horsies-child-poll-watch";
