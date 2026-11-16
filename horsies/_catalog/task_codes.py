@@ -58,6 +58,16 @@ class OperationalErrorCode(str, Enum):
     WORKFLOW_START_INCOMPLETE = 'WORKFLOW_START_INCOMPLETE'
     """A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code."""
 
+    TASK_BLOCKED_LOOP = 'TASK_BLOCKED_LOOP'
+    """The task held the event loop of its shared async child for the block limit, before its
+    deadline; the worker killed the child.
+    """
+
+    NEIGHBOUR_BLOCKED_LOOP = 'NEIGHBOUR_BLOCKED_LOOP'
+    """Another task held the event loop of the shared async child; the worker killed the child, and
+    this task, before its deadline, ended with it.
+    """
+
 
 class ContractCode(str, Enum):
     """A code/typing/usage contract was violated.
