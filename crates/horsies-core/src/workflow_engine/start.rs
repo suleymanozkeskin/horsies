@@ -18,7 +18,7 @@ use crate::core::{
 
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::{node_max_retries, parse_good_until_from_options};
+use crate::workflow_engine::{node_good_until, node_max_retries};
 
 // ---------------------------------------------------------------------------
 // SQL constants
@@ -132,7 +132,7 @@ fn node_task_facts(
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
     Ok(NodeTaskFacts {
         max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
-        good_until: parse_good_until_from_options(merged_task_options),
+        good_until: node_good_until(node.index, &node.task_name, merged_task_options)?,
         facts,
     })
 }
@@ -610,9 +610,11 @@ fn insert_workflow_tasks<'a>(
 
             // Merge good_until into task_options_json (mirrors Python's lifecycle.py).
             let merged_task_options = crate::workflow_engine::merge_good_until_into_options(
+                task.index,
+                &task.task_name,
                 task.good_until,
                 task.task_options_json.as_deref(),
-            );
+            )?;
 
             let args_from_json = if task.args_from.is_empty() {
                 None
@@ -1287,6 +1289,80 @@ mod tests {
             root.task_name = task_name.to_owned();
             root.task_options_json = Some(options);
             let spec = keyed_spec(Some("tests.start.refused_retry_policy.v1"), vec![root]);
+            let workflow_id = Uuid::new_v4();
+
+            let started = start_workflow::<serde_json::Value>(
+                &broker,
+                &spec,
+                Some(workflow_id),
+                &WorkflowSpecRegistry::new(),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await;
+
+            let refused = match started {
+                Ok(_) => panic!("{case}: the start must be refused"),
+                Err(refused) => refused,
+            };
+            assert_eq!(
+                refused.code,
+                WorkflowStartErrorCode::ValidationFailed,
+                "{case}"
+            );
+            assert!(!refused.retryable, "{case}");
+            assert!(
+                refused.message.contains(&format!(
+                    "task_options of workflow node 0 ({task_name}) refused"
+                )),
+                "{case}: {}",
+                refused.message
+            );
+            let rows: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
+                        (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),
+                        (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
+            )
+            .bind(workflow_id)
+            .bind(task_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows, (0, 0, 0), "{case}");
+        }
+    }
+
+    /// Python raises when a node's options are not a JSON object and the start rolls back
+    /// (`horsies/core/workflows/lifecycle.py:576-604`); a deadline the database cannot read fails the
+    /// insert. The core refuses both before any row: options that do not read are not replaced when a
+    /// deadline is merged in, and a stored `good_until` that is not an RFC 3339 text is not read as no
+    /// deadline.
+    #[tokio::test]
+    #[serial]
+    async fn a_node_whose_options_or_deadline_do_not_read_is_refused_before_any_row() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let task_name = "start_refused_deadline_node";
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+        let cases = [
+            (
+                "options are a list, with a node deadline",
+                Some(deadline),
+                "[1]",
+            ),
+            (
+                "good_until is not a time",
+                None,
+                r#"{"good_until": "not-a-date"}"#,
+            ),
+            ("good_until is a number", None, r#"{"good_until": 12345}"#),
+        ];
+        for (case, good_until, options) in cases {
+            let mut root = node_with(false, Some(17));
+            root.task_name = task_name.to_owned();
+            root.good_until = good_until;
+            root.task_options_json = Some(options.to_owned());
+            let spec = keyed_spec(Some("tests.start.refused_deadline.v1"), vec![root]);
             let workflow_id = Uuid::new_v4();
 
             let started = start_workflow::<serde_json::Value>(

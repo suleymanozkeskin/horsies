@@ -10,7 +10,6 @@ use uuid::Uuid;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
@@ -1026,7 +1025,11 @@ async fn reevaluate_and_enqueue(
             )
             .await?;
 
-            let good_until = parse_good_until_from_options(task.task_options.as_deref());
+            let good_until = crate::workflow_engine::node_good_until(
+                task.task_index,
+                &task.task_name,
+                task.task_options.as_deref(),
+            )?;
             let retention_class_key = retention.resolve_queue_class(&task.queue_name);
             let facts = prepare_workflow_task_facts(
                 &merged_input,

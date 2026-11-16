@@ -794,8 +794,11 @@ async fn enqueue_phase2_dependent_in_tx(
     );
     let task_id = crate::core::history::identity::uuid7::mint_task_id()
         .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let good_until =
-        crate::workflow_engine::parse_good_until_from_options(node.task_options.as_deref());
+    let good_until = crate::workflow_engine::node_good_until(
+        node.task_index,
+        &node.task_name,
+        node.task_options.as_deref(),
+    )?;
     let facts = prepare_workflow_task_facts(
         &merged_input,
         node.task_options.as_deref(),
@@ -1783,8 +1786,11 @@ async fn build_enqueued_task_params(
         &task.task_name,
         task.task_options.as_deref(),
     )?;
-    let good_until =
-        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
+    let good_until = crate::workflow_engine::node_good_until(
+        task.task_index,
+        &task.task_name,
+        task.task_options.as_deref(),
+    )?;
     let retention_class_key = retention.resolve_queue_class(&task.queue_name);
     let facts = prepare_workflow_task_facts(
         &merged_input,
