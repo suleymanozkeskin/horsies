@@ -3096,7 +3096,8 @@ fn decode_pong(
 /// Maps database statuses to `TaskResult` variants:
 /// - `COMPLETED`/`FAILED` + valid JSON -> decoded `TaskResult<T>`
 /// - `COMPLETED`/`FAILED` + null -> `TaskResult::Err(ResultNotAvailable)`
-/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))`
+/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
+///   `data = {"task_id": "<id>"}`
 #[allow(clippy::needless_pass_by_value)]
 fn parse_task_result_row<T: DeserializeOwned>(
     row: TaskResultRow,
@@ -3128,10 +3129,15 @@ fn parse_task_result_row<T: DeserializeOwned>(
                 format!("task {} expired", row.id),
             ))),
         },
-        "CANCELLED" => Ok(TaskResult::Err(TaskError::builtin(
-            OutcomeCode::TaskCancelled,
-            format!("task {} was cancelled", row.id),
-        ))),
+        // Python `TaskHandle._record_to_task_result`: the code, the message
+        // and the task id in `data`.
+        "CANCELLED" => Ok(TaskResult::Err(TaskError {
+            data: Some(serde_json::json!({ "task_id": row.id.to_string() })),
+            ..TaskError::builtin(
+                OutcomeCode::TaskCancelled,
+                format!("Task {} was cancelled before completion", row.id),
+            )
+        })),
         other => Err(BrokerError::InvalidStatus(format!(
             "task {} has non-terminal status {}",
             row.id, other,
@@ -3455,6 +3461,41 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&Uuid::nil().to_string()));
+    }
+
+    /// A CANCELLED task reads as `TASK_CANCELLED` with Python's message and
+    /// its task id in `data` (Python `TaskHandle._record_to_task_result`;
+    /// `tests/e2e/test_layer1_tasks.py::test_task_cancelled`:
+    /// `result.err.data['task_id'] == task_id`).
+    #[test]
+    fn parse_cancelled_carries_the_task_id_in_data() {
+        let task_id = Uuid::new_v4();
+        let row = TaskResultRow {
+            id: task_id,
+            status: "CANCELLED".to_owned(),
+            result: None,
+            failed_reason: None,
+        };
+
+        let task_result: TaskResult<serde_json::Value> =
+            parse_task_result_row(row).expect("a CANCELLED row reads");
+
+        let TaskResult::Err(error) = task_result else {
+            panic!("a CANCELLED task must read as an error");
+        };
+        assert_eq!(
+            error.error_code,
+            TaskError::builtin(OutcomeCode::TaskCancelled, "").error_code
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some(format!("Task {task_id} was cancelled before completion").as_str())
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({ "task_id": task_id.to_string() }))
+        );
+        assert!(error.cause.is_none());
     }
 
     /// Completed task with a string result type.
