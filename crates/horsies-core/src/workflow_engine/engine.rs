@@ -4949,8 +4949,9 @@ mod promotion_batch_tests {
             insert_node(&pool, wf_id, 1, vec![0], "PENDING", "all", false).await;
         }
         insert_node(&pool, &level_wf, 2, vec![0], "PENDING", "all", false).await;
+        // A context member merges into an object input.
         sqlx::query(
-            "UPDATE horsies_workflow_tasks SET workflow_ctx_from = ARRAY['node_0']
+            "UPDATE horsies_workflow_tasks SET workflow_ctx_from = ARRAY['node_0'], input = '{}'
              WHERE workflow_id = $1::uuid AND task_index = 2",
         )
         .bind(test_uuid(&level_wf))
