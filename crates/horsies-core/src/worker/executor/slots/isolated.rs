@@ -310,9 +310,8 @@ async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildC
         shared.set(index, IsolatedSlotState::Busy { pid: channel.pid() });
         tasks_done = tasks_done.saturating_add(1);
         match run_one(shared, &mut channel, run).await {
-            AfterRun::Serve { rss } => match recycle_reason(shared, tasks_done, rss) {
-                None => {}
-                Some(reason) => {
+            AfterRun::Serve { rss } => {
+                if let Some(reason) = recycle_reason(shared, tasks_done, rss) {
                     tracing::debug!(
                         slot = index,
                         pid = channel.pid().get(),
@@ -321,7 +320,7 @@ async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildC
                     );
                     break;
                 }
-            },
+            }
             AfterRun::Retire => break,
             AfterRun::ChildGone => {
                 shared.set(index, IsolatedSlotState::Retiring);

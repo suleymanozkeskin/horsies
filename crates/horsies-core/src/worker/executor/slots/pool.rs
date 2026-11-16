@@ -418,13 +418,12 @@ impl IsolatedPool {
 async fn join_all(slots: &mut JoinSet<()>, bound: Duration) -> bool {
     let all = async {
         while let Some(joined) = slots.join_next().await {
-            match joined {
-                Ok(()) => {}
-                Err(error) => match error.try_into_panic() {
-                    Ok(panic) => std::panic::resume_unwind(panic),
-                    // A cancelled slot task: the abort after the drain.
-                    Err(_cancelled) => {}
-                },
+            // A cancelled slot task is the abort after the drain; only a
+            // panic is raised.
+            if let Err(error) = joined {
+                if let Ok(panic) = error.try_into_panic() {
+                    std::panic::resume_unwind(panic);
+                }
             }
         }
     };
