@@ -10,7 +10,8 @@ use crate::core::config::QueueMode;
 use crate::core::error::{ErrorCode, HorsiesError};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::{
-    RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
+    BuilderHookName, RegisteredWorkflowDefinition, RegisteredWorkflowSpec, SpecBuildError,
+    WorkflowSpecRegistry,
 };
 use crate::core::workflow::spec::{WorkflowSpec, WorkflowSpecBuilder};
 
@@ -29,6 +30,40 @@ pub struct ResolvedEnqueue {
     pub priority: u32,
     /// The queue-mapped retention of the send.
     pub retention: crate::core::config::EnqueueRetention,
+}
+
+/// What every fired slot of one schedule stores besides its input, resolved
+/// once at scheduler start from the task registry (Python
+/// `core/scheduler/validation.py` `prepare_schedules`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleSendFacts {
+    /// The schedule's queue, else the queue the task declares, else
+    /// `default`; validated against the queue mode.
+    pub queue_name: String,
+    /// The task's stored options text, as a send of the task stores it:
+    /// timeout, retry policy and retryable codes. `None` when the task
+    /// declares none.
+    pub task_options: Option<String>,
+}
+
+/// The send facts of each enabled schedule, by schedule name.
+pub type PreparedSchedules = std::collections::HashMap<String, ScheduleSendFacts>;
+
+/// The queue a schedule's slots go to: the schedule's own queue, else the
+/// queue its task declares, else `default` (Python
+/// `Scheduler._resolve_schedule_queue`).
+fn schedule_queue<'a>(
+    schedule: &'a crate::core::config::TaskSchedule,
+    task: Option<&'a crate::core::task::fn_trait::RegisteredTask>,
+) -> &'a str {
+    match (
+        schedule.queue_name.as_deref(),
+        task.and_then(|task| task.queue_name()),
+    ) {
+        (Some(queue), _) => queue,
+        (None, Some(task_queue)) => task_queue,
+        (None, None) => "default",
+    }
 }
 
 /// Main horsies application.
@@ -84,7 +119,7 @@ impl Horsies {
         Ok(Self {
             config,
             registry: TaskRegistry::new(),
-            workflow_registry: WorkflowSpecRegistry::new(),
+            workflow_registry: WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER),
             workflow_builders: Vec::new(),
             role: "producer".to_owned(),
             suppress_sends: Arc::new(AtomicBool::new(false)),
@@ -308,7 +343,7 @@ impl Horsies {
         let name_owned = name.to_owned();
         let wrapped = Arc::new(move |input_json: &str| {
             let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
-            builder(params)
+            builder(params).map_err(SpecBuildError::Failed)
         });
 
         self.workflow_registry
@@ -343,7 +378,7 @@ impl Horsies {
         let name_owned = name.to_owned();
         let wrapped = Arc::new(move |input_json: &str| {
             let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
-            builder(params)
+            builder(params).map_err(SpecBuildError::Failed)
         });
 
         self.workflow_registry
@@ -737,8 +772,11 @@ impl Horsies {
                 );
             }
 
-            // 2. Validate queue name.
-            let queue_name = task_schedule.queue_name.as_deref().unwrap_or("default");
+            // 2. Validate the queue: the schedule's, else the task's.
+            let queue_name = schedule_queue(
+                task_schedule,
+                self.registry.get(&task_schedule.task_name).ok(),
+            );
             if let Err(e) = self.validate_queue(queue_name) {
                 report.add(
                     HorsiesError::new(format!(
@@ -776,9 +814,58 @@ impl Horsies {
                     );
                 }
             }
+
+            // 4. Refuse input over payload.reject_bytes at start, so a slot has
+            // no size refusal of its own (Python `validation.py:259-280`).
+            let input_bytes = task_schedule.input.to_string().len();
+            if let Some(limit) = self.config.payload.reject_bytes {
+                if input_bytes as u64 > limit {
+                    report.add(
+                        HorsiesError::new(format!(
+                            "schedule '{}' input is {} bytes, over payload.reject_bytes={}",
+                            task_schedule.name, input_bytes, limit,
+                        ))
+                        .with_code(ErrorCode::ConfigInvalidSchedule)
+                        .with_note(
+                            "every slot of the schedule sends the same input, so every \
+                             enqueue would be refused",
+                        )
+                        .with_help(
+                            "make the schedule's input smaller, or raise payload.reject_bytes",
+                        ),
+                    );
+                }
+            }
         }
 
         report.into_result()
+    }
+
+    /// Check the schedules as [`Horsies::validate_schedules`] does, then
+    /// resolve what every fired slot of each enabled schedule stores: its
+    /// queue and the task's options text (Python `prepare_schedules`). The
+    /// scheduler starts from this value. Errors: every refusal of
+    /// `validate_schedules`, collected.
+    pub fn prepare_schedules(&self) -> Result<PreparedSchedules, HorsiesError> {
+        self.validate_schedules()?;
+        let mut prepared = PreparedSchedules::new();
+        let Some(schedule_config) = &self.config.schedule else {
+            return Ok(prepared);
+        };
+        for task_schedule in schedule_config.schedules.iter().filter(|s| s.enabled) {
+            // validate_schedules refused an unregistered task above.
+            let task = self.registry.get(&task_schedule.task_name)?;
+            prepared.insert(
+                task_schedule.name.clone(),
+                ScheduleSendFacts {
+                    queue_name: schedule_queue(task_schedule, Some(task)).to_owned(),
+                    task_options: task
+                        .task_options()
+                        .and_then(|options| options.serialize_retry_options()),
+                },
+            );
+        }
+        Ok(prepared)
     }
 
     /// Run all offline validation checks.
@@ -1376,31 +1463,70 @@ where
 
 /// Decode a child workflow's params from the parent node's encoded input, as
 /// the client encoded it. The text must pass the core's strict JSON read rule;
-/// it is then decoded as stored, with no conversion.
+/// it is then decoded as stored, with no conversion, in the member order of
+/// the text.
+///
+/// Errors:
+/// - [`SpecBuildError::MemberRefused`]: the value of one top-level member
+///   does not decode to its field of `P` (the first such member in the text).
+/// - [`SpecBuildError::Failed`]: the text fails the strict read rule, or the
+///   decode refuses the input as a whole (a missing member, an input that is
+///   not an object, text after the value).
 fn decode_parameterized_workflow_input<P>(
     workflow_name: &str,
     input_json: &str,
-) -> Result<P, HorsiesError>
+) -> Result<P, SpecBuildError>
 where
     P: DeserializeOwned,
 {
     crate::core::codec::check_json_text(input_json).map_err(|e| {
-        HorsiesError::new(format!(
+        SpecBuildError::Failed(HorsiesError::new(format!(
             "params of workflow '{}' are refused: {}",
             workflow_name, e,
-        ))
+        )))
     })?;
-    serde_json::from_str::<serde_json::Value>(input_json)
-        .and_then(serde_json::from_value::<P>)
-        .map_err(|e| {
-            HorsiesError::new(format!(
-                "failed to decode params for workflow '{}': {}",
-                workflow_name, e,
-            ))
-            .with_help(
-                "ensure the child workflow params type matches the parent-provided input shape",
-            )
-        })
+    let mut deserializer = serde_json::Deserializer::from_str(input_json);
+    // The strict read rule bounds the depth, so serde_json's own limit of
+    // 128 levels is turned off, as `core::codec::from_json_str` does.
+    deserializer.disable_recursion_limit();
+    let decoded: Result<P, _> = serde_path_to_error::deserialize(&mut deserializer);
+    let params = decoded.map_err(|error| params_decode_error(workflow_name, &error))?;
+    deserializer
+        .end()
+        .map_err(|e| whole_input_refused(workflow_name, &e))?;
+    Ok(params)
+}
+
+/// The error of a params decode that failed at `error.path()`: the first
+/// segment names a top-level member ([`SpecBuildError::MemberRefused`]), or
+/// the input as a whole failed ([`SpecBuildError::Failed`]). Pure.
+fn params_decode_error(
+    workflow_name: &str,
+    error: &serde_path_to_error::Error<serde_json::Error>,
+) -> SpecBuildError {
+    match error.path().iter().next() {
+        Some(serde_path_to_error::Segment::Map { key }) => SpecBuildError::MemberRefused {
+            key: key.clone(),
+            cause: error.to_string(),
+        },
+        Some(
+            serde_path_to_error::Segment::Seq { .. }
+            | serde_path_to_error::Segment::Enum { .. }
+            | serde_path_to_error::Segment::Unknown,
+        )
+        | None => whole_input_refused(workflow_name, error.inner()),
+    }
+}
+
+/// The input of `workflow_name` does not decode to its params as a whole.
+fn whole_input_refused(workflow_name: &str, error: &serde_json::Error) -> SpecBuildError {
+    SpecBuildError::Failed(
+        HorsiesError::new(format!(
+            "failed to decode params for workflow '{}': {}",
+            workflow_name, error,
+        ))
+        .with_help("ensure the child workflow params type matches the parent-provided input shape"),
+    )
 }
 
 /// Builder for registering typed workflow builders on the app.
@@ -1567,6 +1693,74 @@ mod tests {
     use crate::core::task::options::{RetryPolicy, TaskOptions};
     use crate::core::workflow::node::TaskNode;
 
+    /// The params of a child workflow in the decode tests.
+    #[derive(Debug, serde::Deserialize)]
+    struct ChildParams {
+        count: i64,
+        label: String,
+    }
+
+    /// A member whose value does not fit its field is refused by its key,
+    /// with the path in the cause; the builder would not run.
+    #[test]
+    fn a_params_member_that_does_not_decode_is_refused_by_its_key() {
+        let refused = decode_parameterized_workflow_input::<ChildParams>(
+            "child",
+            r#"{"count":"seven","label":"a"}"#,
+        );
+        match refused {
+            Err(SpecBuildError::MemberRefused { key, cause }) => {
+                assert_eq!(key, "count");
+                assert!(cause.starts_with("count: invalid type: string"), "{cause}");
+            }
+            other => panic!("expected a member refusal, got {other:?}"),
+        }
+    }
+
+    /// The decode reads the members in the order of the text: of two
+    /// refused members, the first in the text is named, not the first in key
+    /// order.
+    #[test]
+    fn the_first_refused_member_in_the_text_is_named() {
+        let refused = decode_parameterized_workflow_input::<ChildParams>(
+            "child",
+            r#"{"label":5,"count":"seven"}"#,
+        );
+        match refused {
+            Err(SpecBuildError::MemberRefused { key, .. }) => assert_eq!(key, "label"),
+            other => panic!("expected a member refusal, got {other:?}"),
+        }
+    }
+
+    /// A missing member is not at one member: the input as a whole is
+    /// refused, as a failed build.
+    #[test]
+    fn a_missing_params_member_fails_the_build() {
+        let refused = decode_parameterized_workflow_input::<ChildParams>("child", r#"{"count":1}"#);
+        match refused {
+            Err(SpecBuildError::Failed(error)) => {
+                let text = error.to_string();
+                assert!(
+                    text.starts_with(
+                        "error: failed to decode params for workflow 'child': missing field `label`"
+                    ),
+                    "{text}"
+                );
+            }
+            other => panic!("expected a failed build, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn params_that_fit_decode() {
+        let params = decode_parameterized_workflow_input::<ChildParams>(
+            "child",
+            r#"{"count":7,"label":"a"}"#,
+        )
+        .expect("params that fit");
+        assert_eq!((params.count, params.label.as_str()), (7, "a"));
+    }
+
     fn valid_config() -> AppConfig {
         AppConfig {
             payload: crate::core::config::payload::PayloadPolicy::default(),
@@ -1582,8 +1776,10 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -1592,6 +1788,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -1910,7 +2107,7 @@ mod tests {
         let opts_json: serde_json::Value =
             serde_json::from_str(node_0.task_options_json.as_ref().unwrap()).unwrap();
         assert!(opts_json.get("retry_policy").is_some());
-        assert!(opts_json.get("auto_retry_for").is_some());
+        assert!(opts_json["retry_policy"].get("auto_retry_for").is_some());
         assert!(
             opts_json.get("task_name").is_none(),
             "task_name should be excluded"
@@ -2352,6 +2549,85 @@ mod tests {
     }
 
     // --- validate_schedules: queue validation tests (gap 12-3) ---
+
+    fn interval_schedule(name: &str, queue: Option<&str>) -> crate::core::config::TaskSchedule {
+        use crate::core::config::schedule::{IntervalSchedule, SchedulePattern, TaskSchedule};
+        TaskSchedule {
+            name: name.to_owned(),
+            task_name: "my_task".to_owned(),
+            pattern: SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(60),
+                minutes: None,
+                hours: None,
+                days: None,
+            }),
+            input: serde_json::Value::Null,
+            queue_name: queue.map(str::to_owned),
+            enabled: true,
+            timezone: "UTC".to_owned(),
+            catch_up_missed: false,
+            max_catch_up_runs: 100,
+        }
+    }
+
+    /// Python `Scheduler._resolve_schedule_queue` and #480: a schedule
+    /// without a queue fires on the task's declared queue, and every fired
+    /// slot carries the task's options text.
+    #[test]
+    fn prepare_schedules_uses_the_task_queue_and_options() {
+        use crate::core::config::schedule::ScheduleConfig;
+        let mut config = custom_config();
+        config.schedule = Some(ScheduleConfig::new(vec![
+            interval_schedule("on_task_queue", None),
+            interval_schedule("on_own_queue", Some("fast")),
+        ]));
+        let mut app = Horsies::new(config).unwrap();
+        let options = TaskOptions {
+            task_name: "my_task".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(5_000),
+        };
+        app.register_with_queue("my_task", registered_with_options(options), "slow")
+            .unwrap();
+
+        let prepared = app.prepare_schedules().unwrap();
+        assert_eq!(
+            prepared["on_task_queue"],
+            ScheduleSendFacts {
+                queue_name: "slow".to_owned(),
+                task_options: Some("{\"timeout_ms\":5000}".to_owned()),
+            },
+        );
+        assert_eq!(prepared["on_own_queue"].queue_name, "fast");
+        assert_eq!(
+            prepared["on_own_queue"].task_options.as_deref(),
+            Some("{\"timeout_ms\":5000}")
+        );
+    }
+
+    /// Python `validation.py:259-280`: input over `payload.reject_bytes`
+    /// refuses the scheduler start, so no slot is refused for its size.
+    #[test]
+    fn validate_schedules_refuses_input_over_reject_bytes() {
+        use crate::core::config::schedule::ScheduleConfig;
+        let mut config = valid_config();
+        config.payload.reject_bytes = Some(8);
+        let mut schedule = interval_schedule("too_big", None);
+        schedule.input = serde_json::json!({"payload": "over the limit"});
+        config.schedule = Some(ScheduleConfig::new(vec![schedule]));
+        let mut app = Horsies::new(config).unwrap();
+        app.register("my_task", dummy_registered()).unwrap();
+
+        let error = app.validate_schedules().unwrap_err();
+        assert!(
+            error.to_string().contains("over payload.reject_bytes=8"),
+            "{error}"
+        );
+        assert!(app.prepare_schedules().is_err());
+    }
 
     #[test]
     fn validate_schedules_ok_with_valid_queue_in_custom_mode() {

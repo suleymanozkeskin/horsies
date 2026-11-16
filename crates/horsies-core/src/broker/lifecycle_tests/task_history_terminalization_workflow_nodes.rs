@@ -7,7 +7,7 @@ use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 
 /// Bound of the paused sweep that runs beside an open node update.

@@ -6,7 +6,10 @@
 --   columns; the history codec, content-type, prior-result and anchor columns; the clock-exception birth and
 --   record times; the phase-2 terminal status, generation, node identity and reason columns);
 -- - removed shims: the archive gate call, the REFERENCE rerun arm, the prior result of an administrative cancel;
--- - the move builds the rerun envelope from input and task_options (horsies_encode_rerun_input).
+-- - the move builds the rerun envelope from input and task_options (horsies_encode_rerun_input);
+-- - the owned-claim functions require the claim generation (22023 on NULL, or on a NULL element of a batch) and
+--   fence on it with no NULL arm; horsies_terminalization_miss takes the caller's fence as a closed kind (NONE,
+--   OWNER, OWNER_AND_GENERATION).
 -- The trigger functions are in 0001_tables.sql. The published history readers are rendered at run time.
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
@@ -347,6 +350,10 @@ DECLARE
     v_workflow_id uuid;
     v_workflow_status text;
 BEGIN
+    IF p_claimed_at IS NULL THEN
+        RAISE EXCEPTION 'claim generation must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     -- The workflow row first, in the workflow-then-task lock order. The
     -- caller read PAUSED before this call; a resume that committed since
     -- then shows here, and its status update waits for this lock.
@@ -367,12 +374,12 @@ BEGIN
     WHERE t.id = p_task_id
       AND t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+      AND t.claimed_at = p_claimed_at
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-            p_worker_id, p_claimed_at
+            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -431,6 +438,10 @@ BEGIN
         RAISE EXCEPTION 'batch task ids must be non-NULL'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    IF array_position(p_claimed_ats, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch claim generations must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     IF cardinality(p_ids) <> (
         SELECT COUNT(DISTINCT item.id)
         FROM unnest(p_ids) AS item(id)
@@ -465,10 +476,7 @@ BEGIN
     JOIN horsies_tasks t ON t.id = input.task_id
     WHERE t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (
-          input.expected_claimed_at IS NULL
-          OR t.claimed_at = input.expected_claimed_at
-      )
+      AND t.claimed_at = input.expected_claimed_at
       AND NOT EXISTS (
           SELECT 1
           FROM horsies_workflow_tasks wt
@@ -485,10 +493,7 @@ BEGIN
     JOIN horsies_tasks t ON t.id = input.task_id
     WHERE t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (
-          input.expected_claimed_at IS NULL
-          OR t.claimed_at = input.expected_claimed_at
-      )
+      AND t.claimed_at = input.expected_claimed_at
       AND NOT (t.id = ANY(v_applied_ids));
 
     RETURN QUERY
@@ -723,7 +728,7 @@ BEGIN
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
         input.task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-        p_worker_id, input.expected_claimed_at
+        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -756,7 +761,7 @@ BEGIN
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['CANCEL_ADMIN']::text[],
-            NULL::text, NULL::timestamptz
+            'NONE', NULL::text, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -1342,6 +1347,10 @@ DECLARE
     v_claimed_at timestamptz;
     v_terminal_at timestamptz;
 BEGIN
+    IF p_claimed_at IS NULL THEN
+        RAISE EXCEPTION 'claim generation must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
@@ -1356,7 +1365,7 @@ BEGIN
           (
               t.status = 'CLAIMED'
               AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-              AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+              AND t.claimed_at = p_claimed_at
           )
           OR (p_accepts_requeued_pending AND t.status = 'PENDING')
       )
@@ -1364,7 +1373,7 @@ BEGIN
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-            p_worker_id, p_claimed_at
+            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -1408,6 +1417,10 @@ BEGIN
         RAISE EXCEPTION 'batch task ids must be non-NULL'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    IF array_position(p_claimed_ats, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch claim generations must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     IF cardinality(p_ids) <> (
         SELECT COUNT(DISTINCT item.id)
         FROM unnest(p_ids) AS item(id)
@@ -1431,10 +1444,7 @@ BEGIN
     JOIN horsies_tasks t ON t.id = input.task_id
     WHERE t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (
-          input.expected_claimed_at IS NULL
-          OR t.claimed_at = input.expected_claimed_at
-      );
+      AND t.claimed_at = input.expected_claimed_at;
 
     IF cardinality(v_applied_ids) > 0 THEN
 
@@ -1645,7 +1655,7 @@ BEGIN
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
         input.task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-        p_worker_id, input.expected_claimed_at
+        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -1663,6 +1673,10 @@ DECLARE
     v_node_status text;
     v_terminal_at timestamptz;
 BEGIN
+    IF p_claimed_at IS NULL THEN
+        RAISE EXCEPTION 'claim generation must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
@@ -1688,7 +1702,7 @@ BEGIN
     IF FOUND
        AND v_status = 'CLAIMED'
        AND v_worker = CAST(p_worker_id AS VARCHAR)
-       AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at)
+       AND v_claimed_at = p_claimed_at
        AND v_is_workflow_task THEN
         IF v_node_status IS NULL THEN
             v_terminal_at := NOW();
@@ -1719,7 +1733,7 @@ BEGIN
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
         p_task_id, ARRAY['CANCEL_ORPHAN', 'CANCEL_ORPHAN_SWEEP']::text[],
-        p_worker_id, p_claimed_at
+        'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
     );
 END
 $$;
@@ -1853,7 +1867,7 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
-            p_worker_id, NULL::timestamptz
+            'OWNER', p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -1979,7 +1993,7 @@ BEGIN
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
         p_task_id, ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[],
-        p_worker_id, NULL::timestamptz
+        'OWNER', p_worker_id, NULL::timestamptz
     );
 END
 $$;
@@ -2263,7 +2277,7 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['FAIL_RUNNING']::text[],
-            p_worker_id, NULL::timestamptz
+            'OWNER', p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -2377,7 +2391,7 @@ BEGIN
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
         p_task_id, ARRAY['FAIL_STALE']::text[],
-        NULL::text, NULL::timestamptz
+        'NONE', NULL::text, NULL::timestamptz
     );
 END
 $$;
@@ -3183,13 +3197,41 @@ CREATE FUNCTION horsies_task_history_leaf_lock_key(p_class_key text, p_anchor ti
     )
 $$;
 
-CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
+-- The miss classifier of every fenced terminal write. p_fence_kind names the caller's fence, a closed set:
+-- - NONE: the caller fences on no claim (worker and generation NULL);
+-- - OWNER: the caller fences on the worker only (generation NULL);
+-- - OWNER_AND_GENERATION: the caller fences on the worker and the claim generation (both required).
+-- Any other kind, or a worker or generation that does not fit the kind, is refused with 22023. A live row that the
+-- fence does not hold is LOST_CLAIM; a fence that holds is SOURCE_STATE_CONFLICT.
+CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
 DECLARE
     v_row horsies_tasks%ROWTYPE;
     v_provenance record;
+    v_held boolean;
 BEGIN
+    CASE p_fence_kind
+        WHEN 'NONE' THEN
+            IF num_nulls(p_worker_id, p_claimed_at) <> 2 THEN
+                RAISE EXCEPTION 'fence NONE takes no worker and no claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER' THEN
+            IF p_worker_id IS NULL OR p_claimed_at IS NOT NULL THEN
+                RAISE EXCEPTION 'fence OWNER takes a worker and no claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER_AND_GENERATION' THEN
+            IF num_nulls(p_worker_id, p_claimed_at) <> 0 THEN
+                RAISE EXCEPTION 'fence OWNER_AND_GENERATION takes a worker and a claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'unknown fence kind'
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
+
     SELECT * INTO v_row
     FROM horsies_tasks
     WHERE id = p_task_id
@@ -3227,11 +3269,14 @@ BEGIN
         RETURN;
     END IF;
 
-    IF p_worker_id IS NOT NULL AND (
-        v_row.claimed_by_worker_id IS DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-        OR (p_claimed_at IS NOT NULL
-            AND v_row.claimed_at IS DISTINCT FROM p_claimed_at)
-    ) THEN
+    v_held := CASE p_fence_kind
+        WHEN 'NONE' THEN TRUE
+        WHEN 'OWNER' THEN v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
+        WHEN 'OWNER_AND_GENERATION' THEN
+            v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
+            AND v_row.claimed_at IS NOT DISTINCT FROM p_claimed_at
+    END;
+    IF NOT v_held THEN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'LOST_CLAIM'::text,
             NULL::timestamptz, NULL::text,

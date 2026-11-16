@@ -73,7 +73,7 @@ def v7_with_birth(birth: datetime) -> str:
     """Mint a v7 identifier whose embedded birth is the given instant."""
     milliseconds = int(birth.timestamp() * 1_000)
     generator = MonotonicUuid7Generator(clock_ms=lambda: milliseconds)
-    return generator.mint()
+    return str(generator.mint())
 
 
 async def seed_class_with_row(

@@ -510,7 +510,8 @@ mod tests {
         use crate::core::registry::workflow::WorkflowSpecRegistry;
 
         let registered = SimpleWorkflow::build_registered().unwrap();
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         registry.register(registered).unwrap();
         assert!(registry.contains("simple_pipeline"));
     }
