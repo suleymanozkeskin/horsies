@@ -101,7 +101,7 @@ RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_o
 # ---------- Worker SQL constants ----------
 
 # TIER 1: one server-side call performs lock acquisition + cap counts + the
-# windowed claim (see horsies_claim, schemas/migrations.py). The caller runs it
+# windowed claim (see horsies_claim in the baseline SQL). The caller runs it
 # in autocommit, so the advisory lock is held only for this one statement —
 # never across a client round trip. Replaces the per-pass lock loop + counts +
 # per-queue CLAIM_SQL loop.
@@ -232,7 +232,7 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
 """)
 
 # The bounded lookup lives in horsies_find_non_runnable_workflow_tasks
-# (horsies/core/schemas/non_runnable_lookup.py).
+# (horsies/core/baseline/sql/0003_interim_functions.sql).
 GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
     SELECT id, status
     FROM horsies_find_non_runnable_workflow_tasks(CAST(:ids AS uuid[]))

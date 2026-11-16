@@ -24,14 +24,24 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.schemas.migrations import CLAIM_IN_FLIGHT_ROWS_SQL
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from tests.integration.autocommit_support import QUEUE, TASK_NAME, WORKER_ID
+from tests.baseline_sql import baseline_function
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 ROWS: Final = 2_000
+
+
+def _in_flight_rows_sql() -> str:
+    """The in-flight row select of the baseline horsies_claim_in_flight."""
+    body = baseline_function('horsies_claim_in_flight')
+    start = body.index('WITH in_flight AS (') + len('WITH in_flight AS (')
+    return body[start : body.index('\n    )\n', start)].strip()
+
+
+CLAIM_IN_FLIGHT_ROWS_SQL: Final = _in_flight_rows_sql()
 STATUS_INDEX_SCAN: Final = 'Index Scan using horsies_tasks_status on horsies_tasks'
 CLAIM_PARAMS: Final[dict[str, object]] = {
     'p_worker_id': 'in-flight-count-worker',

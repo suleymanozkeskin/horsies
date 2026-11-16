@@ -300,7 +300,7 @@ class ClaimMixin:
         # the xact-scoped advisory lock ends with the statement — never held
         # across a client round trip, so a stalled worker cannot freeze the
         # cluster mid-pass. Budget and cap semantics are computed in-function;
-        # see schemas/migrations.py::horsies_claim.
+        # see horsies_claim in the baseline SQL.
         # The claim loop's held connection: one checkout for the passes that
         # follow each other, given back after an idle period.
         claim_result = rows_or_raise(

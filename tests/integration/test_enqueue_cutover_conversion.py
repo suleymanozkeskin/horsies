@@ -376,7 +376,7 @@ class TestKeyedEnqueue:
         landed the maintenance indexes: the recorded sequencing debt is
         discharged, and this pin flips from absence to presence — the
         inventory flip becoming a permanent structural invariant."""
-        from horsies.core.history.ddl.conditional import (
+        from horsies.core.history.names import (
             RESERVATION_REGISTRY_EXPIRY_INDEX,
         )
 
