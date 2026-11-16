@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod phase2_recovery;
 pub mod query;
 pub mod recovery;
+pub(crate) mod recovery_limit;
 pub mod start;
 
 pub use error::WorkflowError;

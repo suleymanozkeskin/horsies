@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..maintenance.database import PartitionMaintenanceDatabase
 from ..commands import (
+    AnchoredLowerBound,
     DETACH_STATEMENT_TIMEOUT_MS,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
@@ -75,6 +76,8 @@ from ..partitions.catalog import (
     capture_partition_bound_utc,
     database_now,
     decode_leaf_bounds,
+    heartbeat_probe_index_name,
+    render_partition_bound,
     read_leaf_catalog_row,
     read_leaf_physical_state,
     read_retention_class,
@@ -129,10 +132,7 @@ def hourly_leaf_name(lower: datetime) -> str:
 
 def probe_index_name(leaf_name: str) -> str:
     """The per-leaf stale-probe index name."""
-    name = f'{leaf_name}_probe_idx'
-    if not is_safe_identifier(name):
-        raise ValueError(f'{name!r} is not a safe identifier')
-    return name
+    return heartbeat_probe_index_name(leaf_name)
 
 
 def heartbeat_horizon(
@@ -197,6 +197,13 @@ type HeartbeatClassRegistration = (
 )
 
 
+def _whole_hours(horizon: timedelta) -> int:
+    """The horizon as the whole hours that ``heartbeat_horizon_hours`` stores."""
+    if horizon % _HOURLY != timedelta(0):
+        raise ValueError('heartbeat horizon must be a whole number of hours')
+    return horizon // _HOURLY
+
+
 async def register_heartbeat_class(
     connection: AsyncConnection,
     *,
@@ -233,19 +240,17 @@ async def register_heartbeat_class(
                 text(
                     f"""
                     INSERT INTO {RETENTION_CLASSES} (
-                        class_key, duration, partition_interval,
-                        finite_parent_name, created_at
+                        class_key, class_kind, retention_days,
+                        heartbeat_horizon_hours, created_at
                     ) VALUES (
-                        :class_key, :duration, :interval,
-                        :parent, statement_timestamp()
+                        :class_key, 'HEARTBEAT', NULL,
+                        :horizon_hours, statement_timestamp()
                     )
                     """
                 ),
                 {
                     'class_key': HEARTBEAT_CLASS_KEY,
-                    'duration': horizon,
-                    'interval': _HOURLY,
-                    'parent': HEARTBEATS_TABLE,
+                    'horizon_hours': _whole_hours(horizon),
                 },
             )
             return HeartbeatClassRegistered(horizon=horizon)
@@ -260,11 +265,14 @@ async def register_heartbeat_class(
                 text(
                     f"""
                     UPDATE {RETENTION_CLASSES}
-                    SET duration = :duration
+                    SET heartbeat_horizon_hours = :horizon_hours
                     WHERE class_key = :class_key
                     """
                 ),
-                {'duration': horizon, 'class_key': HEARTBEAT_CLASS_KEY},
+                {
+                    'horizon_hours': _whole_hours(horizon),
+                    'class_key': HEARTBEAT_CLASS_KEY,
+                },
             )
             return HeartbeatHorizonUpdated(previous_horizon=stored, horizon=horizon)
         case RetentionClassRow():
@@ -406,34 +414,36 @@ async def create_hourly_heartbeat_leaf(
             """
         )
     )
-    # Captured under the UTC rendering convention; every later
-    # comparison captures the live bound the same way.
+    # The bound the leaf was created with, under the UTC rendering
+    # convention; the catalog derives the same text from the anchors.
     recorded_bound = await capture_partition_bound_utc(connection, leaf.leaf_name)
+    if recorded_bound != render_partition_bound(
+        AnchoredLowerBound(leaf.bounds.lower), leaf.bounds.upper
+    ):
+        raise HistoryContractError(
+            f'heartbeat leaf {leaf.leaf_name!r} was created with bound '
+            f'{recorded_bound!r}, not its requested bounds'
+        )
     await connection.execute(
         text(
             f"""
             INSERT INTO {LEAF_CATALOG} (
-                leaf_name, parent_name, class_key,
-                lower_anchor, upper_anchor,
-                index_schema_version, id_index_name, partition_bound,
-                min_birth_at, min_birth_verified, created_at
+                leaf_name, class_key,
+                lower_bound_kind, lower_anchor, upper_anchor,
+                index_schema_version, created_at, detached_at, dropped_at
             ) VALUES (
-                :leaf_name, :parent_name, :class_key,
-                :lower, :upper,
-                :index_schema_version, :id_index_name, :partition_bound,
-                NULL, TRUE, statement_timestamp()
+                :leaf_name, :class_key,
+                'AT', :lower, :upper,
+                :index_schema_version, statement_timestamp(), NULL, NULL
             )
             """
         ),
         {
             'leaf_name': leaf.leaf_name,
-            'parent_name': HEARTBEATS_TABLE,
             'class_key': leaf.class_key,
             'lower': leaf.bounds.lower,
             'upper': leaf.bounds.upper,
             'index_schema_version': INDEX_SCHEMA_VERSION,
-            'id_index_name': index_name,
-            'partition_bound': recorded_bound,
         },
     )
     await connection.execute(
@@ -482,7 +492,7 @@ async def _read_hourly_leaf_creation_state(
     if (
         catalog.parent_name != HEARTBEATS_TABLE
         or catalog.class_key != leaf.class_key
-        or catalog.lower_anchor != leaf.bounds.lower
+        or catalog.lower_bound != AnchoredLowerBound(leaf.bounds.lower)
         or catalog.upper_anchor != leaf.bounds.upper
         or catalog.index_schema_version != INDEX_SCHEMA_VERSION
         or catalog.detached_at is not None
@@ -597,8 +607,10 @@ async def sweep_expired_heartbeat_leaves(
                     JOIN {RETENTION_CLASSES} AS r
                       ON r.class_key = c.class_key
                     WHERE c.class_key = :class_key
+                      AND c.lower_bound_kind = 'AT'
                       AND c.dropped_at IS NULL
-                      AND c.upper_anchor + r.duration
+                      AND c.upper_anchor
+                          + r.heartbeat_horizon_hours * interval '1 hour'
                           <= statement_timestamp()
                     ORDER BY c.lower_anchor
                     """

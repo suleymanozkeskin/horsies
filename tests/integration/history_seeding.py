@@ -32,7 +32,11 @@ from horsies.core.history.archive.attempts import (
     AttemptRecord,
     decode_attempt_snapshot,
 )
-from horsies.core.history.archive.versions import DecodedArchiveValue
+from horsies.core.history.archive.versions import (
+    JSON_CONTENT_TYPE,
+    JSON_UTF8_CODEC,
+    DecodedArchiveValue,
+)
 from horsies.core.history.commands import EnsureLeafCoverage
 from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
 from horsies.core.history.ddl.classes import (
@@ -116,13 +120,17 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
     """
     CREATE OR REPLACE VIEW itest_task_rows AS
     SELECT id, task_name, queue_name, priority, status, is_workflow_task,
-           error_code, failed_reason, failed_at, completed_at, terminal_at,
+           NULL::text AS error_code, NULL::text AS failed_reason,
+           NULL::timestamptz AS failed_at, NULL::timestamptz AS completed_at,
+           NULL::timestamptz AS terminal_at,
            sent_at, started_at, enqueued_at, good_until, next_retry_at,
-           result, claimed, claimed_at, claimed_by_worker_id,
+           NULL::text AS result, FALSE AS claimed, claimed_at,
+           claimed_by_worker_id,
            claimed_by_worker_id AS last_claimed_worker_id,
            claim_expires_at, finalizing_at, finalizing_by_worker_id,
            retry_count, max_retries, worker_pid, worker_hostname,
-           worker_process_name, retention_class_key, terminalization_kind,
+           worker_process_name, retention_class_key,
+           NULL::text AS terminalization_kind,
            created_at
     FROM horsies_tasks
     UNION ALL
@@ -152,7 +160,9 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
     """
 )
 """Test-only readback surface: one task per row regardless of which
-lifecycle side holds it, presented with the live column names. The
+lifecycle side holds it, presented with the live column names. A live row
+has no terminal columns: its error, failed reason, terminal times, result
+and kind read NULL, and ``claimed`` reads FALSE. The
 terminal instant lands in completed_at/failed_at by status. The two
 claimant columns say different things and are NOT interchangeable:
 `claimed_by_worker_id` is the LEASE — who holds the task now — and is
@@ -184,29 +194,27 @@ INSERT_HISTORY_ROW_SQL = text(
     INSERT INTO horsies_task_history (
         task_id, task_name, queue_name, priority,
         command_fingerprint_version, command_fingerprint,
-        status, terminalization_kind, terminal_at, retention_anchor_at,
+        status, terminalization_kind, terminal_at,
         retention_class_key, sent_at, enqueued_at, claimed_at, started_at,
         created_at, good_until, retry_count, max_retries,
         last_claimed_worker_id, last_worker_hostname,
-        result_envelope_version, result_codec, result_content_type,
+        result_envelope_version,
         result_payload, result_digest, error_code, final_failed_reason,
         workflow_id, is_workflow_task, history_schema_version,
-        attempt_archive_version, attempt_snapshot_codec,
-        attempt_snapshot_content_type, attempt_snapshot,
+        attempt_archive_version, attempt_snapshot,
         attempt_snapshot_digest, rerun_input_disposition
     ) VALUES (
         CAST(:task_id AS uuid), :task_name, :queue_name, :priority,
         :fingerprint_version, :fingerprint,
-        :status, :terminalization_kind, :terminal_at, :terminal_at,
+        :status, :terminalization_kind, :terminal_at,
         :retention_class_key, :sent_at, :enqueued_at, :claimed_at,
         :started_at, :created_at, :good_until, :retry_count, :max_retries,
         :last_claimed_worker_id, :last_worker_hostname,
-        :result_envelope_version, :result_codec, :result_content_type,
+        :result_envelope_version,
         :result_payload, :result_digest, :error_code, :final_failed_reason,
         CAST(:workflow_id AS uuid), :is_workflow_task,
         :history_schema_version,
-        :attempt_archive_version, :attempt_snapshot_codec,
-        :attempt_snapshot_content_type, :attempt_snapshot,
+        :attempt_archive_version, :attempt_snapshot,
         :attempt_snapshot_digest, 'NEVER_ELIGIBLE'
     )
     """
@@ -257,8 +265,6 @@ def history_row_params(
         'last_claimed_worker_id': task.claimed_by_worker_id,
         'last_worker_hostname': task.worker_hostname,
         'result_envelope_version': 1,
-        'result_codec': 'json-utf8',
-        'result_content_type': 'application/json',
         'result_payload': payload,
         'result_digest': sha256(payload).digest() if payload else None,
         'error_code': task.error_code,
@@ -267,8 +273,6 @@ def history_row_params(
         'is_workflow_task': task.is_workflow_task,
         'history_schema_version': 1,
         'attempt_archive_version': snapshot.version,
-        'attempt_snapshot_codec': snapshot.codec,
-        'attempt_snapshot_content_type': snapshot.content_type,
         'attempt_snapshot': snapshot.payload,
         'attempt_snapshot_digest': snapshot.digest,
     }
@@ -322,8 +326,7 @@ async def read_attempts(
         await session.execute(
             text(
                 """
-                SELECT attempt_archive_version, attempt_snapshot_codec,
-                       attempt_snapshot_content_type, attempt_snapshot,
+                SELECT attempt_archive_version, attempt_snapshot,
                        attempt_snapshot_digest
                 FROM horsies_task_history
                 WHERE task_id = CAST(:id AS uuid)
@@ -334,10 +337,12 @@ async def read_attempts(
     ).first()
     if snapshot is None:
         return ()
+    # Archive version 1 implies the JSON codec and content type; the
+    # history row stores neither.
     decoded = decode_attempt_snapshot(
         version=snapshot.attempt_archive_version,
-        codec=snapshot.attempt_snapshot_codec,
-        content_type=snapshot.attempt_snapshot_content_type,
+        codec=JSON_UTF8_CODEC,
+        content_type=JSON_CONTENT_TYPE,
         payload=bytes(snapshot.attempt_snapshot),
         digest=bytes(snapshot.attempt_snapshot_digest),
     )
@@ -407,8 +412,6 @@ async def route_rows(session: AsyncSession, rows: tuple[Any, ...]) -> None:
             if task.command_fingerprint_version is None:
                 task.command_fingerprint_version = 1
                 task.command_fingerprint = sha256(task.id.encode()).digest()
-            if task.prepared_rerun_input_disposition is None:
-                task.prepared_rerun_input_disposition = 'DECLINED_BY_POLICY'
             if task.retain_rerun_input is None:
                 task.retain_rerun_input = False
         for task_id, task in history_tasks.items():
@@ -485,16 +488,15 @@ async def force_terminal(
                 task_id, task_name, queue_name, priority,
                 command_fingerprint_version, command_fingerprint,
                 status, terminalization_kind, terminal_at,
-                retention_anchor_at, retention_class_key,
+                retention_class_key,
                 sent_at, enqueued_at, claimed_at, started_at, created_at,
                 retry_count, max_retries,
                 last_claimed_worker_id, last_worker_hostname,
-                result_envelope_version, result_codec, result_content_type,
+                result_envelope_version,
                 result_payload, result_digest,
                 error_code, final_failed_reason,
                 is_workflow_task, history_schema_version,
-                attempt_archive_version, attempt_snapshot_codec,
-                attempt_snapshot_content_type, attempt_snapshot,
+                attempt_archive_version, attempt_snapshot,
                 attempt_snapshot_digest, rerun_input_disposition
             )
             SELECT id, task_name, queue_name, priority,
@@ -507,21 +509,17 @@ async def force_terminal(
                    NOW() - make_interval(
                        secs => CAST(COALESCE(:aged_seconds, 0)
                                     AS double precision)),
-                   NOW() - make_interval(
-                       secs => CAST(COALESCE(:aged_seconds, 0)
-                                    AS double precision)),
                    COALESCE(retention_class_key, :default_class),
                    sent_at, enqueued_at, claimed_at, started_at, created_at,
                    retry_count, max_retries,
                    claimed_by_worker_id, worker_hostname,
-                   1, 'json-utf8', 'application/json',
+                   1,
                    :payload,
                    CASE WHEN CAST(:payload AS bytea) IS NOT NULL
                         THEN sha256(CAST(:payload AS bytea)) END,
                    :error_code, :failed_reason,
                    is_workflow_task, 1,
-                   :snapshot_version, :snapshot_codec,
-                   :snapshot_content_type, :snapshot_payload,
+                   :snapshot_version, :snapshot_payload,
                    :snapshot_digest, 'NEVER_ELIGIBLE'
             FROM horsies_tasks WHERE id = CAST(:id AS uuid)
         """),
@@ -535,8 +533,6 @@ async def force_terminal(
             'aged_seconds': aged_seconds,
             'default_class': HISTORY_SEED_CLASS_KEY,
             'snapshot_version': snapshot.version,
-            'snapshot_codec': snapshot.codec,
-            'snapshot_content_type': snapshot.content_type,
             'snapshot_payload': snapshot.payload,
             'snapshot_digest': snapshot.digest,
         },
@@ -551,17 +547,19 @@ async def force_terminal(
         text(f"""
             INSERT INTO {WORKFLOW_PHASE2_PENDING} (
                 task_id, workflow_id, workflow_node_row_id,
-                terminal_status, terminal_at, terminalization_kind,
+                terminalization_kind,
                 recovery_source, history_class, history_anchor,
                 history_schema_version, result_digest,
-                phase2_generation, created_at, attempt_count
+                quarantine_task_id, created_at, attempt_count,
+                last_attempt_at, last_failure_class
             )
             SELECT h.task_id, wt.workflow_id, wt.id,
-                   h.status, h.terminal_at, h.terminalization_kind,
-                   'HISTORY', h.retention_class_key, h.retention_anchor_at,
+                   h.terminalization_kind,
+                   'HISTORY', h.retention_class_key, h.terminal_at,
                    h.history_schema_version,
                    sha256(h.result_payload),
-                   gen_random_uuid(), h.terminal_at, 0
+                   NULL, h.terminal_at, 0,
+                   NULL, NULL
             FROM horsies_task_history h
             JOIN horsies_workflow_tasks wt ON wt.task_id = h.task_id
             WHERE h.task_id = CAST(:id AS uuid)
@@ -586,59 +584,4 @@ async def force_terminal(
     await session.execute(
         text('DELETE FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
         {'id': task_id},
-    )
-
-
-async def relax_cutover_columns(connection: AsyncConnection) -> None:
-    """Return the cutover statements' effects to their pre-cutover shape.
-
-    A fresh database is now born with these columns required and
-    checked. The cutover battery tests the OTHER world — the one a real
-    pre-cutover deployment brings, whose rows predate every one of these
-    values — so it demotes explicitly. Rendered from the same structured
-    authority the tightening renders from, so a column added there is
-    relaxed here without anyone remembering to.
-    """
-    from horsies.core.history.terminalization.live_cutover import (
-        CUTOVER_COLUMNS,
-    )
-
-    for column in CUTOVER_COLUMNS:
-        if column.check is not None:
-            await connection.execute(
-                text(
-                    'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
-                    f'horsies_tasks_{column.name}_cutover'
-                )
-            )
-        if column.not_null:
-            await connection.execute(
-                text(
-                    f'ALTER TABLE horsies_tasks ALTER COLUMN {column.name} '
-                    'DROP NOT NULL'
-                )
-            )
-    await connection.execute(
-        text(
-            'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
-            'horsies_tasks_rerun_lineage_pair'
-        )
-    )
-    # The locator contract goes with them. It is a cutover statement
-    # too, and it cannot survive the identity demotion: the node key it
-    # references converts back to varchar while the outbox's columns
-    # stay uuid, so a surviving constraint is one the tighten can no
-    # longer re-implement.
-    await connection.execute(
-        text(
-            'ALTER TABLE horsies_workflow_phase2_pending '
-            'DROP CONSTRAINT IF EXISTS '
-            'horsies_workflow_phase2_pending_node_fkey'
-        )
-    )
-    await connection.execute(
-        text(
-            'ALTER TABLE horsies_workflow_tasks DROP CONSTRAINT IF EXISTS '
-            'horsies_workflow_tasks_node_workflow_key'
-        )
     )

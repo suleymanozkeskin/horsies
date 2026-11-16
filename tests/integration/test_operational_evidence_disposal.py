@@ -33,7 +33,7 @@ from tests.task_history_prototypes.schema import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-_CLASS_KEY = 'finite_30d_v1'
+_CLASS_KEY = 'standard_30d'
 # Enough leaves that batching is exercised several times over without paying
 # for the full qualification shape; the 512-leaf proof is the redispatched run.
 _LEAVES = 96

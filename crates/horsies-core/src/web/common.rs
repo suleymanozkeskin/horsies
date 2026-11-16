@@ -6,8 +6,8 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::monitoring::{
-    ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection, TaskGroupBy,
-    TaskSortField,
+    ErrorCategory, MonitoringQueryError, MonitoringQueryErrorCode, PaginationRefused,
+    SortDirection, TaskGroupBy, TaskSortField,
 };
 use crate::TaskStatus;
 
@@ -348,8 +348,19 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
     }
 }
 
+/// Map a monitoring read failure to its response, as Python
+/// (`horsies/web/routes/_common.py:103-127`): a database failure is 503, the
+/// dependency failed and the state can clear; stored history data that does
+/// not decode is 500, the request was valid and a repeat gives the same
+/// answer until the stored row changes.
 pub(crate) fn query_failed(surface: &str, error: MonitoringQueryError) -> ApiError {
-    ApiError::unavailable(format!("{surface} query failed: {}", error.message))
+    let detail = format!("{surface} query failed: {}", error.message);
+    match error.code {
+        MonitoringQueryErrorCode::DbOperationFailed => ApiError::unavailable(detail),
+        MonitoringQueryErrorCode::HistoryContractViolation => {
+            ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, detail)
+        }
+    }
 }
 
 pub(crate) fn pagination_refused(

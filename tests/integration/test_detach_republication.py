@@ -48,7 +48,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-CLASS_KEY = 'it_detach_rp'
+CLASS_KEY = 'standard_30d'
 HORIZON = heartbeat_horizon(
     stale_after=timedelta(minutes=10),
     finalizing_stale_after=timedelta(minutes=30),
@@ -56,7 +56,7 @@ HORIZON = heartbeat_horizon(
 )
 
 terminalization_schema = terminalization_schema_fixture(
-    'task_history_it_detach_republication', partitioned_heartbeats=True
+    'task_history_it_detach_republication'
 )
 
 

@@ -89,6 +89,16 @@ fn advisory_key_queue(queue: &str) -> i64 {
 /// stays in round-robin mode here and still services uncapped queues; Python
 /// switches to custom mode and drops them. Rust's cap accounting is keyed on
 /// `queue_max_concurrency` alone, so caps are enforced in both modes.
+/// The lease of every claim: `claim_lease_ms`, or [`DEFAULT_CLAIM_LEASE_MS`]
+/// when it is not set. Every claim is lease-bounded, in hard-cap and soft-cap
+/// mode alike, so a crashed worker's claims become reclaimable (Python
+/// `claiming.py:697-708`).
+fn effective_claim_lease_ms(app_config: &AppConfig) -> u32 {
+    app_config
+        .claim_lease_ms
+        .unwrap_or(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS)
+}
+
 fn compute_ordered_queues(
     queues: &[String],
     queue_priorities: &std::collections::HashMap<String, i32>,
@@ -410,7 +420,7 @@ impl Worker {
             self.hostname.clone(),
             std::process::id() as i32,
             claimer_interval,
-            self.app_config.claim_lease_ms,
+            effective_claim_lease_ms(&self.app_config),
             self.app_config.max_claim_renew_age_ms,
             self.cancel.clone(),
         );
@@ -828,7 +838,7 @@ impl Worker {
             max_claim_per_worker: self.worker_config.max_claim_per_worker,
             max_claim_batch: self.worker_config.max_claim_batch,
             cluster_wide_cap: self.app_config.cluster_wide_cap,
-            claim_lease_ms: self.app_config.claim_lease_ms,
+            claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),
         };
         let mut claimed_rows = self.broker.claim_batch(&params).await?;
 
@@ -847,7 +857,7 @@ impl Worker {
         if claimed_rows.iter().any(|r| r.is_workflow_task) {
             // The claim generations travel with their ids: one batch can span
             // claim transactions, so each task fences on its own claimed_at.
-            let claims: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+            let claims: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
                 claimed_rows.iter().map(|r| (r.id, r.claimed_at)).collect();
             let filtered_ids = self
                 .broker
@@ -1179,6 +1189,14 @@ mod tests {
         Arc::new(PostgresBroker::from_pool(test_pool().await))
     }
 
+    /// The claim generation of every row that `insert_claimed_task` seeds and
+    /// of every dispatch row that `claimed_task_row` builds, so a test's
+    /// dispatch fences on the generation its row carries.
+    fn test_claim_generation() -> chrono::DateTime<Utc> {
+        static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
+        *GENERATION.get_or_init(Utc::now)
+    }
+
     async fn insert_claimed_task(
         pool: &PgPool,
         task_id: &Uuid,
@@ -1196,7 +1214,7 @@ mod tests {
                 retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'finalize_test', $2, 100, '[]', '{}', 'CLAIMED',
-                NOW(), NOW(), NOW(), NOW(), TRUE,
+                NOW(), $6, NOW(), NOW(), TRUE,
                 'worker-1', $3, $4, $5,
                 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
@@ -1207,6 +1225,7 @@ mod tests {
         .bind(retry_count)
         .bind(max_retries)
         .bind(task_options)
+        .bind(test_claim_generation())
         .execute(pool)
         .await
         .unwrap();
@@ -1262,7 +1281,7 @@ mod tests {
             queue_name: queue_name.to_owned(),
             is_workflow_task: false,
             task_options,
-            claimed_at: None,
+            claimed_at: test_claim_generation(),
         }
     }
 
@@ -1507,6 +1526,44 @@ mod tests {
         assert!(coverage < listener);
         assert!(coverage < heartbeats);
         assert!(coverage < claims);
+    }
+
+    /// Python `test_worker_helpers.py::test_hard_cap_returns_default_lease`:
+    /// with no `claim_lease_ms`, claims carry the 60 s default lease.
+    #[test]
+    fn hard_cap_returns_default_lease() {
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        assert_eq!(app_config.claim_lease_ms, None);
+        assert_eq!(
+            effective_claim_lease_ms(&app_config),
+            crate::core::defaults::DEFAULT_CLAIM_LEASE_MS,
+        );
+        assert_eq!(effective_claim_lease_ms(&app_config), 60_000);
+
+        app_config.claim_lease_ms = Some(90_000);
+        assert_eq!(effective_claim_lease_ms(&app_config), 90_000);
+    }
+
+    /// Every claim and every claimer beat use the effective lease: the claim
+    /// pass never sends `None`, and the heartbeat always renews.
+    #[test]
+    fn claims_and_renewals_always_carry_a_lease() {
+        let source = include_str!("worker.rs");
+        // Production code only: the test module quotes the searched text.
+        let production = &source[..source
+            .find(&["#[cfg(test)]", "\nmod tests {"].concat())
+            .expect("test module marker")];
+        let run = &production[production
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")..];
+        let heartbeat = &run[run
+            .find("spawn_claimer_heartbeat(")
+            .expect("claimer heartbeat startup")..];
+        let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
+        assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
+        assert!(production
+            .contains("claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),"));
+        assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
     }
 
     #[test]
@@ -2343,6 +2400,84 @@ mod tests {
         assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
     }
 
+    /// Python `test_stored_timeout_refusal.py::test_unreadable_options_fail_in_one_claim_and_do_not_retry`:
+    /// stored options that do not parse fail the task before user code runs,
+    /// with WORKER_SERIALIZATION_ERROR, and the task does not retry (its
+    /// retry policy is inside the unreadable text).
+    #[tokio::test]
+    #[serial]
+    async fn unreadable_stored_options_fail_the_task_before_user_code_runs() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 3, Some("{")).await;
+
+        run_finalize(
+            &broker,
+            async_task_fn!(succeed, ()),
+            claimed_task_row(&task_id, "default", Some("{".to_owned())),
+        )
+        .await;
+
+        let (status, _result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "FAILED", "a run of `succeed` would have completed");
+        assert_eq!(error_code.as_deref(), Some("WORKER_SERIALIZATION_ERROR"));
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
+        assert_eq!(outcome, "FAILED");
+        assert!(!will_retry);
+        assert_eq!(
+            attempt_error_code.as_deref(),
+            Some("WORKER_SERIALIZATION_ERROR")
+        );
+    }
+
+    /// Python `test_stored_timeout_refusal.py::test_a_refused_timeout_retries_until_max_retries_when_asked`:
+    /// a stored timeout above the limit refuses the run, and a readable
+    /// policy that names WORKER_SERIALIZATION_ERROR still retries it.
+    #[tokio::test]
+    #[serial]
+    async fn a_refused_timeout_retries_when_the_policy_names_the_refusal() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        let task_options = serde_json::json!({
+            "timeout_ms": 4_294_967_296_u64,
+            "retry_policy": {
+                "max_retries": 2,
+                "intervals": [1, 1],
+                "backoff_strategy": "fixed",
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["WORKER_SERIALIZATION_ERROR"]
+            }
+        })
+        .to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 2, Some(&task_options)).await;
+
+        run_finalize(
+            &broker,
+            async_task_fn!(succeed, ()),
+            claimed_task_row(&task_id, "default", Some(task_options)),
+        )
+        .await;
+
+        let (status, _result, _error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "PENDING", "the refusal is retried, not run");
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
+        assert_eq!(outcome, "FAILED");
+        assert!(will_retry);
+        assert_eq!(
+            attempt_error_code.as_deref(),
+            Some("WORKER_SERIALIZATION_ERROR")
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_retryable_failure_requeues_and_skips_callback() {
@@ -2351,12 +2486,15 @@ mod tests {
         clean(&pool).await;
 
         let task_id = Uuid::new_v4();
+        // Python's stored layout: auto_retry_for lives inside retry_policy.
         let task_options = serde_json::json!({
-            "auto_retry_for": ["RETRY_ME"],
             "retry_policy": {
+                "max_retries": 3,
                 "intervals": [1, 1, 1],
                 "backoff_strategy": "fixed",
-                "jitter": false
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["RETRY_ME"]
             }
         })
         .to_string();
@@ -2483,6 +2621,7 @@ mod tests {
             task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
+            &crate::worker::retry::read_stored_options(None),
             &crate::broker::SetRunningRow {
                 id: task_id,
                 started_at: Utc::now(),
