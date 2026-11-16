@@ -24,6 +24,9 @@ use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::recovery::{new_reaper_health, spawn_reaper};
+use crate::worker::runner_beats::{
+    launch_runner_beats, runner_beat_pool, BeatSender, LiveDispatches, StaleRunningRecovery,
+};
 
 /// Decode a liveness ping and reply when it is a broadcast or addressed to
 /// this worker.
@@ -233,6 +236,9 @@ pub struct Worker {
     /// The buffered-dispatch probe skips these so a task still in its
     /// CLAIMED→RUNNING window is not re-fetched and re-dispatched next pass (P7).
     in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
+    /// Dispatches whose rows the runner-beat writer beats, with their claim
+    /// generations.
+    live_dispatches: LiveDispatches,
 }
 
 impl Worker {
@@ -263,6 +269,7 @@ impl Worker {
             cancel: CancellationToken::new(),
             hostname,
             in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            live_dispatches: LiveDispatches::default(),
         })
     }
 
@@ -454,6 +461,29 @@ impl Worker {
             self.cancel.clone(),
         );
 
+        // Runner heartbeats: one fenced statement per interval for every held
+        // dispatch, on its own connection, and a fail-closed watchdog thread
+        // (exit 77). They run until the in-flight dispatches have drained, so
+        // they have their own token, cancelled after `shutdown`.
+        let beats_cancel = CancellationToken::new();
+        let (runner_beat_watch, runner_beats) = launch_runner_beats(
+            runner_beat_pool(self.broker.pool()),
+            BeatSender {
+                worker_id: self.worker_id.clone(),
+                hostname: self.hostname.clone(),
+                pid: std::process::id() as i32,
+            },
+            Duration::from_millis(self.app_config.recovery.runner_heartbeat_interval_ms),
+            StaleRunningRecovery::from_config(&self.app_config.recovery),
+            self.live_dispatches.clone(),
+            beats_cancel.clone(),
+        )
+        .map_err(|error| {
+            WorkerError::Config(format!(
+                "the runner heartbeat watchdog thread did not start: {error}"
+            ))
+        })?;
+
         // Supervise the service loops (C11-inverse): a loop that dies without
         // a shutdown request — panic or unexpected return; DB errors are
         // handled inside each loop — must not leave the worker claiming with
@@ -465,8 +495,9 @@ impl Worker {
         // the closed channel.
         let (fatal_tx, mut fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let services: [(&'static str, tokio::task::JoinHandle<()>); 3] = [
+        let services: [(&'static str, tokio::task::JoinHandle<()>); 4] = [
             ("claimer-heartbeat", claimer_hb),
+            ("runner-heartbeat", runner_beats),
             ("reaper", reaper),
             ("worker-state", state_loop),
         ];
@@ -582,6 +613,16 @@ impl Worker {
 
         // Graceful shutdown: wait for in-flight tasks.
         self.shutdown().await;
+
+        // No dispatch is held any more: stop the runner beats and their
+        // watchdog.
+        beats_cancel.cancel();
+        if tokio::task::spawn_blocking(move || runner_beat_watch.stop())
+            .await
+            .is_err()
+        {
+            tracing::error!("stopping the runner heartbeat watchdog failed");
+        }
 
         // A fatal claim error broke the loop; surface it so the process exits
         // non-zero for a supervisor restart. In-flight tasks were still
@@ -1024,6 +1065,10 @@ impl Worker {
             .expect("in_dispatch poisoned")
             .insert(task_id);
         let in_dispatch = Arc::clone(&self.in_dispatch);
+        // The runner-beat writer beats this row from here until its outcome
+        // is written; its fence lands a beat only while the row is RUNNING
+        // at this claim generation and has no finalizing marker.
+        let held_dispatch = self.live_dispatches.hold(task_id, row.claimed_at);
 
         self.tracker.spawn(async move {
             let phase2_work = execution::execute_and_finalize(
@@ -1036,6 +1081,9 @@ impl Worker {
                 payload_policy,
             )
             .await;
+
+            // The outcome is written: no more runner beats for this row.
+            drop(held_dispatch);
 
             // Release permit immediately after Phase 1 completes,
             // before potentially slow Phase 2 workflow callbacks.
