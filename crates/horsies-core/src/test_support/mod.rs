@@ -1,0 +1,214 @@
+//! Test support of the library's tests: the test databases
+//! ([`database`]), and the core handle on one of them.
+
+mod database;
+
+pub(crate) use database::{
+    connect, database_name_prefix, database_of_this_test, is_generated_name, is_valid_prefix,
+    server_url, with_database, TestDatabase, DATABASE_PREFIX_VARIABLE, DEFAULT_DATABASE_PREFIX,
+};
+
+use crate::broker::client_family::ClientFamily;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::migrations::{install_schema_on, InstallLockPlan};
+use crate::broker::pools::{CoreHandle, PoolProfile};
+use crate::core::PostgresConfig;
+use crate::db::ConnectionEnvironment;
+
+/// A core handle (producer pools) on the database of `url`. The caller
+/// closes it ([`CoreHandle::close`]) before the database is dropped, or
+/// leaves it to the forced drop at the end of the test.
+pub(crate) fn core_handle(url: &str) -> CoreHandle {
+    CoreHandle::open_with_environment(
+        &PostgresConfig::from_url(url),
+        PoolProfile::Producer,
+        ConnectionEnvironment::capture().expect("read the connection environment of the test"),
+    )
+    .expect("the statement layer accepts the test database URL")
+}
+
+/// Installs the schema into the template of this process: the
+/// statement-layer install for the Rust client, then the handle is closed so
+/// that the template has no session left.
+async fn install_template(url: &str) {
+    let handle = core_handle(url);
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the template URL");
+    install_schema_on(
+        open.pools().session_work(),
+        ClientFamily::Rust,
+        InstallLockPlan::fleet(),
+        StatementLog::Off,
+    )
+    .await
+    .expect("install the schema into the test template");
+    drop(open);
+    let _closed = handle.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prefix_rule_is_python_s() {
+        for valid in ["horsies_test_", "pyexit_", "a_", "rs_run_2_"] {
+            assert!(is_valid_prefix(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "_",
+            "Horsies_",
+            "horsies",
+            "9run_",
+            "run-1_",
+            "abcdefghijklmnopqrstuvwxy_",
+        ] {
+            assert!(!is_valid_prefix(invalid), "{invalid}");
+        }
+        assert!(is_valid_prefix("abcdefghijklmnopqrstuvw_"));
+        assert_eq!(DEFAULT_DATABASE_PREFIX, "horsies_test_");
+        assert_eq!(DATABASE_PREFIX_VARIABLE, "HORSIES_TEST_DATABASE_PREFIX");
+    }
+
+    #[test]
+    fn only_generated_names_of_the_prefix_are_swept() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        assert!(is_generated_name(
+            &format!("horsies_test_rs_{hex}"),
+            "horsies_test_"
+        ));
+        assert!(is_generated_name(
+            &format!("horsies_test_rstpl_{hex}"),
+            "horsies_test_"
+        ));
+        for other in [
+            format!("horsies_test_{hex}"),
+            format!("horsies_test_iso_{hex}"),
+            format!("pyexit_rs_{hex}"),
+            format!("horsies_test_rs_{}", &hex[..31]),
+            format!("horsies_test_rs_{}", hex.to_uppercase()),
+            "horsies-core".to_owned(),
+        ] {
+            assert!(!is_generated_name(&other, "horsies_test_"), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_url_changes_only_its_database() {
+        assert_eq!(
+            with_database("postgresql://u:p@host:5432/base", "other"),
+            "postgresql://u:p@host:5432/other"
+        );
+        assert_eq!(
+            with_database("postgresql://u:p@host/base?sslmode=disable", "other"),
+            "postgresql://u:p@host/other?sslmode=disable"
+        );
+        assert_eq!(
+            with_database("postgresql://u:p@host", "other"),
+            "postgresql://u:p@host/other"
+        );
+    }
+
+    /// A copied database holds the installed schema and the Rust family; the
+    /// shutdown of its test runtime drops it.
+    #[test]
+    fn a_copied_database_is_installed_and_dropped_with_its_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let name = runtime.block_on(async {
+            let database = TestDatabase::create().await;
+            let row = database
+                .client()
+                .query_one(
+                    "SELECT (SELECT family FROM horsies_client_family), \
+                            (SELECT max(version) FROM horsies_migrations)",
+                    &[],
+                )
+                .await
+                .expect("read the installed schema");
+            let family: String = row.get(0);
+            let version: i64 = row.get(1);
+            assert_eq!(family, "RUST");
+            assert_eq!(version, crate::broker::expected_schema_version());
+            assert!(database.name().starts_with(&database_name_prefix()));
+            database.name().to_owned()
+        });
+        drop(runtime);
+
+        let check = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("check runtime");
+        let exists = check.block_on(async {
+            let admin = connect(&with_database(&server_url(), "postgres")).await;
+            let row = admin
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+                    &[&name],
+                )
+                .await
+                .expect("look the database up");
+            row.get::<_, bool>(0)
+        });
+        assert!(!exists, "{name} is left after its runtime shut down");
+    }
+
+    /// Every call in one test runtime gets the same database; another
+    /// runtime gets another one.
+    #[test]
+    fn each_test_runtime_has_one_database() {
+        let first_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("first runtime");
+        let (first, again) = first_runtime.block_on(async {
+            let first = database_of_this_test().await.url().to_owned();
+            let again = tokio::spawn(async { database_of_this_test().await.url().to_owned() })
+                .await
+                .expect("spawned lookup");
+            (first, again)
+        });
+        drop(first_runtime);
+        assert_eq!(first, again);
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("second runtime");
+        let second =
+            second_runtime.block_on(async { database_of_this_test().await.url().to_owned() });
+        drop(second_runtime);
+        assert_ne!(first, second);
+    }
+
+    /// An empty database has no horsies table; the explicit drop removes it
+    /// while another session is still open on it.
+    #[tokio::test]
+    async fn an_empty_database_has_no_schema_and_drops_on_request() {
+        let database = TestDatabase::create_empty().await;
+        let row = database
+            .client()
+            .query_one("SELECT to_regclass('horsies_migrations') IS NULL", &[])
+            .await
+            .expect("read the catalog");
+        assert!(row.get::<_, bool>(0));
+        let name = database.name().to_owned();
+        let other_session = database.connect().await;
+        database.drop().await;
+        drop(other_session);
+
+        let admin = connect(&with_database(&server_url(), "postgres")).await;
+        let row = admin
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+                &[&name],
+            )
+            .await
+            .expect("look the database up");
+        assert!(!row.get::<_, bool>(0));
+    }
+}
