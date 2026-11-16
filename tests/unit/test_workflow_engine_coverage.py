@@ -6,6 +6,7 @@ to exercise defensive branches that integration tests don't reach.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -170,6 +171,7 @@ class TestEnqueueWorkflowTask:
             id='wt-1',
             task_name='my_task',
             input='{}',
+            workflow_sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             queue_name='default',
             priority=100,
             args_from=None,

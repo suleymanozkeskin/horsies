@@ -680,6 +680,7 @@ async def enqueue_workflow_task(
         task_index,
         task_name=row.task_name,
         node_input=row.input,
+        workflow_sent_at=row.workflow_sent_at,
         queue_name=row.queue_name,
         priority=row.priority,
         args_from=row.args_from,
@@ -716,6 +717,7 @@ async def _build_enqueued_task_params(
     *,
     task_name: str,
     node_input: str,
+    workflow_sent_at: datetime,
     queue_name: str,
     priority: int,
     args_from: Any,
@@ -734,7 +736,9 @@ async def _build_enqueued_task_params(
     and kwargs serialization all live here.
 
     Inputs come from the READY→ENQUEUED CAS RETURNING row; ``node_input``
-    is the node's stored ``input`` (its static kwargs as a JSON object).
+    is the node's stored ``input`` (its static kwargs as a JSON object), and
+    ``workflow_sent_at`` the ``sent_at`` of its workflow row, which the task
+    row stores.
     Failure means THIS node fails (callers fold into
     ``_fail_enqueued_task``); the only statements issued here are the
     workflow_ctx reads for ctx nodes.
@@ -933,7 +937,7 @@ async def _build_enqueued_task_params(
         queue_name=queue_name,
         priority=priority,
         input_json=kwargs_json,
-        sent_at=datetime.now(timezone.utc),
+        sent_at=workflow_sent_at,
         task_options_json=task_options_str,
         facts=task_node_facts(
             max_retries=max_retries,
@@ -1409,7 +1413,7 @@ async def enqueue_subworkflow_task(
                     queue_name=child_queue,
                     priority=child_priority,
                     input_json=root_kwargs_json,
-                    sent_at=datetime.now(timezone.utc),
+                    sent_at=child_sent_at,
                     task_options_json=child_task_options_json,
                     facts=child_facts,
                 ))
@@ -2420,6 +2424,7 @@ async def _build_level_inserts(
             cas_row.task_index,
             task_name=cas_row.task_name,
             node_input=cas_row.input,
+            workflow_sent_at=cas_row.workflow_sent_at,
             queue_name=cas_row.queue_name,
             priority=cas_row.priority,
             args_from=cas_row.args_from,

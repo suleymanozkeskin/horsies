@@ -630,6 +630,7 @@ class TestWorkflowPaths:
         return {
             'task_name': 'node.task',
             'node_input': '{}',
+            'workflow_sent_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
             'queue_name': 'default',
             'priority': 50,
             'args_from': None,

@@ -310,6 +310,7 @@ class TestPromotionReadsTheStoredOptions:
             id='wt-1',
             task_name='child_task',
             input='{}',
+            workflow_sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             queue_name='default',
             priority=100,
             args_from=None,

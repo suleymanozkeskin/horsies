@@ -644,7 +644,7 @@ async def start_workflow_async(
                             queue_name=resolved_queue,
                             priority=resolved_priority,
                             input_json=task_kwargs_json,
-                            sent_at=datetime.now(timezone.utc),
+                            sent_at=workflow_sent_at,
                             task_options_json=task_options_json,
                             facts=node_facts,
                         ))

@@ -9,6 +9,7 @@ all use it, so only a policy that validates as `RetryPolicy` reaches
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -172,6 +173,7 @@ class TestWorkflowPaths:
         arguments: dict[str, Any] = {
             'task_name': 'node.task',
             'node_input': '{}',
+            'workflow_sent_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
             'queue_name': 'default',
             'priority': 50,
             'args_from': None,

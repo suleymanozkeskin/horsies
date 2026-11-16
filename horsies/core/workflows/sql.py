@@ -125,7 +125,8 @@ ENQUEUE_WORKFLOW_TASK_SQL = text("""
       AND w.id = wt.workflow_id
       AND w.status = 'RUNNING'
     RETURNING wt.id, wt.task_name, wt.input, wt.queue_name, wt.priority,
-              wt.args_from, wt.workflow_ctx_from, wt.task_options
+              wt.args_from, wt.workflow_ctx_from, wt.task_options,
+              w.sent_at AS workflow_sent_at
 """)
 # A task row that the engine mints for a workflow node. It carries no command
 # fingerprint (horsies_tasks_command_fingerprint_by_origin) and does not keep
@@ -227,7 +228,9 @@ def workflow_task_row_params(
     """The parameters of INSERT_TASK_FOR_WORKFLOW_SQL for one node's task row.
 
     ``input_json`` is the JSON object of the task's keyword arguments,
-    including the values that the engine injects. Does no I/O.
+    including the values that the engine injects. ``sent_at`` is the
+    ``sent_at`` of the node's workflow row: the call time of the start of
+    that workflow, as a send stores its call time. Does no I/O.
     """
     return {
         'id': task_id,
@@ -520,7 +523,8 @@ PROMOTE_DEPENDENTS_BATCH_SQL = text("""
       AND w.id = wt.workflow_id
     RETURNING wt.task_index, wt.status, wt.task_name, wt.input,
               wt.queue_name, wt.priority, wt.args_from,
-              wt.workflow_ctx_from, wt.task_options
+              wt.workflow_ctx_from, wt.task_options,
+              w.sent_at AS workflow_sent_at
 """)
 GET_WORKFLOW_DEPTH_SQL = text(
     """SELECT depth, root_workflow_id FROM horsies_workflows WHERE id = :wf_id"""
