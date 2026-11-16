@@ -4,6 +4,11 @@
 use uuid::Uuid;
 
 /// Categorized workflow start failure codes.
+///
+/// The members are Python's, in Python's order
+/// (`horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
+/// `EVENT_LOOP_LIMIT` and `ASYNC_CONTEXT` are produced by the Python client
+/// only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
 #[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
@@ -15,6 +20,16 @@ pub enum WorkflowStartErrorCode {
     WorkflowIdConflict,
     /// Infrastructure error: schema init, DB transaction. Conditionally retryable.
     EnqueueFailed,
+    /// A sync start could not run the call on the broker's sync runner: the runner is stopped, its
+    /// thread did not start, or scheduling failed. Nothing ran. Python client only; removed before
+    /// 0.8.0.
+    LoopRunnerFailed,
+    /// The broker already holds resource sets for its limit of open event loops, and this call ran on a
+    /// new one; nothing was written. Python client only; removed before 0.8.0.
+    EventLoopLimit,
+    /// A sync start was called on a thread that runs an event loop; its wait would stall that loop, so
+    /// nothing was written. Python client only.
+    AsyncContext,
 }
 
 impl std::fmt::Display for WorkflowStartErrorCode {
@@ -24,6 +39,9 @@ impl std::fmt::Display for WorkflowStartErrorCode {
             Self::ValidationFailed => write!(f, "VALIDATION_FAILED"),
             Self::WorkflowIdConflict => write!(f, "WORKFLOW_ID_CONFLICT"),
             Self::EnqueueFailed => write!(f, "ENQUEUE_FAILED"),
+            Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
+            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
+            Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
         }
     }
 }
