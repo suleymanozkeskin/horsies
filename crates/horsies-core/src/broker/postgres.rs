@@ -1176,6 +1176,26 @@ impl PostgresBroker {
             .await
     }
 
+    /// Connect the broker of a worker's child: no migration and no fleet
+    /// gate check, as [`Self::connect_observe_only`]; the main URL pool keeps
+    /// `kept_open` connections open and, with `check`, pings every pooled
+    /// connection at checkout ([`PoolProfile::Child`]).
+    ///
+    /// Must run inside a tokio runtime when `kept_open` keeps connections
+    /// open: the pool starts the task that opens them.
+    pub async fn connect_child(
+        config: &PostgresConfig,
+        kept_open: crate::db::KeptOpen,
+        check: bool,
+    ) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(
+            config,
+            SchemaInitializationMode::ObserveOnly,
+            PoolProfile::Child { kept_open, check },
+        )
+        .await
+    }
+
     /// Connect a worker's broker: the main URL pool is the worker profile
     /// pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from
     /// batch checkouts for the reaper and the per-task writes.
@@ -1206,7 +1226,7 @@ impl PostgresBroker {
         let core = CoreHandle::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let runtime_options = match profile {
-            PoolProfile::Producer => pg_pool_options(config),
+            PoolProfile::Producer | PoolProfile::Child { .. } => pg_pool_options(config),
             PoolProfile::Worker => pg_worker_runtime_pool_options(config),
         };
         let reserve_runtime =

@@ -16,6 +16,7 @@ use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, Poll
 use crate::broker::PostgresBroker;
 use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
+use crate::db::KeptOpen;
 use crate::manifest::PoolRecycle;
 use crate::worker::executor::protocol::{
     decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
@@ -242,13 +243,13 @@ fn runtime_threads(kind: ChildKind) -> usize {
 
 /// The broker config of a child: the URL of the init frame with the
 /// connection settings of the parent's config, a pool of up to `max_size`
-/// connections of the child kind with no overflow, `check` as the pre-ping,
-/// and Python's checkout wait and connection age of a child pool. `min_size`
-/// has no form in the config: the pools of the core open a connection at its
-/// first checkout. Pure.
+/// connections of the child kind with no overflow, `check` as the pre-ping
+/// of a session pool, and Python's checkout wait and connection age of a
+/// child pool. The `min_size` and the `check` of the main pool are its pool
+/// profile ([`kept_open_of`], [`PostgresBroker::connect_child`]). Pure.
 ///
 /// Python's child pool takes the same settings as psycopg connect kwargs
-/// (`horsies/core/worker/child_pool.py:124-133`, the `kwargs` of
+/// (`horsies/core/worker/child_pool.py:123-132`, the `kwargs` of
 /// `PostgresConfig.pooled_connect_args`). In PgBouncer transaction mode the
 /// config also names the parent's session URL, which
 /// [`PostgresConfig::validate`] requires in that mode.
@@ -279,16 +280,29 @@ fn child_broker_config(
     }
 }
 
-/// The child's broker, on the connect path of the parent's broker
-/// ([`PostgresBroker::connect_observe_only`]): the child applies no
-/// migration. Errors: the text of a refused config or of a failed connect.
+/// The connections that a child pool keeps open: its `min_size` (Python
+/// `ConnectionPool(min_size=...)`, `horsies/core/worker/child_pool.py:123-132`
+/// and `:169-178`, opened at `:136` and `:179`). Pure.
+fn kept_open_of(pool: ChildPool) -> KeptOpen {
+    let min_size = u32::try_from(pool.min_size.get())
+        .expect("a child pool min_size is from 0 to MAX_CHILD_POOL_CONNECTIONS");
+    match NonZeroU32::new(min_size) {
+        None => KeptOpen::NoConnections,
+        Some(kept) => KeptOpen::Connections(kept),
+    }
+}
+
+/// The child's broker ([`PostgresBroker::connect_child`]): the child
+/// applies no migration. Its main pool keeps `min_size` connections open and,
+/// with `check`, pings every pooled connection at checkout (Python
+/// `check=ConnectionPool.check_connection`,
+/// `horsies/core/worker/child_pool.py:122` and `:168`). Errors: the text of a
+/// refused config or of a failed connect; a `min_size` above `max_size` is a
+/// refused config, as Python's `ValueError`.
 async fn connect(init: &InitFrame) -> Result<PostgresBroker, String> {
-    let config = child_broker_config(
-        init.database_url.as_str(),
-        &init.connection,
-        pool_of(init.child_kind),
-    );
-    PostgresBroker::connect_observe_only(&config)
+    let pool = pool_of(init.child_kind);
+    let config = child_broker_config(init.database_url.as_str(), &init.connection, pool);
+    PostgresBroker::connect_child(&config, kept_open_of(pool), pool.check)
         .await
         .map_err(|error| error.to_string())
 }
@@ -415,6 +429,21 @@ mod tests {
             max_size: PoolMaxSize::new(max_size).expect("the test max size is inside its bounds"),
             check,
         }
+    }
+
+    /// Python `min_size=0`: no connection stays open; another `min_size`
+    /// stays open.
+    #[test]
+    fn the_min_size_of_a_child_pool_is_its_kept_connections() {
+        assert_eq!(kept_open_of(child_pool(4, false)), KeptOpen::NoConnections);
+        let pool = ChildPool {
+            min_size: PoolMinSize::new(3).expect("3 is a pool min size"),
+            ..child_pool(4, true)
+        };
+        assert_eq!(
+            kept_open_of(pool),
+            KeptOpen::Connections(NonZeroU32::new(3).expect("three"))
+        );
     }
 
     /// Python `_initialize_worker_pool`: at most `max_size` connections,
