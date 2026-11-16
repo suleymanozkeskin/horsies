@@ -231,14 +231,14 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let fetch = builder.task(TaskNode::<String>::raw("fetch").node_id("fetch"));
+            let fetch = builder.task(TaskNode::<String>::raw("fetch", "null").node_id("fetch"));
             let process = builder.task(
-                TaskNode::<String>::raw("process")
+                TaskNode::<String>::raw("process", "{}")
                     .raw_arg_from("raw", fetch.into())
                     .node_id("process"),
             );
             let persist = builder.task(
-                TaskNode::<()>::raw("persist")
+                TaskNode::<()>::raw("persist", "{}")
                     .raw_arg_from("data", process.into())
                     .node_id("persist"),
             );
@@ -279,7 +279,7 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let node = builder.task(TaskNode::<String>::raw("fetch").node_id("fetch"));
+            let node = builder.task(TaskNode::<String>::raw("fetch", "null").node_id("fetch"));
             Ok(WorkflowDefConfig::new().output(node))
         }
 
@@ -287,7 +287,7 @@ mod tests {
             let mut builder = WorkflowSpecBuilder::new(format!("param_pipeline_{}", params));
             builder.definition_key(format!("param_pipeline_{}", params));
             let node = builder.task(
-                TaskNode::<String>::raw("fetch")
+                TaskNode::<String>::raw("fetch", "null")
                     .node_id("fetch")
                     .input_json(serde_json::to_string(&params).unwrap()),
             );
@@ -301,7 +301,7 @@ mod tests {
         let spec = ParamWorkflow::build_with("eu".to_owned()).unwrap();
         assert_eq!(spec.name, "param_pipeline_eu");
         assert_eq!(spec.definition_key.as_deref(), Some("param_pipeline_eu"));
-        assert_eq!(spec.tasks[0].input_json.as_deref(), Some("\"eu\""));
+        assert_eq!(spec.tasks[0].input_json, "\"eu\"");
     }
 
     struct CustomErrorWorkflow;
@@ -322,8 +322,8 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            builder.task(TaskNode::<()>::raw("step_a").node_id("step_a"));
-            builder.task(TaskNode::<()>::raw("step_b").node_id("step_b"));
+            builder.task(TaskNode::<()>::raw("step_a", "null").node_id("step_a"));
+            builder.task(TaskNode::<()>::raw("step_b", "null").node_id("step_b"));
             Ok(WorkflowDefConfig::new())
         }
     }
@@ -349,9 +349,9 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let a = builder.task(TaskNode::<()>::raw("task_a").node_id("task_a"));
-            let b = builder.task(TaskNode::<()>::raw("task_b").node_id("task_b"));
-            builder.task(TaskNode::<()>::raw("task_c").node_id("task_c"));
+            let a = builder.task(TaskNode::<()>::raw("task_a", "null").node_id("task_a"));
+            let b = builder.task(TaskNode::<()>::raw("task_b", "null").node_id("task_b"));
+            builder.task(TaskNode::<()>::raw("task_c", "null").node_id("task_c"));
 
             let policy = SuccessPolicy {
                 cases: vec![SuccessCase {
@@ -389,14 +389,18 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let prep = builder.task(TaskNode::<()>::raw("prepare").node_id("prepare"));
+            let prep = builder.task(TaskNode::<()>::raw("prepare", "null").node_id("prepare"));
             let child = builder.sub_workflow(
-                SubWorkflowNode::new("child_pipeline")
-                    .waits_for(prep)
-                    .node_id("child"),
+                SubWorkflowNode::new(
+                    "child_pipeline",
+                    "null",
+                    crate::core::workflow::node::SubWorkflowParams::NotGiven,
+                )
+                .waits_for(prep)
+                .node_id("child"),
             );
             let finalize = builder.task(
-                TaskNode::<()>::raw("finalize")
+                TaskNode::<()>::raw("finalize", "null")
                     .waits_for(child)
                     .node_id("finalize"),
             );
@@ -427,15 +431,19 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let root = builder.task(TaskNode::<()>::raw("root").node_id("root"));
-            let left = builder.task(TaskNode::<()>::raw("left").waits_for(root).node_id("left"));
+            let root = builder.task(TaskNode::<()>::raw("root", "null").node_id("root"));
+            let left = builder.task(
+                TaskNode::<()>::raw("left", "null")
+                    .waits_for(root)
+                    .node_id("left"),
+            );
             let right = builder.task(
-                TaskNode::<()>::raw("right")
+                TaskNode::<()>::raw("right", "null")
                     .waits_for(root)
                     .node_id("right"),
             );
             let join = builder.task(
-                TaskNode::<()>::raw("join")
+                TaskNode::<()>::raw("join", "null")
                     .waits_for_all(&[left, right])
                     .node_id("join"),
             );
@@ -525,7 +533,7 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            builder.task(TaskNode::<()>::raw("task_a").node_id("task_a"));
+            builder.task(TaskNode::<()>::raw("task_a", "null").node_id("task_a"));
             Ok(WorkflowDefConfig::new())
         }
     }
@@ -583,9 +591,9 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            builder.task(TaskNode::<()>::raw("fetch").node_id("fetch_a"));
-            builder.task(TaskNode::<()>::raw("fetch").node_id("fetch_b"));
-            builder.task(TaskNode::<()>::raw("fetch").node_id("fetch_c"));
+            builder.task(TaskNode::<()>::raw("fetch", "null").node_id("fetch_a"));
+            builder.task(TaskNode::<()>::raw("fetch", "null").node_id("fetch_b"));
+            builder.task(TaskNode::<()>::raw("fetch", "null").node_id("fetch_c"));
             Ok(WorkflowDefConfig::new())
         }
     }
@@ -618,18 +626,18 @@ mod tests {
     fn multiple_join_errors_collected() {
         // Two tasks with bad join settings should both be reported.
         let mut builder = WorkflowSpecBuilder::new("bad_joins");
-        let root = builder.task(TaskNode::<()>::raw("root").node_id("root"));
+        let root = builder.task(TaskNode::<()>::raw("root", "null").node_id("root"));
 
         // Node A: quorum with min_success=5 but only 1 dependency
         builder.task(
-            TaskNode::<()>::raw("task_a")
+            TaskNode::<()>::raw("task_a", "null")
                 .waits_for(root)
                 .join_quorum(5)
                 .node_id("task_a"),
         );
         // Node B: quorum with min_success=0 (must be >= 1)
         builder.task(
-            TaskNode::<()>::raw("task_b")
+            TaskNode::<()>::raw("task_b", "null")
                 .waits_for(root)
                 .join_quorum(0)
                 .node_id("task_b"),
@@ -651,7 +659,7 @@ mod tests {
 
         // Invalid node_id prevents subsequent DAG validation from running.
         let mut builder = WorkflowSpecBuilder::new("bad_id");
-        builder.task(TaskNode::<()>::raw("task_a").node_id("invalid chars!"));
+        builder.task(TaskNode::<()>::raw("task_a", "null").node_id("invalid chars!"));
 
         let result = builder.build();
         assert!(result.is_err());
@@ -677,9 +685,9 @@ mod tests {
     fn duplicate_node_ids_collected() {
         // Three nodes sharing the same node_id produces multiple errors.
         let mut builder = WorkflowSpecBuilder::new("dup_ids");
-        builder.task(TaskNode::<()>::raw("task_a").node_id("shared"));
-        builder.task(TaskNode::<()>::raw("task_b").node_id("shared"));
-        builder.task(TaskNode::<()>::raw("task_c").node_id("shared"));
+        builder.task(TaskNode::<()>::raw("task_a", "null").node_id("shared"));
+        builder.task(TaskNode::<()>::raw("task_b", "null").node_id("shared"));
+        builder.task(TaskNode::<()>::raw("task_c", "null").node_id("shared"));
 
         let result = builder.build();
         assert!(result.is_err());

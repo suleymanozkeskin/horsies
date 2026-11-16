@@ -253,13 +253,15 @@ pub fn send_error_from_enqueue(
         | BrokerError::IncompleteTaskHistoryCutover
         | BrokerError::SchemaVersionMismatch { .. }
         | BrokerError::InvalidStatus(_)
+        | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
         | BrokerError::EnqueueConflictUnverifiable { .. }
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
         | BrokerError::TerminalizationContract(_)
-        | BrokerError::HistoryReadContract(_) => TaskSendError::EnqueueFailed {
+        | BrokerError::HistoryReadContract(_)
+        | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,
