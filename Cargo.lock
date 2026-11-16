@@ -854,6 +854,7 @@ dependencies = [
  "horsies-macros",
  "http-body-util",
  "include_dir",
+ "libc",
  "log",
  "miette",
  "mime_guess",

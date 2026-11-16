@@ -7,6 +7,8 @@
 //!
 //! - [`protocol`]: the parent-child frame codec. The worker parent and every
 //!   child use this one implementation.
+//! - [`supervisor`]: the spawner thread, child channels, exits and the
+//!   restart rules.
 
 // The worker loop still runs task bodies in its own process; it switches to
 // this executor in a later change. Until then only the tests call these
@@ -14,3 +16,4 @@
 #![allow(dead_code)]
 
 pub mod protocol;
+pub mod supervisor;
