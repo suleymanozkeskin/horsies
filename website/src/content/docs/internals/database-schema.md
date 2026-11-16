@@ -22,8 +22,14 @@ enqueue, result wait, task info read, workflow start or scheduler start):
 1. It reads the state of the current schema, with no lock.
 2. A database with no `horsies_` table: it takes the schema advisory lock on a direct connection to the
    session URL, reads the state again, and runs the migration with its bookkeeping row in
-   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction.
-3. A database that holds version 1000 with this build's checksum: nothing to do, no lock.
+   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction. Then it
+   publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
+   `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`)
+   from the leaf catalog, in a second transaction, before it returns.
+3. A database that holds version 1000 with this build's checksum, the `PYTHON` family row and every
+   history reader: nothing to do, no lock. A missing family row or a missing reader (an install that
+   stopped between its two transactions): it takes the lock, publishes the readers and writes the family
+   row.
 4. Any other database is refused with `SCHEMA_INIT_FAILED`, and nothing is changed. The refusal names what the
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
