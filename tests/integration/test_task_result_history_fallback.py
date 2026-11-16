@@ -42,7 +42,7 @@ from horsies.core.history.reads.lookup_generation import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
 from horsies.core.types.result import Err, Ok, is_err
-from tests.integration.history_seeding import route_rows
+from tests.integration.monitoring_seeding import insert_rows
 from tests.integration.test_monitoring_queries import ago, make_task
 from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
@@ -78,7 +78,7 @@ async def seed_history_task(
         enqueued_at=ago(7200),
         started_at=ago(3600),
     )
-    await route_rows(session, (task,))
+    await insert_rows(session, task)
     payload = result_json.encode() if result_json is not None else None
     _ = await session.execute(
         text(
@@ -223,7 +223,7 @@ class TestHistoryFallback:
                 broker_module,
                 'GET_TASK_RESULT_RECORD_SQL',
                 text(
-                    'SELECT task_name, status, result '
+                    'SELECT task_name, status, NULL::text AS result '
                     'FROM horsies_tasks WHERE FALSE'
                 ),
             )

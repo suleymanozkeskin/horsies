@@ -125,8 +125,6 @@ class TestBatchSnapshotReuse:
             for row in history:
                 decoded = decode_attempt_snapshot(
                     version=row.attempt_archive_version,
-                    codec='json-utf8',
-                    content_type='application/json',
                     payload=bytes(row.attempt_snapshot),
                     digest=bytes(row.attempt_snapshot_digest),
                 )
