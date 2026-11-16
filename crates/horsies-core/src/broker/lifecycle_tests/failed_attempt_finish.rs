@@ -150,10 +150,7 @@ mod terminal_failure {
                 Some("lifecycle-process"),
             )
         );
-        assert_eq!(
-            wakes.payloads(&pool).await,
-            vec![format!("capacity:{task_id}")]
-        );
+        assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
@@ -331,10 +328,7 @@ mod retry {
             panic!("expected one attempt, got {records:?}");
         };
         assert!(!attempt.will_retry());
-        assert_eq!(
-            wakes.payloads(&pool).await,
-            vec![format!("capacity:{task_id}")]
-        );
+        assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
@@ -400,10 +394,7 @@ mod no_write {
         else {
             panic!("expected a failure, got {first:?}");
         };
-        assert_eq!(
-            wakes.payloads(&pool).await,
-            vec![format!("capacity:{task_id}")]
-        );
+        assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
         let replay = write_failed_attempt(&pool, &command).await.expect("replay");
 
