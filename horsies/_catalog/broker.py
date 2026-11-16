@@ -86,8 +86,8 @@ class BrokerErrorCode(str, Enum):
     """
 
     LISTENER_DISABLED = 'LISTENER_DISABLED'
-    """The handle was built without a listener, so an operation that needs
-    one cannot run. Nothing ran. It does not clear for this handle.
+    """The broker has no listener, so an operation that needs one cannot run.
+    Nothing ran. It does not clear for this broker.
     """
 
     WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'

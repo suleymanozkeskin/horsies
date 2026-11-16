@@ -59,8 +59,8 @@ pub enum BrokerErrorCode {
     /// An argument of the call was refused before anything ran. Nothing was
     /// written, and the same arguments are refused again.
     InvalidInput,
-    /// The handle was built without a listener, so an operation that needs
-    /// one cannot run. Nothing ran. It does not clear for this handle.
+    /// The broker has no listener, so an operation that needs one cannot run.
+    /// Nothing ran. It does not clear for this broker.
     ListenerDisabled,
     /// A result wait was called in a process that runs task bodies. A wait
     /// there can hold the slot that the awaited task needs, so nothing ran.
@@ -150,6 +150,14 @@ mod tests {
             "\"INVALID_INPUT\""
         );
         assert_eq!(BrokerErrorCode::InvalidInput.to_string(), "INVALID_INPUT");
+    }
+
+    #[test]
+    fn listener_disabled_has_python_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&BrokerErrorCode::ListenerDisabled).unwrap(),
+            "\"LISTENER_DISABLED\""
+        );
     }
 
     #[test]
