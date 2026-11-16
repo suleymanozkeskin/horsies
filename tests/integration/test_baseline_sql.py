@@ -96,6 +96,15 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_task_history_leaf_lock_key',
         'horsies_terminalization_miss',
         'horsies_uuid7_birth',
+        # 0006_history_functions.sql.
+        'horsies_begin_leaf_detach',
+        'horsies_drop_detached_leaf',
+        'horsies_inspect_history_leaf',
+        'horsies_move_tasks_to_history',
+        'horsies_prune_candidates',
+        'horsies_record_leaf_detached',
+        'horsies_rerun_source_read',
+        'horsies_task_absence_reason',
         # 0007_scheduler_monitoring_functions.sql.
         'horsies_fire_schedule',
         'horsies_list_expired_tasks',
