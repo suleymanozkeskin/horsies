@@ -3134,46 +3134,53 @@ fn decode_pong(
 
 /// Parse the result row into a `TaskResult<T>`.
 ///
-/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED/FAILED.
-/// Maps database statuses to `TaskResult` variants:
-/// - `COMPLETED`/`FAILED` + valid JSON -> decoded `TaskResult<T>`
-/// - `COMPLETED`/`FAILED` + null -> `TaskResult::Err(ResultNotAvailable)`
-/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))`
+/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED,
+/// FAILED and EXPIRED. Maps database statuses to `TaskResult` variants
+/// (Python `TaskHandle._record_to_task_result`):
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + valid JSON -> decoded `TaskResult<T>`
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + null -> `TaskResult::Err(ResultNotAvailable)`
+///   with `data = {"task_id": "<id>", "status": "<status>"}`
+/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
+///   `data = {"task_id": "<id>"}`
 #[allow(clippy::needless_pass_by_value)]
 fn parse_task_result_row<T: DeserializeOwned>(
     row: TaskResultRow,
 ) -> Result<TaskResult<T>, BrokerError> {
     match row.status.as_str() {
-        "COMPLETED" | "FAILED" => match row.result {
+        // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`,
+        // so an EXPIRED row decodes like COMPLETED and FAILED.
+        "COMPLETED" | "FAILED" | "EXPIRED" => match row.result {
             Some(ref result_json) => {
                 let task_result: TaskResult<T> =
                     serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
                 Ok(task_result)
             }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                RetrievalCode::ResultNotAvailable,
-                format!("task {} completed but result is null", row.id),
-            ))),
+            // Python `TaskHandle._record_to_task_result`: a terminal row
+            // that stored no result is RESULT_NOT_AVAILABLE, with the id and
+            // the status in `data`.
+            None => Ok(TaskResult::Err(TaskError {
+                data: Some(serde_json::json!({
+                    "task_id": row.id.to_string(),
+                    "status": row.status,
+                })),
+                ..TaskError::builtin(
+                    RetrievalCode::ResultNotAvailable,
+                    format!(
+                        "Task {} reached terminal status {} but stored no result payload",
+                        row.id, row.status
+                    ),
+                )
+            })),
         },
-        "EXPIRED" => match row.result {
-            // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`;
-            // decode it like COMPLETED/FAILED. A NULL result (older rows, or a
-            // lost write) still yields the terminal expired outcome instead of a
-            // spurious "non-terminal status EXPIRED" broker error (C2).
-            Some(ref result_json) => {
-                let task_result: TaskResult<T> =
-                    serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
-                Ok(task_result)
-            }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                OutcomeCode::TaskExpired,
-                format!("task {} expired", row.id),
-            ))),
-        },
-        "CANCELLED" => Ok(TaskResult::Err(TaskError::builtin(
-            OutcomeCode::TaskCancelled,
-            format!("task {} was cancelled", row.id),
-        ))),
+        // Python `TaskHandle._record_to_task_result`: the code, the message
+        // and the task id in `data`.
+        "CANCELLED" => Ok(TaskResult::Err(TaskError {
+            data: Some(serde_json::json!({ "task_id": row.id.to_string() })),
+            ..TaskError::builtin(
+                OutcomeCode::TaskCancelled,
+                format!("Task {} was cancelled before completion", row.id),
+            )
+        })),
         other => Err(BrokerError::InvalidStatus(format!(
             "task {} has non-terminal status {}",
             row.id, other,
@@ -3306,7 +3313,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3335,7 +3342,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3383,24 +3390,52 @@ mod tests {
         assert_eq!(err.error_code, expected);
     }
 
-    /// Python `test_app_get_result.py::TestHorsiesGetResultEnvelopeGuards::
-    /// test_terminal_status_with_none_payload_is_result_not_available`: an
-    /// EXPIRED row with no stored result is a terminal row whose result was
-    /// not written, so the read answers `RESULT_NOT_AVAILABLE`; it does not
-    /// invent a `TASK_EXPIRED` outcome.
+    /// A terminal row that stored no result reads as `RESULT_NOT_AVAILABLE`
+    /// with Python's message and the id and status in `data`, for each of
+    /// COMPLETED, FAILED and EXPIRED (Python
+    /// `TaskHandle._record_to_task_result`; `test_app_get_result.py::
+    /// TestHorsiesGetResultEnvelopeGuards::
+    /// test_terminal_status_with_none_payload_is_result_not_available`). An
+    /// EXPIRED row with no stored result does not read as `TASK_EXPIRED`,
+    /// and it is no `InvalidStatus` broker error.
     #[test]
-    #[ignore = "waits on #831"]
-    fn parse_expired_null_result() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "EXPIRED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        let err = task_result.unwrap_err();
-        let expected = TaskError::builtin(RetrievalCode::ResultNotAvailable, "").error_code;
-        assert_eq!(err.error_code, expected);
+    fn a_terminal_row_without_a_result_reads_as_result_not_available() {
+        let task_id = Uuid::new_v4();
+        for status in ["COMPLETED", "FAILED", "EXPIRED"] {
+            let row = TaskResultRow {
+                id: task_id,
+                status: status.to_owned(),
+                result: None,
+                failed_reason: None,
+            };
+
+            let task_result: TaskResult<serde_json::Value> =
+                parse_task_result_row(row).expect("a terminal row reads");
+
+            let TaskResult::Err(error) = task_result else {
+                panic!("{status}: a row with no result must read as an error");
+            };
+            assert_eq!(
+                error.error_code,
+                TaskError::builtin(RetrievalCode::ResultNotAvailable, "").error_code,
+                "{status}"
+            );
+            assert_eq!(
+                error.message.as_deref(),
+                Some(
+                    format!(
+                        "Task {task_id} reached terminal status {status} but stored no result payload"
+                    )
+                    .as_str()
+                ),
+                "{status}"
+            );
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({ "task_id": task_id.to_string(), "status": status })),
+                "{status}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3484,6 +3519,41 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&Uuid::nil().to_string()));
+    }
+
+    /// A CANCELLED task reads as `TASK_CANCELLED` with Python's message and
+    /// its task id in `data` (Python `TaskHandle._record_to_task_result`;
+    /// `tests/e2e/test_layer1_tasks.py::test_task_cancelled`:
+    /// `result.err.data['task_id'] == task_id`).
+    #[test]
+    fn parse_cancelled_carries_the_task_id_in_data() {
+        let task_id = Uuid::new_v4();
+        let row = TaskResultRow {
+            id: task_id,
+            status: "CANCELLED".to_owned(),
+            result: None,
+            failed_reason: None,
+        };
+
+        let task_result: TaskResult<serde_json::Value> =
+            parse_task_result_row(row).expect("a CANCELLED row reads");
+
+        let TaskResult::Err(error) = task_result else {
+            panic!("a CANCELLED task must read as an error");
+        };
+        assert_eq!(
+            error.error_code,
+            TaskError::builtin(OutcomeCode::TaskCancelled, "").error_code
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some(format!("Task {task_id} was cancelled before completion").as_str())
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({ "task_id": task_id.to_string() }))
+        );
+        assert!(error.cause.is_none());
     }
 
     /// Completed task with a string result type.
