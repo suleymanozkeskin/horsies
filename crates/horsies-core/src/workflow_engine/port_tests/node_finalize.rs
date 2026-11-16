@@ -30,7 +30,7 @@ use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOut
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{
     confirm_ownership_and_set_running, finalize_workflow_phase, persist_terminal_state,
-    FinalizeError, FinalizeOutcome, FinalizeStage, OwnershipOutcome,
+    FinalizeError, FinalizeOutcome, FinalizeStage, OwnershipOutcome, PhaseTwoForm,
 };
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
@@ -172,18 +172,20 @@ async fn finalize(
         FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
-        } => Some((*is_success, *capacity_notified)),
+            phase_two: form,
+        } => Some((*is_success, *capacity_notified, *form)),
         FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused => None,
     };
-    if let Some((is_success, capacity_notified)) = owed {
+    if let Some((is_success, capacity_notified, form)) = owed {
         finalize_workflow_phase(
-            pool,
+            &broker,
             &WorkflowSpecRegistry::new(),
             claimed.id,
             is_success,
             &claimed.queue_name,
             claimed.is_workflow_task,
             capacity_notified,
+            form,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -198,8 +200,10 @@ fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
         Ok(FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
+             phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -582,24 +586,29 @@ async fn seed_owed_phase_two(
 }
 
 /// Phase 2 of a success of `task_id`, with its capacity wake on `queue_name`.
+/// The phase-1 outcome is not at hand, so the step reads the dependents in a
+/// transaction (`PhaseTwoForm::NotKnown`).
 async fn phase_two(
     pool: &PgPool,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
+    let broker = PostgresBroker::from_pool(pool.clone());
     finalize_workflow_phase(
-        pool,
+        &broker,
         &WorkflowSpecRegistry::new(),
         task_id,
         true,
         queue_name,
         is_workflow_task,
         false,
+        PhaseTwoForm::NotKnown,
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
+    .map(|_parent_advance| ())
 }
 
 fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeError {
