@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::{
     JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowFailure,
@@ -798,14 +797,22 @@ async fn enqueue_phase2_dependent_in_tx(
     );
     let task_id = crate::core::history::identity::uuid7::mint_task_id()
         .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let good_until =
-        crate::workflow_engine::parse_good_until_from_options(node.task_options.as_deref());
+    let good_until = crate::workflow_engine::node_good_until(
+        node.task_index,
+        &node.task_name,
+        node.task_options.as_deref(),
+    )?;
     let facts = prepare_workflow_task_facts(
         &merged_input,
         node.task_options.as_deref(),
         retention.resolve_queue_class(&node.queue_name).as_deref(),
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    let max_retries = crate::workflow_engine::node_max_retries(
+        node.task_index,
+        &node.task_name,
+        node.task_options.as_deref(),
+    )?;
     sqlx::query(ENQUEUE_TASK_SQL)
         .bind(task_id)
         .bind(&node.task_name)
@@ -815,7 +822,7 @@ async fn enqueue_phase2_dependent_in_tx(
         .bind(&node.task_options)
         .bind(facts.execution.as_str())
         .bind(&facts.retention_class_key)
-        .bind(parse_max_retries(node.task_options.as_deref()))
+        .bind(max_retries)
         .bind(good_until)
         .bind(workflow_id)
         .execute(transaction.as_mut())
@@ -1781,9 +1788,16 @@ async fn build_enqueued_task_params(
         merged_input.len(),
     );
 
-    let max_retries = parse_max_retries(task.task_options.as_deref());
-    let good_until =
-        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
+    let max_retries = crate::workflow_engine::node_max_retries(
+        task.task_index,
+        &task.task_name,
+        task.task_options.as_deref(),
+    )?;
+    let good_until = crate::workflow_engine::node_good_until(
+        task.task_index,
+        &task.task_name,
+        task.task_options.as_deref(),
+    )?;
     let retention_class_key = retention.resolve_queue_class(&task.queue_name);
     let facts = prepare_workflow_task_facts(
         &merged_input,

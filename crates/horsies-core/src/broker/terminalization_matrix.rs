@@ -449,6 +449,7 @@ async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
     assert!(!database_exists);
 }
 
+/// The URL of the P5 database, accepted by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
     let pool = migrated_pool().await;
     drop(pool);
