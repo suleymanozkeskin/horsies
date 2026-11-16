@@ -1272,6 +1272,7 @@ mod tests {
         slow.index = 1;
         // A root that names a context source takes the per-row slow path.
         slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
+        slow.input_json = "{}".to_owned();
         let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
         let workflow_id = Uuid::new_v4();
