@@ -102,6 +102,7 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_finish_workflow_success',
         'horsies_insert_task_rows',
         'horsies_node_has_dependents',
+        'horsies_node_downstream_subworkflow',
         'horsies_release_claims',
         'horsies_requeue_stale_claims',
         'horsies_stale_running_scan',
@@ -342,11 +343,11 @@ _WORKFLOW_ROW_SQL: Final = """
 """
 
 _NODE_ROW_SQL: Final = """
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
         allow_failed_deps, join_type, max_retries, execution, retention_class_key, status,
         is_subworkflow, sub_workflow_params, created_at
-    ) VALUES (
+    ) VALUES ('NONE',
         '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
         'params.case', '{}', 'default', 100, '{}', FALSE, 'all', %(max_retries)s, %(execution)s,
         %(retention_class_key)s, 'PENDING', %(is_subworkflow)s, %(sub_workflow_params)s, now()
@@ -390,6 +391,48 @@ async def test_sub_workflow_params_are_set_exactly_on_sub_workflow_nodes(
                 with pytest.raises(psycopg.errors.CheckViolation) as raised:
                     await installed.execute(_NODE_ROW_SQL, params)
                 assert raised.value.diag.constraint_name == constraint
+
+
+_DOWNSTREAM_NODE_SQL: Final = """
+    INSERT INTO horsies_workflow_tasks (
+        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
+        allow_failed_deps, join_type, max_retries, execution, retention_class_key, downstream_subworkflow,
+        status, is_subworkflow, created_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
+        'downstream.case', '{}', 'default', 100, '{}', FALSE, 'all', 0, 'ISOLATED', 'forever',
+        %(downstream_subworkflow)s, 'PENDING', FALSE, now()
+    )
+"""
+
+
+@pytest.mark.parametrize(
+    ('downstream_subworkflow', 'violation'),
+    [
+        ('NONE', None),
+        ('REACHABLE', None),
+        ('SOME', psycopg.errors.CheckViolation),
+        (None, psycopg.errors.NotNullViolation),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_downstream_subworkflow_is_one_of_two_named_values(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    downstream_subworkflow: str | None,
+    violation: type[psycopg.errors.IntegrityError] | None,
+) -> None:
+    async with installed.transaction(force_rollback=True):
+        await installed.execute(_WORKFLOW_ROW_SQL)
+        match violation:
+            case None:
+                await installed.execute(
+                    _DOWNSTREAM_NODE_SQL, {'downstream_subworkflow': downstream_subworkflow}
+                )
+            case error:
+                with pytest.raises(error):
+                    await installed.execute(
+                        _DOWNSTREAM_NODE_SQL, {'downstream_subworkflow': downstream_subworkflow}
+                    )
 
 
 @pytest.mark.asyncio(loop_scope='function')

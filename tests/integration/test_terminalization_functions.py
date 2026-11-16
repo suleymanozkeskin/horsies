@@ -1560,7 +1560,7 @@ async def _link_workflow_task(
     )
     await session.execute(
         text("""
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, args_from,
                 workflow_ctx_from, allow_failed_deps, join_type, min_success,
@@ -1570,7 +1570,7 @@ async def _link_workflow_task(
                 sub_workflow_summary, result, error, created_at, started_at,
                 completed_at
             )
-            VALUES (
+            VALUES ('NONE',
                 :id, :workflow_id, 0, 'node_0', 'terminalization.test', '{}',
                 'default', 100, '{}', NULL,
                 NULL, FALSE, 'all', NULL,

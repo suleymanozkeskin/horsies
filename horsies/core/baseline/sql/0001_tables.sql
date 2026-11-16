@@ -272,6 +272,11 @@ CREATE TABLE horsies_workflow_tasks (
     execution text,
     good_until timestamp with time zone,
     retention_class_key character varying(64),
+    -- Typed fact of the static graph, written at workflow start: REACHABLE when a sub-workflow node is reachable
+    -- through the dependency edges below this node (the node is an ancestor of one), NONE otherwise. Phase 1
+    -- returns it, and phase 2 of a REACHABLE node runs in a transaction, because its promotion can owe a child
+    -- start that must commit with the step. Conservative: a REACHABLE node can still promote no sub-workflow node.
+    downstream_subworkflow character varying(9) NOT NULL,
     status character varying(9) NOT NULL,
     task_id uuid,
     is_subworkflow boolean NOT NULL,
@@ -311,6 +316,9 @@ CREATE TABLE horsies_workflow_tasks (
         )
     ),
     CONSTRAINT horsies_workflow_tasks_subworkflow_fields CHECK (NOT is_subworkflow OR task_id IS NULL),
+    CONSTRAINT horsies_workflow_tasks_downstream_subworkflow_known CHECK (
+        downstream_subworkflow IN ('NONE', 'REACHABLE')
+    ),
     CONSTRAINT horsies_workflow_tasks_sub_workflow_params_by_kind CHECK (
         (
             is_subworkflow

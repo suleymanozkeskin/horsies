@@ -116,7 +116,9 @@ sub-workflow (depth 0-32; a root has depth 0 and no parent).
 with `min_success`), status, the linked task id, the sub-workflow fields of a sub-workflow node, and the typed
 facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`). A sub-workflow node also
 stores `sub_workflow_params`: `GIVEN` when the node was given params for the child's `build_with`, `NOT_GIVEN`
-when it was given none; a task node stores NULL.
+when it was given none; a task node stores NULL. Every node stores `downstream_subworkflow`, written at start from
+the dependency graph: `REACHABLE` when a sub-workflow node depends on it directly or through other nodes, `NONE`
+otherwise.
 
 ## Workflow progression outbox and quarantine
 

@@ -121,14 +121,14 @@ _WORKFLOW_SQL: Final[LiteralString] = """
 """
 
 _NODE_SQL: Final[LiteralString] = """
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
         dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type, min_success,
         task_options, max_retries, execution, good_until, retention_class_key, status, task_id,
         is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
         sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
         completed_at
-    ) VALUES (
+    ) VALUES ('NONE',
         %(id)s, %(workflow_id)s, %(task_index)s, %(task_name)s, %(task_name)s, %(input)s,
         'default', 50, %(dependencies)s::integer[], %(args_from)s::jsonb, NULL, FALSE, 'all', NULL,
         NULL, 0, 'ISOLATED', %(good_until)s, 'forever', %(status)s, %(task_id)s,

@@ -160,12 +160,12 @@ async def test_expired_terminal_workflows_deleted(
     for wf_id in (old_completed_wf, old_running_wf):
         await session.execute(text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  is_subworkflow, status, created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node_0', 'retention_test', '{}',
+                ('NONE', :id, :wf_id, 0, 'node_0', 'retention_test', '{}',
                  'default', 100, '{}', FALSE, 'all',
                  FALSE, 'COMPLETED', NOW(),
                  0, 'ISOLATED', 'standard_30d')
@@ -211,13 +211,13 @@ async def _insert_doomed_workflow(
     for index in range(node_count):
         await session.execute(text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
                  created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, :task_index, :node_id, 'retention_budget_test',
+                ('NONE', :id, :wf_id, :task_index, :node_id, 'retention_budget_test',
                  '{}', 'default', 100, '{}', FALSE, 'all',
                  FALSE, 'COMPLETED', NOW(),
                  0, 'ISOLATED', 'standard_30d')
@@ -344,12 +344,12 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
     })
     await session.execute(text("""
         INSERT INTO horsies_workflow_tasks
-            (id, workflow_id, task_index, node_id, task_name, input,
+            (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type,
              is_subworkflow, status, task_id, created_at,
              max_retries, execution, retention_class_key)
         VALUES
-            (:id, :wf_id, 0, 'join', 'workflow_join_barrier', '{}',
+            ('NONE', :id, :wf_id, 0, 'join', 'workflow_join_barrier', '{}',
              'normal', 50, '{}', FALSE, 'all',
              FALSE, 'ENQUEUED', :task_id, NOW() - INTERVAL '48 hours',
              0, 'ISOLATED', 'standard_30d')

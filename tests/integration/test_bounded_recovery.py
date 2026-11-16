@@ -134,13 +134,13 @@ async def _seed_workflow_page_fixture(
         )
         await connection.execute(
             text('''
-                INSERT INTO horsies_workflow_tasks (
+                INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                     id, workflow_id, task_index, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type,
                     status, is_subworkflow, created_at,
                     max_retries, execution, retention_class_key
                 )
-                SELECT md5('bounded-node-' || item::text)::uuid,
+                SELECT 'NONE', md5('bounded-node-' || item::text)::uuid,
                        md5('bounded-workflow-' || item::text)::uuid,
                        0, 'bounded_node', '{}', 'default', 100, '{}'::integer[],
                        FALSE, 'all',
@@ -494,13 +494,13 @@ async def _seed_orphan_task_plan_fixture(
         '''))
         await connection.execute(
             text('''
-                INSERT INTO horsies_workflow_tasks (
+                INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                     id, workflow_id, task_index, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type,
                     status, task_id, is_subworkflow, created_at,
                     max_retries, execution, retention_class_key
                 )
-                SELECT md5('orphan-plan-node-' || item::text)::uuid,
+                SELECT 'NONE', md5('orphan-plan-node-' || item::text)::uuid,
                        md5('orphan-plan-workflow')::uuid,
                        item, 'orphan_plan_task', '{}', 'default', 100,
                        '{}'::integer[], FALSE, 'all', 'RUNNING',
@@ -795,13 +795,13 @@ async def test_generic_audit_uses_partial_node_index(
     await _seed_workflow_page_fixture(engine, rows=200, terminal_last=False)
     async with engine.begin() as connection:
         await connection.execute(text('''
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, task_name, input, status, queue_name,
                 priority, dependencies, allow_failed_deps, join_type,
                 is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             )
-            SELECT md5('wide-partial-' || n)::uuid,
+            SELECT 'NONE', md5('wide-partial-' || n)::uuid,
                    md5('bounded-workflow-200')::uuid, n,
                    'partial_index', '{}', 'COMPLETED', 'default', 100, '{}'::integer[],
                    FALSE, 'all', FALSE, NOW(),
