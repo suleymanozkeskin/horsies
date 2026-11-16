@@ -1,0 +1,5 @@
+error: task function error type must be TaskError, found `MyError`; accepted forms: TaskError, horsies::TaskError
+ --> tests/compile_fail/wrong_error_type.rs:7:39
+  |
+7 | async fn bad(_: ()) -> Result<String, MyError> {
+  |                                       ^^^^^^^

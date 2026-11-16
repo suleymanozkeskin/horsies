@@ -1,0 +1,82 @@
+---
+title: Horsies
+description: A PostgreSQL-backed background task queue and workflow engine for Rust.
+head:
+  - tag: title
+    content: Horsies | PostgreSQL Task Queue & Workflow Engine for Rust
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+import FeatureCard from '../../components/FeatureCard.astro';
+
+<div class="hero-video">
+  <video autoplay loop muted playsinline>
+    <source src="/horsies-rust/galloping-horsie.mp4" type="video/mp4" />
+  </video>
+</div>
+
+**PostgreSQL-backed background task queue and workflow engine for Rust.**
+
+
+> **AI agents:** see [`llms.txt`](/horsies-rust/llms.txt) for a complete sitemap and keyword index of these docs.
+> If you are working from source, agent guidance skills are in `horsies/.agents/skills/` (`SKILL.md`, `tasks.md`, `workflows.md`, `configs.md`, `practical-summary.md`).
+
+> NOTE: There is a <a href="https://suleymanozkeskin.github.io/horsies/" target="_blank">python version</a> of this library, even though rust and python versions have almost the same api and mental model, they are not interoperable!
+
+
+<CardGrid>
+  <LinkCard title="Get Started" href="/horsies-rust/quick-start/getting-started/" description="Install Horsies and run your first task" />
+  <LinkCard title="Workflow API" href="/horsies-rust/concepts/workflows/workflow-api/" description="WorkflowSpec and WorkflowHandle signatures" />
+  <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies-rust" description="Source code and contributions" />
+  <LinkCard title="Questions & Answers" href="/horsies-rust/questions-and-answers/" description="Design trade-offs, scaling, and common questions" />
+</CardGrid>
+
+## Features
+
+<CardGrid stagger>
+  <FeatureCard title="Postgres Based" icon="/horsies-rust/icons/postgresql.svg" description="Postgres based." />
+  <FeatureCard title="Type-safe Tasks" icon="/horsies-rust/icons/shield-check.svg" description="Tasks return typed TaskResult<T> — errors as values, not panics." />
+  <FeatureCard title="Real-time Dispatch" icon="/horsies-rust/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
+  <FeatureCard title="Workflow Engine" icon="/horsies-rust/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
+  <FeatureCard title="Scheduled Tasks" icon="/horsies-rust/icons/clock.svg" description="Type-safe, human-readable schedule patterns — no cron strings." />
+  <FeatureCard title="Multi-queue Support" icon="/horsies-rust/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
+  <FeatureCard title="TUI Monitoring" icon="/horsies-rust/icons/terminal.svg" description="Syce TUI dashboard for monitoring workers, tasks, and workflows." />
+</CardGrid>
+
+## Quick Example
+
+```rust
+use horsies::{
+    Horsies, AppConfig, TaskResult, TaskError, task,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AddInput { a: i32, b: i32 }
+
+#[task("add_numbers")]
+async fn add_numbers(input: AddInput) -> Result<i32, TaskError> {
+    Ok(input.a + input.b)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = Horsies::new(AppConfig::for_database_url(
+        "postgresql://user:pass@localhost:5432/mydb"
+    ))?;
+
+    add_numbers::register(&mut app)?;
+
+    // Start a worker in another process/thread to execute tasks.
+    // Here we just send a task and wait for the result.
+    match add_numbers::send(AddInput { a: 5, b: 3 }).await {
+        Ok(handle) => match handle.get(None).await {
+            TaskResult::Ok(value) => println!("{}", value), // 8
+            TaskResult::Err(err) => println!("Task failed: {:?}", err.error_code),
+        },
+        Err(err) => println!("Send failed: {}", err.message),
+    }
+
+    Ok(())
+}
+```

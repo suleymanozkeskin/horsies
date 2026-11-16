@@ -1,0 +1,66 @@
+{
+  "disposition_ladder": {
+    "fallback": "{row}.prepared_rerun_input_disposition",
+    "rungs": [
+      [
+        "{row}.is_workflow_task OR {status} = 'COMPLETED'",
+        "NEVER_ELIGIBLE"
+      ],
+      [
+        "NOT {row}.retain_rerun_input",
+        "DECLINED_BY_POLICY"
+      ]
+    ]
+  },
+  "history_projection_columns": [
+    "task_id",
+    "task_name",
+    "queue_name",
+    "priority",
+    "command_fingerprint_version",
+    "command_fingerprint",
+    "status",
+    "terminalization_kind",
+    "terminal_at",
+    "retention_anchor_at",
+    "retention_class_key",
+    "sent_at",
+    "enqueued_at",
+    "claimed_at",
+    "started_at",
+    "created_at",
+    "good_until",
+    "result_envelope_version",
+    "result_codec",
+    "result_content_type",
+    "result_payload",
+    "prior_result_payload",
+    "result_digest",
+    "error_code",
+    "final_failed_reason",
+    "retry_count",
+    "max_retries",
+    "last_claimed_worker_id",
+    "last_worker_hostname",
+    "last_worker_pid",
+    "last_worker_process_name",
+    "input_digest",
+    "rerun_of_task_id",
+    "rerun_root_task_id",
+    "workflow_id",
+    "is_workflow_task",
+    "history_schema_version",
+    "attempt_archive_version",
+    "attempt_snapshot_codec",
+    "attempt_snapshot_content_type",
+    "attempt_snapshot",
+    "attempt_snapshot_digest",
+    "rerun_input_disposition",
+    "rerun_input_version",
+    "rerun_input_codec",
+    "rerun_input_content_type",
+    "rerun_input_digest",
+    "rerun_input_inline",
+    "rerun_input_reference"
+  ]
+}

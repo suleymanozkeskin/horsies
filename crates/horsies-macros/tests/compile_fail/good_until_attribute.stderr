@@ -1,0 +1,13 @@
+error: `good_until` is not accepted on `#[task]` because it would be evaluated at registration time; use task.with_options(TaskSendOptions::new().good_until(deadline)).send(args) for ad-hoc sends, or task::node()?.good_until(deadline) for workflow tasks
+ --> tests/compile_fail/good_until_attribute.rs:4:15
+  |
+4 | #[task("bad", good_until = 1)]
+  |               ^^^^^^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/good_until_attribute.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

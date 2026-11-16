@@ -1,0 +1,13 @@
+error: task name must not be empty
+ --> tests/compile_fail/empty_name.rs:4:8
+  |
+4 | #[task("")]
+  |        ^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/empty_name.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

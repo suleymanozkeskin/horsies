@@ -1,0 +1,13 @@
+error: #[horsies::blocking_task] requires a non-async function; use #[horsies::task] for async functions
+ --> tests/compile_fail/async_with_blocking_attr.rs:5:1
+  |
+5 | async fn bad(_: ()) -> Result<String, TaskError> {
+  | ^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/async_with_blocking_attr.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

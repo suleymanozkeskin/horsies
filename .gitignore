@@ -1,3 +1,6 @@
+# Rust build output of the root Cargo workspace
+/target/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -47,7 +50,8 @@ ignored-content/
 
 /docs/
 
-examples/
+# Root scratch folder only; rust/examples/ is a tracked crate.
+/examples/
 
 .coverage
 .env.planetscale
@@ -58,3 +62,17 @@ horsies/web/static/
 
 # Raw measurement samples: large, unreadable, uploaded as CI artifacts instead.
 tests/perf/results/raw/
+
+# Carried over from horsies-rust (its .gitignore applied to its whole tree)
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.collie/
+artifacts/
+ask-for-review/
+ask-review/
+*.profraw
+*.profdata
+crates/horsies-macros/Cargo.toml.bak

@@ -1,0 +1,13 @@
+error: generic task functions are not supported
+ --> tests/compile_fail/lifetime_params.rs:5:13
+  |
+5 | async fn bad<'a>(input: &'a str) -> Result<String, TaskError> {
+  |             ^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/lifetime_params.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
