@@ -1054,8 +1054,8 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::worker::execution::{
-        execute_and_finalize, finalize_with_retry, notify_worker_capacity, persist_terminal_state,
-        run_phase2, FinalizeStage, FINALIZE_MAX_RETRIES,
+        execute_and_finalize, notify_worker_capacity, persist_terminal_state, run_phase2,
+        FinalizeStage,
     };
 
     use crate::async_task_fn;
@@ -1680,19 +1680,9 @@ mod tests {
         );
     }
 
-    // -- finalize_with_retry unit tests --
-
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static EXECUTION_COUNT: AtomicU32 = AtomicU32::new(0);
-
-    fn transient_error() -> crate::broker::BrokerError {
-        crate::broker::BrokerError::ConnectionFailed("simulated transient".to_owned())
-    }
-
-    fn non_retryable_error() -> crate::broker::BrokerError {
-        crate::broker::BrokerError::InvalidStatus("simulated non-retryable".to_owned())
-    }
 
     async fn succeed(_: ()) -> Result<String, TaskError> {
         Ok("done".to_owned())
@@ -1744,70 +1734,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = RawTaskResult> + Send + '_>> {
             Box::pin(async { TaskResult::Ok(b"not-json".to_vec()) })
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_succeeds_on_first_attempt() {
-        let result =
-            finalize_with_retry(Uuid::new_v4(), "test", || async { Ok::<i32, _>(42) }).await;
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_recovers_after_transient_error() {
-        let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
-            let n = call_count.fetch_add(1, Ordering::SeqCst);
-            async move {
-                if n < 2 {
-                    Err(transient_error())
-                } else {
-                    Ok::<i32, _>(99)
-                }
-            }
-        })
-        .await;
-        assert_eq!(result.unwrap(), 99);
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            3,
-            "should have tried 3 times"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_exhausted_returns_error() {
-        let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
-            call_count.fetch_add(1, Ordering::SeqCst);
-            async { Err::<i32, _>(transient_error()) }
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "should return error after exhausting retries"
-        );
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            FINALIZE_MAX_RETRIES,
-            "should have tried exactly FINALIZE_MAX_RETRIES times",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_non_retryable_fails_immediately() {
-        let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
-            call_count.fetch_add(1, Ordering::SeqCst);
-            async { Err::<i32, _>(non_retryable_error()) }
-        })
-        .await;
-        assert!(result.is_err());
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "non-retryable error should not trigger retry",
-        );
     }
 
     /// Helper: run execute_and_finalize + Phase 2 with an empty workflow registry.
@@ -2556,6 +2482,63 @@ mod tests {
             .is_some_and(|msg| msg.contains("async task panicked")),);
     }
 
+    /// A database error during the failed-attempt write decides neither the
+    /// retry nor the failure: phase 1 reports a phase-1 error and writes
+    /// nothing, and the next try sends the same statement (Python
+    /// `core/worker/finalize.py`, `_persist_failed_attempt`). Before, an error
+    /// of the retry write fell through to the terminal failure write.
+    #[tokio::test]
+    #[serial]
+    async fn a_database_error_in_the_failed_attempt_write_decides_nothing() {
+        let pool = test_pool().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        let task_options = serde_json::json!({
+            "retry_policy": {
+                "max_retries": 3,
+                "intervals": [1, 1, 1],
+                "backoff_strategy": "fixed",
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["RETRY_ME"]
+            }
+        })
+        .to_string();
+        insert_running_task(&pool, &task_id, "default", 0, 3, Some(&task_options)).await;
+
+        let closed_broker = test_broker().await;
+        closed_broker.pool().close().await;
+
+        let Err(err) = persist_terminal_state(
+            &closed_broker,
+            task_id,
+            TaskResult::Err(TaskError::new("RETRY_ME", "try again")),
+            &claimed_task_row(&task_id, "default", Some(task_options.clone())),
+            &crate::worker::retry::read_stored_options(Some(&task_options)),
+            &crate::broker::SetRunningRow {
+                id: task_id,
+                started_at: Utc::now(),
+                retry_count: 0,
+                max_retries: 3,
+                good_until: None,
+            },
+            "worker-1",
+            &crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        else {
+            panic!("a closed pool must fail the failed-attempt write");
+        };
+
+        assert_eq!(err.stage, FinalizeStage::Phase1Persist);
+        let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "RUNNING");
+        assert_eq!(result, None);
+        assert_eq!(error_code, None);
+        assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_phase1_db_failure_leaves_task_running_for_reaper() {
@@ -2582,7 +2565,6 @@ mod tests {
                 good_until: None,
             },
             "worker-1",
-            "localhost",
             &crate::core::config::payload::PayloadPolicy::default(),
         )
         .await
