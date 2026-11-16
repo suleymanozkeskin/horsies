@@ -54,7 +54,6 @@ from horsies.core.worker.worker import (
     DELETE_EXPIRED_WORKFLOWS_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
     _build_sys_path_roots,
     _dedupe_paths,
     _derive_sys_path_roots_from_file,

@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Dual-run of the release switch: the per-row updates against ``horsies_release_claims``.
 
 Reference: ``tests/dualrun/reference/release.py``. Candidate: the worker's
