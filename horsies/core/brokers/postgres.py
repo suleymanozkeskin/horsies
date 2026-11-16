@@ -113,6 +113,7 @@ from horsies.core.models.health import (
     parse_slot_health,
 )
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.identity.fingerprint import COMMAND_FINGERPRINT_VERSION
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
@@ -217,11 +218,46 @@ _ENQUEUE_WRITE_ERRORS: Final = (*_DRIVER_ERRORS, HistoryContractError)
 
 @dataclass(frozen=True, slots=True)
 class _PreparedEnqueue:
-    """The checked input of one enqueue. Only the database can refuse it now."""
+    """The checked input of one enqueue. Only the database can refuse it now.
+
+    ``sent_at`` is the call-site instant the row stores: the caller's, else
+    the time of this preparation.
+    """
 
     insert_params: dict[str, Any]
     command_fingerprint: bytes
+    sent_at: datetime
     scoped_key_digest: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredSend:
+    """The facts of an existing task row that the exact-id resend check reads."""
+
+    fingerprint_version: int | None
+    fingerprint: bytes | None
+    sent_at: datetime
+
+
+def _repeats_stored_send(
+    stored: _StoredSend,
+    *,
+    command_fingerprint: bytes,
+    sent_at: datetime,
+) -> bool:
+    """Whether a send with this fingerprint and ``sent_at`` repeats the send
+    that wrote ``stored``. Pure.
+
+    The version-1 command fingerprint and ``sent_at`` together cover every
+    field of ``enqueue_sha``. A row with no fingerprint is a task that the
+    workflow engine wrote, and no send repeats it.
+    """
+    return (
+        stored.fingerprint_version == COMMAND_FINGERPRINT_VERSION
+        and stored.fingerprint is not None
+        and bytes(stored.fingerprint) == command_fingerprint
+        and stored.sent_at == sent_at
+    )
 
 
 _SENT_AT_FUTURE_TOLERANCE: Final = timedelta(seconds=5)
@@ -1739,6 +1775,7 @@ class PostgresBroker:
                     message=f'idempotency key refused for {task_name}: {exc}',
                     exception=exc,
                 ))
+        call_site_sent_at = sent_at or datetime.now(timezone.utc)
         return Ok(_PreparedEnqueue(
             insert_params=PostgresBroker._enqueue_insert_params(
                 task_id=task_id,
@@ -1747,7 +1784,7 @@ class PostgresBroker:
                 priority=priority,
                 args_json=args_json,
                 kwargs_json=kwargs_json,
-                call_site_sent_at=sent_at or datetime.now(timezone.utc),
+                call_site_sent_at=call_site_sent_at,
                 enqueued_at=enqueued_at,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
@@ -1759,6 +1796,7 @@ class PostgresBroker:
                 cutover_values=cutover.ok_value,
             ),
             command_fingerprint=cutover.ok_value['command_fingerprint'],
+            sent_at=call_site_sent_at,
             scoped_key_digest=scoped_key_digest,
         ))
 
@@ -1908,17 +1946,18 @@ class PostgresBroker:
                 return await self._insert_keyed_enqueue(
                     resources,
                     task_id=task_id,
-                    enqueue_sha=enqueue_sha,
                     task_name=task_name,
                     key_digest=prepared.scoped_key_digest,
                     command_fingerprint=prepared.command_fingerprint,
+                    sent_at=prepared.sent_at,
                     insert_params=prepared.insert_params,
                 )
             return await self._insert_unkeyed_enqueue(
                 resources,
                 task_id=task_id,
-                enqueue_sha=enqueue_sha,
                 task_name=task_name,
+                command_fingerprint=prepared.command_fingerprint,
+                sent_at=prepared.sent_at,
                 insert_params=prepared.insert_params,
             )
         except _ENQUEUE_WRITE_ERRORS as exc:
@@ -1932,8 +1971,9 @@ class PostgresBroker:
         resources: BrokerResources,
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
+        command_fingerprint: bytes,
+        sent_at: datetime,
         insert_params: dict[str, Any],
     ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Insert one row, then verify the payload on a task id conflict.
@@ -1956,9 +1996,13 @@ class PostgresBroker:
             # Row inserted — fresh enqueue succeeded.
             return Ok(task_id)
 
-        # Conflict: task_id already exists. Verify payload identity via stored SHA.
+        # Conflict: task_id already exists. Compare the stored send.
         return await self._verify_enqueue_conflict(
-            resources, task_id, enqueue_sha, task_name,
+            resources,
+            task_id=task_id,
+            task_name=task_name,
+            command_fingerprint=command_fingerprint,
+            sent_at=sent_at,
         )
 
     async def _insert_keyed_enqueue(
@@ -1966,10 +2010,10 @@ class PostgresBroker:
         resources: BrokerResources,
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
+        sent_at: datetime,
         insert_params: dict[str, Any],
     ) -> Result[str, BrokerEnqueueError]:
         """Claim the key and insert in ONE transaction.
@@ -2022,10 +2066,10 @@ class PostgresBroker:
                 return await self._bind_key_after_task_id_conflict(
                     session,
                     task_id=task_id,
-                    enqueue_sha=enqueue_sha,
                     task_name=task_name,
                     key_digest=key_digest,
                     command_fingerprint=command_fingerprint,
+                    sent_at=sent_at,
                 )
             await session.commit()
         return Ok(task_id)
@@ -2035,10 +2079,10 @@ class PostgresBroker:
         session: AsyncSession,
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
+        sent_at: datetime,
     ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Bind a claimed key to an exact existing live task atomically.
 
@@ -2050,10 +2094,10 @@ class PostgresBroker:
         existing = (
             await session.execute(
                 select(
-                    TaskModel.enqueue_sha,
                     TaskModel.idempotency_key_digest,
                     TaskModel.command_fingerprint_version,
                     TaskModel.command_fingerprint,
+                    TaskModel.sent_at,
                 )
                 .where(TaskModel.id == task_id)
                 .with_for_update()
@@ -2071,12 +2115,13 @@ class PostgresBroker:
                     exception=NoCause(),
                 )
             )
-        existing_fingerprint = existing.command_fingerprint
-        if (
-            existing.enqueue_sha != enqueue_sha
-            or existing.command_fingerprint_version != 1
-            or existing_fingerprint is None
-            or bytes(existing_fingerprint) != command_fingerprint
+        stored = _StoredSend(
+            fingerprint_version=existing.command_fingerprint_version,
+            fingerprint=existing.command_fingerprint,
+            sent_at=existing.sent_at,
+        )
+        if not _repeats_stored_send(
+            stored, command_fingerprint=command_fingerprint, sent_at=sent_at,
         ):
             await session.rollback()
             return Err(
@@ -2114,19 +2159,27 @@ class PostgresBroker:
     async def _verify_enqueue_conflict(
         self,
         resources: BrokerResources,
+        *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
+        command_fingerprint: bytes,
+        sent_at: datetime,
     ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
-        """Verify a conflicting task_id has the same payload.
+        """Verify that the row with a conflicting task_id holds this send.
 
-        Called when INSERT ... ON CONFLICT DO NOTHING returns no row.
+        Called when INSERT ... ON CONFLICT DO NOTHING returns no row. The
+        exact-id resend check compares the stored command fingerprint and
+        ``sent_at`` (``_repeats_stored_send``).
         """
         try:
             async with resources.session_factory() as session:
                 row = (
                     await session.execute(
-                        select(TaskModel.enqueue_sha).where(TaskModel.id == task_id),
+                        select(
+                            TaskModel.command_fingerprint_version,
+                            TaskModel.command_fingerprint,
+                            TaskModel.sent_at,
+                        ).where(TaskModel.id == task_id),
                     )
                 ).fetchone()
         except _DRIVER_ERRORS as exc:
@@ -2142,9 +2195,9 @@ class PostgresBroker:
             )
 
         if row is None:
-            # The insert observed a conflict, but the row disappeared before we
-            # could compare enqueue_sha. Without the stored fingerprint, this
-            # cannot be proven idempotent.
+            # The insert observed a conflict, but the row disappeared before
+            # the compare. Without the stored send, this cannot be proven
+            # idempotent.
             return Err(
                 BrokerEnqueueFailed(
                     message=(
@@ -2156,22 +2209,23 @@ class PostgresBroker:
                 )
             )
 
-        existing_sha: str = row.enqueue_sha
-        # enqueue_sha is NOT NULL — defensive assertion against data corruption.
-        assert (
-            existing_sha is not None
-        ), f'enqueue_sha is NULL for task_id={task_id} — column is NOT NULL'
-
-        if existing_sha == enqueue_sha:
-            # Idempotent success — same payload already enqueued.
+        stored = _StoredSend(
+            fingerprint_version=row.command_fingerprint_version,
+            fingerprint=row.command_fingerprint,
+            sent_at=row.sent_at,
+        )
+        if _repeats_stored_send(
+            stored, command_fingerprint=command_fingerprint, sent_at=sent_at,
+        ):
+            # Idempotent success — the same send is already enqueued.
             return Ok(task_id)
 
-        # Different payload with same task_id — always a bug.
+        # Another command or another sent_at with the same task_id.
         return Err(
             BrokerPayloadMismatch(
                 message=(
                     f'task_id {task_id} already exists with different payload '
-                    f'for {task_name} (sha mismatch)'
+                    f'for {task_name} (command fingerprint or sent_at differs)'
                 ),
             )
         )
@@ -3106,8 +3160,7 @@ class PostgresBroker:
         A worker is live while its latest snapshot is at most
         ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
         the queue is one of its queues and one of its budgets serves the
-        class. A live worker whose snapshot has no ``class_capacity`` is left
-        out and named in ``ClassCoverage.not_recorded``. Reads only.
+        class. Reads only.
         ``Err(MONITORING_QUERY_FAILED)``: a database or network error, a live
         snapshot whose ``class_capacity`` is unreadable, or a read that
         reached its bound (``retryable`` is ``False`` for the last two).
@@ -3137,8 +3190,7 @@ class PostgresBroker:
         """Pending streams with the wait of their oldest due row and their
         coverage, and the budget load of each live worker.
 
-        A live worker whose snapshot has no ``class_capacity`` is left out
-        and named in ``ClassReport.not_recorded``. Reads only.
+        Reads only.
         ``Err(MONITORING_QUERY_FAILED)``: as ``get_class_coverage_async``, or
         a live worker holds rows of a class that its recorded budgets do not
         serve.
@@ -3773,7 +3825,11 @@ class PostgresBroker:
                 pass
         try:
             return self.run_sync(
-                self._verify_taken_task_id, task_id, enqueue_sha, task_name,
+                self._verify_taken_task_id,
+                task_id,
+                task_name,
+                prepared.command_fingerprint,
+                prepared.sent_at,
             )
         except LoopRunnerError as exc:
             return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
@@ -3781,8 +3837,9 @@ class PostgresBroker:
     async def _verify_taken_task_id(
         self,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
+        command_fingerprint: bytes,
+        sent_at: datetime,
     ) -> Result[str, BrokerEnqueueError]:
         """``_verify_enqueue_conflict`` on this loop's resource set, for a
         sync send whose INSERT found the task id taken."""
@@ -3793,7 +3850,11 @@ class PostgresBroker:
                 pass
         try:
             return await self._verify_enqueue_conflict(
-                resources, task_id, enqueue_sha, task_name,
+                resources,
+                task_id=task_id,
+                task_name=task_name,
+                command_fingerprint=command_fingerprint,
+                sent_at=sent_at,
             )
         except _ENQUEUE_WRITE_ERRORS as exc:
             return _enqueue_failed(
@@ -3939,8 +4000,6 @@ class PostgresBroker:
                 ))
             decoded = decode_result_envelope(
                 version=detail.result_envelope_version,
-                codec=detail.result_codec,
-                content_type=detail.result_content_type,
                 payload=detail.result_payload,
                 digest=detail.result_digest,
             )
@@ -4053,18 +4112,20 @@ class PostgresBroker:
                     'enqueued_at',
                     'claimed_at',
                     'started_at',
-                    'completed_at',
-                    'failed_at',
+                    # A live row stores no terminal times, error code,
+                    # result or failed reason: those live in history.
+                    'NULL::timestamptz AS completed_at',
+                    'NULL::timestamptz AS failed_at',
                     'worker_hostname',
                     'worker_pid',
                     'worker_process_name',
-                    'error_code',
+                    'NULL::text AS error_code',
                     'execution',
                 ]
                 if include_result:
-                    base_columns.append('result')
+                    base_columns.append('NULL::text AS result')
                 if include_failed_reason:
-                    base_columns.append('failed_reason')
+                    base_columns.append('NULL::text AS failed_reason')
 
                 query = text(
                     f"""
