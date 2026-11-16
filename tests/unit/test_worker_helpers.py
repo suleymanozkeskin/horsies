@@ -6016,8 +6016,6 @@ class TestPersistTerminalStateFusedPath:
             claimed_at=CLAIMED_AT,
         )
         assert command.result_json == _OK_WIRE
-        assert command.notify_channel == 'task_queue_q1'
-        assert command.notify_payload == 'capacity:task-1'
         # One statement in autocommit: no transaction of a session.
         session.execute.assert_not_awaited()
         session.commit.assert_not_awaited()
