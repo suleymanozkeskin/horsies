@@ -1,0 +1,344 @@
+//! Render a manifest of horsies-core as `_catalog/manifest.py`: one frozen
+//! dataclass per manifest type, the integer bounds the core's parser
+//! enforces, and the dump function that gives the manifest's JSON text.
+
+use horsies_core::manifest_schema::{
+    ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, PythonValue,
+    TaggedVariant,
+};
+
+use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
+
+/// The file name of the manifest module, inside `_catalog`.
+pub const MANIFEST_MODULE_FILE: &str = "manifest.py";
+
+/// The decorator of every generated dataclass. `kw_only` lets a tag field
+/// with a default come before the fields without one.
+const DATACLASS: &str = "@dataclass(frozen=True, slots=True, kw_only=True)";
+
+/// The text of the manifest module.
+pub fn render_manifest_module(module: &ManifestModule) -> String {
+    let dump = dump_function_name(module.root);
+    let bounds = module.int_bounds();
+    let mut text = format!("{GENERATED_HEADER}\n");
+    text.push_str(&format!(
+        "\"\"\"The {} of horsies-core, generated from its Rust types.\n\n\
+         One frozen dataclass per manifest type, the integer bounds that the core's\n\
+         parser enforces, and `{dump}`, which gives the JSON text that\n\
+         `horsies._core.CoreHandle` takes.\n\"\"\"\n\n",
+        words(module.root)
+    ));
+    text.push_str(
+        "from __future__ import annotations\n\nimport dataclasses\nimport json\n\
+         from dataclasses import dataclass\nfrom typing import Final, Literal\n\n",
+    );
+    text.push_str(&render_all_list(module, &dump, &bounds));
+    text.push_str(&format!(
+        "\nMANIFEST_VERSION: Final = {}\n\"\"\"The manifest version this core reads.\"\"\"\n",
+        module.version
+    ));
+    for bound in &bounds {
+        text.push_str(&format!(
+            "\n{name}_MIN: Final = {min}\n{name}_MAX: Final = {max}\n",
+            name = bound.name,
+            min = bound.min,
+            max = bound.max
+        ));
+    }
+    for manifest_type in module.types {
+        text.push_str(&render_type(manifest_type));
+    }
+    text.push_str(&format!(
+        "\n\ndef {dump}(manifest: {root}) -> str:\n    \
+         \"\"\"The JSON text of `manifest`, in the form that `CoreHandle` takes.\"\"\"\n    \
+         return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)\n",
+        root = module.root
+    ));
+    text
+}
+
+fn render_all_list(module: &ManifestModule, dump: &str, bounds: &[IntBound]) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for manifest_type in module.types {
+        if let ManifestShape::Tagged { variants, .. } = manifest_type.shape {
+            names.extend(
+                variants
+                    .iter()
+                    .map(|variant| variant.python_class.to_owned()),
+            );
+        }
+        names.push(manifest_type.python_name.to_owned());
+    }
+    names.push(dump.to_owned());
+    names.push("MANIFEST_VERSION".to_owned());
+    for bound in bounds {
+        names.push(format!("{}_MIN", bound.name));
+        names.push(format!("{}_MAX", bound.name));
+    }
+    let quoted: Vec<String> = names.iter().map(|name| string_literal(name)).collect();
+    let mut text = String::from("__all__ = [\n");
+    for name in quoted {
+        text.push_str(&format!("    {name},\n"));
+    }
+    text.push_str("]\n");
+    text
+}
+
+fn render_type(manifest_type: &ManifestType) -> String {
+    match manifest_type.shape {
+        ManifestShape::Record { fields } => format!(
+            "\n\n{}",
+            render_dataclass(manifest_type.python_name, manifest_type.doc, None, fields)
+        ),
+        ManifestShape::Tagged {
+            tag_field,
+            variants,
+        } => render_tagged(manifest_type, tag_field, variants),
+        ManifestShape::Choice { values } => render_choice(manifest_type, values),
+    }
+}
+
+/// One dataclass per variant, then the union alias.
+fn render_tagged(
+    manifest_type: &ManifestType,
+    tag_field: &str,
+    variants: &[TaggedVariant],
+) -> String {
+    let mut text = String::new();
+    for variant in variants {
+        let tag = TagField {
+            name: tag_field,
+            value: variant.tag_value,
+        };
+        text.push_str("\n\n");
+        text.push_str(&render_dataclass(
+            variant.python_class,
+            variant.doc,
+            Some(tag),
+            variant.fields,
+        ));
+    }
+    let members: Vec<&str> = variants
+        .iter()
+        .map(|variant| variant.python_class)
+        .collect();
+    text.push_str(&format!(
+        "\n\ntype {} = {}\n",
+        manifest_type.python_name,
+        members.join(" | ")
+    ));
+    if let Some(doc) = docstring(manifest_type.doc, "") {
+        text.push_str(&doc);
+    }
+    text
+}
+
+/// The `Literal` alias, with each value's doc listed in the alias doc.
+fn render_choice(manifest_type: &ManifestType, values: &[ChoiceValue]) -> String {
+    let literals: Vec<String> = values
+        .iter()
+        .map(|choice| string_literal(choice.value))
+        .collect();
+    let mut text = format!(
+        "\n\ntype {} = Literal[{}]\n",
+        manifest_type.python_name,
+        literals.join(", ")
+    );
+    let mut doc = manifest_type.doc.trim().to_owned();
+    for choice in values {
+        let value_doc = choice.doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !value_doc.is_empty() {
+            doc.push_str(&format!("\n\n`{}`: {value_doc}", choice.value));
+        }
+    }
+    if let Some(rendered) = docstring(&doc, "") {
+        text.push_str(&rendered);
+    }
+    text
+}
+
+/// The tag field of a variant class: its name and its one value.
+#[derive(Clone, Copy)]
+struct TagField<'a> {
+    name: &'a str,
+    value: &'a str,
+}
+
+fn render_dataclass(
+    class: &str,
+    doc: &str,
+    tag: Option<TagField<'_>>,
+    fields: &[ManifestField],
+) -> String {
+    let mut text = format!("{DATACLASS}\nclass {class}:\n");
+    let class_doc = docstring(doc, "    ");
+    let has_doc = class_doc.is_some();
+    if let Some(rendered) = class_doc {
+        text.push_str(&rendered);
+    }
+    let mut lines: Vec<(String, &str)> = Vec::with_capacity(fields.len() + 1);
+    if let Some(tag) = tag {
+        let literal = string_literal(tag.value);
+        lines.push((format!("{}: Literal[{literal}] = {literal}", tag.name), ""));
+    }
+    for field in fields {
+        lines.push((
+            format!("{}: {}", field.name, python_type(field.value)),
+            field.doc,
+        ));
+    }
+    if lines.is_empty() && !has_doc {
+        text.push_str("    pass\n");
+    }
+    for (position, (line, field_doc)) in lines.iter().enumerate() {
+        if position > 0 || has_doc {
+            text.push('\n');
+        }
+        text.push_str(&format!("    {line}\n"));
+        if let Some(rendered) = docstring(field_doc, "    ") {
+            text.push_str(&rendered);
+        }
+    }
+    text
+}
+
+fn python_type(value: PythonValue) -> &'static str {
+    match value {
+        PythonValue::Bool => "bool",
+        PythonValue::Str => "str",
+        PythonValue::Int(_) => "int",
+        PythonValue::Named(name) => name,
+    }
+}
+
+/// `dump_<root in snake case>`.
+fn dump_function_name(root: &str) -> String {
+    format!("dump_{}", snake_case(root))
+}
+
+/// `ProducerManifest` as `producer manifest`.
+fn words(root: &str) -> String {
+    snake_case(root).replace('_', " ")
+}
+
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (position, character) in name.char_indices() {
+        if position > 0 && character.is_uppercase() {
+            out.push('_');
+        }
+        out.push(character.to_ascii_lowercase());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use horsies_core::manifest_schema::PRODUCER_MANIFEST;
+
+    use super::*;
+
+    const BOUND: IntBound = IntBound {
+        name: "POOL_CONNECTIONS",
+        min: 0,
+        max: 10,
+    };
+
+    const FIELDS: &[ManifestField] = &[
+        ManifestField {
+            name: "pool_size",
+            doc: "Connections of the pool.",
+            value: PythonValue::Int(BOUND),
+        },
+        ManifestField {
+            name: "echo",
+            doc: "",
+            value: PythonValue::Bool,
+        },
+    ];
+
+    #[test]
+    fn a_record_is_a_frozen_keyword_only_dataclass_with_field_docs() {
+        let rendered = render_dataclass("Pool", "Pool settings.", None, FIELDS);
+        assert_eq!(
+            rendered,
+            "@dataclass(frozen=True, slots=True, kw_only=True)\nclass Pool:\n    \
+             \"\"\"Pool settings.\"\"\"\n\n    pool_size: int\n    \
+             \"\"\"Connections of the pool.\"\"\"\n\n    echo: bool\n"
+        );
+    }
+
+    #[test]
+    fn a_tagged_variant_has_its_tag_as_a_literal_field_with_a_default() {
+        let tag = TagField {
+            name: "kind",
+            value: "SEPARATE",
+        };
+        let rendered = render_dataclass("SessionSeparate", "", Some(tag), &FIELDS[1..]);
+        assert_eq!(
+            rendered,
+            "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SessionSeparate:\n    \
+             kind: Literal['SEPARATE'] = 'SEPARATE'\n\n    echo: bool\n"
+        );
+    }
+
+    #[test]
+    fn a_choice_is_a_literal_alias_that_lists_its_value_docs() {
+        let manifest_type = ManifestType {
+            python_name: "Mode",
+            doc: "The mode.",
+            shape: ManifestShape::Choice {
+                values: &[
+                    ChoiceValue {
+                        value: "ONE",
+                        doc: "The first\nmode.",
+                    },
+                    ChoiceValue {
+                        value: "TWO",
+                        doc: "",
+                    },
+                ],
+            },
+        };
+        let ManifestShape::Choice { values } = manifest_type.shape else {
+            panic!("the fixture is a choice");
+        };
+        let rendered = render_choice(&manifest_type, values);
+        assert_eq!(
+            rendered,
+            "\n\ntype Mode = Literal['ONE', 'TWO']\n\"\"\"The mode.\n\n`ONE`: The first mode.\n\"\"\"\n"
+        );
+    }
+
+    #[test]
+    fn the_producer_manifest_module_has_every_type_bound_and_the_dump() {
+        let rendered = render_manifest_module(&PRODUCER_MANIFEST);
+        assert!(rendered.starts_with(GENERATED_HEADER));
+        for manifest_type in PRODUCER_MANIFEST.types {
+            let defined = match manifest_type.shape {
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
+                    format!("\ntype {} = ", manifest_type.python_name)
+                }
+            };
+            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+        }
+        for bound in PRODUCER_MANIFEST.int_bounds() {
+            assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
+            assert!(rendered.contains(&format!("\n{}_MAX: Final = {}\n", bound.name, bound.max)));
+        }
+        assert!(
+            rendered.contains("\ndef dump_producer_manifest(manifest: ProducerManifest) -> str:\n")
+        );
+        assert!(rendered.contains("\nMANIFEST_VERSION: Final = 1\n"));
+    }
+
+    #[test]
+    fn the_dump_function_is_named_after_the_root() {
+        assert_eq!(
+            dump_function_name("ProducerManifest"),
+            "dump_producer_manifest"
+        );
+        assert_eq!(words("ProducerManifest"), "producer manifest");
+    }
+}
