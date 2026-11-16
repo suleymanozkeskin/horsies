@@ -122,7 +122,7 @@ async fn fail_task(pool: &PgPool, task_id: Uuid) {
                 worker_id: "w3-worker".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("W3 failure".to_owned()),
         },
     )

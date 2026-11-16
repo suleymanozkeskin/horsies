@@ -20,11 +20,12 @@ import horsies._catalog.broker
 import horsies._catalog.history
 import horsies._catalog.monitoring
 import horsies._catalog.status
+import horsies._catalog.task_codes
 import horsies._catalog.task_send
 import horsies._catalog.workflow_start
 from horsies.core.brokers import result_types
 from horsies.core.history.reads import detail
-from horsies.core.models import task_send_types
+from horsies.core.models import task_send_types, tasks
 from horsies.core.models.workflow import enums
 from horsies.core.types import status
 from horsies.core.workflows import start_types
@@ -106,6 +107,63 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'DB_OPERATION_FAILED',
             'EVENT_LOOP_LIMIT',
             'STORED_DATA_INVALID',
+        ),
+    ),
+    (
+        tasks.OperationalErrorCode,
+        horsies._catalog.task_codes.OperationalErrorCode,
+        (
+            'UNHANDLED_EXCEPTION',
+            'TASK_EXCEPTION',
+            'WORKER_CRASHED',
+            'BROKER_ERROR',
+            'WORKER_RESOLUTION_ERROR',
+            'WORKER_SERIALIZATION_ERROR',
+            'RESULT_DESERIALIZATION_ERROR',
+            'WORKFLOW_ENQUEUE_FAILED',
+            'SUBWORKFLOW_LOAD_FAILED',
+            'WORKFLOW_RECOVERY_LIMIT_REACHED',
+            'SUBWORKFLOW_DEPTH_LIMIT_REACHED',
+            'TASK_BLOCKED_LOOP',
+            'NEIGHBOUR_BLOCKED_LOOP',
+            'WORKFLOW_START_INCOMPLETE',
+        ),
+    ),
+    (
+        tasks.ContractCode,
+        horsies._catalog.task_codes.ContractCode,
+        ('RETURN_TYPE_MISMATCH', 'WORKFLOW_CTX_MISSING_ID', 'NO_TYPE_AVAILABLE'),
+    ),
+    (
+        tasks.RetrievalCode,
+        horsies._catalog.task_codes.RetrievalCode,
+        (
+            'WAIT_TIMEOUT',
+            'TASK_NOT_FOUND',
+            'WORKFLOW_NOT_FOUND',
+            'RESULT_NOT_AVAILABLE',
+            'RESULT_NOT_READY',
+            'EVENT_LOOP_LIMIT',
+            'ASYNC_CONTEXT',
+            'INVALID_INPUT',
+            'WAIT_INSIDE_TASK',
+        ),
+    ),
+    (
+        tasks.OutcomeCode,
+        horsies._catalog.task_codes.OutcomeCode,
+        (
+            'TASK_CANCELLED',
+            'TASK_EXPIRED',
+            'TASK_TIMEOUT',
+            'WORKFLOW_PAUSED',
+            'WORKFLOW_EXPIRED',
+            'WORKFLOW_FAILED',
+            'WORKFLOW_CANCELLED',
+            'UPSTREAM_SKIPPED',
+            'SUBWORKFLOW_FAILED',
+            'WORKFLOW_SUCCESS_CASE_NOT_MET',
+            'WORKFLOW_OUTPUT_SKIPPED',
         ),
     ),
     (
@@ -221,3 +279,23 @@ def test_is_terminal_holds_exactly_for_the_terminal_members(
 
 def test_workflow_task_terminal_values_are_the_terminal_member_values() -> None:
     assert sorted(enums.WF_TASK_TERMINAL_VALUES) == ['COMPLETED', 'FAILED', 'SKIPPED']
+
+
+def test_the_built_in_registry_holds_every_generated_member() -> None:
+    # `BUILTIN_CODE_REGISTRY` is built from the four re-exported families;
+    # `WORKFLOW_START_INCOMPLETE` is a built-in name, so a user code cannot
+    # take it.
+    families = (
+        tasks.OperationalErrorCode,
+        tasks.ContractCode,
+        tasks.RetrievalCode,
+        tasks.OutcomeCode,
+    )
+    expected = {member.value: member for family in families for member in family}
+    assert tasks.BUILTIN_CODE_REGISTRY == expected
+    assert (
+        tasks.BUILTIN_CODE_REGISTRY['WORKFLOW_START_INCOMPLETE']
+        is tasks.OperationalErrorCode.WORKFLOW_START_INCOMPLETE
+    )
+    with pytest.raises(ValueError, match='reserved built-in error code'):
+        tasks.TaskError(error_code='WORKFLOW_START_INCOMPLETE')

@@ -13,25 +13,15 @@ class OperationalErrorCode(str, Enum):
 
     Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 
-    Note: The Rust port uses different names than Python for two variants:
-
-    - Python `UNHANDLED_EXCEPTION` → Rust `UNHANDLED_ERROR`
-    - Python `TASK_EXCEPTION`      → Rust `TASK_ERROR`
-
-    Rust has no exceptions — tasks return `Result<T, TaskError>`. \"Exception\"
-    is a Python-specific concept. Since the Rust port uses its own database
-    (not shared with Python), wire-format compatibility is not required.
+    Members, wire values and order are Python's (`horsies/core/models/tasks.py`), plus
+    `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
     """
 
-    UNHANDLED_ERROR = 'UNHANDLED_ERROR'
-    """Task panicked or produced an unexpected error the worker couldn't handle.
-    Python equivalent: `UNHANDLED_EXCEPTION`.
-    """
+    UNHANDLED_EXCEPTION = 'UNHANDLED_EXCEPTION'
+    """The task panicked or raised an error that no exception mapper turned into a task error."""
 
-    TASK_ERROR = 'TASK_ERROR'
-    """Task returned `Err(TaskError)` during execution.
-    Python equivalent: `TASK_EXCEPTION`.
-    """
+    TASK_EXCEPTION = 'TASK_EXCEPTION'
+    """The worker caught an exception outside the task wrapper, or a validator raised on a default."""
 
     WORKER_CRASHED = 'WORKER_CRASHED'
 
@@ -55,6 +45,18 @@ class OperationalErrorCode(str, Enum):
     SUBWORKFLOW_DEPTH_LIMIT_REACHED = 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
     """A child workflow would pass the depth limit (32), so it did not start and its sub-workflow node failed."""
 
+    TASK_BLOCKED_LOOP = 'TASK_BLOCKED_LOOP'
+    """This task held the event loop of its shared async child past the block limit, before its
+    `timeout_ms`. The worker killed the child; a retry (only when `auto_retry_for` names this code)
+    runs in an isolated child.
+    """
+
+    NEIGHBOUR_BLOCKED_LOOP = 'NEIGHBOUR_BLOCKED_LOOP'
+    """Another task held the event loop of this task's shared async child past the block limit, before
+    this task's `timeout_ms`. The worker killed the child. A retry runs only when `auto_retry_for`
+    names this code.
+    """
+
     WORKFLOW_START_INCOMPLETE = 'WORKFLOW_START_INCOMPLETE'
     """A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code."""
 
@@ -65,11 +67,15 @@ class ContractCode(str, Enum):
     Typical caller behavior: fix code or type assumptions, do not blindly retry.
     """
 
-    ARGUMENT_TYPE_MISMATCH = 'ARGUMENT_TYPE_MISMATCH'
-
     RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
 
     WORKFLOW_CTX_MISSING_ID = 'WORKFLOW_CTX_MISSING_ID'
+
+    NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
+    """A handle-level read (`TaskHandle.get`, `WorkflowHandle.get`) asked for a typed value, but the ok
+    type cannot be obtained, for example on a handle rebuilt by id without the task or workflow
+    registered in this process. The result-returning form is `BrokerErrorCode.NO_TYPE_AVAILABLE`.
+    """
 
 
 class RetrievalCode(str, Enum):
@@ -88,10 +94,27 @@ class RetrievalCode(str, Enum):
 
     RESULT_NOT_READY = 'RESULT_NOT_READY'
 
+    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
+    """The broker already holds resource sets for its limit of open event loops, so this new loop
+    cannot read the value now. Never cached: it clears when one of those loops closes.
+    """
+
+    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
+    """A sync get was called on a thread that runs an event loop, so this call site cannot wait for
+    the value. Never cached: the async form, or a sync call from a thread without a running loop,
+    reads it.
+    """
+
     INVALID_INPUT = 'INVALID_INPUT'
     """An argument of the get call was refused before anything ran, for
     example a wait limit above 2^32 - 1 ms. Never cached: a call with a
     valid argument reads the value.
+    """
+
+    WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'
+    """A result wait was called in a process that runs task bodies, so it returns at once and waits
+    for nothing. Never cached: a task composes with other tasks through a workflow, not through a
+    wait.
     """
 
 
@@ -109,11 +132,11 @@ class OutcomeCode(str, Enum):
 
     WORKFLOW_PAUSED = 'WORKFLOW_PAUSED'
 
+    WORKFLOW_EXPIRED = 'WORKFLOW_EXPIRED'
+
     WORKFLOW_FAILED = 'WORKFLOW_FAILED'
 
     WORKFLOW_CANCELLED = 'WORKFLOW_CANCELLED'
-
-    WORKFLOW_EXPIRED = 'WORKFLOW_EXPIRED'
 
     UPSTREAM_SKIPPED = 'UPSTREAM_SKIPPED'
 
@@ -125,7 +148,3 @@ class OutcomeCode(str, Enum):
     """A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
     SKIPPED.
     """
-
-    WORKFLOW_STOPPED = 'WORKFLOW_STOPPED'
-
-    SEND_SUPPRESSED = 'SEND_SUPPRESSED'

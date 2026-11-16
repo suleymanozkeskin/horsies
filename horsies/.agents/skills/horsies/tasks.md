@@ -186,6 +186,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `SUBWORKFLOW_DEPTH_LIMIT_REACHED` — the engine did not start a child workflow, because its depth would pass 32
 - `TASK_BLOCKED_LOOP` — the task held the event loop of its shared async child past the block limit (5 s), before its `timeout_ms`; the worker killed the child, and a retry runs in an isolated child
 - `NEIGHBOUR_BLOCKED_LOOP` — another task held the event loop of this task's shared async child past the block limit, before this task's `timeout_ms`; the worker killed the child
+- `WORKFLOW_START_INCOMPLETE` — a RUNNING workflow has no node rows: its start did not finish, and recovery failed it
 
 ### `ContractCode`
 

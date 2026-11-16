@@ -541,7 +541,7 @@ pub(crate) async fn execute_task(
                     task_timeout_error(timeout.unwrap_or_default())
                 }
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("async task panicked: {}", join_err),
                 )),
             }
@@ -567,11 +567,11 @@ pub(crate) async fn execute_task(
             match join {
                 Ok(Ok(r)) => r,
                 Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     "blocking task panicked".to_owned(),
                 )),
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("blocking task join error: {}", join_err),
                 )),
             }
