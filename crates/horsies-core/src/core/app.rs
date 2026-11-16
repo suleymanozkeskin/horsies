@@ -28,8 +28,8 @@ pub struct ResolvedEnqueue {
     pub queue_name: String,
     /// The resolved priority (from task, queue config, or default).
     pub priority: u32,
-    /// Queue-mapped retention class; `None` is explicit forever.
-    pub retention_class_key: Option<String>,
+    /// The queue-mapped retention of the send.
+    pub retention: crate::core::config::EnqueueRetention,
 }
 
 /// Main horsies application.
@@ -1251,7 +1251,7 @@ impl Horsies {
             task_name: task_name.to_string(),
             queue_name: queue.to_string(),
             priority: resolved_priority,
-            retention_class_key: self.config.retention.resolve_queue_class(queue),
+            retention: self.config.retention.resolve_queue_retention(queue),
         })
     }
 }

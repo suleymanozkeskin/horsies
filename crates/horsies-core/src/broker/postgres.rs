@@ -26,8 +26,9 @@ use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 use crate::core::{
-    OutcomeCode, PostgresConfig, ResolvedEnqueue, RetrievalCode, TaskError, TaskInfo, TaskOptions,
-    TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
+    EnqueueRetention, OutcomeCode, PostgresConfig, ResolvedEnqueue, RetrievalCode, TaskError,
+    TaskInfo, TaskOptions, TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult,
 };
 
 use crate::broker::bound_handle::TaskHandle;
@@ -1000,7 +1001,7 @@ impl PostgresBroker {
         predetermined_task_id: Option<Uuid>,
         enqueue_delay_seconds: Option<i64>,
         idempotency_key: Option<&str>,
-        retention_class_key: Option<&str>,
+        retention: EnqueueRetention,
         retain_rerun_input: Option<bool>,
     ) -> Result<Uuid, BrokerError> {
         if enqueued_at.is_some() && enqueue_delay_seconds.is_some() {
@@ -1025,6 +1026,7 @@ impl PostgresBroker {
         let max_retries = parse_max_retries(task_options);
         let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
+        let retention_class_key = retention.class_key();
         let facts = prepare_enqueue_facts(
             task_name,
             queue_name,
@@ -1033,7 +1035,7 @@ impl PostgresBroker {
             good_until,
             enqueue_delay_seconds,
             task_options,
-            retention_class_key,
+            Some(&retention_class_key),
             retain_rerun_input,
             idempotency_key,
         )
@@ -1367,7 +1369,7 @@ impl PostgresBroker {
             enqueue_delay_seconds,
             task_options: task_options_json.clone(),
             idempotency_key: None,
-            retention_class_key: resolved.retention_class_key.clone(),
+            retention: resolved.retention,
         };
 
         let task_id = self
@@ -1383,7 +1385,7 @@ impl PostgresBroker {
                 Some(pre_task_id),
                 enqueue_delay_seconds,
                 None,
-                resolved.retention_class_key.as_deref(),
+                resolved.retention,
                 None,
             )
             .await
@@ -1423,7 +1425,7 @@ impl PostgresBroker {
                 original_task_id,
                 payload.enqueue_delay_seconds,
                 payload.idempotency_key.as_deref(),
-                payload.retention_class_key.as_deref(),
+                payload.retention,
                 None,
             )
             .await?;
@@ -3760,7 +3762,7 @@ mod tests {
                 task_name: "my_task".to_owned(),
                 queue_name: "default".to_owned(),
                 priority: 0,
-                retention_class_key: Some("standard_30d".to_owned()),
+                retention: EnqueueRetention::Default,
             };
             let _handle: TaskHandle<i32> = broker.send_task(&resolved, "null", None).await.unwrap();
         }
@@ -3775,7 +3777,7 @@ mod tests {
                 task_name: "delayed_task".to_owned(),
                 queue_name: "default".to_owned(),
                 priority: 5,
-                retention_class_key: Some("standard_30d".to_owned()),
+                retention: EnqueueRetention::Default,
             };
             let delay = Duration::from_secs(60);
             let _handle: TaskHandle<String> = broker
@@ -3794,7 +3796,7 @@ mod tests {
                 task_name: "opts_task".to_owned(),
                 queue_name: "default".to_owned(),
                 priority: 0,
-                retention_class_key: Some("standard_30d".to_owned()),
+                retention: EnqueueRetention::Default,
             };
             let opts = TaskOptions {
                 task_name: "opts_task".to_owned(),

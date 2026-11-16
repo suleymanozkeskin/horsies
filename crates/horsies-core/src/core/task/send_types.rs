@@ -53,8 +53,8 @@ pub struct TaskSendPayload {
     pub enqueue_delay_seconds: Option<i64>,
     pub task_options: Option<String>,
     pub idempotency_key: Option<String>,
-    /// `None` is the explicit forever class, never an omitted choice.
-    pub retention_class_key: Option<String>,
+    /// The retention of the send: the default class, forever or a period.
+    pub retention: crate::core::config::EnqueueRetention,
 }
 
 /// Error from task send/schedule operations.
@@ -124,7 +124,7 @@ mod tests {
                 enqueue_delay_seconds: None,
                 task_options: None,
                 idempotency_key: None,
-                retention_class_key: Some("standard_30d".to_owned()),
+                retention: crate::core::config::EnqueueRetention::Default,
             }),
         };
         let display = format!("{}", err);

@@ -882,7 +882,7 @@ async fn enqueue_scheduled_task(
 
     let queue = schedule.queue_name.as_deref().unwrap_or("default");
     let priority = resolve_queue_priority(app_config, queue);
-    let retention_class_key = app_config.retention.resolve_queue_class(queue);
+    let retention = app_config.retention.resolve_queue_retention(queue);
 
     // Deterministic task_id from schedule + slot (idempotent on retry).
     let task_id = schedule_slot_task_id(&schedule.name, slot_time);
@@ -903,7 +903,7 @@ async fn enqueue_scheduled_task(
             Some(task_id),   // predetermined deterministic task_id
             None,
             None,
-            retention_class_key.as_deref(),
+            retention,
             None,
         )
         .await

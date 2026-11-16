@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::config::retention::RetentionConfig;
+use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
+use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 fn test_db_url() -> String {
@@ -164,13 +165,17 @@ fn keyed_input(value: &str) -> String {
     format!("{{\"value\":{value},\"named\":true}}")
 }
 
+fn period_days(days: i64) -> EnqueueRetention {
+    EnqueueRetention::Period(RetentionDays::parse_period(Duration::days(days)).unwrap())
+}
+
 async fn enqueue_keyed(
     broker: &PostgresBroker,
     task_id: Uuid,
     sent_at: chrono::DateTime<Utc>,
     value: &str,
     key: Option<&str>,
-    class: Option<&str>,
+    retention: EnqueueRetention,
 ) -> Result<Uuid, BrokerError> {
     broker
         .enqueue(
@@ -185,7 +190,7 @@ async fn enqueue_keyed(
             Some(task_id),
             None,
             key,
-            class,
+            retention,
             Some(true),
         )
         .await
@@ -205,7 +210,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
         sent_at,
         "[1]",
         Some("request-1"),
-        Some("audit_7d"),
+        period_days(7),
     )
     .await
     .expect("first keyed enqueue applies");
@@ -219,7 +224,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     assert!(facts.rerun_root_task_id.is_none());
     assert_eq!(facts.command_fingerprint_version, Some(1));
     assert_eq!(facts.command_fingerprint_length, Some(32));
-    assert_eq!(facts.retention_class_key.as_deref(), Some("audit_7d"));
+    assert_eq!(facts.retention_class_key.as_deref(), Some("standard_7d"));
     assert_eq!(facts.idempotency_key_digest_length, Some(32));
     assert_eq!(facts.retain_rerun_input, Some(true));
     let reservation_window_seconds: i64 = sqlx::query_scalar(
@@ -239,7 +244,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
         sent_at,
         "[1]",
         Some("request-1"),
-        Some("audit_7d"),
+        period_days(7),
     )
     .await
     .expect("same command replays");
@@ -252,7 +257,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
         sent_at,
         "[2]",
         Some("request-1"),
-        Some("audit_7d"),
+        period_days(7),
     )
     .await
     .expect_err("different command conflicts");
@@ -280,7 +285,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
             Some(forever_id),
             None,
             None,
-            None,
+            EnqueueRetention::Forever,
             Some(false),
         )
         .await
@@ -320,7 +325,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             None,
-            Some("standard_2d"),
+            period_days(2),
             Some(false),
         )
         .await
@@ -338,7 +343,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             Some("bind-key"),
-            Some("standard_2d"),
+            period_days(2),
             Some(false),
         )
         .await
@@ -378,7 +383,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             Some("different-bind-key"),
-            Some("standard_2d"),
+            period_days(2),
             Some(false),
         )
         .await
@@ -413,7 +418,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             Some("rejected-bind-key"),
-            Some("standard_2d"),
+            period_days(2),
             Some(false),
         )
         .await
@@ -493,7 +498,7 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
             None,
             None,
             None,
-            Some("standard_30d"),
+            EnqueueRetention::Default,
             None,
         )
         .await
@@ -511,7 +516,7 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
             None,
             None,
             None,
-            Some("standard_30d"),
+            EnqueueRetention::Default,
             Some(false),
         )
         .await
@@ -519,6 +524,11 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
 
     let inherited_facts = stored_facts(&pool, inherited).await;
     assert_eq!(inherited_facts.retain_rerun_input, Some(true));
+    // A send that names no class stores the default class.
+    assert_eq!(
+        inherited_facts.retention_class_key.as_deref(),
+        Some("standard_30d")
+    );
     let declined_facts = stored_facts(&pool, declined).await;
     assert_eq!(declined_facts.retain_rerun_input, Some(false));
 }
