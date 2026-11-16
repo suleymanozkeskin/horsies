@@ -26,10 +26,6 @@ from horsies.core.history.commands import (
     LeafLifecycle,
     LeafRef,
 )
-from horsies.core.history.cutover.state import (
-    CREATE_CUTOVER_STATE_TABLE_SQL,
-    MARK_CUTOVER_COMPLETE_SQL,
-)
 from horsies.core.history.heartbeats.partitioning import (
     CreateHourlyHeartbeatLeaf,
     create_hourly_heartbeat_leaf,
@@ -39,11 +35,6 @@ from horsies.core.history.heartbeats.partitioning import (
     sweep_expired_heartbeat_leaves,
 )
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
-from horsies.core.history.maintenance.pruning import (
-    ForeverSweepRan,
-    sweep_empty_forever_leaves,
-)
-from horsies.core.history.names import TASK_HISTORY_FOREVER
 from horsies.core.history.outcomes import (
     LeafAlreadyConformant,
     LeafCreated,
@@ -55,7 +46,6 @@ from horsies.core.history.outcomes import (
 from horsies.core.history.partitions.catalog import daily_leaf_name
 from horsies.core.history.partitions.manager import create_daily_leaf, inspect_leaf
 from horsies.core.history.partitions.publication import UnpublishedLoader
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.integration.task_history_harness import (
     HistorySchema,
     register_class,
@@ -107,9 +97,6 @@ async def _dst_engine(schema: HistorySchema) -> AsyncEngine:
 async def dst_history(
     history_schema: HistorySchema,
 ) -> AsyncGenerator[AsyncEngine, None]:
-    async with history_schema.engine.begin() as connection:
-        await connection.execute(CREATE_CUTOVER_STATE_TABLE_SQL)
-        await connection.execute(MARK_CUTOVER_COMPLETE_SQL)
     engine = await _dst_engine(history_schema)
     yield engine
     await engine.dispose()
@@ -203,33 +190,3 @@ async def test_the_heartbeat_sweep_drops_leaves_across_a_fold(
     for entry in swept:
         assert isinstance(entry.detach, LeafDetached), entry
         assert entry.drop == LeafDropped(leaf_name=entry.leaf_name)
-
-
-async def test_the_forever_sweep_drops_empty_leaves_across_a_fold(
-    dst_history: AsyncEngine,
-) -> None:
-    leaves = [
-        _daily_leaf(TASK_HISTORY_FOREVER, 'forever', PAST_FOLD - timedelta(days=1)),
-        _daily_leaf(TASK_HISTORY_FOREVER, 'forever', PAST_FOLD),
-    ]
-    async with dst_history.begin() as connection:
-        for leaf in leaves:
-            created = await create_daily_leaf(
-                connection, CreateDailyHistoryLeaf(leaf=leaf), UnpublishedLoader()
-            )
-            assert isinstance(created, LeafCreated), created
-        await StagedLoaderPublisher().republish(connection)
-
-    sweep = await sweep_empty_forever_leaves(
-        PartitionMaintenanceDatabase(dst_history, connection_capacity=2),
-        StagedLoaderPublisher(),
-    )
-
-    assert isinstance(sweep, ForeverSweepRan), sweep
-    assert sweep.errors == ()
-    assert [entry.leaf_name for entry in sweep.swept] == [
-        leaf.leaf_name for leaf in leaves
-    ]
-    for entry in sweep.swept:
-        assert entry.outcome == LeafDropped(leaf_name=entry.leaf_name)
-

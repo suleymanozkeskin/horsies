@@ -9,9 +9,9 @@ use sqlx::{PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::core::history::commands::{
-    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf,
-    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage,
-    FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
+    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
+    DropDetachedHistoryLeaf, EnsureLeafCoverage, FinalizeInterruptedLeafDetach, InspectHistoryLeaf,
+    LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::{
@@ -20,8 +20,8 @@ use crate::core::history::ddl::runtime_names::{
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER, TASK_HISTORY_FOREVER_LEAF,
-    WORKFLOW_PHASE2_PENDING,
+    CLOCK_EXCEPTIONS, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER,
+    TASK_HISTORY_FOREVER_LEAF, WORKFLOW_PHASE2_PENDING,
 };
 use crate::core::history::outcomes::{
     CatalogConflictKind, LeafAttachment, LeafCreation, LeafDrop, LeafInspection,
@@ -46,14 +46,12 @@ const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlannedLeaf {
     Daily(CreateDailyHistoryLeaf),
-    OpenEnded(CreateOpenEndedHistoryLeaf),
 }
 
 impl PlannedLeaf {
     pub(crate) fn leaf(&self) -> &LeafRef {
         match self {
             Self::Daily(command) => command.leaf(),
-            Self::OpenEnded(command) => command.leaf(),
         }
     }
 }
@@ -66,9 +64,6 @@ pub(crate) async fn create_planned_leaf<P: LoaderPublication>(
 ) -> Result<LeafCreation, HistoryError> {
     match planned {
         PlannedLeaf::Daily(create) => create_daily_leaf(connection, create, publisher).await,
-        PlannedLeaf::OpenEnded(create) => {
-            create_open_ended_leaf(connection, create, publisher).await
-        }
     }
 }
 
@@ -501,15 +496,6 @@ pub async fn create_daily_leaf<P: LoaderPublication>(
         }),
         None => create_leaf(connection, leaf, publisher).await,
     }
-}
-
-/// Creates or repairs the open-ended `forever` leaf.
-pub async fn create_open_ended_leaf<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    command: &CreateOpenEndedHistoryLeaf,
-    publisher: &P,
-) -> Result<LeafCreation, HistoryError> {
-    create_leaf(connection, command.leaf(), publisher).await
 }
 
 async fn create_leaf<P: LoaderPublication>(
@@ -1119,6 +1105,19 @@ pub async fn drop_detached_leaf<P: LoaderPublication>(
     sqlx::query(&format!("DROP TABLE {}", leaf.leaf_name()))
         .execute(&mut *connection)
         .await?;
+    // The exceptions of the rows the leaf held go with it. A heartbeat leaf
+    // holds no history row, so it has none.
+    if leaf.class_key() != HEARTBEAT_CLASS_KEY {
+        sqlx::query(&format!(
+            "DELETE FROM {CLOCK_EXCEPTIONS}
+             WHERE retention_class_key = $1 AND terminal_at >= $2 AND terminal_at < $3"
+        ))
+        .bind(leaf.class_key())
+        .bind(leaf.bounds().lower())
+        .bind(leaf.bounds().upper())
+        .execute(&mut *connection)
+        .await?;
+    }
     let sql = format!(
         "UPDATE {LEAF_CATALOG}
          SET detached_at = COALESCE(detached_at, statement_timestamp()),

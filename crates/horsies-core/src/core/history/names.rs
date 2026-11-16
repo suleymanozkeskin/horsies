@@ -13,6 +13,9 @@ pub const TASK_HISTORY_FOREVER_LEAF: &str = "horsies_task_history_forever_open";
 pub const LEAF_CATALOG: &str = "horsies_task_history_leaf_catalog";
 pub const LEAF_LOCK_KEY_FUNCTION: &str = "horsies_task_history_leaf_lock_key";
 pub const KEY_RESERVATIONS: &str = "horsies_key_reservations";
+/// Moved UUIDv7 ids whose birth, minus the clock bound, is later than their
+/// terminal time: rows a fast client clock placed in an earlier leaf.
+pub const CLOCK_EXCEPTIONS: &str = "horsies_task_history_clock_exceptions";
 pub const HEARTBEAT_CLASS_KEY: &str = "heartbeats";
 pub const HEARTBEATS_TABLE: &str = "horsies_heartbeats";
 pub const TASK_LOOKUP_FUNCTION: &str = "horsies_task_lookup_staged";
