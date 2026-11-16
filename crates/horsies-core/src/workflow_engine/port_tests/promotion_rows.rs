@@ -602,3 +602,55 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
     assert_eq!(resumed_rows[&1].task_status.as_deref(), Some("PENDING"));
     db.drop().await;
 }
+
+/// `test_workflow_recovery_limit.py` (`BAD_GOOD_UNTIL`): a stored deadline
+/// that does not parse is refused at promotion. Python passes the stored text
+/// to the database, which refuses it, so the promotion raises; the dependent
+/// never gets a task without its deadline.
+#[tokio::test]
+#[serial]
+#[ignore = "waits on #1018"]
+async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
+    let db = IsolatedDatabase::create().await;
+    for stored_options in [r#"{"good_until":"not-a-date"}"#, r#"{"good_until":12345}"#] {
+        let workflow_id = run(
+            &db.pool,
+            &spec(
+                "promotion_bad_deadline",
+                vec![
+                    after(0, "promotion_bad_deadline_task", &[]),
+                    after(1, "promotion_bad_deadline_task", &[0]),
+                ],
+            ),
+        )
+        .await;
+        sqlx::query(
+            "UPDATE horsies_workflow_tasks SET task_options = $2
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .bind(stored_options)
+        .execute(&db.pool)
+        .await
+        .expect("store a deadline that does not parse");
+        let root_task = node(&db.pool, workflow_id, 0)
+            .await
+            .task_id
+            .expect("the root has a task");
+
+        let _phase_two = try_finish_task(
+            &db.pool,
+            root_task,
+            &ok(serde_json::json!(0)),
+            &WorkflowSpecRegistry::new(),
+        )
+        .await;
+
+        assert_eq!(
+            node(&db.pool, workflow_id, 1).await.task_id,
+            None,
+            "{stored_options}"
+        );
+    }
+    db.drop().await;
+}

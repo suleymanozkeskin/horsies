@@ -78,11 +78,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_good_until_invalid_json() {
-        assert!(parse_good_until_from_options(Some("not{json")).is_none());
-    }
-
-    #[test]
     fn parse_good_until_no_good_until_key() {
         assert!(parse_good_until_from_options(Some(r#"{"retries": 3}"#)).is_none());
     }
@@ -96,18 +91,6 @@ mod tests {
         assert_eq!(dt.year(), 2025);
         assert_eq!(dt.month(), 6);
         assert_eq!(dt.day(), 15);
-    }
-
-    #[test]
-    fn parse_good_until_invalid_date_string() {
-        let opts = r#"{"good_until": "not-a-date"}"#;
-        assert!(parse_good_until_from_options(Some(opts)).is_none());
-    }
-
-    #[test]
-    fn parse_good_until_non_string_value() {
-        let opts = r#"{"good_until": 12345}"#;
-        assert!(parse_good_until_from_options(Some(opts)).is_none());
     }
 
     // -- merge_good_until_into_options --

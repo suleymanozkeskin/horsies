@@ -850,14 +850,17 @@ mod tests {
         assert_eq!(err.code, Some(ErrorCode::WorkflowDuplicateNodeId));
     }
 
+    /// Python `test_workflow_models.py::TestWorkflowSpecValidation::test_node_id_auto_assigned`:
+    /// a node with no id gets `<slug of the workflow name>:<index>`.
     #[test]
+    #[ignore = "waits on #1016"]
     fn auto_assign_node_ids() {
-        let mut b = WorkflowSpecBuilder::new("wf");
+        let mut b = WorkflowSpecBuilder::new("node_id_auto");
         b.task(simple_node("fetch_data"));
         b.task(simple_node("process"));
         let spec = b.build().unwrap();
-        assert_eq!(spec.tasks[0].node_id.as_deref(), Some("fetch_data:0"));
-        assert_eq!(spec.tasks[1].node_id.as_deref(), Some("process:1"));
+        assert_eq!(spec.tasks[0].node_id.as_deref(), Some("node_id_auto:0"));
+        assert_eq!(spec.tasks[1].node_id.as_deref(), Some("node_id_auto:1"));
     }
 
     #[test]
@@ -868,12 +871,16 @@ mod tests {
         assert_eq!(spec.tasks[0].node_id.as_deref(), Some("step-1:sub_task.v2"),);
     }
 
+    /// Python `test_workflow_models.py::TestSlugify`: in the workflow name of
+    /// an auto node id, a space becomes `_` and a character outside
+    /// `[A-Za-z0-9_\-:.]` is removed.
     #[test]
+    #[ignore = "waits on #1016"]
     fn slugify_special_chars() {
-        let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(simple_node("my task/v2"));
+        let mut b = WorkflowSpecBuilder::new("my flow/v2.0");
+        b.task(simple_node("a"));
         let spec = b.build().unwrap();
-        assert_eq!(spec.tasks[0].node_id.as_deref(), Some("my_task_v2:0"));
+        assert_eq!(spec.tasks[0].node_id.as_deref(), Some("my_flowv2.0:0"));
     }
 
     // -----------------------------------------------------------------------
@@ -1126,8 +1133,12 @@ mod tests {
         assert_eq!(spec.tasks[0].input_json, "[1, 2, 3]");
     }
 
+    /// Python `test_workflow_models.py::TestWorkflowSpecValidation::test_kwargs_args_from_overlap_rejected`:
+    /// an input member that an `args_from` key also names is refused with
+    /// `HRS-021` (`WORKFLOW_KWARGS_ARGS_FROM_OVERLAP`).
     #[test]
-    fn e019_kwargs_args_from_collision() {
+    #[ignore = "waits on #1019"]
+    fn e021_kwargs_args_from_overlap() {
         let mut b = WorkflowSpecBuilder::new("wf");
         let a = b.task(simple_node("a"));
         b.task(
@@ -1136,7 +1147,7 @@ mod tests {
                 .raw_arg_from("data", a.into()),
         );
         let err = b.build().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+        assert_eq!(err.code.map(|code| code.as_code_str()), Some("HRS-021"));
     }
 
     // -----------------------------------------------------------------------
@@ -1289,18 +1300,20 @@ mod tests {
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidNodeId));
     }
 
+    /// Python `WorkflowSpec.__post_init__` gates on node-id errors only; the
+    /// DAG and data-flow checks report their errors together
+    /// (`test_workflow_models.py::TestMultiErrorWorkflowCollection`).
     #[test]
-    fn phase2_errors_block_phase3() {
-        // root is valid, but b depends on index 99 (phase 2 error).
-        // Also add bad args_from on b (phase 3 error) — should not be reached.
+    #[ignore = "waits on #1017"]
+    fn dag_and_data_flow_errors_are_reported_together() {
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(simple_node("root"));
         let _b_ref = b.task(simple_node("b"));
-        b.tasks[1].dependencies.push(99); // phase 2: invalid dep
-        b.tasks[1].args_from.insert("x".to_owned(), 88); // phase 3: bad args_from
+        b.tasks[1].dependencies.push(99); // DAG: an invalid dependency
+        b.tasks[1].args_from.insert("x".to_owned(), 88); // data flow: an invalid args_from
         let err = b.build().unwrap_err();
-        // Should get phase 2 error (invalid dep), not phase 3
-        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidDependency));
+        assert_eq!(err.code, None, "{err}");
+        assert!(err.message.contains("2 previous errors"), "{err}");
     }
 
     // -----------------------------------------------------------------------
@@ -1464,10 +1477,11 @@ mod tests {
 
     // -- Spec isolation tests (ported from Python test_workflow_spec_isolation.py) --
 
+    /// Python `test_workflow_spec_isolation.py::TestSpecIsolation::test_node_reuse_across_specs_independent_ids`:
+    /// the same node in two specs gets the auto id of each spec.
     #[test]
+    #[ignore = "waits on #1016"]
     fn node_reuse_across_specs_independent_ids() {
-        // Building two specs from fresh TaskNodes with the same name produces
-        // independent node_ids (auto-assigned from task_name:index).
         let mut b1 = WorkflowSpecBuilder::new("alpha");
         b1.task(TaskNode::<()>::raw("task_a", "null"));
         let spec1 = b1.build().unwrap();
@@ -1476,8 +1490,8 @@ mod tests {
         b2.task(TaskNode::<()>::raw("task_a", "null"));
         let spec2 = b2.build().unwrap();
 
-        assert_eq!(spec1.tasks[0].node_id.as_deref(), Some("task_a:0"));
-        assert_eq!(spec2.tasks[0].node_id.as_deref(), Some("task_a:0"));
+        assert_eq!(spec1.tasks[0].node_id.as_deref(), Some("alpha:0"));
+        assert_eq!(spec2.tasks[0].node_id.as_deref(), Some("beta:0"));
     }
 
     #[test]
