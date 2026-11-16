@@ -1,12 +1,11 @@
 """The stored node status is a ``WorkflowTaskStatus`` or a crash.
 
-The database CHECK ``horsies_workflow_tasks_status_check`` allows only the
+The database CHECK ``horsies_workflow_tasks_status_known`` allows only the
 enum values. Both lists are read from code and must stay equal.
 """
 
 from __future__ import annotations
 
-import inspect
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -18,8 +17,8 @@ from horsies.core.brokers.resources import ListenerDisabled
 
 from horsies.core.models.workflow.enums import WorkflowTaskStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.schemas import node_status
 from horsies.core.types.result import is_ok
+from tests.baseline_sql import baseline_sql
 from tests.broker_resources_support import attach_resources, fake_resources
 
 pytestmark = [pytest.mark.unit]
@@ -32,13 +31,17 @@ def _quoted_values(in_list: str) -> frozenset[str]:
 
 
 class TestCheckMatchesEnum:
-    def test_every_status_list_in_the_migration_equals_the_enum(self) -> None:
-        source = inspect.getsource(node_status.close_workflow_node_status_set)
-        lists = _STATUS_IN_LIST.findall(source)
-        assert len(lists) == 2, 'expected the row scan and the CHECK'
+    def test_the_baseline_check_equals_the_enum(self) -> None:
+        check = re.search(
+            r'CONSTRAINT horsies_workflow_tasks_status_known CHECK \((.*?)\n    \)',
+            baseline_sql(),
+            re.DOTALL,
+        )
+        assert check is not None, 'horsies_workflow_tasks_status_known'
+        lists = _STATUS_IN_LIST.findall(check.group(1))
+        assert len(lists) == 1, lists
         expected = frozenset(status.value for status in WorkflowTaskStatus)
-        for in_list in lists:
-            assert _quoted_values(in_list) == expected
+        assert _quoted_values(lists[0]) == expected
 
 
 def _node_row(status: str) -> SimpleNamespace:

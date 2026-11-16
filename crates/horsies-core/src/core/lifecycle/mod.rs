@@ -17,7 +17,8 @@ pub mod outcomes;
 
 pub use attempt_outcomes::{
     decode_failed_attempt_row, decode_workflow_success_row, AfterFailure, AttemptWriteRefusal,
-    FailedAttemptOutcome, PhaseTwoOwed, PhaseTwoStep, RetryRefusal, WorkflowSuccessOutcome,
+    FailedAttemptOutcome, PhaseTwoOwed, PhaseTwoStep, ReleasedClaim, RetryRefusal,
+    UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 pub use commands::{BatchSize, TerminalizationCommand};
 pub use fences::{
@@ -101,8 +102,6 @@ mod tests {
                     task_id: Uuid::nil(),
                     fence: owned.clone(),
                     result_json: "{}".into(),
-                    notify_channel: "c".into(),
-                    notify_payload: "p".into(),
                 },
             ),
             (

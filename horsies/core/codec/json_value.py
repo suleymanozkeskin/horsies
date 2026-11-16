@@ -17,6 +17,8 @@ Defines:
   `NaN`, `Infinity`, `-Infinity` (Python lenient extensions, not RFC 8259).
 - `_parse_finite_float(literal)` — `parse_float` hook for the same sites;
   rejects a numeric literal outside the finite binary64 range.
+- `_object_without_repeated_key(pairs)` — `object_pairs_hook` for the same
+  sites; rejects an object that repeats a key.
 - `_reject_deep_nesting(text, parsed)` — post-parse check for the same sites;
   rejects a document nested deeper than `MAX_JSON_DEPTH`.
 - `_reject_lone_surrogate(text, parsed)` — post-parse check for the same
@@ -42,6 +44,7 @@ __all__ = [
     '_validate_json_native',
     '_reject_nonstandard_json_constant',
     '_parse_finite_float',
+    '_object_without_repeated_key',
     '_reject_deep_nesting',
     '_reject_lone_surrogate',
     'escape_lone_surrogates',
@@ -176,6 +179,30 @@ def _parse_finite_float(literal: str) -> float:
     if math.isinf(value):
         raise StrictJsonError('JSON number is outside the finite binary64 range')
     return value
+
+
+def _object_without_repeated_key(
+    pairs: list[tuple[str, JsonValue]],
+) -> dict[str, JsonValue]:
+    """`object_pairs_hook` that rejects a JSON object which repeats a key.
+
+    `json.loads` keeps the last value of a repeated key. Keys compare after
+    unescaping, so `{"a": 1, "\\u0061": 2}` repeats `a`.
+
+    Args:
+        pairs: The key and value pairs of one object, in text order. They
+            hold task input, so the error text does not repeat a key.
+
+    Returns:
+        The object as a dict.
+
+    Raises:
+        StrictJsonError: when two pairs have the same key.
+    """
+    built = dict(pairs)
+    if len(built) != len(pairs):
+        raise StrictJsonError('JSON object repeats a key')
+    return built
 
 
 def _encodes_as_utf8(text: str) -> bool:
