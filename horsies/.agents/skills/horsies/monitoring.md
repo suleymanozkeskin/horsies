@@ -192,9 +192,9 @@ within it.
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |
 |---|---|
-| `PREDATES_RETAINED_HISTORY` | The id's UUIDv7 birth is before the oldest retained history; retention can have removed the task |
-| `WITHIN_RETAINED_HISTORY` | Retained history covers the id's birth and has no row: the task did not exist, or its history partition was removed out of band |
-| `NOT_CLASSIFIED` | The id is not a UUIDv7, no attached history partition has a birth, or the database has no staged history read |
+| `PREDATES_RETAINED_HISTORY` | The id's UUIDv7 birth is before the end of the latest history period that retention removed (plus 5 s); retention can have removed the task |
+| `WITHIN_RETAINED_HISTORY` | The id's UUIDv7 birth is later: the task did not exist, or its history partition was removed out of band |
+| `NOT_CLASSIFIED` | The id is not a UUIDv7, or the database has no staged history read |
 
 List and aggregate reads are **window-scoped** and take a
 `MonitoringWindow`. Only `resolve_monitoring_window(since=..., until=...)`

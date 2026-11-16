@@ -31,11 +31,11 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     ObservedForeignTerminalization,
     PhaseTwoOwed,
+    PhaseTwoStep,
     SourceStateConflict,
     SuccessApplied,
     TaskAbsent,
     WorkflowSuccessOutcome,
-    decode_workflow_success_row,
 )
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.workflow_success import (
@@ -269,10 +269,12 @@ class TestApplied:
             case SuccessApplied(
                 task_id=task_id,
                 observed=observed,
-                phase_two=PhaseTwoOwed(task_name=name, queue_name=queue),
+                phase_two=PhaseTwoOwed(task_name=name, queue_name=queue, step=step),
             ):
                 assert task_id == seeded.task_id
                 assert (name, queue) == (TASK_NAME, QUEUE)
+                # The seeded node is the only node of its workflow.
+                assert step is PhaseTwoStep.NO_DEPENDENTS
                 assert observed.status is TaskStatus.RUNNING
                 assert observed.worker_id == WORKER
                 assert observed.claimed_at == seeded.claimed_at
