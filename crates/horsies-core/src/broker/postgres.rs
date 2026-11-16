@@ -526,11 +526,16 @@ WHERE t.id = target.id \
   AND target.releasable \
 RETURNING t.id";
 
-/// Reset workflow_tasks for unclaimed tasks back to READY.
+/// Reset the nodes of abandoned tasks of PAUSED workflows to READY, so a
+/// resume enqueues a fresh task. Only an ENQUEUED or RUNNING node is reset;
+/// a node in another state keeps its state and its task link (Python
+/// `RESET_PAUSED_WORKFLOW_TASKS_SQL`, `horsies/core/worker/sql.py:291-296`,
+/// and `RESET_PAUSED_NODE_SQL`, `horsies/core/worker/child_runner.py:684-691`).
 const RESET_WORKFLOW_TASKS_SQL: &str = "\
 UPDATE horsies_workflow_tasks \
 SET status = 'READY', task_id = NULL, started_at = NULL \
-WHERE task_id = ANY($1)";
+WHERE task_id = ANY($1) \
+  AND status IN ('ENQUEUED', 'RUNNING')";
 
 /// Count active CLAIMED tasks for a specific worker (excludes expired leases).
 const COUNT_CLAIMED_FOR_WORKER_SQL: &str = "\
