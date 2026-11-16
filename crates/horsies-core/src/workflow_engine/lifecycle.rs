@@ -13,7 +13,8 @@ use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx, stored_row_params,
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 #[cfg(test)]
@@ -132,7 +133,7 @@ const FIND_READY_TASKS_SQL: &str = "\
 SELECT task_index, task_name, input,
        queue_name, priority, task_options, node_id,
        args_from, workflow_ctx_from, dependencies, is_subworkflow,
-       sub_workflow_name, sub_definition_key
+       sub_workflow_name, sub_definition_key, sub_workflow_params
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1::uuid AND status = 'READY'";
 
@@ -278,6 +279,9 @@ struct ReadyTaskRow {
     is_subworkflow: bool,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
+    /// `GIVEN`); `NULL` on a task node.
+    sub_workflow_params: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1144,7 +1148,7 @@ async fn enqueue_subworkflow_on_resume(
     };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
-    let params = stored_row_params(&task.args_from);
+    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
 
     let merged_input = merge_args_from_for_ready(
         pool,
@@ -1693,9 +1697,9 @@ mod p7_lifecycle_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
              ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -1778,9 +1782,9 @@ mod p7_lifecycle_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
              ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -1900,9 +1904,9 @@ mod p7_lifecycle_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
              ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())

@@ -196,6 +196,27 @@ pub enum SubWorkflowParams {
     Given,
 }
 
+impl SubWorkflowParams {
+    /// The value that a sub-workflow node row stores in
+    /// `horsies_workflow_tasks.sub_workflow_params`: `NOT_GIVEN` or `GIVEN`.
+    /// A task node row stores `NULL`.
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            Self::NotGiven => "NOT_GIVEN",
+            Self::Given => "GIVEN",
+        }
+    }
+
+    /// The choice of a stored value; `None` for any other text.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "NOT_GIVEN" => Some(Self::NotGiven),
+            "GIVEN" => Some(Self::Given),
+            _ => None,
+        }
+    }
+}
+
 /// Type-erased node stored in `WorkflowSpec.tasks`.
 ///
 /// Contains all fields needed for validation, DB insertion, and engine
@@ -759,6 +780,27 @@ mod tests {
         // Finite floats (including f64::MAX) are unchanged.
         assert!(serialize_explicit_input(&Payload { ratio: 2.5 }).is_ok());
         assert!(serialize_explicit_input(&Payload { ratio: f64::MAX }).is_ok());
+    }
+
+    #[test]
+    fn sub_workflow_params_round_trip_through_the_stored_value() {
+        for params in [SubWorkflowParams::NotGiven, SubWorkflowParams::Given] {
+            assert_eq!(
+                SubWorkflowParams::from_stored(params.as_stored()),
+                Some(params)
+            );
+        }
+        assert_eq!(
+            SubWorkflowParams::as_stored(SubWorkflowParams::NotGiven),
+            "NOT_GIVEN"
+        );
+        assert_eq!(
+            SubWorkflowParams::as_stored(SubWorkflowParams::Given),
+            "GIVEN"
+        );
+        for refused in ["", "not_given", "NotGiven", "GIVEN "] {
+            assert_eq!(SubWorkflowParams::from_stored(refused), None, "{refused:?}");
+        }
     }
 
     #[test]

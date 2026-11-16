@@ -14,7 +14,8 @@ use crate::core::{
 };
 
 use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx, stored_row_params,
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 use crate::workflow_engine::error::WorkflowError;
@@ -113,6 +114,7 @@ SELECT d.task_index, d.dependencies, d.args_from, d.workflow_ctx_from,
        d.input, d.queue_name, d.priority,
        d.node_id, d.task_options, d.status,
        d.is_subworkflow, d.sub_workflow_name, d.sub_definition_key,
+       d.sub_workflow_params,
        COALESCE((
            SELECT jsonb_object_agg(s.status, s.cnt)
            FROM (SELECT src.status, COUNT(*) AS cnt
@@ -134,7 +136,7 @@ SELECT task_index, dependencies, args_from, workflow_ctx_from,
        allow_failed_deps, join_type, min_success, task_name,
        input, queue_name, priority, node_id,
        task_options, status, is_subworkflow, sub_workflow_name,
-       sub_definition_key
+       sub_definition_key, sub_workflow_params
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = $2 AND status = 'PENDING'";
 
@@ -421,6 +423,9 @@ struct DependentRow {
     is_subworkflow: bool,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
+    /// `GIVEN`); `NULL` on a task node.
+    sub_workflow_params: Option<String>,
 }
 
 /// One batched-eval row: a PENDING dependent's full node config plus its
@@ -898,7 +903,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .await;
     };
     let merged_input = merge_args_from(&node.input, &node.args_from, dep_results)?;
-    let params = stored_row_params(&node.args_from);
+    let params = stored_sub_workflow_params(node.sub_workflow_params.as_deref())?;
     let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
     let child_id = start_child_workflow_in_tx(
@@ -2035,7 +2040,7 @@ async fn enqueue_subworkflow_task(
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
     // otherwise use the static registered spec.
-    let params = stored_row_params(&task.args_from);
+    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
 
     let merged_input = merge_args_from(&task.input, &task.args_from, dep_results)?;
     let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
@@ -3404,6 +3409,7 @@ mod p7_exact_error_tests {
             is_subworkflow: true,
             sub_workflow_name: Some("p7_missing_child".to_owned()),
             sub_definition_key: Some("missing.definition".to_owned()),
+            sub_workflow_params: Some("NOT_GIVEN".to_owned()),
         }
     }
 
@@ -3417,11 +3423,11 @@ mod p7_exact_error_tests {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params,
                 sub_workflow_name, sub_definition_key, created_at
             ) VALUES (
                 $1, $2, 1, 'missing_child', '__sub_workflow:p7_missing_child', 'null',
-                'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'p7_missing_child',
+                'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'NOT_GIVEN', 'p7_missing_child',
                 'missing.definition', NOW()
             )",
         )
@@ -3486,9 +3492,9 @@ mod p7_exact_error_tests {
             "INSERT INTO horsies_workflow_tasks (
                  id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_name, sub_definition_key, created_at
+                 is_subworkflow, sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
              ) VALUES ($1, $2, 1, 'missing_child', 'p7_missing_child', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'READY', TRUE,
+                       'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'NOT_GIVEN',
                        'p7_missing_child', 'missing.definition', NOW())",
         )
         .bind(Uuid::new_v4())
@@ -3552,10 +3558,10 @@ mod p7_exact_error_tests {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params, created_at
             ) VALUES (
                 $1, $2, 1, 'child', '__sub_workflow:p7_child', 'null', 'default', 100, '{}',
-                FALSE, 'all', 'RUNNING', TRUE, NOW()
+                FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN', NOW()
             )",
         )
         .bind(Uuid::new_v4())
@@ -3684,11 +3690,11 @@ mod guard_tests {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params,
                 sub_workflow_id, created_at
             ) VALUES (
                 $1, $2, 0, 'node_0', 'subwf_node', 'null', 'default', 100, '{}', FALSE, 'all',
-                'RUNNING', TRUE, $3, NOW()
+                'RUNNING', TRUE, 'NOT_GIVEN', $3, NOW()
             )",
         )
         .bind(Uuid::new_v4())
@@ -4036,10 +4042,10 @@ WHERE wt.workflow_id = $1
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params, created_at
             ) VALUES (
                 $1, $2, 0, 'node_0', 'sub', 'null', 'default', 100, '{}', FALSE, 'all',
-                'READY', TRUE, NOW()
+                'READY', TRUE, 'NOT_GIVEN', NOW()
             )",
         )
         .bind(Uuid::new_v4())
@@ -4211,10 +4217,10 @@ WHERE wt.workflow_id = $1
             "INSERT INTO horsies_workflow_tasks (
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, sub_workflow_name, sub_definition_key, created_at
+                status, is_subworkflow, sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
             ) VALUES ($1, $2, 0, 'node_0', 'child', '{}',
                       'default', 100, '{}', FALSE, 'all',
-                      'RUNNING', TRUE, 'child', 'tests.child.v1', NOW())",
+                      'RUNNING', TRUE, 'NOT_GIVEN', 'child', 'tests.child.v1', NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(wf_id)

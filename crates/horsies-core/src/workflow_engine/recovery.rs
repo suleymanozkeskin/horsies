@@ -15,7 +15,8 @@ use crate::workflow_engine::recovery_limit::{
     FailureRecord, RecoveryCase, RecoveryFailurePolicy,
 };
 use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx, stored_row_params,
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 // ---------------------------------------------------------------------------
@@ -185,7 +186,7 @@ LIMIT CAST($2 AS bigint)";
 const GLOBAL_CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
        wt.input, wt.args_from, wt.dependencies,
-       wt.sub_workflow_name, wt.sub_definition_key
+       wt.sub_workflow_name, wt.sub_definition_key, wt.sub_workflow_params
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -197,7 +198,7 @@ LIMIT CAST($1 AS bigint)";
 const TREE_CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
        wt.input, wt.args_from, wt.dependencies,
-       wt.sub_workflow_name, wt.sub_definition_key
+       wt.sub_workflow_name, wt.sub_definition_key, wt.sub_workflow_params
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -549,6 +550,8 @@ struct ReadySubworkflowRow {
     dependencies: Vec<i32>,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice (`NOT_GIVEN` or `GIVEN`).
+    sub_workflow_params: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1672,7 +1675,7 @@ async fn start_stuck_subworkflow(
         &row.dependencies,
     )
     .await?;
-    let params = stored_row_params(&row.args_from);
+    let params = stored_sub_workflow_params(row.sub_workflow_params.as_deref())?;
     let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);

@@ -694,7 +694,7 @@ fn insert_workflow_tasks<'a>(
              dependencies, args_from, workflow_ctx_from, \
              allow_failed_deps, join_type, min_success, \
              task_options, max_retries, execution, good_until, \
-             retention_class_key, status, is_subworkflow, \
+             retention_class_key, status, is_subworkflow, sub_workflow_params, \
              sub_workflow_name, sub_definition_key, \
              task_id, started_at, created_at) ",
         );
@@ -731,6 +731,11 @@ fn insert_workflow_tasks<'a>(
                 )
                 .push_bind(p.status)
                 .push_bind(p.node.is_subworkflow)
+                .push_bind(match p.node.is_subworkflow {
+                    // A task node has no child: its row stores NULL.
+                    true => Some(p.node.sub_workflow_params.as_stored()),
+                    false => None,
+                })
                 .push_bind(p.sub_workflow_name.clone())
                 .push_bind(p.node.sub_definition_key.clone())
                 .push_bind(p.task_id.clone())
@@ -1028,18 +1033,24 @@ pub(crate) fn build_child_spec(
     )
 }
 
-/// The params choice that a stored sub-workflow node row shows.
+/// The params choice that a sub-workflow node row stores
+/// (`horsies_workflow_tasks.sub_workflow_params`), as the client set it when
+/// it defined the node.
 ///
-/// The row keeps no column for the client's choice. It shows
-/// `SubWorkflowParams::Given` when the node takes `args_from` members, and
-/// `NotGiven` otherwise. A node defined `Given` with only a static input is
-/// refused at start for a child without a `spec_builder`
-/// (`WorkflowSpecRegistry::resolve_and_validate_spec`), so the row path
-/// checks the members only. Does no I/O.
-pub(crate) fn stored_row_params(args_from: &Option<serde_json::Value>) -> SubWorkflowParams {
-    match args_from {
-        Some(_) => SubWorkflowParams::Given,
-        None => SubWorkflowParams::NotGiven,
+/// Every sub-workflow node row stores `NOT_GIVEN` or `GIVEN`. `NULL` or any
+/// other value on a sub-workflow node row is refused with
+/// `WorkflowError::Validation`; the row is not read any other way. Does no
+/// I/O.
+pub(crate) fn stored_sub_workflow_params(
+    stored: Option<&str>,
+) -> Result<SubWorkflowParams, WorkflowError> {
+    match stored.map(SubWorkflowParams::from_stored) {
+        Some(Some(params)) => Ok(params),
+        Some(None) | None => Err(WorkflowError::Validation(format!(
+            "sub-workflow node row stores no known params choice \
+             (sub_workflow_params = {:?}; expected NOT_GIVEN or GIVEN)",
+            stored,
+        ))),
     }
 }
 
@@ -1442,12 +1453,24 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_row_gives_params_when_it_takes_members() {
+    fn a_sub_workflow_row_is_read_by_its_stored_choice_only() {
         assert_eq!(
-            stored_row_params(&Some(serde_json::json!({"data": 0}))),
+            stored_sub_workflow_params(Some("NOT_GIVEN")).unwrap(),
+            SubWorkflowParams::NotGiven
+        );
+        assert_eq!(
+            stored_sub_workflow_params(Some("GIVEN")).unwrap(),
             SubWorkflowParams::Given
         );
-        assert_eq!(stored_row_params(&None), SubWorkflowParams::NotGiven);
+        for refused in [None, Some(""), Some("given")] {
+            assert!(
+                matches!(
+                    stored_sub_workflow_params(refused),
+                    Err(WorkflowError::Validation(_))
+                ),
+                "{refused:?}"
+            );
+        }
     }
 
     #[test]
