@@ -1,8 +1,12 @@
-//! The broker's listener: one [`crate::db::Listener`] per broker, on the
-//! session URL. Every LISTEN of the broker and of the modules that hold the
-//! broker subscribes here; none of them opens a listener connection of its
-//! own.
+//! The process listener: one [`crate::db::Listener`] per process and session
+//! URL, shared by every broker of the process. Every LISTEN of a broker and
+//! of the modules that hold it subscribes here; none of them opens a listener
+//! connection of its own.
 //!
+//! - Brokers on the same session URL share one listener and its one
+//!   connection. The listener stops when the last broker that uses it drops.
+//!   A listener task runs on one tokio runtime, so a broker on another
+//!   runtime of the process gets its own listener.
 //! - The listener starts at the first subscription. The session URL is
 //!   parsed and its connection plan is loaded then, not when the broker is
 //!   built, so building a broker reads no file.
@@ -13,7 +17,7 @@
 //! - A refused plan is not kept: the next subscription loads it again.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use tokio::sync::OnceCell;
 
@@ -162,12 +166,13 @@ impl StartedListener {
     }
 }
 
-/// The listener of one broker. It holds no connection until the first
-/// subscription. Dropping it stops the listener: every subscription then
-/// reads `Stopped`.
+/// The listener of one broker: a reference to the process listener of its
+/// session URL. It holds no connection until the first subscription. When the
+/// last broker that uses a process listener drops, the listener stops: every
+/// subscription then reads `Stopped`.
 pub struct ProcessListener {
     source: ListenerSource,
-    started: OnceCell<StartedListener>,
+    started: OnceCell<Arc<StartedListener>>,
 }
 
 impl fmt::Debug for ProcessListener {
@@ -198,17 +203,18 @@ impl ProcessListener {
         }
     }
 
-    /// The started listener. The first call loads the connection plan of the
-    /// session URL (blocking reads run off the runtime threads) and starts
-    /// the listener task; the connection opens at the first subscription.
+    /// The started listener. The first call takes the running process
+    /// listener of the session URL on this runtime, or loads the connection
+    /// plan (blocking reads run off the runtime threads) and starts one. The
+    /// connection opens at the first subscription.
     pub async fn start(&self) -> Result<&StartedListener, ListenError> {
         match &self.source {
             ListenerSource::NoSessionUrl => Err(ListenError::NoSessionUrl),
-            ListenerSource::SessionUrl(session_url) => {
-                self.started
-                    .get_or_try_init(|| start_listener(session_url.clone()))
-                    .await
-            }
+            ListenerSource::SessionUrl(session_url) => self
+                .started
+                .get_or_try_init(|| process_listener(session_url.clone()))
+                .await
+                .map(|started| &**started),
         }
     }
 
@@ -235,15 +241,86 @@ impl ProcessListener {
     }
 }
 
-async fn start_listener(session_url: SessionUrl) -> Result<StartedListener, ListenError> {
-    let plan = load_plan(session_url)
+/// A process listener of one runtime and session URL. The entry holds no
+/// strong reference, so it does not keep its listener alive.
+struct RegisteredListener {
+    runtime: tokio::runtime::Id,
+    session_url: SessionUrl,
+    listener: Weak<StartedListener>,
+}
+
+/// The process listeners. It holds an entry per live listener: each
+/// registration first drops the entries whose listener has stopped.
+static PROCESS_LISTENERS: Mutex<Vec<RegisteredListener>> = Mutex::new(Vec::new());
+
+/// Locks the process listeners. A poisoned lock means a panic while it was
+/// held, which already crashed its thread loudly; every critical section
+/// leaves the list whole, so the list is used as it is.
+fn lock_process_listeners() -> MutexGuard<'static, Vec<RegisteredListener>> {
+    PROCESS_LISTENERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The running listener of `runtime` on `session_url`, when one is
+/// registered.
+fn find_running(
+    registered: &[RegisteredListener],
+    runtime: tokio::runtime::Id,
+    session_url: &SessionUrl,
+) -> Option<Arc<StartedListener>> {
+    registered
+        .iter()
+        .filter(|entry| entry.runtime == runtime && entry.session_url.0 == session_url.0)
+        .find_map(|entry| {
+            entry
+                .listener
+                .upgrade()
+                .filter(|started| started.listener.is_running())
+        })
+}
+
+/// The process listener of `session_url` on the current runtime: the running
+/// one, or a new one. A refused plan starts nothing.
+async fn process_listener(session_url: SessionUrl) -> Result<Arc<StartedListener>, ListenError> {
+    let runtime = tokio::runtime::Handle::current().id();
+    let running = {
+        let registered = lock_process_listeners();
+        find_running(&registered, runtime, &session_url)
+    };
+    if let Some(running) = running {
+        return Ok(running);
+    }
+    let plan = load_plan(session_url.clone())
         .await
         .map_err(ListenError::PlanRefused)?;
+    Ok(register(runtime, session_url, plan))
+}
+
+/// Starts and registers the listener of `plan`. When another broker of the
+/// same runtime registered a running listener on the same URL while this plan
+/// loaded, that listener is returned and `plan` is dropped unused.
+fn register(
+    runtime: tokio::runtime::Id,
+    session_url: SessionUrl,
+    plan: ConnectPlan,
+) -> Arc<StartedListener> {
+    let mut registered = lock_process_listeners();
+    registered.retain(|entry| entry.listener.strong_count() > 0);
+    if let Some(running) = find_running(&registered, runtime, &session_url) {
+        return running;
+    }
     let masked_url = plan.masked_url().clone();
-    Ok(StartedListener {
+    let started = Arc::new(StartedListener {
         listener: Listener::start(Arc::new(plan)),
         masked_url,
-    })
+    });
+    registered.push(RegisteredListener {
+        runtime,
+        session_url,
+        listener: Arc::downgrade(&started),
+    });
+    started
 }
 
 /// Runs [`read_plan`] on the blocking pool. A panic in it is resumed here.
@@ -267,6 +344,17 @@ fn read_plan(session_url: &SessionUrl) -> Result<ConnectPlan, ListenerPlanError>
         parse_connection_url(&session_url.0, &environment).map_err(ListenerPlanError::Url)?;
     ConnectPlan::load(&settings, &environment, &DEFAULT_SOCKET_SETTINGS)
         .map_err(ListenerPlanError::Plan)
+}
+
+#[cfg(test)]
+impl ProcessListener {
+    /// The shared listener itself, so a test can hold a weak reference.
+    async fn started_for_test(&self) -> &Arc<StartedListener> {
+        let _started = self.start().await.expect("the plan loads");
+        self.started
+            .get()
+            .expect("start fills the cell when it succeeds")
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +403,46 @@ mod tests {
         assert!(matches!(refused, ListenError::PlanRefused(_)), "{refused}");
         assert!(!refused.is_retryable());
         assert!(!listener.started.initialized());
+    }
+
+    /// A URL whose plan loads with no file and no environment password.
+    const PLAN_ONLY_URL: &str = "postgresql://horsies:pw@127.0.0.1:1/horsies";
+
+    /// Two brokers on the same session URL in one runtime share one listener;
+    /// another URL gets its own. Starting connects to nothing.
+    #[tokio::test]
+    async fn brokers_on_one_session_url_share_one_listener() {
+        let first = ProcessListener::on_session_url(PLAN_ONLY_URL);
+        let second = ProcessListener::on_session_url(PLAN_ONLY_URL);
+        let other =
+            ProcessListener::on_session_url(&format!("{PLAN_ONLY_URL}?application_name=other"));
+
+        let first_started = first.start().await.expect("the plan loads");
+        let second_started = second.start().await.expect("the plan loads");
+        let other_started = other.start().await.expect("the plan loads");
+
+        assert!(std::ptr::eq(first_started, second_started));
+        assert!(!std::ptr::eq(first_started, other_started));
+    }
+
+    /// The listener stops when the last broker that uses it drops; the
+    /// process keeps no reference to it.
+    #[tokio::test]
+    async fn the_last_broker_drop_stops_the_shared_listener() {
+        let url = format!("{PLAN_ONLY_URL}?application_name=last_drop");
+        let first = ProcessListener::on_session_url(&url);
+        let second = ProcessListener::on_session_url(&url);
+        let shared = Arc::downgrade(first.started_for_test().await);
+        assert!(second.start().await.is_ok(), "the plan loads");
+
+        drop(first);
+        assert!(
+            shared.upgrade().is_some(),
+            "the second broker still uses it"
+        );
+        drop(second);
+
+        assert!(shared.upgrade().is_none());
     }
 
     #[test]

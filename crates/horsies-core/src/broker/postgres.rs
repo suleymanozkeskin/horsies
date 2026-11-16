@@ -763,8 +763,9 @@ pub enum SchemaInitializationMode {
 /// PostgreSQL-backed task broker.
 ///
 /// All operations are async and use connection pooling via `sqlx::PgPool`.
-/// Every LISTEN of the broker goes through its one listener connection on the
-/// session URL.
+/// Every LISTEN of the broker goes through the process listener of its
+/// session URL: one connection, shared with the other brokers of the process
+/// on the same URL.
 pub struct PostgresBroker {
     pool: PgPool,
     session_pool: PgPool,
@@ -795,8 +796,8 @@ impl PostgresBroker {
     }
 
     /// Construct a broker from an existing pool, with its listener on
-    /// `session_url`. The listener opens its own connection at the first
-    /// subscription; the URL is parsed then.
+    /// `session_url`: the process listener of that URL, which opens its
+    /// connection at the first subscription. The URL is parsed then.
     pub fn from_pool_and_session_url(pool: PgPool, session_url: &str) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
@@ -1032,8 +1033,9 @@ impl PostgresBroker {
         Ok(outcome)
     }
 
-    /// The broker's listener: the one LISTEN connection of the broker, on the
-    /// session URL, shared by every subscriber.
+    /// The broker's listener: the process listener of the session URL, one
+    /// LISTEN connection shared by every subscriber of every broker of the
+    /// process on that URL.
     pub(crate) fn listener(&self) -> &ProcessListener {
         &self.listener
     }
@@ -6053,6 +6055,29 @@ mod result_wait_tests {
             .ping_workers(None, Duration::from_millis(200), None)
             .await;
         assert!(pinged.is_ok(), "{:?}", pinged.err());
+    }
+
+    /// Two brokers on one session URL in one process share one listener
+    /// connection.
+    #[tokio::test]
+    #[serial]
+    async fn two_brokers_on_one_session_url_open_one_listener_connection() {
+        let application_name = format!("shared_listener_{}", Uuid::new_v4().simple());
+        let first = listener_broker(&application_name).await;
+        let second = listener_broker(&application_name).await;
+
+        let first_wait = first.result_wait_mode(Uuid::new_v4()).await;
+        let second_wait = second.result_wait_mode(Uuid::new_v4()).await;
+        assert!(matches!(first_wait, ResultWaitMode::Subscribed(_)));
+        assert!(matches!(second_wait, ResultWaitMode::Subscribed(_)));
+
+        let connections: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+                .bind(&application_name)
+                .fetch_one(first.pool())
+                .await
+                .expect("count the listener connections");
+        assert_eq!(connections, 1);
     }
 
     /// Dropping the broker stops its listener. The wait turns into polling,
