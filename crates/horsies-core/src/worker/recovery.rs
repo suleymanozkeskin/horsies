@@ -851,8 +851,9 @@ pub fn spawn_reaper(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let check_interval = Duration::from_millis(config.check_interval_ms);
-        let mut next_retention_cleanup =
-            tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
+        // The first pass runs at start and includes the retention cleanup
+        // (Python `_ReaperPassState(next_retention_cleanup_at=time.monotonic())`).
+        let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
 
@@ -864,26 +865,52 @@ pub fn spawn_reaper(
             "reaper started",
         );
 
-        loop {
+        // The first pass runs at start, then one per check interval (Python
+        // `_reaper_loop`: pass, then wait).
+        while !cancel.is_cancelled() {
+            // Cluster-wide gate: only one worker runs a pass per interval.
+            // The passes are safe to run concurrently (SKIP LOCKED), but
+            // redundant across a cluster; the gate elides the duplicate work.
+            match acquire_gate(&runtime_pool, advisory_key_reaper()).await {
+                GatePass::Skip => {
+                    tracing::debug!("reaper pass skipped: another worker holds the gate");
+                }
+                GatePass::Ungated => {
+                    run_reaper_pass(
+                        &runtime_pool,
+                        &maintenance_pool,
+                        &registry,
+                        &config,
+                        &payload,
+                        &retention,
+                        &health,
+                        &mut next_retention_cleanup,
+                        &mut next_partition_maintenance,
+                        &mut orphan_state,
+                    )
+                    .await;
+                }
+                GatePass::Held(tx) => {
+                    run_reaper_pass(
+                        &runtime_pool,
+                        &maintenance_pool,
+                        &registry,
+                        &config,
+                        &payload,
+                        &retention,
+                        &health,
+                        &mut next_retention_cleanup,
+                        &mut next_partition_maintenance,
+                        &mut orphan_state,
+                    )
+                    .await;
+                    release_gate(tx).await;
+                }
+            }
+
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(check_interval) => {
-                    // Cluster-wide gate: only one worker runs a pass per interval.
-                    // The passes are safe to run concurrently (SKIP LOCKED), but
-                    // redundant across a cluster; the gate elides the duplicate work.
-                    match acquire_gate(&runtime_pool, advisory_key_reaper()).await {
-                        GatePass::Skip => {
-                            tracing::debug!("reaper pass skipped: another worker holds the gate");
-                        }
-                        GatePass::Ungated => {
-                            run_reaper_pass(&runtime_pool, &maintenance_pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
-                        }
-                        GatePass::Held(tx) => {
-                            run_reaper_pass(&runtime_pool, &maintenance_pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
-                            release_gate(tx).await;
-                        }
-                    }
-                }
+                _ = tokio::time::sleep(check_interval) => {}
             }
         }
     })
@@ -965,8 +992,9 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
     }
 }
 
-/// Run one reaper pass: stale-RUNNING recovery, PENDING expiry, stale-CLAIMED
-/// requeue, and periodic retention cleanup.
+/// Run one reaper pass, in Python's order: stale-CLAIMED requeue, orphan
+/// audit, stale-RUNNING recovery, PENDING expiry, workflow recovery, then
+/// periodic retention cleanup and partition maintenance.
 async fn run_reaper_pass(
     runtime_pool: &PgPool,
     maintenance_pool: &PgPool,
@@ -979,38 +1007,11 @@ async fn run_reaper_pass(
     next_partition_maintenance: &mut tokio::time::Instant,
     orphan_state: &mut OrphanSweepState,
 ) {
-    if config.auto_fail_stale_running {
-        let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
-        let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
-        match mark_stale_running_as_failed(
-            runtime_pool,
-            threshold_secs,
-            finalizing_threshold_secs,
-            STALE_RUNNING_SCAN_LIMIT,
-        )
-        .await
-        {
-            Ok(count) if count > 0 => {
-                tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
-            }
-            _ => {}
-        }
-    }
-
-    // Expire unclaimed PENDING tasks whose good_until has passed.
-    match expire_pending_tasks(runtime_pool).await {
-        Ok(count) if count > 0 => {
-            tracing::info!(count, "reaper expired unclaimed PENDING tasks");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
-        }
-        _ => {}
-    }
-
+    // Python's order (`reaper.py:144-638`): requeue stale CLAIMED rows,
+    // audit orphaned workflow tasks, fail stale RUNNING rows, expire PENDING
+    // rows, then the workflow and maintenance steps. No step stops for the
+    // life of the process: a step that keeps failing logs an error on every
+    // pass and its health keeps reporting the failure.
     if config.auto_requeue_stale_claimed {
         let threshold_secs = config.claimed_stale_threshold_ms as f64 / 1000.0;
         match requeue_stale_claimed(runtime_pool, threshold_secs).await {
@@ -1028,7 +1029,7 @@ async fn run_reaper_pass(
     // cannot reach RUNNING, so the requeue above skips them and they would
     // otherwise stay CLAIMED forever; cancelling frees claim budget and lets
     // retention sweep them.
-    if config.auto_terminate_orphaned_workflow_tasks && !orphan_state.disabled {
+    if config.auto_terminate_orphaned_workflow_tasks {
         let now = tokio::time::Instant::now();
         if orphan_state.schedule_if_due(
             now,
@@ -1070,29 +1071,53 @@ async fn run_reaper_pass(
                             );
                         }
                         OrphanAuditFailureKind::Permanent => {
-                            orphan_state.permanent_failures += 1;
-                            if orphan_state.permanent_failures
-                                >= ORPHAN_SWEEP_MAX_PERMANENT_FAILURES
-                            {
-                                orphan_state.disabled = true;
-                                tracing::error!(
-                                    %error,
-                                    failures = orphan_state.permanent_failures,
-                                    "reaper orphan audit disabled after consecutive permanent failures",
-                                );
-                            } else {
-                                tracing::error!(
-                                    %error,
-                                    failures = orphan_state.permanent_failures,
-                                    max = ORPHAN_SWEEP_MAX_PERMANENT_FAILURES,
-                                    "reaper orphan audit failed",
-                                );
-                            }
+                            // The audit never stops on a live worker: each
+                            // failing pass logs, and the health snapshot
+                            // above keeps reporting the failure.
+                            orphan_state.permanent_failures =
+                                orphan_state.permanent_failures.saturating_add(1);
+                            tracing::error!(
+                                %error,
+                                consecutive_failures = orphan_state.permanent_failures,
+                                "reaper orphan audit failed and will run again on its next schedule",
+                            );
                         }
                     }
                 }
             }
         }
+    }
+
+    if config.auto_fail_stale_running {
+        let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
+        let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
+        match mark_stale_running_as_failed(
+            runtime_pool,
+            threshold_secs,
+            finalizing_threshold_secs,
+            STALE_RUNNING_SCAN_LIMIT,
+        )
+        .await
+        {
+            Ok(count) if count > 0 => {
+                tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
+            }
+            _ => {}
+        }
+    }
+
+    // Expire unclaimed PENDING tasks whose good_until has passed.
+    match expire_pending_tasks(runtime_pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(count, "reaper expired unclaimed PENDING tasks");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
+        }
+        _ => {}
     }
 
     // Exact outbox recovery. Each candidate owns its transaction; retaining
@@ -1483,16 +1508,13 @@ const EXPIRE_MAX_BATCHES_PER_PASS: u32 = 200;
 
 /// Maximum rows examined by one orphan-task audit page.
 const ORPHAN_BATCH_SIZE: i32 = 500;
-/// Consecutive permanent failures before the orphan sweep disables itself.
-const ORPHAN_SWEEP_MAX_PERMANENT_FAILURES: u32 = 3;
 
-/// Per-reaper state for the orphan sweep's disable-after-permanent-failures
-/// guard: a sweep that keeps failing non-retryably (a contract breach, not a
-/// network blip) stops burning every cycle on it.
+/// Per-reaper state of the orphan audit: when it next runs, and how many
+/// permanent failures in a row it had (for the log only; the audit never
+/// stops on a live worker).
 struct OrphanSweepState {
     next_audit: tokio::time::Instant,
     permanent_failures: u32,
-    disabled: bool,
 }
 
 impl Default for OrphanSweepState {
@@ -1500,7 +1522,6 @@ impl Default for OrphanSweepState {
         Self {
             next_audit: tokio::time::Instant::now(),
             permanent_failures: 0,
-            disabled: false,
         }
     }
 }
@@ -1525,12 +1546,51 @@ mod orphan_audit_schedule_tests {
         let mut state = OrphanSweepState {
             next_audit: now,
             permanent_failures: 0,
-            disabled: false,
         };
         let interval = Duration::from_secs(60);
         assert!(state.schedule_if_due(now, interval));
         assert!(!state.schedule_if_due(now + Duration::from_secs(59), interval));
         assert!(state.schedule_if_due(now + Duration::from_secs(60), interval));
+    }
+
+    /// The orphan audit never stops on a live worker: permanent failures in
+    /// a row do not change its schedule (Python stops it after 3; the core
+    /// does not).
+    #[test]
+    fn orphan_audit_stays_scheduled_after_permanent_failures() {
+        let now = tokio::time::Instant::now();
+        let mut state = OrphanSweepState {
+            next_audit: now,
+            permanent_failures: u32::MAX,
+        };
+        let interval = Duration::from_secs(60);
+        assert!(state.schedule_if_due(now, interval));
+        assert!(state.schedule_if_due(now + interval, interval));
+    }
+
+    /// The reaper pass runs Python's order (`reaper.py:144-638`): requeue
+    /// stale CLAIMED, orphan audit, stale RUNNING, expire PENDING, then
+    /// workflow recovery.
+    #[test]
+    fn reaper_pass_runs_the_steps_in_python_order() {
+        let source = include_str!("recovery.rs");
+        let pass = &source[source
+            .find(&["async fn ", "run_reaper_pass("].concat())
+            .expect("run_reaper_pass source")..];
+        let pass = &pass[..pass.find("\n}\n").expect("end of run_reaper_pass")];
+        let position = |call: &str| {
+            pass.find(call)
+                .unwrap_or_else(|| panic!("{call} not called in run_reaper_pass"))
+        };
+        let order = [
+            position("requeue_stale_claimed(runtime_pool"),
+            position("terminate_orphaned_workflow_tasks(runtime_pool"),
+            position("mark_stale_running_as_failed("),
+            position("expire_pending_tasks(runtime_pool)"),
+            position("recover_stuck_workflows_observed("),
+        ];
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+        assert!(!pass.contains(&["orphan_state", ".disabled"].concat()));
     }
 
     #[test]
