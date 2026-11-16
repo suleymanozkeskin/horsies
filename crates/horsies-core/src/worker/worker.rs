@@ -34,7 +34,8 @@ use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::recovery::{new_reaper_health, spawn_reaper};
 use crate::worker::runner_beats::{
-    launch_runner_beats, runner_beat_pool, BeatSender, LiveDispatches, StaleRunningRecovery,
+    launch_runner_beats, runner_beat_pool, BeatSender, DispatchRunner, FailClosedState,
+    FailClosedStop, LiveDispatches, RegistryClosed, StaleRunningRecovery,
 };
 
 /// Decode a liveness ping and reply when it is a broadcast or addressed to
@@ -639,8 +640,10 @@ impl Worker {
         // Runner heartbeats: one fenced statement per interval for every held
         // dispatch, on its own connection, and a fail-closed watchdog thread
         // (exit 77). They run until the in-flight dispatches have drained, so
-        // they have their own token, cancelled after `shutdown`.
+        // they have their own token, cancelled after `shutdown`. A watchdog
+        // that fails closed stops the worker through its own token.
         let beats_cancel = CancellationToken::new();
+        let fail_closed_stop = FailClosedStop::new(self.cancel.clone());
         let (runner_beat_watch, runner_beats) = launch_runner_beats(
             runner_beat_pool(self.broker.pool()),
             BeatSender {
@@ -652,6 +655,7 @@ impl Worker {
             StaleRunningRecovery::from_config(&self.app_config.recovery),
             self.live_dispatches.clone(),
             beats_cancel.clone(),
+            fail_closed_stop.clone(),
         )
         .map_err(|error| {
             WorkerError::Config(format!(
@@ -791,6 +795,15 @@ impl Worker {
             .is_err()
         {
             tracing::error!("stopping the runner heartbeat watchdog failed");
+        }
+
+        // The runner heartbeats failed closed and stopped the worker: exit
+        // non-zero. In-flight tasks were still drained above.
+        match fail_closed_stop.state() {
+            FailClosedState::Watching => {}
+            FailClosedState::FailedClosed { cause } => {
+                return Err(WorkerError::RunnerHeartbeatLost { cause });
+            }
         }
 
         // A fatal claim error broke the loop; surface it so the process exits
@@ -1140,6 +1153,33 @@ impl Worker {
         )
     }
 
+    /// Release the claim of a task that this worker will not run: its row
+    /// goes back to the queue, unless another actor holds it now.
+    fn release_unrun_claim(
+        &self,
+        task_id: Uuid,
+        claimed_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+    ) {
+        let broker = Arc::clone(&self.broker);
+        let worker_id = self.worker_id.clone();
+        let reason = reason.to_owned();
+        self.tracker.spawn(async move {
+            if let Err(e) = execution::unclaim_task_with_retry(
+                &broker, task_id, &worker_id, claimed_at, &reason,
+            )
+            .await
+            {
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %e,
+                    reason,
+                    "failed to release the claim of a task this worker does not run",
+                );
+            }
+        });
+    }
+
     /// Dispatch a single claimed task for execution.
     fn dispatch_task(&self, row: ClaimedTaskRow) {
         let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
@@ -1255,18 +1295,32 @@ impl Worker {
         let phase2_policy = self.app_config.payload.clone();
         let phase2_retention = self.app_config.retention.clone();
 
+        // The runner-beat writer beats this row from here until its outcome
+        // is written; its fence lands a beat only while the row is RUNNING
+        // at this claim generation and has no finalizing marker. A closed
+        // registry means the runner heartbeats failed closed: the task does
+        // not run, and its claim is released.
+        let task_id = row.id;
+        let held_dispatch =
+            match self
+                .live_dispatches
+                .hold(task_id, row.claimed_at, DispatchRunner::WorkerProcess)
+            {
+                Ok(held) => held,
+                Err(RegistryClosed) => {
+                    self.release_unrun_claim(row.id, row.claimed_at, &RegistryClosed.to_string());
+                    drop(permit);
+                    return;
+                }
+            };
+
         // Mark this task in-dispatch until the spawned execution finishes, so the
         // buffered probe won't re-fetch it while it is still CLAIMED (P7).
-        let task_id = row.id;
         self.in_dispatch
             .lock()
             .expect("in_dispatch poisoned")
             .insert(task_id);
         let in_dispatch = Arc::clone(&self.in_dispatch);
-        // The runner-beat writer beats this row from here until its outcome
-        // is written; its fence lands a beat only while the row is RUNNING
-        // at this claim generation and has no finalizing marker.
-        let held_dispatch = self.live_dispatches.hold(task_id, row.claimed_at);
 
         self.tracker.spawn(async move {
             let phase2_work = execution::execute_and_finalize(

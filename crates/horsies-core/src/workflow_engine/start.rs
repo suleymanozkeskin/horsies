@@ -1154,6 +1154,8 @@ pub(crate) fn materialize_child_spec(
     input_json: &str,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowSpec, WorkflowError> {
+    let builder_input = crate::workflow_engine::args_merge::child_builder_input(input_json)?;
+    let input_json = builder_input.as_str();
     match resolved {
         crate::core::registry::workflow::ResolvedChildWorkflow::Dynamic(registered) => {
             let mut spec = (registered.spec_builder)(input_json).map_err(|e| {
