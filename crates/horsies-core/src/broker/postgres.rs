@@ -545,8 +545,11 @@ const SESSION_POOL_MAX_CONNECTIONS: u32 = 4;
 /// holds at most the cache capacity and closes the oldest name on eviction.
 /// PgBouncer transaction mode therefore requires `max_prepared_statements > 0`.
 fn pg_connect_options(database_url: &str, echo: bool) -> Result<PgConnectOptions, BrokerError> {
-    let mut connect_options = PgConnectOptions::from_str(database_url)
-        .map_err(|e| BrokerError::ConnectionFailed(e.to_string()))?;
+    let mut connect_options = PgConnectOptions::from_str(database_url).map_err(|error| {
+        BrokerError::InvalidConnectionSettings(
+            crate::core::config::PostgresConfigError::UnparseableUrl(error.to_string()),
+        )
+    })?;
 
     if echo {
         connect_options = connect_options.log_statements(log::LevelFilter::Debug);
@@ -757,7 +760,11 @@ impl PostgresBroker {
     }
 
     /// Connect using a raw database URL.
+    ///
+    /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
+    /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str) -> Result<Self, BrokerError> {
+        PostgresConfig::from_url(database_url).validate()?;
         let pool = PgPool::connect(database_url)
             .await
             .map_err(BrokerError::Database)?;
@@ -784,9 +791,7 @@ impl PostgresBroker {
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
     ) -> Result<Self, BrokerError> {
-        config
-            .validate()
-            .map_err(|err| BrokerError::ConnectionFailed(err.to_string()))?;
+        config.validate()?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let pool = pg_pool_options(config)
             .connect_with(connect_options)
@@ -2460,7 +2465,7 @@ impl PostgresBroker {
             Err(e) => Err(BrokerOperationError {
                 code: BrokerErrorCode::DbPingFailed,
                 message: format!("database ping failed: {}", e),
-                retryable: true,
+                retryable: is_retryable_sqlx_error(&e),
             }),
         }
     }
@@ -2492,18 +2497,14 @@ impl PostgresBroker {
         min_responses: Option<usize>,
     ) -> BrokerResult<Vec<WorkerPong>> {
         if timeout.is_zero() {
-            return Err(BrokerOperationError {
-                code: BrokerErrorCode::WorkerPingFailed,
-                message: "ping_workers timeout must be positive".to_owned(),
-                retryable: false,
-            });
+            return Err(invalid_input(
+                "ping_workers timeout must be positive, got 0".to_owned(),
+            ));
         }
         if min_responses == Some(0) {
-            return Err(BrokerOperationError {
-                code: BrokerErrorCode::WorkerPingFailed,
-                message: "ping_workers min_responses must be >= 1 when set".to_owned(),
-                retryable: false,
-            });
+            return Err(invalid_input(
+                "ping_workers min_responses must be >= 1 when set, got 0".to_owned(),
+            ));
         }
 
         let correlation_id = Uuid::new_v4().simple().to_string();
@@ -2692,12 +2693,18 @@ impl PostgresBroker {
     /// State-snapshot history for one worker, newest first.
     ///
     /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
-    /// fetch. Mirrors Python's `get_worker_state_history_async`.
+    /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
+    /// Mirrors Python's `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,
         limit: Option<i64>,
     ) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+        if let Some(refused) = limit.filter(|value| *value <= 0) {
+            return Err(invalid_input(format!(
+                "limit must be positive when set, got {refused}"
+            )));
+        }
         sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
             .bind(worker_id)
             .bind(limit)
@@ -3234,20 +3241,33 @@ fn is_terminal_status(status: &str) -> bool {
 }
 
 /// Build a `MONITORING_QUERY_FAILED` broker error for a failed read query.
+/// `retryable` is the driver classification of the cause, as Python's
+/// `_operation_failed`.
 fn monitoring_query_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
     BrokerOperationError {
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{} failed: {}", operation, err),
-        retryable: true,
+        retryable: is_retryable_sqlx_error(&err),
     }
 }
 
 /// Build a `WORKER_PING_FAILED` broker error for a failed ping-pong step.
+/// `retryable` is the driver classification of the cause.
 fn worker_ping_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
     BrokerOperationError {
         code: BrokerErrorCode::WorkerPingFailed,
         message: format!("ping_workers {} failed: {}", operation, err),
-        retryable: true,
+        retryable: is_retryable_sqlx_error(&err),
+    }
+}
+
+/// Build an `INVALID_INPUT` broker error: an argument was refused before
+/// anything ran, and the same argument is refused again.
+fn invalid_input(message: String) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::InvalidInput,
+        message,
+        retryable: false,
     }
 }
 
@@ -5794,5 +5814,140 @@ mod connect_options_tests {
         );
         drop(connection);
         broker.pool().close().await;
+    }
+}
+
+#[cfg(test)]
+mod broker_operation_error_tests {
+    //! Python's catalog for broker operations: a refused argument is
+    //! `INVALID_INPUT` with no database call, refused connection settings are
+    //! not retryable, and a database failure carries the driver
+    //! classification of its cause (`core/brokers/postgres.py`,
+    //! `_operation_failed`).
+    use super::*;
+
+    /// No server listens on port 1, so a call that reached the pool would
+    /// fail with a pool timeout instead of the refusal under test.
+    const UNREACHABLE_URL: &str = "postgresql://horsies@127.0.0.1:1/horsies";
+
+    fn unreachable_broker() -> PostgresBroker {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy(UNREACHABLE_URL)
+            .expect("a lazy pool opens no connection");
+        PostgresBroker::from_pool(pool)
+    }
+
+    #[tokio::test]
+    async fn connect_refuses_a_driver_suffix_scheme_before_any_connection() {
+        let refused = PostgresBroker::connect("postgresql+psycopg://horsies@127.0.0.1:1/horsies")
+            .await
+            .err()
+            .expect("the scheme is refused");
+
+        assert!(matches!(
+            &refused,
+            BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::InvalidUrlScheme(scheme)
+            ) if scheme == "postgresql+psycopg"
+        ));
+        assert!(!refused.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn connect_with_refuses_a_config_rule_as_not_retryable() {
+        let config = PostgresConfig::from_url("mysql://horsies@127.0.0.1:1/horsies");
+
+        let refused = PostgresBroker::connect_with(&config)
+            .await
+            .err()
+            .expect("the scheme is refused");
+
+        assert!(matches!(
+            refused,
+            BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::InvalidUrlScheme(_)
+            )
+        ));
+        assert!(!refused.is_retryable());
+    }
+
+    #[test]
+    fn an_unparseable_url_is_refused_as_not_retryable() {
+        let refused = pg_connect_options("postgresql://horsies@127.0.0.1:notaport/horsies", false)
+            .err()
+            .expect("the port does not parse");
+
+        assert!(matches!(
+            refused,
+            BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::UnparseableUrl(_)
+            )
+        ));
+        assert!(!refused.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn ping_workers_refuses_a_zero_timeout_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let Err(refused) = broker.ping_workers(None, Duration::ZERO, None).await else {
+            panic!("a zero timeout must be refused");
+        };
+
+        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
+        assert!(!refused.retryable);
+    }
+
+    #[tokio::test]
+    async fn ping_workers_refuses_zero_min_responses_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let Err(refused) = broker
+            .ping_workers(None, Duration::from_secs(1), Some(0))
+            .await
+        else {
+            panic!("min_responses of 0 must be refused");
+        };
+
+        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
+        assert!(!refused.retryable);
+    }
+
+    /// Python `test_broker_postgres.py::test_history_rejects_nonpositive_limit`.
+    #[tokio::test]
+    async fn worker_state_history_refuses_a_limit_of_zero_or_less() {
+        let broker = unreachable_broker();
+
+        for limit in [0, -1, i64::MIN] {
+            let Err(refused) = broker.get_worker_state_history("w1", Some(limit)).await else {
+                panic!("limit {limit} must be refused");
+            };
+            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{limit}");
+            assert!(!refused.retryable, "{limit}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_database_ping_on_a_closed_pool_is_not_retryable() {
+        let broker = unreachable_broker();
+        broker.pool().close().await;
+
+        let Err(failed) = broker.ping_database().await else {
+            panic!("a closed pool cannot ping");
+        };
+
+        assert_eq!(failed.code, BrokerErrorCode::DbPingFailed);
+        assert!(!failed.retryable);
+    }
+
+    #[test]
+    fn a_monitoring_read_failure_carries_the_driver_classification() {
+        assert!(monitoring_query_error("read", sqlx::Error::PoolTimedOut).retryable);
+        assert!(!monitoring_query_error("read", sqlx::Error::PoolClosed).retryable);
+        assert!(!monitoring_query_error("read", sqlx::Error::RowNotFound).retryable);
+        assert!(worker_ping_error("notify", sqlx::Error::PoolTimedOut).retryable);
+        assert!(!worker_ping_error("notify", sqlx::Error::PoolClosed).retryable);
     }
 }
