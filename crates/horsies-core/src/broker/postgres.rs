@@ -5123,7 +5123,7 @@ mod filter_non_runnable_tests {
             for index in 0..2 {
                 let task_id = Uuid::new_v4();
                 ids.push(task_id);
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES($1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
+                sqlx::query("INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES('NONE', $1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
                     .bind(Uuid::new_v4()).bind(workflow_id).bind(index)
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
@@ -5222,11 +5222,11 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
                 status, is_subworkflow, max_retries, execution, retention_class_key,
                 task_id, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', 'null',
+            ) VALUES ('NONE', $1, $2, 0, 'node_0', 'c15_task', 'null',
                       'default', 100, '{}', FALSE, 'all',
                       'ENQUEUED', FALSE, 3, 'ISOLATED', 'standard_30d',
                       $3, NOW())",

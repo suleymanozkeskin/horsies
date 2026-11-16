@@ -1248,11 +1248,11 @@ mod resume_idempotency_tests {
     async fn insert_running_task(pool: &PgPool, wf_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'c8_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'c8_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1367,11 +1367,11 @@ mod resume_idempotency_tests {
         insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '1', 'bulk', 17, '{}',
+                'NONE', $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '1', 'bulk', 17, '{}',
                 FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1470,11 +1470,11 @@ mod p7_lifecycle_tests {
         .expect("seed backing task");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_lifecycle_task', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_lifecycle_task', 'null', 'default', 100, '{}', FALSE,
                 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1489,11 +1489,11 @@ mod p7_lifecycle_tests {
     async fn seed_running_node(pool: &PgPool, workflow_id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_running_node', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_running_node', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1695,10 +1695,10 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
                        'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
@@ -1710,11 +1710,11 @@ mod p7_lifecycle_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'pending', 'p7_child_pending', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'pending', 'p7_child_pending', 'null', 'default', 100, '{}', FALSE,
                 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1780,10 +1780,10 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
                        'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
@@ -1795,11 +1795,11 @@ mod p7_lifecycle_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'pending', 'p7_poison_child_pending', 'null', 'default', 100, '{}',
+                'NONE', $1, $2, 0, 'pending', 'p7_poison_child_pending', 'null', 'default', 100, '{}',
                 FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1902,10 +1902,10 @@ mod p7_lifecycle_tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
                        'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
@@ -1994,11 +1994,11 @@ mod cancel_lock_order_tests {
     async fn insert_wf_task(pool: &PgPool, wf_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'n6_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'n6_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2138,11 +2138,11 @@ mod cancel_tree_tests {
     async fn seed_pending_node(pool: &PgPool, workflow_id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  max_retries, execution, retention_class_key, status,
                  is_subworkflow, created_at
-             ) VALUES ($1, $2, 1, 'later', 'later_task', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, 1, 'later', 'later_task', '{}', 'default', 100,
                        '{0}', FALSE, 'all', 0, 'ISOLATED', 'forever', 'PENDING',
                        FALSE, NOW())",
         )
