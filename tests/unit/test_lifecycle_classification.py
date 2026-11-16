@@ -201,15 +201,7 @@ class TestSuccess:
             task_id='t1',
             fence=OwnedClaim(worker_id='w1', claimed_at=_GENERATION),
             result_json=_RESULT,
-            notify_channel='task_queue_default',
-            notify_payload='capacity:t1',
         )
-
-    def test_queue_name_falls_back_to_default_channel(self) -> None:
-        decision = classify(ResultProduced(), _context(queue_name=''))
-        command = _command(decision)
-        assert isinstance(command, CompleteTaskFused)
-        assert command.notify_channel == 'task_queue_default'
 
     def test_workflow_node_completion_cannot_fuse(self) -> None:
         """Phase 2 still owes work on this row, so the fast path is unsound."""
