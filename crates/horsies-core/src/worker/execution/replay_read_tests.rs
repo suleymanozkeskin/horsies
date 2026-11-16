@@ -1,0 +1,187 @@
+//! The read of a phase-1 replay (`replay_of_committed_write`) on the
+//! baseline phase-2 record, which stores `terminalization_kind` and no
+//! status. Python reference: `core/worker/finalize.py`, `_phase2_of_a_replay`
+//! (a replay of a committed workflow write owes the phase 2 of its committed
+//! outcome; a plain task owes nothing), and
+//! `core/workflows/phase2_recovery.py`, `terminal_status_of_pending_kind`
+//! (the status of each kind of the record).
+
+use serial_test::serial;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome};
+
+/// The ids of one seeded workflow node and its task.
+struct SeededRecord {
+    task_id: Uuid,
+    workflow_id: Uuid,
+}
+
+/// A RUNNING workflow with one RUNNING task node for a new task id, and the
+/// phase-2 record of that task with `kind`, as the terminal move writes it
+/// (`horsies_move_task_to_history`). The task row itself has moved to
+/// history, so no live row is seeded.
+async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
+    let task_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    let node_row_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+             id, name, definition_key, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at
+         ) VALUES ($1, 'replay_read_workflow', NULL, 'RUNNING', 'fail', 0, $1,
+                   NOW(), NOW(), NOW(), NOW())",
+    )
+    .bind(workflow_id)
+    .execute(pool)
+    .await
+    .expect("seed workflow");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             dependencies, allow_failed_deps, join_type, max_retries, execution,
+             retention_class_key, status, task_id, is_subworkflow, created_at, started_at
+         ) VALUES ($1, $2, 0, 'only', 'replay_read_task', '{}', 'default', 100,
+                   '{}', FALSE, 'all', 0, 'ISOLATED',
+                   'forever', 'RUNNING', $3, FALSE, NOW(), NOW())",
+    )
+    .bind(node_row_id)
+    .bind(workflow_id)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("seed workflow node");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_phase2_pending (
+             task_id, workflow_id, workflow_node_row_id, terminalization_kind,
+             recovery_source, history_class, history_anchor, history_schema_version,
+             result_digest, quarantine_task_id, created_at, attempt_count,
+             last_attempt_at, last_failure_class
+         ) VALUES ($1, $2, $3, $4,
+                   'HISTORY', 'forever', NOW(), 1,
+                   decode(repeat('00', 32), 'hex'), NULL, NOW(), 0,
+                   NULL, NULL)",
+    )
+    .bind(task_id)
+    .bind(workflow_id)
+    .bind(node_row_id)
+    .bind(kind)
+    .execute(pool)
+    .await
+    .expect("seed phase-2 record");
+    SeededRecord {
+        task_id,
+        workflow_id,
+    }
+}
+
+/// Delete the workflow; its node and the phase-2 record go with it (both
+/// foreign keys cascade).
+async fn cleanup(pool: &PgPool, seeded: &SeededRecord) {
+    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        .bind(seeded.workflow_id)
+        .execute(pool)
+        .await
+        .expect("delete the seeded workflow");
+}
+
+/// A name for each outcome, for assertion messages.
+fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
+    match outcome {
+        Ok(FinalizeOutcome::Terminal {
+            is_success,
+            capacity_notified,
+        }) => format!(
+            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+        ),
+        Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
+        Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
+        Ok(FinalizeOutcome::Refused) => "Refused".to_owned(),
+        Err(error) => format!("Err({error})"),
+    }
+}
+
+/// A replay of a committed workflow success owes a successful phase 2.
+#[tokio::test]
+#[serial]
+async fn a_complete_locked_record_owes_a_successful_phase_two() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let seeded = seed_record(&pool, "COMPLETE_LOCKED").await;
+
+    let outcome = replay_of_committed_write(&pool, seeded.task_id, true).await;
+
+    cleanup(&pool, &seeded).await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(FinalizeOutcome::Terminal {
+                is_success: true,
+                capacity_notified: false,
+            })
+        ),
+        "{}",
+        describe(&outcome)
+    );
+}
+
+/// A replay of a committed failure or expiry owes a failed phase 2: the
+/// node takes FAILED for a FAILED and for an EXPIRED task.
+#[tokio::test]
+#[serial]
+async fn failure_and_expiry_records_owe_a_failed_phase_two() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    for kind in [
+        "FAIL_RUNNING",
+        "FAIL_STALE",
+        "EXPIRE_CLAIMED",
+        "EXPIRE_PENDING",
+    ] {
+        let seeded = seed_record(&pool, kind).await;
+
+        let outcome = replay_of_committed_write(&pool, seeded.task_id, true).await;
+
+        cleanup(&pool, &seeded).await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(FinalizeOutcome::Terminal {
+                    is_success: false,
+                    capacity_notified: false,
+                })
+            ),
+            "{kind}: {}",
+            describe(&outcome)
+        );
+    }
+}
+
+/// With no phase-2 record, phase 2 consumed it: the replay owes nothing.
+#[tokio::test]
+#[serial]
+async fn a_consumed_record_owes_nothing() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+
+    let outcome = replay_of_committed_write(&pool, Uuid::new_v4(), true).await;
+
+    assert!(
+        matches!(outcome, Ok(FinalizeOutcome::Finalized)),
+        "{}",
+        describe(&outcome)
+    );
+}
+
+/// A plain task owes no phase 2, whatever the record table holds.
+#[tokio::test]
+#[serial]
+async fn a_plain_task_replay_owes_nothing() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+
+    let outcome = replay_of_committed_write(&pool, Uuid::new_v4(), false).await;
+
+    assert!(
+        matches!(outcome, Ok(FinalizeOutcome::Finalized)),
+        "{}",
+        describe(&outcome)
+    );
+}

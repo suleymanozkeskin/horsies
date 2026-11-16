@@ -106,8 +106,8 @@ pub enum BrokerError {
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
 
-    /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
-    #[error("shared listener closed")]
+    /// The broker's listener stopped while a wait used it.
+    #[error("the broker's listener stopped")]
     ListenerClosed,
 
     /// A terminalization operation violated its wire contract: an undecodable
@@ -125,6 +125,12 @@ pub enum BrokerError {
     /// takes. It is refused, never clamped.
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
+
+    /// A row of the claim, the start or the release breaks its function's
+    /// row contract (`broker::claims`). Not retryable: the same call meets
+    /// it again.
+    #[error("claim contract violation: {0}")]
+    ClaimContract(String),
 
     /// A statement on a core pool failed with one of the statement layer's
     /// three outcomes. Retryable when its cause may clear
@@ -188,6 +194,7 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_)
+            | Self::ClaimContract(_)
             | Self::PoolSettings(_)
             | Self::RowDecode(_) => false,
         }

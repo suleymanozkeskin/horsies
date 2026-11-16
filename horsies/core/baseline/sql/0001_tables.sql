@@ -278,6 +278,10 @@ CREATE TABLE horsies_workflow_tasks (
     sub_workflow_id uuid,
     sub_workflow_name character varying(255),
     sub_definition_key character varying(255),
+    -- The client's choice for a sub-workflow node's params: GIVEN when the node definition carries params for
+    -- the child's build, NOT_GIVEN when it carries none. Set exactly on sub-workflow nodes; see
+    -- horsies_workflow_tasks_sub_workflow_params_by_kind.
+    sub_workflow_params character varying(9),
     sub_workflow_summary text,
     result text,
     error text,
@@ -307,6 +311,17 @@ CREATE TABLE horsies_workflow_tasks (
         )
     ),
     CONSTRAINT horsies_workflow_tasks_subworkflow_fields CHECK (NOT is_subworkflow OR task_id IS NULL),
+    CONSTRAINT horsies_workflow_tasks_sub_workflow_params_by_kind CHECK (
+        (
+            is_subworkflow
+            AND sub_workflow_params IS NOT NULL
+            AND sub_workflow_params IN ('NOT_GIVEN', 'GIVEN')
+        )
+        OR (
+            NOT is_subworkflow
+            AND sub_workflow_params IS NULL
+        )
+    ),
     -- The bounds are those of horsies_tasks.
     CONSTRAINT horsies_workflow_tasks_task_facts_by_kind CHECK (
         (
@@ -554,8 +569,9 @@ INSERT INTO horsies_retention_classes (class_key, class_kind, retention_days, he
 VALUES ('forever', 'FOREVER', NULL, NULL, statement_timestamp());
 
 -- History parent. No primary key and no unique key on task_id: a unique index on a partitioned table must contain
--- the partition keys. The duplicate identity guard holds uniqueness at the move. No single-column CHECK: the move
--- functions are the only writers, and each CHECK costs every history insert.
+-- the partition keys. The duplicate identity guard holds uniqueness at the move. One single-column CHECK, on the
+-- terminalization kind, so no writer can store a kind outside the vocabulary; no other: the move functions are the
+-- only writers, and each CHECK costs every history insert.
 CREATE TABLE horsies_task_history (
     -- Identity and command, copied from the locked live row.
     task_id uuid NOT NULL,
@@ -604,6 +620,16 @@ CREATE TABLE horsies_task_history (
     rerun_input_inline bytea,
     CONSTRAINT horsies_task_history_result_domain CHECK (
         terminalization_kind <> 'CANCEL_ADMIN' OR (result_payload IS NULL AND result_digest IS NULL)
+    ),
+    -- The 15 terminalization kinds. Every leaf is a PARTITION OF this table and inherits the CHECK.
+    CONSTRAINT horsies_task_history_kind_known CHECK (
+        terminalization_kind IN (
+            'COMPLETE_LOCKED', 'COMPLETE_FUSED', 'FAIL_RUNNING', 'FAIL_STALE',
+            'EXPIRE_CLAIMED', 'EXPIRE_PENDING', 'CANCEL_ADMIN', 'CANCEL_ORPHAN',
+            'CANCEL_ORPHAN_SWEEP', 'PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH',
+            'PAUSE_ABANDON_WORKFLOW', 'WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH',
+            'WORKFLOW_CANCEL_WORKFLOW'
+        )
     ),
     CONSTRAINT horsies_task_history_rerun_input_shape CHECK (
         (
