@@ -57,10 +57,12 @@ use crate::broker::task_lists::{
 use crate::broker::wait_limit::WaitLimit;
 use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
 
-use crate::broker::pools::{BrokerPools, PoolProfile};
+use crate::broker::pools::{
+    CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
+};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
-    StatementFailure, Transaction as CoreTransaction, TypedStatement,
+    Transaction as CoreTransaction, TypedStatement, WORKER_RESERVED_CONNECTIONS,
 };
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
@@ -770,6 +772,9 @@ const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
 static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH_CHECK_SQL, &[]);
 
+/// `SELECT 1` on the session pool in the worker boot check.
+static SESSION_CHECK: TypedStatement = TypedStatement::new("session_check", HEALTH_CHECK_SQL, &[]);
+
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
 /// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
@@ -893,6 +898,37 @@ fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
     with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
+/// The runtime pool of a worker broker: the batch users get
+/// `pool_size + max_overflow - WORKER_RESERVED_CONNECTIONS` connections, as
+/// the worker profile pool's batch limit; the reserve has its own pool.
+fn pg_worker_runtime_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    let batch_limit = config
+        .pool_size
+        .saturating_add(config.max_overflow)
+        .saturating_sub(WORKER_RESERVED_CONNECTIONS.get());
+    pg_pool_options(config).max_connections(batch_limit)
+}
+
+/// The worker reserve on `database_url`: [`WORKER_RESERVED_CONNECTIONS`]
+/// connections with the runtime pool's settings.
+fn pg_reserve_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    pg_pool_options(config).max_connections(WORKER_RESERVED_CONNECTIONS.get())
+}
+
+/// The sqlx pools of the worker reserve: connections that the users of
+/// [`PostgresBroker::pool`] cannot take. The reaper takes its gate and runs
+/// its pass on them, so a pass runs while the runtime pool is exhausted
+/// (Python keeps the reaper's gate session and pass body in the parent
+/// pool's reserve of 2).
+struct ReservePools {
+    /// [`WORKER_RESERVED_CONNECTIONS`] connections on `database_url`,
+    /// opened at first use.
+    runtime: PgPool,
+    /// The reaper's partition maintenance: the session pool when the session
+    /// URL differs, else `runtime`.
+    maintenance: PgPool,
+}
+
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
     // String-sniff deliberately: PgBouncer prepared-statement tracking failures
     // do not have one stable SQLSTATE across "missing prepared statement",
@@ -979,8 +1015,9 @@ pub enum SchemaInitializationMode {
 /// Every LISTEN of the broker goes through its one listener connection on the
 /// session URL.
 pub struct PostgresBroker {
-    core: BrokerPools,
+    core: CoreHandle,
     statement_log: StatementLog,
+    reserve: ReservePools,
     pool: PgPool,
     session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
@@ -1000,7 +1037,7 @@ pub struct PostgresBroker {
 impl PostgresBroker {
     /// Construct a test broker on the database of a test's sqlx pool. The
     /// sqlx pool is the adapter pool; the core pools connect to the same
-    /// database ([`crate::broker::pools::pools_for_test_pool`]).
+    /// database ([`crate::broker::pools::handle_for_test_pool`]).
     ///
     /// The broker has no session URL, so it has no listener: result waits
     /// poll, and an operation that needs a listener is refused with
@@ -1046,9 +1083,16 @@ impl PostgresBroker {
         schema_initialization_mode: SchemaInitializationMode,
         listener: ProcessListener,
     ) -> Self {
+        let reserve_runtime = PgPoolOptions::new()
+            .max_connections(WORKER_RESERVED_CONNECTIONS.get())
+            .connect_lazy_with((*pool.connect_options()).clone());
         Self {
-            core: crate::broker::pools::pools_for_test_pool(&pool),
+            core: crate::broker::pools::handle_for_test_pool(&pool),
             statement_log: StatementLog::Off,
+            reserve: ReservePools {
+                maintenance: reserve_runtime.clone(),
+                runtime: reserve_runtime,
+            },
             session_pool: pool.clone(),
             pool,
             pgbouncer_transaction_mode: false,
@@ -1140,9 +1184,15 @@ impl PostgresBroker {
         profile: PoolProfile,
     ) -> Result<Self, BrokerError> {
         config.validate()?;
-        let core = BrokerPools::open(config, profile)?;
+        let core = CoreHandle::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
-        let pool = pg_pool_options(config)
+        let runtime_options = match profile {
+            PoolProfile::Producer => pg_pool_options(config),
+            PoolProfile::Worker => pg_worker_runtime_pool_options(config),
+        };
+        let reserve_runtime =
+            pg_reserve_pool_options(config).connect_lazy_with(connect_options.clone());
+        let pool = runtime_options
             .connect_with(connect_options)
             .await
             .map_err(BrokerError::Database)?;
@@ -1157,10 +1207,18 @@ impl PostgresBroker {
                 .await
                 .map_err(BrokerError::Database)?
         };
+        let reserve = ReservePools {
+            maintenance: match config.effective_session_database_url() == config.database_url {
+                true => reserve_runtime.clone(),
+                false => session_pool.clone(),
+            },
+            runtime: reserve_runtime,
+        };
 
         Ok(Self {
             core,
             statement_log: StatementLog::from_echo(config.echo),
+            reserve,
             pool,
             session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
@@ -1297,16 +1355,35 @@ impl PostgresBroker {
         &self.session_pool
     }
 
-    /// The core pool on `database_url`, for the lifecycle writers that run
-    /// on the statement layer ([`crate::broker::attempt_writes`],
-    /// [`crate::broker::terminalization::terminalize`]). In a worker it is
-    /// the worker profile pool.
-    pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
-        self.core.main()
+    /// The sqlx pool of the worker reserve on `database_url`:
+    /// [`WORKER_RESERVED_CONNECTIONS`] connections, opened at first use,
+    /// that the users of [`PostgresBroker::pool`] cannot take. The reaper
+    /// takes its gate and runs its pass on it.
+    pub fn reserve_pool(&self) -> &PgPool {
+        &self.reserve.runtime
+    }
+
+    /// The pool of the reaper's partition maintenance: the session pool when
+    /// the session URL differs, else [`PostgresBroker::reserve_pool`].
+    pub fn reserve_maintenance_pool(&self) -> &PgPool {
+        &self.reserve.maintenance
+    }
+
+    /// The open core pools, for a lifecycle writer that runs on the main
+    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
+    /// write: [`PostgresBroker::close`] waits for the write while the token
+    /// lives. In a worker the main core pool is the worker profile pool. An
+    /// `Idle` handle opens its pools first.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
+    pub(crate) fn core_pools_for_write(
+        &self,
+    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
+        Ok(self.core.pools_for_write()?)
     }
 
     /// Whether this broker logs each core statement it runs, for the
-    /// lifecycle writers that run on [`PostgresBroker::core_main_pool`].
+    /// lifecycle writers that run on the main core pool.
     pub(crate) fn statement_log(&self) -> StatementLog {
         self.statement_log
     }
@@ -1317,33 +1394,36 @@ impl PostgresBroker {
     /// moved call sites are producer and monitoring work, never the reaper or
     /// a per-task write. Bound: the connection's own timeouts, as the sqlx
     /// path.
-    async fn query_main(
-        &self,
-        statement: &BoundStatement<'_>,
-    ) -> Result<Vec<Row>, StatementFailure> {
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
+    /// its pools again; [`BrokerError::Statement`].
+    async fn query_main(&self, statement: &BoundStatement<'_>) -> Result<Vec<Row>, BrokerError> {
+        let open = self.core.pools()?;
         self.log_statement(statement.statement());
-        self.core
+        Ok(open
             .main()
             .query(
                 CheckoutClass::Batch,
                 statement,
                 StatementBound::ConnectionTimeouts,
             )
-            .await
+            .await?)
     }
 
     /// Runs one statement on the main core pool and reads the count of
-    /// affected rows. Checkout and bound as [`PostgresBroker::query_main`].
-    async fn execute_main(&self, statement: &BoundStatement<'_>) -> Result<u64, StatementFailure> {
+    /// affected rows. Checkout, bound and errors as
+    /// [`PostgresBroker::query_main`].
+    async fn execute_main(&self, statement: &BoundStatement<'_>) -> Result<u64, BrokerError> {
+        let open = self.core.pools()?;
         self.log_statement(statement.statement());
-        self.core
+        Ok(open
             .main()
             .execute(
                 CheckoutClass::Batch,
                 statement,
                 StatementBound::ConnectionTimeouts,
             )
-            .await
+            .await?)
     }
 
     /// Runs one read on the main core pool and reads each row with `read`.
@@ -1466,7 +1546,8 @@ impl PostgresBroker {
             fingerprint: Some(facts.command_fingerprint.to_vec()),
             sent_at: effective_sent_at,
         };
-        let mut connection = checkout_batch(self.core.main(), &ENQUEUE).await?;
+        let (open, _write) = self.core.pools_for_write()?;
+        let mut connection = checkout_batch(open.main(), &ENQUEUE).await?;
         let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
@@ -1789,8 +1870,9 @@ impl PostgresBroker {
         let result_json = serde_json::to_string(&task_result)
             .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
 
+        let (open, _write) = self.core_pools_for_write()?;
         let outcomes = crate::broker::terminalization::terminalize(
-            self.core_main_pool(),
+            open.main(),
             self.statement_log,
             &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
                 task_id,
@@ -2582,10 +2664,31 @@ impl PostgresBroker {
         Ok(row.is_some())
     }
 
-    /// Close the core pools and the sqlx main pool. Later checkouts on them
-    /// fail as closed; neither reopens.
+    /// Close the broker's pools.
+    ///
+    /// - Core pools: no new operation takes them. Writes in flight run to
+    ///   their end within [`crate::broker::pools::CLOSE_WRITE_BOUND`]; then
+    ///   the pools close and the handle is `Idle`. The next operation opens
+    ///   new core pools. A read in flight that checks out again fails with
+    ///   `PoolClosed`.
+    /// - The sqlx main pool closes as before and does not reopen; the call
+    ///   sites that still borrow it through [`PostgresBroker::pool`] fail
+    ///   after a close.
+    ///
+    /// Writes that did not end within the bound are logged with their count;
+    /// their outcome is unknown.
     pub async fn close(&self) {
-        self.core.close();
+        match self.core.close().await {
+            CloseOutcome::AlreadyIdle | CloseOutcome::Closed => {}
+            CloseOutcome::ClosedWithWritesUnfinished { unfinished } => {
+                tracing::warn!(
+                    unfinished,
+                    bound_ms = crate::broker::pools::CLOSE_WRITE_BOUND.as_millis() as u64,
+                    "broker close: writes in flight did not end within the bound; their \
+                     outcome is unknown",
+                );
+            }
+        }
         self.pool.close().await;
     }
 
@@ -2618,7 +2721,6 @@ impl PostgresBroker {
         let probe = self
             .query_main(&HEALTH_CHECK.bind().finish())
             .await
-            .map_err(BrokerError::Statement)
             .and_then(|rows| one_row(rows, &HEALTH_CHECK).map_err(BrokerError::RowDecode));
         match probe {
             Ok(_row) => Ok(DatabasePing {
@@ -2703,9 +2805,7 @@ impl PostgresBroker {
                     .finish(),
             )
             .await
-            .map_err(|failure| {
-                worker_ping_statement_error("ping notify", BrokerError::Statement(failure))
-            })?;
+            .map_err(|error| worker_ping_statement_error("ping notify", error))?;
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2748,6 +2848,37 @@ impl PostgresBroker {
         }
 
         Ok(pongs)
+    }
+
+    /// The pool checks of a worker boot, before the session check
+    /// ([`PostgresBroker::check_session_delivery`]):
+    ///
+    /// 1. `SELECT 1` on the main core pool. Its first checkout runs the
+    ///    statement-pooling check: a URL that does not keep a transaction is
+    ///    `StatementPooledUrl`, not retryable.
+    /// 2. `SELECT 1` on the session core pool when the session URL differs
+    ///    (its first checkout runs the statement-pooling check too).
+    ///
+    /// A database that cannot be reached fails with its retryable error, so
+    /// the worker's start resilience retries it.
+    pub async fn check_worker_session(&self) -> Result<(), BrokerError> {
+        self.health_check().await?;
+        let open = self.core.pools()?;
+        match open.pools().session() {
+            SessionPool::SameAsMain => {}
+            SessionPool::Separate { pool, .. } => {
+                self.log_statement(&SESSION_CHECK);
+                let rows = pool
+                    .query(
+                        CheckoutClass::Batch,
+                        &SESSION_CHECK.bind().finish(),
+                        StatementBound::ConnectionTimeouts,
+                    )
+                    .await?;
+                let _row = one_row(rows, &SESSION_CHECK)?;
+            }
+        }
+        Ok(())
     }
 
     /// The session check of a worker boot: the session URL keeps session
@@ -2935,7 +3066,8 @@ impl PostgresBroker {
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
-        let read = read_task_result(self.core.main(), self.statement_log, task_id).await?;
+        let open = self.core.pools()?;
+        let read = read_task_result(open.main(), self.statement_log, task_id).await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
@@ -3044,7 +3176,8 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<Option<TaskDetailResult>, BrokerError> {
-        read_history_detail(self.core.main(), self.statement_log, task_id).await
+        let open = self.core.pools()?;
+        read_history_detail(open.main(), self.statement_log, task_id).await
     }
 
     /// Poll the result row once for the wait loop.
@@ -6068,6 +6201,7 @@ mod broker_operation_error_tests {
     //! classification of its cause (`core/brokers/postgres.py`,
     //! `_operation_failed`).
     use super::*;
+    use crate::db::StatementFailure;
 
     /// No server listens on port 1, so a call that reached the pool would
     /// fail with a pool timeout instead of the refusal under test.
@@ -6874,6 +7008,7 @@ mod task_info_code_tests {
     //! `:4973-4977`): only a stored result that fails its check is
     //! `INVALID_JSON_PAYLOAD`.
     use super::*;
+    use crate::db::StatementFailure;
 
     #[test]
     fn a_result_that_does_not_parse_is_invalid_json_payload() {

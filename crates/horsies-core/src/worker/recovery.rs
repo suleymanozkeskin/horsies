@@ -1043,7 +1043,11 @@ async fn run_reaper_pass(
 
     // Expire unclaimed PENDING tasks whose good_until has passed, on the
     // main core pool with the reserve.
-    match expire_pending_tasks(broker.core_main_pool(), broker.statement_log()).await {
+    let expired = match broker.core_pools_for_write() {
+        Ok((open, _write)) => expire_pending_tasks(open.main(), broker.statement_log()).await,
+        Err(error) => Err(error),
+    };
+    match expired {
         Ok(count) if count > 0 => {
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
@@ -1540,7 +1544,7 @@ mod orphan_audit_schedule_tests {
             position("requeue_stale_claimed("),
             position("terminate_orphaned_workflow_tasks(runtime_pool"),
             position("mark_stale_running_as_failed("),
-            position("expire_pending_tasks(broker.core_main_pool()"),
+            position("expire_pending_tasks(open.main()"),
             position("recover_stuck_workflows_observed("),
         ];
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
@@ -1947,6 +1951,83 @@ mod tests {
             acquire_gate(&unavailable, advisory_key_reaper()).await,
             GatePass::Skip
         ));
+    }
+
+    /// #772: the reaper's gate and pass run on the worker reserve, so a pass
+    /// completes while every connection of the runtime pool is held.
+    #[tokio::test]
+    #[serial]
+    async fn a_reaper_pass_completes_on_the_reserve_while_the_runtime_pool_is_exhausted() {
+        let seed = test_pool().await;
+        let task_id = Uuid::new_v4();
+        insert_stale_running_task(&seed, task_id, "NULL").await;
+
+        let runtime = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_millis(500))
+            .connect_with((*seed.connect_options()).clone())
+            .await
+            .unwrap();
+        let broker = crate::broker::PostgresBroker::from_pool(runtime.clone());
+        let held = [
+            runtime.acquire().await.unwrap(),
+            runtime.acquire().await.unwrap(),
+        ];
+        assert!(
+            matches!(
+                acquire_gate(&runtime, advisory_key_reaper()).await,
+                GatePass::Skip
+            ),
+            "the exhausted runtime pool cannot take the gate",
+        );
+
+        let GatePass::Held(gate) = acquire_gate(broker.reserve_pool(), advisory_key_reaper()).await
+        else {
+            panic!("the reserve takes the reaper gate");
+        };
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        recovery.auto_fail_stale_running = true;
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut orphan_state = OrphanSweepState::default();
+        let pass = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_reaper_pass(
+                broker.reserve_pool(),
+                broker.reserve_maintenance_pool(),
+                &WorkflowSpecRegistry::new(),
+                &recovery,
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+                &health,
+                &mut next_retention_cleanup,
+                &mut next_partition_maintenance,
+                &mut orphan_state,
+            ),
+        )
+        .await;
+        assert!(pass.is_ok(), "the reaper pass completes on the reserve");
+        release_gate(gate).await;
+        drop(held);
+
+        let failed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_task_history
+             WHERE task_id = $1 AND status = 'FAILED' AND terminalization_kind = 'FAIL_STALE'",
+        )
+        .bind(task_id)
+        .fetch_one(&seed)
+        .await
+        .unwrap();
+        assert_eq!(failed, 1, "the pass failed the stale RUNNING task");
+
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&seed)
+            .await
+            .unwrap();
     }
 
     fn test_db_url() -> String {
