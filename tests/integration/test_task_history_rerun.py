@@ -426,8 +426,9 @@ class TestTypedRefusals:
                 await connection.execute(
                     text(
                         'SELECT outcome FROM horsies_complete_task_fused('
-                        'CAST(:task_id AS uuid), :worker, NULL, :result, '
-                        "'task_done', CAST(:task_id AS text))"
+                        'CAST(:task_id AS uuid), :worker, '
+                        'COALESCE((SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)), NOW()), '
+                        ':result, TRUE)'
                     ),
                     {
                         'task_id': task_id,

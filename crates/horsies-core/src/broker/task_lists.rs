@@ -70,9 +70,52 @@ impl<T> BoundedTaskList<T> {
     }
 }
 
-/// The `LIMIT` of a list read: one row more than [`TASK_LIST_BOUND`], so a
-/// truncated list can be told from a complete one.
-pub(crate) const TASK_LIST_READ_LIMIT: i64 = TASK_LIST_BOUND as i64 + 1;
+/// How a list function's `LIST_END` row ends the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListEnd {
+    /// Every matching row came back.
+    Complete,
+    /// The function stopped at `bound` rows; more rows match.
+    Truncated { bound: usize },
+}
+
+/// One row of a list function (`horsies_list_stale_tasks`,
+/// `horsies_list_expired_tasks`): a task row, or the one `LIST_END` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ListRow<T> {
+    Task(T),
+    End(ListEnd),
+}
+
+/// The rows of a list function that break its result contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ListShapeError {
+    #[error("the list has no LIST_END row")]
+    NoEnd,
+    #[error("a row follows the LIST_END row")]
+    RowAfterEnd,
+}
+
+/// The list from the rows of a list function, in their order: task rows,
+/// then exactly one `LIST_END` row, last. Pure.
+pub(crate) fn bounded_list_from_rows<T>(
+    rows: Vec<ListRow<T>>,
+) -> Result<BoundedTaskList<T>, ListShapeError> {
+    let mut tasks = Vec::with_capacity(rows.len());
+    let mut end = None;
+    for row in rows {
+        match (row, end) {
+            (_, Some(_)) => return Err(ListShapeError::RowAfterEnd),
+            (ListRow::Task(task), None) => tasks.push(task),
+            (ListRow::End(list_end), None) => end = Some(list_end),
+        }
+    }
+    match end {
+        None => Err(ListShapeError::NoEnd),
+        Some(ListEnd::Complete) => Ok(BoundedTaskList::Complete(tasks)),
+        Some(ListEnd::Truncated { bound }) => Ok(BoundedTaskList::Truncated { rows: tasks, bound }),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -120,7 +163,47 @@ mod tests {
     }
 
     #[test]
-    fn the_read_limit_is_one_past_the_bound() {
-        assert_eq!(TASK_LIST_READ_LIMIT, 10_001);
+    fn function_rows_end_with_their_list_end_row() {
+        assert_eq!(
+            bounded_list_from_rows(vec![
+                ListRow::Task(1),
+                ListRow::Task(2),
+                ListRow::End(ListEnd::Complete)
+            ]),
+            Ok(BoundedTaskList::Complete(vec![1, 2]))
+        );
+        assert_eq!(
+            bounded_list_from_rows(vec![
+                ListRow::Task(1),
+                ListRow::End(ListEnd::Truncated { bound: 1 })
+            ]),
+            Ok(BoundedTaskList::Truncated {
+                rows: vec![1],
+                bound: 1
+            })
+        );
+        assert_eq!(
+            bounded_list_from_rows::<i32>(vec![ListRow::End(ListEnd::Complete)]),
+            Ok(BoundedTaskList::Complete(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn function_rows_without_one_last_list_end_row_break_the_contract() {
+        assert_eq!(
+            bounded_list_from_rows(vec![ListRow::Task(1)]),
+            Err(ListShapeError::NoEnd)
+        );
+        assert_eq!(
+            bounded_list_from_rows(vec![ListRow::End(ListEnd::Complete), ListRow::Task(1)]),
+            Err(ListShapeError::RowAfterEnd)
+        );
+        assert_eq!(
+            bounded_list_from_rows::<i32>(vec![
+                ListRow::End(ListEnd::Complete),
+                ListRow::End(ListEnd::Complete)
+            ]),
+            Err(ListShapeError::RowAfterEnd)
+        );
     }
 }

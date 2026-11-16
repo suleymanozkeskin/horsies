@@ -96,10 +96,15 @@ fn query_vocabulary_and_bounds_are_exhaustive() {
         .with_limit(501)
         .is_err());
     assert!(WorkflowRunsQuery::new().with_limit(201).is_err());
-    for payload_column in ["args", "kwargs", "result", "task_options"] {
-        assert!(!super::queries::LIVE_SUMMARY_COLUMNS
-            .split(", ")
-            .any(|column| column.trim() == payload_column));
+    let list_columns = super::function_rows::MONITORING_TASK_LIST
+        .sql()
+        .split("FROM")
+        .next()
+        .expect("the list statement has a select list");
+    for payload_column in ["input", "result", "task_options"] {
+        assert!(!list_columns
+            .split(|character: char| character == ',' || character.is_whitespace())
+            .any(|column| column == payload_column));
     }
 }
 
@@ -493,13 +498,21 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 uptime_s: Some(0),
                 processes: 1,
                 queues: vec![],
-                queue_max_concurrency: None,
+                queue_max_concurrency: BTreeMap::new(),
                 tasks_running: 0,
                 tasks_claimed: 0,
                 cluster_wide_cap: None,
                 memory_usage_mb: None,
                 memory_percent: None,
                 cpu_percent: None,
+                slot_health: SlotHealthKind::SlotsDown,
+                down_slots: vec![DownSlotInfo {
+                    slot: 1,
+                    cause: "the OS ran short of a resource (EMFILE)".to_owned(),
+                    detail: "d".to_owned(),
+                    down_since: now,
+                    failed_boots: 2,
+                }],
             }),
             vec![
                 "worker_id",
@@ -519,7 +532,19 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "memory_usage_mb",
                 "memory_percent",
                 "cpu_percent",
+                "slot_health",
+                "down_slots",
             ],
+        ),
+        (
+            keys(DownSlotInfo {
+                slot: 1,
+                cause: "c".to_owned(),
+                detail: "d".to_owned(),
+                down_since: now,
+                failed_boots: 1,
+            }),
+            vec!["slot", "cause", "detail", "down_since", "failed_boots"],
         ),
         (
             keys(WorkerPingInfo {
@@ -1132,7 +1157,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
 
     let match_name = scope.task("filter_match");
     let mut live_match = scope.running("filter_match");
-    live_match.error_code = Some("TASK_ERROR".to_owned());
+    live_match.error_code = Some("TASK_EXCEPTION".to_owned());
     live_match.retry_count = 2;
     live_match.enqueued_seconds_ago = 60;
     live_match.started_seconds_ago = Some(40);
@@ -1143,28 +1168,28 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     history_match.enqueued_seconds_ago = 90;
     history_match.started_seconds_ago = Some(60);
     seed_task(&pool, &history_match).await;
-    fail_task(&pool, history_match.id, "TASK_ERROR").await;
+    fail_task(&pool, history_match.id, "TASK_EXCEPTION").await;
 
     for (name, queue, worker, code, retry_count) in [
         (
             "wrong_name",
             "matching",
             Some("w2-worker"),
-            Some("TASK_ERROR"),
+            Some("TASK_EXCEPTION"),
             2,
         ),
         (
             "filter_match",
             "wrong_queue",
             Some("w2-worker"),
-            Some("TASK_ERROR"),
+            Some("TASK_EXCEPTION"),
             2,
         ),
         (
             "filter_match",
             "matching",
             Some("another-worker"),
-            Some("TASK_ERROR"),
+            Some("TASK_EXCEPTION"),
             2,
         ),
         (
@@ -1178,7 +1203,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
             "filter_match",
             "matching",
             Some("w2-worker"),
-            Some("TASK_ERROR"),
+            Some("TASK_EXCEPTION"),
             0,
         ),
     ] {
@@ -1198,7 +1223,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
         task_names: vec![match_name.clone()],
         queues: vec![scope.queue.clone()],
         workers: vec!["w2-worker".to_owned()],
-        error_codes: vec!["TASK_ERROR".to_owned()],
+        error_codes: vec!["TASK_EXCEPTION".to_owned()],
         error_categories: vec![ErrorCategory::Operational],
         retried_only: true,
         ..TaskFilters::default()
@@ -1349,10 +1374,10 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     seed_workflow(&pool, workflow_id, &scope.workflow("detail"), "RUNNING").await;
     let mut task = scope.running("detail_task");
     task.workflow_task = true;
-    task.error_code = Some("TASK_ERROR".to_owned());
+    task.error_code = Some("TASK_EXCEPTION".to_owned());
     seed_task(&pool, &task).await;
-    seed_attempt(&pool, task.id, 1, "TASK_ERROR").await;
-    seed_attempt(&pool, task.id, 2, "TASK_ERROR").await;
+    seed_attempt(&pool, task.id, 1, "TASK_EXCEPTION").await;
+    seed_attempt(&pool, task.id, 2, "TASK_EXCEPTION").await;
     seed_node(
         &pool,
         &scope,
@@ -1384,7 +1409,7 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
         Some("attempt message")
     );
 
-    fail_task(&pool, task.id, "TASK_ERROR").await;
+    fail_task(&pool, task.id, "TASK_EXCEPTION").await;
     let history = get_task_detail(&broker, task.id)
         .await
         .expect("history detail")
