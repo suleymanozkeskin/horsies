@@ -12,7 +12,6 @@ use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::{
     RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
 };
-use crate::core::task::error::{BuiltInTaskCode, TaskErrorCode};
 use crate::core::workflow::spec::{WorkflowSpec, WorkflowSpecBuilder};
 
 /// Pre-resolved parameters for enqueueing a task.
@@ -30,6 +29,40 @@ pub struct ResolvedEnqueue {
     pub priority: u32,
     /// The queue-mapped retention of the send.
     pub retention: crate::core::config::EnqueueRetention,
+}
+
+/// What every fired slot of one schedule stores besides its input, resolved
+/// once at scheduler start from the task registry (Python
+/// `core/scheduler/validation.py` `prepare_schedules`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleSendFacts {
+    /// The schedule's queue, else the queue the task declares, else
+    /// `default`; validated against the queue mode.
+    pub queue_name: String,
+    /// The task's stored options text, as a send of the task stores it:
+    /// timeout, retry policy and retryable codes. `None` when the task
+    /// declares none.
+    pub task_options: Option<String>,
+}
+
+/// The send facts of each enabled schedule, by schedule name.
+pub type PreparedSchedules = std::collections::HashMap<String, ScheduleSendFacts>;
+
+/// The queue a schedule's slots go to: the schedule's own queue, else the
+/// queue its task declares, else `default` (Python
+/// `Scheduler._resolve_schedule_queue`).
+fn schedule_queue<'a>(
+    schedule: &'a crate::core::config::TaskSchedule,
+    task: Option<&'a crate::core::task::fn_trait::RegisteredTask>,
+) -> &'a str {
+    match (
+        schedule.queue_name.as_deref(),
+        task.and_then(|task| task.queue_name()),
+    ) {
+        (Some(queue), _) => queue,
+        (None, Some(task_queue)) => task_queue,
+        (None, None) => "default",
+    }
 }
 
 /// Main horsies application.
@@ -738,8 +771,11 @@ impl Horsies {
                 );
             }
 
-            // 2. Validate queue name.
-            let queue_name = task_schedule.queue_name.as_deref().unwrap_or("default");
+            // 2. Validate the queue: the schedule's, else the task's.
+            let queue_name = schedule_queue(
+                task_schedule,
+                self.registry.get(&task_schedule.task_name).ok(),
+            );
             if let Err(e) = self.validate_queue(queue_name) {
                 report.add(
                     HorsiesError::new(format!(
@@ -777,9 +813,58 @@ impl Horsies {
                     );
                 }
             }
+
+            // 4. Refuse input over payload.reject_bytes at start, so a slot has
+            // no size refusal of its own (Python `validation.py:259-280`).
+            let input_bytes = task_schedule.input.to_string().len();
+            if let Some(limit) = self.config.payload.reject_bytes {
+                if input_bytes as u64 > limit {
+                    report.add(
+                        HorsiesError::new(format!(
+                            "schedule '{}' input is {} bytes, over payload.reject_bytes={}",
+                            task_schedule.name, input_bytes, limit,
+                        ))
+                        .with_code(ErrorCode::ConfigInvalidSchedule)
+                        .with_note(
+                            "every slot of the schedule sends the same input, so every \
+                             enqueue would be refused",
+                        )
+                        .with_help(
+                            "make the schedule's input smaller, or raise payload.reject_bytes",
+                        ),
+                    );
+                }
+            }
         }
 
         report.into_result()
+    }
+
+    /// Check the schedules as [`Horsies::validate_schedules`] does, then
+    /// resolve what every fired slot of each enabled schedule stores: its
+    /// queue and the task's options text (Python `prepare_schedules`). The
+    /// scheduler starts from this value. Errors: every refusal of
+    /// `validate_schedules`, collected.
+    pub fn prepare_schedules(&self) -> Result<PreparedSchedules, HorsiesError> {
+        self.validate_schedules()?;
+        let mut prepared = PreparedSchedules::new();
+        let Some(schedule_config) = &self.config.schedule else {
+            return Ok(prepared);
+        };
+        for task_schedule in schedule_config.schedules.iter().filter(|s| s.enabled) {
+            // validate_schedules refused an unregistered task above.
+            let task = self.registry.get(&task_schedule.task_name)?;
+            prepared.insert(
+                task_schedule.name.clone(),
+                ScheduleSendFacts {
+                    queue_name: schedule_queue(task_schedule, Some(task)).to_owned(),
+                    task_options: task
+                        .task_options()
+                        .and_then(|options| options.serialize_retry_options()),
+                },
+            );
+        }
+        Ok(prepared)
     }
 
     /// Run all offline validation checks.
@@ -1095,25 +1180,9 @@ impl Horsies {
                             .with_help("provide at least one retryable error code"),
                     );
                 }
-                Some(entries) => {
-                    for entry in entries {
-                        if let TaskErrorCode::User(code) = entry {
-                            if let Some(builtin) = BuiltInTaskCode::parse(code) {
-                                report.add(
-                                    HorsiesError::new(format!(
-                                        "auto_retry_for value '{}' collides with reserved built-in {}",
-                                        code, builtin,
-                                    ))
-                                    .with_code(ErrorCode::CheckReservedCodeCollision)
-                                    .with_note(format!("task '{}'", task_name))
-                                    .with_help(
-                                        "use TaskErrorCode::BuiltIn(...) for built-in retry codes, or rename the custom user code",
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
+                // A user code never has the name of a built-in code: `UserCode::parse`
+                // refuses it, so no entry can collide with a built-in.
+                Some(_) => {}
                 None => {
                     if opts.retry_policy.is_some() {
                         report.add(
@@ -1577,7 +1646,9 @@ mod tests {
     use crate::core::config::{
         CustomQueueConfig, PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig,
     };
-    use crate::core::task::error::OperationalErrorCode;
+    use crate::core::task::error::{
+        OperationalErrorCode, TaskErrorCode, UserCode, UserCodeRefused,
+    };
     use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::options::{RetryPolicy, TaskOptions};
     use crate::core::workflow::node::TaskNode;
@@ -1592,6 +1663,7 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
@@ -1887,7 +1959,9 @@ mod tests {
             task_name: "retryable_task".to_owned(),
             queue_name: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("STORAGE_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
         };
@@ -1922,7 +1996,7 @@ mod tests {
         let opts_json: serde_json::Value =
             serde_json::from_str(node_0.task_options_json.as_ref().unwrap()).unwrap();
         assert!(opts_json.get("retry_policy").is_some());
-        assert!(opts_json.get("auto_retry_for").is_some());
+        assert!(opts_json["retry_policy"].get("auto_retry_for").is_some());
         assert!(
             opts_json.get("task_name").is_none(),
             "task_name should be excluded"
@@ -1948,7 +2022,9 @@ mod tests {
             task_name: "retryable_task".to_owned(),
             queue_name: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("STORAGE_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
         };
@@ -2363,6 +2439,85 @@ mod tests {
 
     // --- validate_schedules: queue validation tests (gap 12-3) ---
 
+    fn interval_schedule(name: &str, queue: Option<&str>) -> crate::core::config::TaskSchedule {
+        use crate::core::config::schedule::{IntervalSchedule, SchedulePattern, TaskSchedule};
+        TaskSchedule {
+            name: name.to_owned(),
+            task_name: "my_task".to_owned(),
+            pattern: SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(60),
+                minutes: None,
+                hours: None,
+                days: None,
+            }),
+            input: serde_json::Value::Null,
+            queue_name: queue.map(str::to_owned),
+            enabled: true,
+            timezone: "UTC".to_owned(),
+            catch_up_missed: false,
+            max_catch_up_runs: 100,
+        }
+    }
+
+    /// Python `Scheduler._resolve_schedule_queue` and #480: a schedule
+    /// without a queue fires on the task's declared queue, and every fired
+    /// slot carries the task's options text.
+    #[test]
+    fn prepare_schedules_uses_the_task_queue_and_options() {
+        use crate::core::config::schedule::ScheduleConfig;
+        let mut config = custom_config();
+        config.schedule = Some(ScheduleConfig::new(vec![
+            interval_schedule("on_task_queue", None),
+            interval_schedule("on_own_queue", Some("fast")),
+        ]));
+        let mut app = Horsies::new(config).unwrap();
+        let options = TaskOptions {
+            task_name: "my_task".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(5_000),
+        };
+        app.register_with_queue("my_task", registered_with_options(options), "slow")
+            .unwrap();
+
+        let prepared = app.prepare_schedules().unwrap();
+        assert_eq!(
+            prepared["on_task_queue"],
+            ScheduleSendFacts {
+                queue_name: "slow".to_owned(),
+                task_options: Some("{\"timeout_ms\":5000}".to_owned()),
+            },
+        );
+        assert_eq!(prepared["on_own_queue"].queue_name, "fast");
+        assert_eq!(
+            prepared["on_own_queue"].task_options.as_deref(),
+            Some("{\"timeout_ms\":5000}")
+        );
+    }
+
+    /// Python `validation.py:259-280`: input over `payload.reject_bytes`
+    /// refuses the scheduler start, so no slot is refused for its size.
+    #[test]
+    fn validate_schedules_refuses_input_over_reject_bytes() {
+        use crate::core::config::schedule::ScheduleConfig;
+        let mut config = valid_config();
+        config.payload.reject_bytes = Some(8);
+        let mut schedule = interval_schedule("too_big", None);
+        schedule.input = serde_json::json!({"payload": "over the limit"});
+        config.schedule = Some(ScheduleConfig::new(vec![schedule]));
+        let mut app = Horsies::new(config).unwrap();
+        app.register("my_task", dummy_registered()).unwrap();
+
+        let error = app.validate_schedules().unwrap_err();
+        assert!(
+            error.to_string().contains("over payload.reject_bytes=8"),
+            "{error}"
+        );
+        assert!(app.prepare_schedules().is_err());
+    }
+
     #[test]
     fn validate_schedules_ok_with_valid_queue_in_custom_mode() {
         use crate::core::config::schedule::{
@@ -2582,26 +2737,13 @@ mod tests {
         assert!(err.to_string().contains("auto_retry_for must not be empty"));
     }
 
+    /// An `auto_retry_for` user code cannot have a built-in name: the user code
+    /// type refuses it before any option is built (Python
+    /// `core/models/tasks.py:304-311`).
     #[test]
-    fn check_rejects_built_in_collision_in_auto_retry_for_user_code() {
-        let mut app = Horsies::new(valid_config()).unwrap();
-        let opts = TaskOptions {
-            task_name: "collision_task".to_owned(),
-            queue_name: Some("default".to_owned()),
-            good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User(
-                OperationalErrorCode::BrokerError.to_string(),
-            )]),
-            retry_policy: Some(RetryPolicy::fixed(vec![60], true).unwrap()),
-            timeout_ms: None,
-        };
-
-        app.register("collision_task", registered_with_options(opts))
-            .unwrap();
-
-        let err = app.check().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::CheckReservedCodeCollision));
-        assert!(err.to_string().contains("collides with reserved built-in"));
+    fn an_auto_retry_for_user_code_cannot_have_a_built_in_name() {
+        let refused = UserCode::parse(OperationalErrorCode::BrokerError.to_string());
+        assert!(matches!(refused, Err(UserCodeRefused::BuiltInName(_))));
     }
 
     #[test]
@@ -2788,7 +2930,9 @@ mod tests {
             task_name: "valid_retry_task".to_owned(),
             queue_name: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("FETCH_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("FETCH_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300], true).unwrap()),
             timeout_ms: None,
         };

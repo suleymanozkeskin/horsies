@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput, ItemFn};
 
+mod code_catalog;
 mod codegen;
 mod parse;
 mod workflow_input;
@@ -102,6 +103,30 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn derive_workflow_input(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match workflow_input::derive_workflow_input(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Derive the static catalog data of a closed code enum of horsies-core:
+/// its members, their wire values and their docs. `horsies-codegen` renders
+/// the Python enum classes from it.
+///
+/// ```ignore
+/// /// Categorized broker operation failure codes.
+/// #[derive(horsies_macros::CodeCatalog)]
+/// #[code_catalog(module = "broker", base = "str_enum")]
+/// pub enum BrokerErrorCode {
+///     /// Schema initialization failed.
+///     SchemaInitFailed,
+/// }
+/// ```
+///
+/// Emits `impl horsies_core::catalog::CodeEnum for BrokerErrorCode`.
+#[proc_macro_derive(CodeCatalog, attributes(code_catalog))]
+pub fn derive_code_catalog(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    match code_catalog::derive_code_catalog(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

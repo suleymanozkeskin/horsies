@@ -14,7 +14,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -343,7 +343,7 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .await
                 .expect("create P5 database");
             let generated_options = base_options.database(&database_name);
-            let database_url = generated_options.to_url_lossy().to_string();
+            let database_url = crate::broker::pools::test_url_of(&generated_options);
             let anchor = PgPoolOptions::new()
                 .min_connections(1)
                 .max_connections(1)

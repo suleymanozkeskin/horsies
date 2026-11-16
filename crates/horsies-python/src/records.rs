@@ -20,8 +20,9 @@ pub struct BrokerFailure {
 }
 
 impl BrokerFailure {
-    /// The failure of an operation whose broker could not connect.
-    pub fn from_connect_error(code: BrokerErrorCode, error: &BrokerError) -> Self {
+    /// The failure `code` of an operation that met `error`: a failed
+    /// connect, or a failure of a broker call that returns `BrokerError`.
+    pub fn from_broker_error(code: BrokerErrorCode, error: &BrokerError) -> Self {
         Self {
             code: code.to_string(),
             message: error.to_string(),
