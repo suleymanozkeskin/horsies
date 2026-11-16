@@ -93,6 +93,12 @@ pub enum ErrorCode {
     CliInvalidArgs,
     WorkerInvalidLocator,
     ConfigInvalidResilience,
+    /// A worker profile that AppConfig validation refuses.
+    ConfigInvalidWorkerProfile,
+    /// `check --live`: one worker of a profile needs more Postgres
+    /// connections than the server has usable slots, or the server limit
+    /// could not be read.
+    CheckWorkerConnections,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -148,6 +154,8 @@ impl ErrorCode {
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
             Self::ConfigInvalidResilience => "HRS-208",
+            Self::ConfigInvalidWorkerProfile => "HRS-218",
+            Self::CheckWorkerConnections => "HRS-219",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -208,6 +216,8 @@ impl ErrorCode {
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
+            | Self::ConfigInvalidWorkerProfile
+            | Self::CheckWorkerConnections
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -277,6 +287,8 @@ impl ErrorCode {
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
                 | Self::ConfigInvalidResilience
+                | Self::ConfigInvalidWorkerProfile
+                | Self::CheckWorkerConnections
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
@@ -472,6 +484,12 @@ mod tests {
         assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
         assert_eq!(ErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
         assert!(ErrorCode::ConfigInvalidResilience.is_config_error());
+        assert_eq!(ErrorCode::CheckWorkerConnections.to_string(), "HRS-219");
+        assert_eq!(
+            ErrorCode::CheckWorkerConnections.category(),
+            ErrorCategory::Config,
+        );
+        assert!(ErrorCode::CheckWorkerConnections.is_config_error());
     }
 
     #[test]

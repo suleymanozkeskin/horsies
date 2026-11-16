@@ -1668,7 +1668,7 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -1678,6 +1678,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -1996,7 +1997,7 @@ mod tests {
         let opts_json: serde_json::Value =
             serde_json::from_str(node_0.task_options_json.as_ref().unwrap()).unwrap();
         assert!(opts_json.get("retry_policy").is_some());
-        assert!(opts_json.get("auto_retry_for").is_some());
+        assert!(opts_json["retry_policy"].get("auto_retry_for").is_some());
         assert!(
             opts_json.get("task_name").is_none(),
             "task_name should be excluded"
