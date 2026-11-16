@@ -17,6 +17,7 @@ applies migrations). Coverage:
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -48,6 +49,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
+from horsies.monitoring.queries import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
@@ -2748,6 +2750,93 @@ class TestListSchedules:
             'beta',
             'delta',
             'gamma',
+        ]
+
+
+@pytest.mark.usefixtures('clean_monitoring_tables')
+class TestListBounds:
+    """The names and schedules lists stop at the bound and log the cut."""
+
+    async def _seed_schedules(self, session: AsyncSession, count: int) -> None:
+        _ = await session.execute(
+            text(
+                'INSERT INTO horsies_schedule_state ('
+                'schedule_name, next_run_at, last_run_at, last_task_id, run_count, '
+                'config_hash, updated_at'
+                ") SELECT 'schedule_' || lpad(n::text, 6, '0'), now() + interval '1 hour', "
+                "NULL, NULL, 0, sha256(n::text::bytea), now() "
+                'FROM generate_series(1, :count) AS n'
+            ),
+            {'count': count},
+        )
+        await session.commit()
+
+    async def test_schedules_past_the_bound_are_cut_and_the_cut_is_logged(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        await self._seed_schedules(session, LIST_ROW_BOUND + 1)
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_schedules(broker)
+
+        assert is_ok(result)
+        names = [row.schedule_name for row in result.ok_value]
+        assert len(names) == LIST_ROW_BOUND
+        assert names[-1] == f'schedule_{LIST_ROW_BOUND:06d}'
+        assert [record.getMessage() for record in caplog.records] == [
+            f'schedule state: the list is cut at {LIST_ROW_BOUND} schedules; '
+            'more exist and are not returned',
+        ]
+
+    async def test_schedules_at_the_bound_are_complete_and_nothing_is_logged(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        await self._seed_schedules(session, LIST_ROW_BOUND)
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_schedules(broker)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == LIST_ROW_BOUND
+        assert caplog.records == []
+
+    async def test_workflow_names_past_the_bound_are_cut_and_the_cut_is_logged(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _ = await session.execute(
+            text(
+                'INSERT INTO horsies_workflows ('
+                'id, name, definition_key, status, on_error, output_task_index, '
+                'success_policy, result, error, parent_workflow_id, parent_task_index, '
+                'root_workflow_id, depth, sent_at, created_at, started_at, completed_at, '
+                'updated_at'
+                ') SELECT run.id, '
+                "'flow_' || lpad(run.n::text, 6, '0'), NULL, 'RUNNING', 'fail', NULL, "
+                'NULL, NULL, NULL, NULL, NULL, run.id, 0, now(), now(), NULL, NULL, now() '
+                'FROM (SELECT horsies_uuidv7() AS id, n FROM generate_series(1, :count) AS n) AS run'
+            ),
+            {'count': LIST_ROW_BOUND + 1},
+        )
+        await session.commit()
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_workflow_names(broker)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == LIST_ROW_BOUND
+        assert result.ok_value[-1] == f'flow_{LIST_ROW_BOUND:06d}'
+        assert [record.getMessage() for record in caplog.records] == [
+            f'workflow names: the list is cut at {LIST_ROW_BOUND} root workflow names; '
+            'more exist and are not returned',
         ]
 
 

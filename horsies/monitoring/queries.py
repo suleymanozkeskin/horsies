@@ -90,6 +90,7 @@ from horsies.core.history.archive.versions import (
     DecodedArchiveValue,
 )
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.logging import get_logger
 from horsies.core.history.reads.aggregates import (
     HISTORY_NONEMPTY_PROBE_SQL,
     HistoryScope,
@@ -145,6 +146,12 @@ from horsies.monitoring.models import (
     WorkflowRunSummary,
     WorkflowTaskDetail,
 )
+
+logger = get_logger('monitoring')
+
+# The most rows that ``list_workflow_names`` and ``list_schedules`` return. A
+# longer list is cut, and the cut is logged as a warning.
+LIST_ROW_BOUND: Final = 10_000
 
 # --------------------------------------------------------------------------- #
 # Allowlists and vocabularies
@@ -1567,12 +1574,17 @@ def _node_error(task_index: int, stored: str | None) -> str | None:
 async def list_workflow_names(
     broker: PostgresBroker,
 ) -> MonitoringResult[list[str]]:
-    """Distinct names of root workflow runs, for the run-picker filter."""
+    """Distinct names of root workflow runs, for the run-picker filter.
+
+    At most ``LIST_ROW_BOUND`` names, in the database collation; a longer
+    list is cut, and the cut is logged as a warning.
+    """
     stmt = (
         select(WorkflowModel.name)
         .where(WorkflowModel.parent_workflow_id.is_(None))
         .distinct()
         .order_by(WorkflowModel.name)
+        .limit(LIST_ROW_BOUND + 1)
     )
 
     match await broker.select_resources():
@@ -1587,7 +1599,19 @@ async def list_workflow_names(
     except SQLAlchemyError as exc:
         return _db_err('workflow names query', exc)
 
-    return Ok(list(names))
+    if len(names) > LIST_ROW_BOUND:
+        _log_cut_list('workflow names', 'root workflow names')
+    return Ok(list(names[:LIST_ROW_BOUND]))
+
+
+def _log_cut_list(read: str, rows: str) -> None:
+    """Warn that a list read returned ``LIST_ROW_BOUND`` rows and more exist."""
+    logger.warning(
+        '%s: the list is cut at %d %s; more exist and are not returned',
+        read,
+        LIST_ROW_BOUND,
+        rows,
+    )
 
 
 async def list_workflow_runs(
@@ -1845,10 +1869,15 @@ async def list_schedules(
     """Recurring schedule states, soonest next-run first, then by name.
 
     Schedules due at one time come by name, so the list does not reorder
-    between polls.
+    between polls. At most ``LIST_ROW_BOUND`` schedules; a longer list is
+    cut, and the cut is logged as a warning.
     """
-    stmt = select(ScheduleStateModel).order_by(
-        ScheduleStateModel.next_run_at.asc(), ScheduleStateModel.schedule_name.asc()
+    stmt = (
+        select(ScheduleStateModel)
+        .order_by(
+            ScheduleStateModel.next_run_at.asc(), ScheduleStateModel.schedule_name.asc()
+        )
+        .limit(LIST_ROW_BOUND + 1)
     )
 
     match await broker.select_resources():
@@ -1863,6 +1892,8 @@ async def list_schedules(
     except SQLAlchemyError as exc:
         return _db_err('schedule state query', exc)
 
+    if len(rows) > LIST_ROW_BOUND:
+        _log_cut_list('schedule state', 'schedules')
     return Ok(
         [
             ScheduleStateInfo(
@@ -1873,6 +1904,6 @@ async def list_schedules(
                 run_count=row.run_count,
                 updated_at=row.updated_at,
             )
-            for row in rows
+            for row in rows[:LIST_ROW_BOUND]
         ]
     )
