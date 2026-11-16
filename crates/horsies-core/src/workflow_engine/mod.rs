@@ -11,6 +11,7 @@ pub mod query;
 pub mod recovery;
 pub(crate) mod recovery_limit;
 pub mod start;
+pub(crate) mod start_statement;
 pub(crate) mod steps;
 
 #[cfg(test)]
