@@ -13,6 +13,7 @@ pub(crate) mod broker;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod manifest;
 pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;

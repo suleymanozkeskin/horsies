@@ -910,6 +910,22 @@ impl PostgresBroker {
         Ok(broker)
     }
 
+    /// Connect with the schema behaviour and the keyed-enqueue reservation
+    /// window of a client manifest. The window is checked before any
+    /// database connection is attempted.
+    pub async fn connect_with_policies(
+        config: &PostgresConfig,
+        schema_initialization_mode: SchemaInitializationMode,
+        window: chrono::Duration,
+    ) -> Result<Self, BrokerError> {
+        let seconds = idempotency_reservation_window_seconds(Some(window))?;
+        let mut broker =
+            Self::connect_with_schema_initialization_mode(config, schema_initialization_mode)
+                .await?;
+        broker.idempotency_reservation_window_seconds = seconds;
+        Ok(broker)
+    }
+
     /// Run embedded SQL migrations.
     ///
     /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
