@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from itertools import combinations
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -60,11 +61,8 @@ from horsies.core.worker.row_class import (
     registered_task_classes,
 )
 from horsies.core.worker.slots import SlotPool
-from horsies.core.worker.sql import (
-    HORSIES_CLAIM_SQL,
-    NOTIFY_TASK_QUEUE_SQL,
-    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
-)
+from horsies.core.worker.release import RELEASE_CLAIMS_SQL
+from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import Worker, _log_claim_plan
 from pydantic import SecretStr
@@ -421,7 +419,7 @@ def _session(
     returned_rowcount: int,
 ) -> AsyncMock:
     """A session whose claim returns ``claimed`` and whose class return
-    updates ``returned_rowcount`` rows."""
+    releases its first ``returned_rowcount`` rows (the others are NOT_HELD)."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
@@ -431,8 +429,15 @@ def _session(
         if statement is HORSIES_CLAIM_SQL:
             result.keys.return_value = _COLUMNS
             result.fetchall.return_value = claimed
-        elif statement is RETURN_CLAIMED_TASK_AS_ISOLATED_SQL:
-            result.rowcount = returned_rowcount
+        elif statement is RELEASE_CLAIMS_SQL:
+            result.fetchall.return_value = [
+                SimpleNamespace(
+                    ordinality=position,
+                    task_id=task_id,
+                    outcome='RELEASED' if position <= returned_rowcount else 'NOT_HELD',
+                )
+                for position, task_id in enumerate(params['task_ids'], start=1)
+            ]
         return result
 
     session.execute = AsyncMock(side_effect=_execute)
@@ -508,21 +513,17 @@ class TestClaimPassWithClasses:
         returns = [
             call.args[1]
             for call in session.execute.await_args_list
-            if call.args[0] is RETURN_CLAIMED_TASK_AS_ISOLATED_SQL
+            if call.args[0] is RELEASE_CLAIMS_SQL
         ]
         assert returns == [
             {
-                'id': 't1',
-                'wid': worker.worker_instance_id,
-                'claimed_at': _claim_time('t1'),
+                'task_ids': ['t1'],
+                'claimed_ats': [_claim_time('t1')],
+                'worker_id': worker.worker_instance_id,
+                'placement': 'ISOLATED',
             },
         ]
-        notifies = [
-            call.args[1]
-            for call in session.execute.await_args_list
-            if call.args[0] is NOTIFY_TASK_QUEUE_SQL
-        ]
-        assert notifies == [{'c2': 'task_queue_q', 'p': 'class:t1'}]
+        assert _statements(session) == [HORSIES_CLAIM_SQL, RELEASE_CLAIMS_SQL]
         assert (
             'Task t1 (now_def) stores execution SHARED_ASYNC, and the registered '
             'function is ISOLATED on this worker; wrote ISOLATED on the row and '
@@ -549,7 +550,7 @@ class TestClaimPassWithClasses:
 
         assert claim_pass == ClaimPass(claimed=1, dropped=1, short_of_plan=0)
         worker._dispatch_one.assert_not_awaited()
-        assert NOTIFY_TASK_QUEUE_SQL not in _statements(session)
+        assert _statements(session) == [HORSIES_CLAIM_SQL, RELEASE_CLAIMS_SQL]
         assert 'the claim was lost, so the row was left as it is' in caplog.text
 
     @pytest.mark.asyncio
@@ -571,7 +572,7 @@ class TestClaimPassWithClasses:
         claim_pass = await worker._claim_and_dispatch_all()
 
         assert claim_pass == ClaimPass(claimed=3, dropped=0, short_of_plan=0)
-        assert RETURN_CLAIMED_TASK_AS_ISOLATED_SQL not in _statements(session)
+        assert RELEASE_CLAIMS_SQL not in _statements(session)
         dispatched = [call.args[0] for call in worker._dispatch_one.await_args_list]
         assert dispatched == ['t1', 't2', 't3']
 

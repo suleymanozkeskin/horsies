@@ -51,8 +51,8 @@ def _registered_duration() -> object | None:
             return (
                 connection.execute(
                     text(
-                        'SELECT duration FROM horsies_retention_classes '
-                        'WHERE class_key = :key'
+                        'SELECT make_interval(days => retention_days) '
+                        'FROM horsies_retention_classes WHERE class_key = :key'
                     ),
                     {'key': E2E_CLASS_KEY},
                 )

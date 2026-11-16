@@ -1558,6 +1558,7 @@ class TestCallerUnwrapContract:
             BaselineCurrent,
             ClientFamily,
             FamilyRecorded,
+            ReadersPublished,
         )
 
         with (
@@ -1575,7 +1576,8 @@ class TestCallerUnwrapContract:
                 new=AsyncMock(
                     return_value=Ok(
                         BaselineCurrent(
-                            family=FamilyRecorded(family=ClientFamily.PYTHON)
+                            family=FamilyRecorded(family=ClientFamily.PYTHON),
+                            readers=ReadersPublished(),
                         )
                     )
                 ),

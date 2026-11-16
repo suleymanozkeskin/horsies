@@ -6,8 +6,8 @@ is booted through the CLI, and the leaf must be gone without anything in
 the test asking for it.
 
 The leaf is overdue because its BOUNDS are backdated, not because a
-clock was moved. The sweep selects on `upper_anchor + duration <=
-statement_timestamp()`, so a leaf anchored well before the horizon is
+clock was moved. The sweep selects on `upper_anchor + <heartbeat horizon>
+<= statement_timestamp()`, so a leaf anchored well before the horizon is
 genuinely expired by the same arithmetic production uses.
 """
 
@@ -177,8 +177,8 @@ def test_the_planted_leaf_is_genuinely_expired() -> None:
             horizon = (
                 connection.execute(
                     text(
-                        'SELECT duration FROM horsies_retention_classes '
-                        "WHERE class_key = 'heartbeats'"
+                        'SELECT make_interval(hours => heartbeat_horizon_hours) '
+                        "FROM horsies_retention_classes WHERE class_key = 'heartbeats'"
                     )
                 )
             ).scalar_one_or_none()
