@@ -235,16 +235,21 @@ class TestProgram:
 
     def test_the_fence_holds_the_worker_and_the_generation(self) -> None:
         """The row is read and locked by its id alone; the claim is checked
-        on the locked row, and a NULL comparison counts as a miss."""
+        on the locked row, and a NULL comparison counts as a miss. A NULL
+        generation is refused before the lock, so the fence has no NULL arm."""
         read = _BODY[_BODY.index('FROM horsies_tasks') : _BODY.index('FOR UPDATE')]
         fence = _BODY[_BODY.index('FOR UPDATE') : _BODY.index('RETURN QUERY')]
 
-        assert 'WHERE id = p_task_id' in read
+        assert 'WHERE t.id = p_task_id' in read
         assert 'status' not in read
         assert "v_ctx.status = 'RUNNING'" in fence
-        assert 'v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)' in fence
-        assert '(p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)' in fence
+        assert 'v_ctx.claimed_by_worker_id = p_worker_id' in fence
+        assert 'AND v_ctx.claimed_at = p_claimed_at' in fence
+        assert 'p_claimed_at IS NULL' not in fence
         assert ') IS NOT TRUE THEN' in fence
+        assert _BODY.index('num_nulls(p_task_id, p_worker_id, p_claimed_at)') < (
+            _BODY.index('pg_advisory_xact_lock')
+        )
 
     def test_a_plain_task_is_refused_before_any_write(self) -> None:
         refusal = _BODY.index('IF NOT v_ctx.is_workflow_task THEN')

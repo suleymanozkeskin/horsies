@@ -547,7 +547,9 @@ class TestUnclaimSqlClearsLeaseExpiry:
         The guard runs in its own transaction after the claim committed, so a
         lapsed-and-re-claimed row is CLAIMED by this worker again and the
         (status, worker) pair alone cannot reject it. Generations travel
-        alongside ids because one batch can span claim transactions.
+        alongside ids because one batch can span claim transactions. A NULL
+        generation is refused before any row is read, so the fence has no
+        NULL arm.
         """
         for name in ('horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'):
             normalised = ' '.join(baseline_function(name).split())
@@ -556,10 +558,10 @@ class TestUnclaimSqlClearsLeaseExpiry:
                 'FROM unnest(p_ids, p_claimed_ats) '
                 'AS input(task_id, expected_claimed_at)' in normalised
             )
-            assert (
-                'input.expected_claimed_at IS NULL '
-                'OR t.claimed_at = input.expected_claimed_at'
-                in normalised
+            assert 'AND t.claimed_at = input.expected_claimed_at' in normalised
+            assert 'expected_claimed_at IS NULL' not in normalised
+            assert normalised.index('batch claim generations must be non-NULL') < (
+                normalised.index('FOR UPDATE')
             )
 
     def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
