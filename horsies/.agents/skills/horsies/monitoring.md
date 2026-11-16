@@ -183,7 +183,10 @@ answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
 READ snapshot, so the live read and the history read see the same rows.
 
 `TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
-404 for each reason.
+404 for each reason. `get_task_detail` derives it from the detached history
+leaves: a UUIDv7 id born before the latest upper bound of a detached leaf of a
+period class (plus 5 s) predates retained history; any other UUIDv7 id is
+within it.
 
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |

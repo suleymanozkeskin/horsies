@@ -18,7 +18,9 @@ applies migrations). Coverage:
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
 
@@ -41,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring import queries as queries_module
@@ -1062,6 +1064,49 @@ class TestTaskBreakdown:
         assert result.ok_value.total.total == 1
 
 
+def _uuid7_born_at(birth: datetime) -> str:
+    """A UUIDv7 text whose embedded birth is ``birth``, with random tail bits."""
+    milliseconds = int(birth.timestamp() * 1000)
+    value = (milliseconds << 80) | int.from_bytes(os.urandom(10), 'big')
+    value = (value & ~(0xF << 76)) | (0x7 << 76)
+    value = (value & ~(0x3 << 62)) | (0x2 << 62)
+    return str(uuid.UUID(int=value))
+
+
+@asynccontextmanager
+async def _detached_period_leaf(
+    session: AsyncSession, *, upper_anchor: datetime
+) -> AsyncGenerator[None, None]:
+    """A catalog row of a detached and dropped leaf of the default class, for the block.
+
+    Only the absence rule reads it: it names no relation. The row is
+    deleted at the end, so later tests see no detached leaf.
+    """
+    leaf_name = f'itest_detached_{uuid.uuid4().hex}'
+    _ = await session.execute(
+        text(
+            'INSERT INTO horsies_task_history_leaf_catalog ('
+            'leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor, '
+            'index_schema_version, created_at, detached_at, dropped_at'
+            ") VALUES (:leaf, 'standard_30d', 'AT', :lower, :upper, 1, now(), now(), now())"
+        ),
+        {
+            'leaf': leaf_name,
+            'lower': upper_anchor - timedelta(days=1),
+            'upper': upper_anchor,
+        },
+    )
+    await session.commit()
+    try:
+        yield
+    finally:
+        _ = await session.execute(
+            text('DELETE FROM horsies_task_history_leaf_catalog WHERE leaf_name = :leaf'),
+            {'leaf': leaf_name},
+        )
+        await session.commit()
+
+
 def _builtin_category(code: str) -> str:
     """The category of a built-in error code, as the facet function takes it."""
     match categorize_error_code(code):
@@ -1789,6 +1834,41 @@ class TestGetTaskDetail:
         # A UUIDv4 has no birth, so the history read cannot classify it.
         assert result.ok_value == TaskDetailNotFound(
             task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
+        )
+
+    async def test_an_absent_v7_task_with_no_detached_leaf_is_within_retained_history(
+        self, broker: PostgresBroker
+    ) -> None:
+        task_id = _uuid7_born_at(datetime.now(UTC) - timedelta(days=2))
+
+        result = await get_task_detail(broker, task_id)
+
+        assert result == Ok(
+            TaskDetailNotFound(
+                task_id=task_id, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
+            )
+        )
+
+    async def test_an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        detached_upper = datetime.now(UTC) - timedelta(days=1)
+        before = _uuid7_born_at(detached_upper - timedelta(hours=1))
+        after = _uuid7_born_at(detached_upper + timedelta(hours=1))
+
+        async with _detached_period_leaf(session, upper_anchor=detached_upper):
+            before_result = await get_task_detail(broker, before)
+            after_result = await get_task_detail(broker, after)
+
+        assert before_result == Ok(
+            TaskDetailNotFound(
+                task_id=before, reason=TaskAbsenceReason.PREDATES_RETAINED_HISTORY,
+            )
+        )
+        assert after_result == Ok(
+            TaskDetailNotFound(
+                task_id=after, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
+            )
         )
 
     async def test_a_task_inserted_during_the_read_is_not_in_its_snapshot(

@@ -113,17 +113,26 @@ class TestTaskDetailNotFound:
         list(TaskAbsenceReason),
         ids=lambda reason: reason.value,
     )
-    async def test_the_reason_is_the_staged_classification(
+    async def test_the_reason_is_the_detached_leaf_classification(
         self,
         monkeypatch: pytest.MonkeyPatch,
         reason: TaskAbsenceReason,
     ) -> None:
+        """The staged read finds no row; the absence rule names the reason."""
         _staged_read(
             monkeypatch,
             published=True,
-            detail=TaskDetailAbsent(task_id=TASK_ID, reason=reason),
+            detail=TaskDetailAbsent(
+                task_id=TASK_ID, reason=TaskAbsenceReason.NOT_CLASSIFIED,
+            ),
         )
-        broker = _broker_with_session(_session(_scalar_result(None)))
+        session = _session(_scalar_result(None))
+        classified = MagicMock()
+        classified.scalar_one.return_value = reason.value
+        connection = MagicMock()
+        connection.execute = AsyncMock(return_value=classified)
+        session.connection = AsyncMock(return_value=connection)
+        broker = _broker_with_session(session)
 
         result = await get_task_detail(broker, TASK_ID)
 

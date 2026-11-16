@@ -1479,6 +1479,29 @@ async def _begin_one_snapshot(session: AsyncSession) -> None:
     )
 
 
+# The one rule of absence (#668), in the snapshot of the detail read: an id
+# that is not a UUIDv7 is not classified; an id born before the latest upper
+# anchor of the detached leaves of PERIOD classes, plus the 5 s clock
+# allowance of the history readers, predates retained history (retention can
+# have removed it); any other id is within retained history.
+_ABSENCE_REASON_SQL = text("""
+    SELECT CASE
+               WHEN birth.at IS NULL THEN 'NOT_CLASSIFIED'
+               WHEN detached.upper_anchor IS NOT NULL
+                    AND birth.at < detached.upper_anchor + interval '5 seconds'
+                   THEN 'PREDATES_RETAINED_HISTORY'
+               ELSE 'WITHIN_RETAINED_HISTORY'
+           END
+    FROM (SELECT horsies_uuid7_birth(CAST(:task_id AS uuid)) AS at) AS birth
+    CROSS JOIN (
+        SELECT max(leaf.upper_anchor) AS upper_anchor
+        FROM horsies_task_history_leaf_catalog AS leaf
+        JOIN horsies_retention_classes AS class ON class.class_key = leaf.class_key
+        WHERE class.class_kind = 'PERIOD' AND leaf.detached_at IS NOT NULL
+    ) AS detached
+""")
+
+
 async def _history_detail(
     session: AsyncSession, task_id: str
 ) -> HistoryTaskDetail | TaskAbsenceReason:
@@ -1487,7 +1510,8 @@ async def _history_detail(
     Terminalization moves finished rows out of the live table, so an
     absent live row is the normal terminal case, not an error. A database
     without the staged detail function has no history to read:
-    ``NOT_CLASSIFIED``. The session reads in one snapshot
+    ``NOT_CLASSIFIED``. A task in neither place gets its reason from the
+    detached leaves (``_ABSENCE_REASON_SQL``). The session reads in one snapshot
     (``_begin_one_snapshot``), so the staged read cannot find the task live.
 
     Raises:
@@ -1502,8 +1526,11 @@ async def _history_detail(
     match detail:
         case HistoryTaskDetail():
             return detail
-        case TaskDetailAbsent(reason=reason):
-            return reason
+        case TaskDetailAbsent():
+            reason = (
+                await connection.execute(_ABSENCE_REASON_SQL, {'task_id': task_id})
+            ).scalar_one()
+            return TaskAbsenceReason(reason)
         case LiveTaskLocation():
             raise HistoryContractError(
                 f'staged detail reports task {task_id} live in the snapshot '
