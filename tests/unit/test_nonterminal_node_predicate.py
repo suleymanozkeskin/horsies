@@ -7,15 +7,14 @@ A status added to ``WorkflowTaskStatus`` must reach every copy of the list.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from sqlalchemy import TextClause
 
 from horsies.core.models.workflow.enums import WorkflowTaskStatus
-from horsies.core.schemas.recovery import (
-    RECOVERY_INDEXES,
-    VALIDATE_RECOVERY_INDEXES_SQL,
-)
 from horsies.core.workflows import recovery
+from tests.baseline_sql import baseline_sql
 
 NONTERMINAL_NODE_INDEX_NAME = 'idx_horsies_workflow_tasks_nonterminal'
 
@@ -31,7 +30,6 @@ PREDICATE_STATEMENTS: dict[str, TextClause] = {
         recovery.GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL
     ),
     'GLOBAL_WORKFLOW_AUDIT_SQL': recovery.GLOBAL_WORKFLOW_AUDIT_SQL,
-    'VALIDATE_RECOVERY_INDEXES_SQL': VALIDATE_RECOVERY_INDEXES_SQL,
 }
 
 
@@ -51,7 +49,12 @@ def test_statement_spells_the_nonterminal_statuses_of_the_enum(
 
 @pytest.mark.unit
 def test_partial_index_spells_the_nonterminal_statuses_of_the_enum() -> None:
-    index = next(
-        index for index in RECOVERY_INDEXES if index.name == NONTERMINAL_NODE_INDEX_NAME
+    """The baseline index's predicate is the enum's nonterminal list."""
+    statement = re.search(
+        rf'CREATE INDEX {NONTERMINAL_NODE_INDEX_NAME}\b[^;]*;',
+        baseline_sql(),
     )
-    assert index.create_sql.endswith(f'WHERE status {_nonterminal_in_list()}')
+    assert statement is not None, NONTERMINAL_NODE_INDEX_NAME
+    assert ' '.join(statement.group(0).split()).endswith(
+        f'WHERE status {_nonterminal_in_list()};'
+    )

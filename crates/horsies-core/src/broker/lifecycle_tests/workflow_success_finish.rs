@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
-use crate::core::lifecycle::{PhaseTwoOwed, WorkflowSuccessOutcome};
+use crate::core::lifecycle::{PhaseTwoOwed, PhaseTwoStep, WorkflowSuccessOutcome};
 use crate::core::types::status::TaskStatus;
 
 const QUEUE: &str = "lifecycle_workflow_success";
@@ -81,10 +81,12 @@ async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
     let WorkflowSuccessOutcome::SuccessApplied {
         task_id: applied,
         observed,
-        phase_two: PhaseTwoOwed {
-            task_name,
-            queue_name,
-        },
+        phase_two:
+            PhaseTwoOwed {
+                task_name,
+                queue_name,
+                step,
+            },
         ..
     } = outcome
     else {
@@ -95,6 +97,7 @@ async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
         (task_name.as_str(), queue_name.as_str()),
         ("lifecycle.test", QUEUE)
     );
+    assert_eq!(step, PhaseTwoStep::NoDependents);
     assert_eq!(observed.status, Some(TaskStatus::Running));
     assert_eq!(observed.worker_id.as_deref(), Some(WORKER));
     assert_eq!(observed.claimed_at, Some(generation()));

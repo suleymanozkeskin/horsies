@@ -61,11 +61,14 @@ async def cancel_orphan(
     *,
     worker: str = WORKER,
 ) -> Any:
+    """Cancel with the claim generation that the stored row holds."""
     return (
         await connection.execute(
             text(
                 'SELECT * FROM horsies_cancel_owned_orphan('
-                'CAST(:task_id AS uuid), :worker, NULL)'
+                'CAST(:task_id AS uuid), :worker, '
+                '(SELECT claimed_at FROM horsies_tasks '
+                'WHERE id = CAST(:task_id AS uuid)))'
             ),
             {'task_id': task_id, 'worker': worker},
         )

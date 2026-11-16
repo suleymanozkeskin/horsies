@@ -1453,6 +1453,9 @@ pub fn select_worker_profile(
 }
 
 #[cfg(test)]
+mod start_log_tests;
+
+#[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
 
