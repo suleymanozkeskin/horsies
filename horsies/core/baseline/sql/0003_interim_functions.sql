@@ -9,8 +9,12 @@
 -- - the move builds the rerun envelope from input and task_options (horsies_encode_rerun_input);
 -- - each single terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...), and
 --   each batch terminal write calls the batch move stage horsies_move_tasks_to_history
---   (0006_history_functions.sql).
--- The trigger functions are in 0001_tables.sql. The published history readers are rendered at run time.
+--   (0006_history_functions.sql);
+-- - each terminal write that misses passes its own kind to horsies_terminalization_miss(uuid, text, text,
+--   timestamptz) (0008_history_maintenance_functions.sql), which owns the equivalence classes of the kinds.
+-- The trigger functions are in 0001_tables.sql. The published history readers are rendered by
+-- horsies_publish_history_readers (0008_history_maintenance_functions.sql);
+-- horsies_task_history_duplicate_staged here is the first version that the first publication replaces.
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
@@ -87,23 +91,6 @@ CREATE TYPE horsies_phase2_disposition AS (
 CREATE TYPE horsies_phase2_quarantine_verdict AS (
 	verdict text,
 	detail text
-);
-
-CREATE TYPE horsies_task_lookup AS (
-	found boolean,
-	location text,
-	task_id uuid,
-	fingerprint_version smallint,
-	command_fingerprint bytea
-);
-
-CREATE TYPE horsies_task_provenance AS (
-	found boolean,
-	location text,
-	task_id uuid,
-	status text,
-	terminal_at timestamp with time zone,
-	terminalization_kind text
 );
 
 -- Functions
@@ -195,7 +182,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
+            p_task_id, 'PAUSE_ABANDON_CLAIM',
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -370,7 +357,7 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
+        input.task_id, 'PAUSE_ABANDON_CLAIM_BATCH',
         p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
@@ -402,7 +389,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['CANCEL_ADMIN']::text[],
+            p_task_id, 'CANCEL_ADMIN',
             NULL::text, NULL::timestamptz
         );
         RETURN;
@@ -654,7 +641,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
+            p_task_id, 'WORKFLOW_CANCEL_CLAIM',
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -759,7 +746,7 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
+        input.task_id, 'WORKFLOW_CANCEL_CLAIM_BATCH',
         p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
@@ -831,7 +818,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['CANCEL_ORPHAN', 'CANCEL_ORPHAN_SWEEP']::text[],
+        p_task_id, 'CANCEL_ORPHAN',
         p_worker_id, p_claimed_at
     );
 END
@@ -1228,7 +1215,7 @@ BEGIN
         AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
+            p_task_id, 'COMPLETE_LOCKED',
             p_worker_id, NULL::timestamptz
         );
         RETURN;
@@ -1274,7 +1261,7 @@ BEGIN
         AND (p_claimed_at IS NULL OR v_task.claimed_at = p_claimed_at)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
+            p_task_id, 'COMPLETE_FUSED',
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -1478,7 +1465,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[],
+        p_task_id, 'EXPIRE_CLAIMED',
         p_worker_id, NULL::timestamptz
     );
 END
@@ -1562,7 +1549,7 @@ BEGIN
         AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[],
+            p_task_id, 'FAIL_RUNNING',
             p_worker_id, NULL::timestamptz
         );
         RETURN;
@@ -1677,7 +1664,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['FAIL_STALE']::text[],
+        p_task_id, 'FAIL_STALE',
         NULL::text, NULL::timestamptz
     );
 END
@@ -1781,7 +1768,7 @@ BEGIN
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
             NULL::boolean, NULL::text, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[],
+            p_task_id, 'FAIL_RUNNING',
             p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
@@ -1914,7 +1901,7 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT m.*, NULL::text, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
+            p_task_id, 'COMPLETE_LOCKED',
             p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
@@ -2413,9 +2400,8 @@ CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid) RETURNS bo
     LANGUAGE plpgsql STABLE
     AS $$
             BEGIN
-                RETURN (
-                    SELECT prov.found
-                    FROM horsies_task_provenance_staged(p_task_id, FALSE) AS prov
+                RETURN EXISTS (
+                    SELECT 1 FROM horsies_task_provenance_staged(p_task_id)
                 ) OR EXISTS (
                     SELECT 1 FROM horsies_task_history_clock_exceptions
                     WHERE task_id = p_task_id
@@ -2432,71 +2418,6 @@ CREATE FUNCTION horsies_task_history_leaf_lock_key(p_class_key text, p_anchor ti
             ::bigint::text,
         1601
     )
-$$;
-
-CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_row horsies_tasks%ROWTYPE;
-    v_provenance record;
-BEGIN
-    SELECT * INTO v_row
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        SELECT * INTO v_provenance
-        FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF NOT v_provenance.found THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'TASK_ABSENT'::text,
-                NULL::timestamptz, NULL::text,
-                NULL::text, NULL::varchar, NULL::timestamptz,
-                NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        IF v_provenance.location <> 'HISTORY' THEN
-            RAISE EXCEPTION
-                'provenance reported % after a live miss', v_provenance.location
-                USING ERRCODE = 'data_corrupted';
-        END IF;
-        IF v_provenance.terminalization_kind = ANY(p_equivalent_kinds) THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'ALREADY_APPLIED'::text,
-                v_provenance.terminal_at, v_provenance.terminalization_kind,
-                v_provenance.status, NULL::varchar, NULL::timestamptz,
-                NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-            v_provenance.terminal_at, v_provenance.terminalization_kind,
-            v_provenance.status, NULL::varchar, NULL::timestamptz,
-            'FOREIGN_TERMINALIZATION'::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    IF p_worker_id IS NOT NULL AND (
-        v_row.claimed_by_worker_id IS DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-        OR (p_claimed_at IS NOT NULL
-            AND v_row.claimed_at IS DISTINCT FROM p_claimed_at)
-    ) THEN
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'LOST_CLAIM'::text,
-            NULL::timestamptz, NULL::text,
-            v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
-            NULL::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    RETURN QUERY SELECT
-        p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-        NULL::timestamptz, NULL::text,
-        v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
-        NULL::text, NULL::jsonb;
-END
 $$;
 
 CREATE FUNCTION horsies_uuid7_birth(p_id uuid) RETURNS timestamp with time zone

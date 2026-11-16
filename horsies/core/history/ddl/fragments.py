@@ -20,13 +20,13 @@ reference, never by redefinition.
 from __future__ import annotations
 
 from ..identity.reservations import reservation_function_fragments
-from ..names import WORKFLOW_PHASE2_PENDING
-from ..partitions.catalog import LEAF_CATALOG_DDL, LEAF_LOCK_KEY_FUNCTION_DDL
-from ..reads.lookup_generation import (
-    TASK_LOOKUP_MANIFEST_DDL,
-    TASK_LOOKUP_TYPE_DDL,
-    TASK_PROVENANCE_TYPE_DDL,
+from ..names import (
+    TASK_LOOKUP_MANIFEST,
+    TASK_LOOKUP_TYPE,
+    TASK_PROVENANCE_TYPE,
+    WORKFLOW_PHASE2_PENDING,
 )
+from ..partitions.catalog import LEAF_CATALOG_DDL, LEAF_LOCK_KEY_FUNCTION_DDL
 from .tables import (
     FOREVER_CLASS_ROW_DML,
     KEY_RESERVATIONS_DDL,
@@ -37,6 +37,41 @@ from .tables import (
     WORKFLOW_PHASE2_PENDING_INDEX_DDL,
     WORKFLOW_PHASE2_QUARANTINE_DDL,
 )
+
+
+TASK_LOOKUP_TYPE_DDL = f"""
+CREATE TYPE {TASK_LOOKUP_TYPE} AS (
+    found boolean,
+    location text,
+    task_id uuid,
+    fingerprint_version smallint,
+    command_fingerprint bytea
+)
+"""
+
+TASK_PROVENANCE_TYPE_DDL = f"""
+CREATE TYPE {TASK_PROVENANCE_TYPE} AS (
+    found boolean,
+    location text,
+    task_id uuid,
+    status text,
+    terminal_at timestamptz,
+    terminalization_kind text
+)
+"""
+
+TASK_LOOKUP_MANIFEST_DDL = f"""
+CREATE TABLE {TASK_LOOKUP_MANIFEST} (
+    leaf_name text PRIMARY KEY,
+    probe_position integer NOT NULL UNIQUE,
+    lower_anchor timestamptz NOT NULL,
+    upper_anchor timestamptz NOT NULL,
+    min_birth_at timestamptz,
+    published_at timestamptz NOT NULL,
+    CHECK (probe_position >= 0),
+    CHECK (lower_anchor < upper_anchor)
+)
+"""
 
 
 def frozen_fragments() -> tuple[str, ...]:

@@ -239,7 +239,7 @@ SELECT fixture_check(
     AND pg_get_function_result(to_regprocedure('horsies_task_provenance_staged(uuid)'))
         = 'TABLE(task_id uuid, status text, terminal_at timestamp with time zone, terminalization_kind text, '
           'is_workflow_task boolean)'
-    AND to_regprocedure('horsies_task_provenance_staged(uuid, boolean)') IS NULL
+    AND (SELECT count(*) FROM pg_proc AS p WHERE p.proname = 'horsies_task_provenance_staged') = 1
     AND to_regprocedure('horsies_task_lookup_staged(uuid)') IS NULL
 );
 SELECT fixture_check(
@@ -928,7 +928,7 @@ SELECT fixture_expect_error('miss: a NULL task id is refused',
 SELECT fixture_expect_error('miss: a kind outside the 15 kinds is refused',
     $sql$SELECT * FROM horsies_terminalization_miss(gen_random_uuid(), 'LEGACY_TERMINAL', NULL, NULL)$sql$, '22023');
 SELECT fixture_check(
-    'miss: the kind overload and the interim array overload are two functions',
-    to_regprocedure('horsies_terminalization_miss(uuid, text, text, timestamp with time zone)') IS NOT NULL
-    AND to_regprocedure('horsies_terminalization_miss(uuid, text[], text, timestamp with time zone)') IS NOT NULL
+    'miss: pg_proc holds one horsies_terminalization_miss, the overload that takes the kind',
+    (SELECT array_agg(p.oid::regprocedure::text) FROM pg_proc AS p WHERE p.proname = 'horsies_terminalization_miss')
+        = ARRAY['horsies_terminalization_miss(uuid,text,text,timestamp with time zone)']
 );

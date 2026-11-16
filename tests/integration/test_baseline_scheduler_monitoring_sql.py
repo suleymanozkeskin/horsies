@@ -18,13 +18,6 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
-from horsies.core.history.commands import OPEN_END_ANCHOR, OpenLowerBound
-from horsies.core.history.reads.lookup_generation import (
-    LookupLeaf,
-    LookupManifest,
-    render_staged_detail_function,
-    render_staged_provenance_function,
-)
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
@@ -36,13 +29,6 @@ _CASES_SQL: Final = Path(__file__).with_name('baseline_scheduler_monitoring_case
 
 PASSED_CASES: Final = 76
 """The number of cases in the file. A case added to the file changes it."""
-
-_FOREVER_LEAF: Final = LookupLeaf(
-    relation_name='horsies_task_history_forever_open',
-    lower_bound=OpenLowerBound(),
-    upper_anchor=OPEN_END_ANCHOR,
-)
-
 
 def _migration() -> BaselineMigration:
     match load_baseline_migration():
@@ -56,7 +42,6 @@ def _migration() -> BaselineMigration:
 async def prepared() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ...]]]:
     """An autocommit connection to a fresh database prepared for the cases."""
     migration = _migration()
-    manifest = LookupManifest(leaves=(_FOREVER_LEAF,))
     async with isolated_test_database(DB_URL) as url:
         connection_url = to_psycopg_url(url)
         connection = await psycopg.AsyncConnection.connect(
@@ -69,10 +54,7 @@ async def prepared() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ...
             async with connection.transaction():
                 await connection.execute(migration.sql.encode('utf-8'))
                 await connection.execute(
-                    render_staged_detail_function(manifest).encode('utf-8'),
-                )
-                await connection.execute(
-                    render_staged_provenance_function(manifest).encode('utf-8'),
+                    'SELECT outcome FROM horsies_publish_history_readers()'
                 )
                 await connection.execute('CREATE EXTENSION dblink')
             await connection.execute(

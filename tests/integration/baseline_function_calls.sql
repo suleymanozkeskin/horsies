@@ -2,10 +2,12 @@
 -- and rolls it back. PL/pgSQL checks a statement against the tables only when the statement runs, so each function
 -- is called on a path that runs its statements that name columns. Each call checks its outcome.
 
--- The published provenance reader is rendered at run time; this stand-in answers "not found".
-CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql AS $$
-    SELECT ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
+-- The published provenance reader is rendered by horsies_publish_history_readers; this stand-in answers "not found"
+-- (no row).
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+LANGUAGE sql AS $$
+    SELECT NULL::uuid, NULL::text, NULL::timestamptz, NULL::text, NULL::boolean WHERE FALSE
 $$;
 
 CREATE FUNCTION fixture_task(
@@ -331,7 +333,7 @@ SELECT count(*) FROM horsies_cancel_orphaned_tasks(10);
 SELECT expect_value(
     'terminalization_miss',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-0000000000ff', ARRAY['FAIL_RUNNING'], NULL, NULL)),
+        '00000000-0000-7000-8000-0000000000ff', 'FAIL_RUNNING', NULL, NULL)),
     'TASK_ABSENT'
 );
 SELECT expect_value(

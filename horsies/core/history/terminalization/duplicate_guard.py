@@ -23,7 +23,9 @@ from ..names import (
     TASK_PROVENANCE_FUNCTION,
     UUID7_BIRTH_FUNCTION,
 )
-from ..reads.lookup_generation import CLOCK_BOUND_SECONDS
+
+CLOCK_BOUND_SECONDS: Final = 5
+"""Clock-skew allowance of a UUIDv7 birth, in seconds."""
 
 CLOCK_SKEW_EXCEPTIONS_DDL: Final = f"""
 CREATE TABLE IF NOT EXISTS {CLOCK_SKEW_EXCEPTIONS} (

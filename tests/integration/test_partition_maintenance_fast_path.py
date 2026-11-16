@@ -43,10 +43,7 @@ from horsies.core.history.partitions.locks import (
     IndexRemovalOutcome,
     remove_attached_index_for_repair,
 )
-from horsies.core.history.reads.publisher import (
-    StagedLoaderPublisher,
-    published_manifest_matches_catalog,
-)
+from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.integration.task_history_harness import (
     HistorySchema,
     terminalization_schema_fixture,
@@ -401,7 +398,7 @@ async def test_stale_manifest_metadata_is_republished(
     assert isinstance(outcome, CoverageEnsured), outcome
     assert outcome.republished
     async with partition_schema.engine.connect() as connection:
-        assert await published_manifest_matches_catalog(connection)
+        assert await StagedLoaderPublisher().is_current(connection)
 
 
 async def test_failed_final_publication_is_retried(

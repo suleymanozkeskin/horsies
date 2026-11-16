@@ -1,247 +1,113 @@
-"""The staged-loader publisher: the loader side of the publication seam.
+"""The staged-reader publisher: the loader side of the publication seam.
 
-Republication regenerates the lookup function and rewrites the published
-manifest table in the caller's transaction, so the function and the record
-of what it references become visible in one commit. The manifest table —
-not the function source — answers `references_leaf`: text-searching
-`pg_proc` for a relation name would confuse a leaf with any identifier that
-embeds it, while the manifest is exact by construction.
+The readers are rendered in the database by
+``horsies_publish_history_readers()`` (0008_history_maintenance_functions.sql),
+the one renderer of every client. One call, in the caller's transaction,
+rewrites the manifest table from the leaf catalog, replaces the four readers
+and stamps each with the manifest it was rendered from, so the readers and
+the record of what they probe become visible in one commit. A call on
+current readers changes nothing.
 
-The manifest is assembled inside this module from the complete attached
-catalog set across every retention class. Accepting a caller-supplied
-manifest was rejected: a caller scoped to one class would silently drop
-every other class's leaves from the function, and the resulting false
-absence would be undetectable at the call site.
-
-The probe list additionally requires each relation to exist. A leaf the
-catalog still calls attached whose relation was dropped out of band would
-otherwise be rendered into the function body, which CREATE accepts and
-execution rejects — on the finalize path, for every queue and class at
-once. Excluding it is honest rather than false absence: a relation that
-does not exist holds no rows to hide. The catalog row is left untouched;
-`CatalogConflictKind` in `outcomes.py` reserves catalog correction to an
-operator, and the exclusion is reported instead.
-
-The manifest table therefore records exactly the probe list and nothing
-else. `references_leaf` answers from it, and `drop_detached_leaf` refuses
-a drop while it answers True — so an unprobed row written here would
-block a legitimate drop on behalf of a reader that never looks at the
-relation.
-
-Each rendered function carries the stamp of the manifest it was rendered
-from as its comment. A publisher of an earlier release renders fewer
-functions but rewrites the same manifest table, so a function it did not
-render keeps an older stamp. The freshness checks compare every stamp
-with the published manifest, and a mismatch causes a republication.
+The manifest table, not the reader source, answers ``references_leaf``:
+``horsies_drop_detached_leaf`` and the Python drop refuse a leaf while the
+manifest names it.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Final
+from typing import Final, cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import AnchoredLowerBound, LowerBound, OpenLowerBound
-from ..names import (
-    HEARTBEAT_CLASS_KEY,
-    LEAF_CATALOG,
-    TASK_DETAIL_FUNCTION,
-    TASK_DUPLICATE_GUARD_FUNCTION,
-    TASK_LOOKUP_FUNCTION,
-    TASK_LOOKUP_MANIFEST,
-    TASK_PROVENANCE_FUNCTION,
-    TASK_RESULT_FUNCTION,
-)
-from ..partitions.catalog import read_manifest_leaf_rows
+from ..errors import HistoryContractError
+from ..names import TASK_LOOKUP_MANIFEST
 from ..partitions.publication import LoaderRepublished
-from .lookup_generation import (
-    LookupManifest,
-    manifest_from_catalog,
-    render_staged_detail_function,
-    render_staged_duplicate_guard_function,
-    render_staged_lookup_function,
-    render_staged_provenance_function,
-    render_staged_result_function,
+
+PUBLICATION_OUTCOMES: Final = frozenset({'PUBLISHED', 'ALREADY_CURRENT'})
+"""The outcomes of ``horsies_publish_history_readers``."""
+
+_PUBLISH_READERS_SQL: Final = text(
+    'SELECT outcome, absent_leaves FROM horsies_publish_history_readers()'
+)
+_READERS_CURRENT_SQL: Final = text('SELECT horsies_history_readers_current()')
+_REFERENCES_LEAF_SQL: Final = text(
+    f'SELECT EXISTS (SELECT 1 FROM {TASK_LOOKUP_MANIFEST} WHERE leaf_name = :leaf_name)'
 )
 
-# Every function that `republish` renders from the manifest.
-RENDERED_READER_SIGNATURES: Final = (
-    f'{TASK_LOOKUP_FUNCTION}(uuid)',
-    f'{TASK_PROVENANCE_FUNCTION}(uuid, boolean)',
-    f'{TASK_DETAIL_FUNCTION}(uuid)',
-    f'{TASK_RESULT_FUNCTION}(uuid)',
-    f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
-)
-_SIGNATURE_ARRAY = (
-    'CAST(ARRAY['
-    + ', '.join(f"'{signature}'" for signature in RENDERED_READER_SIGNATURES)
-    + '] AS text[])'
-)
 
-# The stamp of the published manifest table: a SHA-256 over the probe
-# metadata of every row, in probe order. The anchors enter as epoch seconds,
-# so the stamp does not depend on the session time zone. An empty manifest
-# has a stamp too.
-MANIFEST_STAMP_SQL: Final = f"""(
-    SELECT 'horsies:manifest:' || encode(sha256(convert_to(COALESCE(
-        string_agg(
-            concat_ws(
-                '|',
-                manifest.leaf_name,
-                manifest.probe_position,
-                manifest.lower_bound_kind,
-                COALESCE(extract(epoch FROM manifest.lower_anchor)::text, '-'),
-                extract(epoch FROM manifest.upper_anchor)
-            ),
-            ',' ORDER BY manifest.probe_position
-        ),
-        ''
-    ), 'UTF8')), 'hex')
-    FROM {TASK_LOOKUP_MANIFEST} AS manifest
-)"""
-
-# True when every rendered function exists and carries the stamp of the
-# published manifest. A missing function has no comment, so it fails too.
-READERS_STAMPED_SQL: Final = f"""NOT EXISTS (
-    SELECT 1
-    FROM unnest({_SIGNATURE_ARRAY}) AS reader(signature)
-    WHERE obj_description(to_regprocedure(reader.signature), 'pg_proc')
-        IS DISTINCT FROM {MANIFEST_STAMP_SQL}
-)"""
-
-# Writes the stamp of the published manifest on every rendered function.
-# Run it after the manifest table is rewritten, in the same transaction.
-_STAMP_RENDERED_READERS_DDL: Final = f"""
-DO $stamp$
-DECLARE
-    manifest_stamp text := {MANIFEST_STAMP_SQL};
-    signature text;
-BEGIN
-    FOREACH signature IN ARRAY {_SIGNATURE_ARRAY} LOOP
-        EXECUTE format(
-            'COMMENT ON FUNCTION %s IS %L', signature, manifest_stamp
-        );
-    END LOOP;
-END
-$stamp$
-"""
+def _leaf_names(value: object) -> tuple[str, ...]:
+    """The absent-leaf column (text[], in name order) as a tuple; anything else raises."""
+    if not isinstance(value, list):
+        raise HistoryContractError(
+            f'reader publication returned absent leaves {value!r}, not a text array'
+        )
+    names: list[str] = []
+    for name in cast(list[object], value):
+        match name:
+            case str():
+                names.append(name)
+            case _:
+                raise HistoryContractError(
+                    f'reader publication returned absent leaf {name!r}, not a text value'
+                )
+    return tuple(names)
 
 
 class StagedLoaderPublisher:
-    """Implements the partition manager's `LoaderPublication` protocol."""
+    """Implements the partition manager's ``LoaderPublication`` protocol."""
 
-    async def republish(
-        self, connection: AsyncConnection
-    ) -> LoaderRepublished:
-        """Regenerate function and manifest from the full attached set.
+    async def republish(self, connection: AsyncConnection) -> LoaderRepublished:
+        """Publish the readers for the attached history leaves: one statement.
 
-        Leaves the manager still believes attached whose relation no
-        longer exists are excluded from the probe list and returned, so
-        the regeneration is self-correcting: republishing over a wound
-        heals it in one pass instead of rebuilding the same broken
-        function.
+        Leaves the catalog records as attached whose relation no longer exists
+        are left out of the readers and returned. A database error propagates
+        and aborts the caller's transaction: 25000 when the transaction is not
+        READ COMMITTED, 42P01 when no attached leaf resolves its parent. A row
+        with an unknown outcome or without an absent-leaf list raises
+        ``HistoryContractError``.
         """
-        selection = await read_manifest_leaf_rows(connection)
-        manifest = manifest_from_catalog(
-            selection.attached,
-            absent_relations=selection.absent_relations,
-        )
-        await connection.execute(text(render_staged_lookup_function(manifest)))
-        # PostgreSQL overloads by signature: the provenance function's
-        # include-live parameter changed its signature, and CREATE OR
-        # REPLACE would leave a stale single-parameter overload callable
-        # forever. Dropping the superseded signature is idempotent.
-        await connection.execute(
-            text(
-                'DROP FUNCTION IF EXISTS '
-                'horsies_task_provenance_staged(uuid)'
+        row = (await connection.execute(_PUBLISH_READERS_SQL)).one()
+        if row.outcome not in PUBLICATION_OUTCOMES:
+            raise HistoryContractError(
+                f'reader publication returned unknown outcome {row.outcome!r}'
             )
-        )
-        await connection.execute(
-            text(render_staged_provenance_function(manifest))
-        )
-        await connection.execute(
-            text(render_staged_detail_function(manifest))
-        )
-        await connection.execute(
-            text(render_staged_result_function(manifest))
-        )
-        await connection.execute(
-            text(render_staged_duplicate_guard_function(manifest))
-        )
-        await _rewrite_manifest_table(connection, manifest)
-        await connection.execute(text(_STAMP_RENDERED_READERS_DDL))
-        return LoaderRepublished(
-            absent_leaves=tuple(sorted(selection.absent_relations))
-        )
+        return LoaderRepublished(absent_leaves=_leaf_names(row.absent_leaves))
 
     async def is_current(self, connection: AsyncConnection) -> bool:
-        """Whether the published readers already match the catalog.
-
-        The same two checks the coverage pass uses: the published manifest
-        equals the attached history leaves and their probe bounds, and
-        every rendered function carries the stamp of that manifest.
-        """
-        return (
-            await published_manifest_matches_catalog(connection)
-            and await published_readers_stamped(connection)
-        )
+        """Whether the published readers serve the current catalog
+        (``horsies_history_readers_current``)."""
+        current = (await connection.execute(_READERS_CURRENT_SQL)).scalar_one()
+        if not isinstance(current, bool):
+            raise HistoryContractError(
+                f'reader freshness check returned {current!r}, not a boolean'
+            )
+        return current
 
     async def references_leaf(
         self,
         connection: AsyncConnection,
         leaf_name: str,
     ) -> bool:
-        """Whether the published function still probes `leaf_name`."""
+        """Whether the published manifest still names ``leaf_name``."""
         referenced = (
-            await connection.execute(
-                text(
-                    f"""
-                    SELECT EXISTS (
-                        SELECT 1 FROM {TASK_LOOKUP_MANIFEST}
-                        WHERE leaf_name = :leaf_name
-                    )
-                    """
-                ),
-                {'leaf_name': leaf_name},
+            await connection.execute(_REFERENCES_LEAF_SQL, {'leaf_name': leaf_name})
+        ).scalar_one()
+        if not isinstance(referenced, bool):
+            raise HistoryContractError(
+                f'manifest lookup of {leaf_name} returned {referenced!r}, not a boolean'
             )
-        ).scalar_one()
-        return bool(referenced)
-
-
-async def published_readers_stamped(connection: AsyncConnection) -> bool:
-    """Whether every rendered function carries the stamp of the published
-    manifest.
-
-    False when a function is missing, when it is the first version that
-    the schema installs, or when a publisher that does not render it
-    rewrote the manifest after the last full publication.
-    """
-    return bool(
-        (
-            await connection.execute(text(f'SELECT {READERS_STAMPED_SQL}'))
-        ).scalar_one()
-    )
+        return referenced
 
 
 async def published_manifest_absent_leaves(
     connection: AsyncConnection,
 ) -> tuple[str, ...]:
-    """Published probe entries whose relation no longer resolves.
+    """Published manifest entries whose relation no longer resolves, in name order.
 
-    The divergence trigger for maintenance. Republication is otherwise
-    driven by leaf creation, and a leaf vanishing creates nothing — so
-    without this probe the broken function stays published until some
-    unrelated change forces a regeneration.
-
-    One statement, and empty on a healthy fleet. It answers a different
-    question from `republish`'s own return: this names what the CURRENTLY
-    PUBLISHED function probes and cannot reach, which includes leaves the
-    catalog has since stamped dropped; that names catalog rows still
-    called attached whose relation is gone, which is the operator-visible
-    anomaly.
+    It names what the published readers probe and cannot reach, which
+    includes leaves the catalog has since recorded as dropped. Empty on a
+    healthy database.
     """
     rows = (
         await connection.execute(
@@ -256,116 +122,3 @@ async def published_manifest_absent_leaves(
         )
     ).all()
     return tuple(str(row.leaf_name) for row in rows)
-
-
-async def published_manifest_matches_catalog(
-    connection: AsyncConnection,
-) -> bool:
-    """Whether every published leaf and its probe metadata are current."""
-    matches = (
-        await connection.execute(
-            text(
-                f"""
-                WITH expected AS (
-                    SELECT
-                        leaf_name,
-                        row_number() OVER (
-                            ORDER BY lower_anchor NULLS FIRST, leaf_name
-                        ) - 1 AS probe_position,
-                        lower_bound_kind,
-                        lower_anchor,
-                        upper_anchor
-                    FROM {LEAF_CATALOG}
-                    WHERE detached_at IS NULL
-                      AND dropped_at IS NULL
-                      AND class_key <> :heartbeat_class
-                      AND to_regclass(leaf_name) IS NOT NULL
-                ),
-                difference AS (
-                    (
-                        SELECT leaf_name, probe_position,
-                               lower_bound_kind, lower_anchor, upper_anchor
-                        FROM expected
-                        EXCEPT
-                        SELECT leaf_name, probe_position::bigint,
-                               lower_bound_kind, lower_anchor, upper_anchor
-                        FROM {TASK_LOOKUP_MANIFEST}
-                    )
-                    UNION ALL
-                    (
-                        SELECT leaf_name, probe_position::bigint,
-                               lower_bound_kind, lower_anchor, upper_anchor
-                        FROM {TASK_LOOKUP_MANIFEST}
-                        EXCEPT
-                        SELECT leaf_name, probe_position,
-                               lower_bound_kind, lower_anchor, upper_anchor
-                        FROM expected
-                    )
-                )
-                SELECT NOT EXISTS (SELECT 1 FROM difference)
-                """
-            ),
-            {'heartbeat_class': HEARTBEAT_CLASS_KEY},
-        )
-    ).scalar_one()
-    return bool(matches)
-
-
-def _lower_bound_kind(bound: LowerBound) -> str:
-    match bound:
-        case OpenLowerBound():
-            return 'OPEN'
-        case AnchoredLowerBound():
-            return 'AT'
-
-
-def _lower_anchor(bound: LowerBound) -> datetime | None:
-    """The stored anchor of a bound: none for an open bound (the pair CHECK)."""
-    match bound:
-        case OpenLowerBound():
-            return None
-        case AnchoredLowerBound(anchor=anchor):
-            return anchor
-
-
-async def _rewrite_manifest_table(
-    connection: AsyncConnection,
-    manifest: LookupManifest,
-) -> None:
-    # One DELETE and one array INSERT: every row of a publication shares
-    # one statement timestamp, and the probe position is the array index.
-    await connection.execute(text(f'DELETE FROM {TASK_LOOKUP_MANIFEST}'))
-    if not manifest.leaves:
-        return
-    await connection.execute(
-        text(
-            f"""
-            INSERT INTO {TASK_LOOKUP_MANIFEST} (
-                leaf_name, probe_position,
-                lower_bound_kind, lower_anchor, upper_anchor,
-                published_at
-            )
-            SELECT leaf.leaf_name, leaf.position - 1,
-                   leaf.lower_bound_kind, leaf.lower_anchor, leaf.upper_anchor,
-                   statement_timestamp()
-            FROM unnest(
-                CAST(:leaf_names AS text[]),
-                CAST(:lower_bound_kinds AS text[]),
-                CAST(:lower_anchors AS timestamptz[]),
-                CAST(:upper_anchors AS timestamptz[])
-            ) WITH ORDINALITY
-                AS leaf(leaf_name, lower_bound_kind, lower_anchor, upper_anchor,
-                        position)
-            """
-        ),
-        {
-            'leaf_names': [leaf.relation_name for leaf in manifest.leaves],
-            'lower_bound_kinds': [
-                _lower_bound_kind(leaf.lower_bound) for leaf in manifest.leaves
-            ],
-            'lower_anchors': [
-                _lower_anchor(leaf.lower_bound) for leaf in manifest.leaves
-            ],
-            'upper_anchors': [leaf.upper_anchor for leaf in manifest.leaves],
-        },
-    )

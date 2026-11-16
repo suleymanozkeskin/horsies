@@ -1,11 +1,8 @@
-"""M10 read primitives: skeleton pins, column discipline, validations.
+"""History read primitives: column discipline and validations.
 
-The detail function must render from the same staged skeleton as the
-identity/provenance pair — same v7 discriminator, same birth-floor
-prune, same probe order — and the listing surfaces must never carry an
-envelope column. Every exclusion pin proves its presence half first:
-the excluded name is shown to exist in the frozen DDL, so an exclusion
-assertion can actually fail.
+The listing surfaces must never carry an envelope column. Every exclusion
+pin proves its presence half first: the excluded name is shown to exist in
+the frozen DDL, so an exclusion assertion can actually fail.
 """
 
 from __future__ import annotations
@@ -14,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from horsies.core.history.commands import AnchoredLowerBound
 from horsies.core.history.ddl.conditional import (
     GatedFragment,
     gated_fragment,
@@ -23,12 +19,6 @@ from horsies.core.history.ddl.tables import TASK_HISTORY_PARENT_DDL
 from horsies.core.history.reads.aggregates import (
     HistoryStatusAggregate,
     history_status_aggregate_statement,
-)
-from horsies.core.history.reads.lookup_generation import (
-    LookupLeaf,
-    LookupManifest,
-    render_staged_detail_function,
-    render_staged_lookup_function,
 )
 from horsies.core.history.reads.pages import (
     HISTORY_SUMMARY_COLUMNS,
@@ -49,15 +39,6 @@ UTC = timezone.utc
 LOWER = datetime(2026, 8, 1, tzinfo=UTC)
 
 
-def make_manifest() -> LookupManifest:
-    leaf = LookupLeaf(
-        relation_name='horsies_task_history_x_2026_08_01',
-        lower_bound=AnchoredLowerBound(LOWER),
-        upper_anchor=LOWER + timedelta(days=1),
-    )
-    return LookupManifest(leaves=(leaf,))
-
-
 def make_window() -> HistoryWindow:
     return HistoryWindow(lower=LOWER, upper=LOWER + timedelta(days=1))
 
@@ -67,41 +48,6 @@ ENVELOPE_COLUMNS = (
     'attempt_snapshot',
     'rerun_input_inline',
 )
-
-
-class TestDetailRendersFromTheSharedSkeleton:
-    def test_same_v7_discriminator_and_birth_prune(self) -> None:
-        manifest = make_manifest()
-        detail = render_staged_detail_function(manifest)
-        identity = render_staged_lookup_function(manifest)
-        for skeleton_fragment in (
-            '(get_byte(v_uuid_bytes, 6) >> 4) = 7',
-            '(get_byte(v_uuid_bytes, 8) & 192) = 128',
-            "v_birth_at - INTERVAL '5 seconds'",
-            'IF v_effective_birth <',
-        ):
-            assert skeleton_fragment in identity
-            assert skeleton_fragment in detail
-
-    def test_probe_order_live_then_cataloged_leaf(self) -> None:
-        detail = render_staged_detail_function(make_manifest())
-        live = detail.index('FROM horsies_tasks WHERE id = p_task_id')
-        finite = detail.index('horsies_task_history_x_2026_08_01')
-        assert live < finite
-        assert 'FROM horsies_task_history_forever' not in detail
-
-    def test_history_hit_returns_the_whole_row(self) -> None:
-        detail = render_staged_detail_function(make_manifest())
-        assert 'v_row horsies_task_history%ROWTYPE;' in detail
-        assert "RETURN QUERY SELECT 'HISTORY'::text, v_row;" in detail
-
-    def test_live_hit_signals_location_without_a_projection(self) -> None:
-        detail = render_staged_detail_function(make_manifest())
-        assert "'LIVE'::text, NULL::horsies_task_history" in detail
-
-    def test_absence_returns_no_rows(self) -> None:
-        detail = render_staged_detail_function(make_manifest())
-        assert 'ROW(FALSE' not in detail
 
 
 class TestColumnDiscipline:

@@ -2,16 +2,14 @@
 --
 -- Each function is the one statement of a history maintenance operation in the core design: the coverage probe,
 -- retention class registration, the creation of one history leaf or one heartbeat leaf, the reader publication,
--- and the miss classification of a terminal write. No client calls them yet. Each function names the Python code it
--- replaces (paths at the 0.7.0 tag, under horsies/core/).
+-- and the miss classification of a terminal write. Each function names the Python code it replaces (paths at the
+-- 0.7.0 tag, under horsies/core/).
 --
 -- The published readers. horsies_publish_history_readers renders four functions from the leaf catalog:
 -- horsies_task_history_duplicate_staged(uuid), horsies_task_provenance_staged(uuid), horsies_task_detail_staged(uuid)
--- and horsies_task_result_staged(uuid). Until the callers switch, the Python publisher renders the readers instead,
--- with the two-argument provenance reader horsies_task_provenance_staged(uuid, boolean) and the composite type
--- horsies_task_provenance of 0003_interim_functions.sql, which the interim functions call. The rendered provenance
--- reader here is a one-argument overload with plain columns. The miss classifier horsies_terminalization_miss gains
--- an overload that takes the kind; the array overload of 0003 stays until its callers switch.
+-- and horsies_task_result_staged(uuid). It is the one renderer: the Python client publishes through it, and the
+-- terminal writes of 0003_interim_functions.sql pass their kind to horsies_terminalization_miss, which reads
+-- history through the provenance reader.
 --
 -- Results are plain rows of built-in types. Closed sets of values are text columns; each function lists its values.
 -- Leaf names and bounds are UTC in any session time zone.
@@ -1143,8 +1141,7 @@ $$;
 -- Replaces: history/terminalization/outcome.py:43-114 (MISS_CLASSIFIER_DDL). Changes from it: the caller passes its
 -- kind and this function owns the equivalence classes, instead of each caller writing the class as an array
 -- literal; the provenance reader takes no include_live argument and has no live probe, so the LIVE-after-miss
--- refusal has nothing to check. The array overload horsies_terminalization_miss(uuid, text[], text, timestamptz)
--- of 0003_interim_functions.sql stays until its callers switch.
+-- refusal has nothing to check.
 CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
