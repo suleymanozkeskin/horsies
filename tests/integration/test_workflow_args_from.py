@@ -67,7 +67,6 @@ class TestArgsFromInjection:
                 text("""
                     UPDATE horsies_tasks
                     SET status = 'CLAIMED',
-                        claimed = TRUE,
                         claimed_at = NOW(),
                         claimed_by_worker_id = :worker_id,
                         claim_expires_at = NULL
