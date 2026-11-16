@@ -62,17 +62,14 @@ async def test_waiting_migrator_does_not_block_a_concurrent_index_build(
     broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
     waiter_broker = PostgresBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
-    first_key = (
-        *waiter_broker._legacy_schema_advisory_keys(),
-        waiter_broker._schema_advisory_key(),
-    )[0]
+    first_key = waiter_broker._schema_advisory_key()
     psycopg_url = to_psycopg_url(DB_URL)
     holder = await psycopg.AsyncConnection.connect(psycopg_url, autocommit=True)
     builder = await psycopg.AsyncConnection.connect(psycopg_url, autocommit=True)
     observer = await psycopg.AsyncConnection.connect(psycopg_url, autocommit=True)
 
     async def _hold_schema_lock_briefly() -> None:
-        async with waiter_broker._schema_session_lock():
+        async with waiter_broker._schema_session_lock() as _connection:
             pass
 
     waiter: asyncio.Task[None] | None = None

@@ -14,12 +14,22 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env.test')
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register custom markers."""
+    """Register custom markers, and create the session database when needed.
+
+    A run that names an integration or e2e path gets a fresh database before
+    any test module is imported, because the e2e task modules read the
+    database URL at import (tests/session_database.py). A unit run opens no
+    connection.
+    """
     config.addinivalue_line('markers', 'unit: Unit tests (no database)')
     config.addinivalue_line(
         'markers', 'integration: Integration tests (requires database)'
     )
     config.addinivalue_line('markers', 'slow: Long-running tests')
+    from tests.session_database import selects_database_suites, suite_database_url
+
+    if selects_database_suites(config.args, config.invocation_params.dir):
+        _ = suite_database_url()
 
 
 class _LibraryRefusals(logging.Handler):
