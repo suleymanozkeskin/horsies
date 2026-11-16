@@ -290,43 +290,6 @@ READ_IN_FLIGHT_ATTEMPT_SQL = text("""
       AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
 """)
 
-SCHEDULE_STALE_TASK_RETRY_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'PENDING',
-        retry_count = :retry_count,
-        next_retry_at = :next_retry_at,
-        enqueued_at = :next_retry_at,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = now()
-    WHERE t.id = :id
-      AND t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
-      )
-      AND COALESCE(
-          (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id AND h.role = 'runner'
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ),
-          t.started_at
-      ) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-      AND (t.good_until IS NULL OR :next_retry_at < t.good_until)
-    RETURNING t.id
-""")
-
 NOTIFY_DELAYED_SQL = text("""
     SELECT pg_notify(:channel, :payload)
 """)
@@ -458,32 +421,7 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
     WHERE id IN (SELECT id FROM budgeted)
 """)
 
-UPSERT_TASK_ATTEMPT_SQL = text("""
-    INSERT INTO horsies_task_attempts (
-        task_id, attempt, outcome, will_retry,
-        started_at, finished_at,
-        error_code, error_message, failed_reason,
-        worker_id, worker_hostname, worker_pid, worker_process_name
-    )
-    VALUES (
-        :task_id, :attempt, :outcome, :will_retry,
-        :started_at, :finished_at,
-        :error_code, :error_message, :failed_reason,
-        :worker_id, :worker_hostname, :worker_pid, :worker_process_name
-    )
-    ON CONFLICT (task_id, attempt) DO UPDATE SET
-        outcome = EXCLUDED.outcome,
-        will_retry = EXCLUDED.will_retry,
-        started_at = EXCLUDED.started_at,
-        finished_at = EXCLUDED.finished_at,
-        error_code = EXCLUDED.error_code,
-        error_message = EXCLUDED.error_message,
-        failed_reason = EXCLUDED.failed_reason,
-        worker_id = EXCLUDED.worker_id,
-        worker_hostname = EXCLUDED.worker_hostname,
-        worker_pid = EXCLUDED.worker_pid,
-        worker_process_name = EXCLUDED.worker_process_name
-""")
+
 
 # Sweep cadence and batch size live on RecoveryConfig
 # (retention_sweep_interval_s, retention_delete_batch_size).
