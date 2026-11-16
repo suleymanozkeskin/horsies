@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_startup_coverage_in_pool, DeclaredRetentionClass, StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, StartupCoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::task::TaskRegistry;
@@ -24,6 +24,9 @@ use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::recovery::{new_reaper_health, spawn_reaper};
+use crate::worker::runner_beats::{
+    launch_runner_beats, runner_beat_pool, BeatSender, LiveDispatches, StaleRunningRecovery,
+};
 
 /// Decode a liveness ping and reply when it is a broadcast or addressed to
 /// this worker.
@@ -106,6 +109,19 @@ fn claim_lease(app_config: &AppConfig) -> std::num::NonZeroU32 {
         Some(lease) => lease,
         None => unreachable!("claim_lease_ms of 0 is refused when the config is loaded"),
     }
+}
+
+/// Bound of one attempt of the database start steps (Python
+/// `_start_with_resilience_config`: `asyncio.wait_for(self.start(), 30.0)`).
+const START_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How the worker start ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    /// The database steps completed; the worker goes on to listen and claim.
+    Started,
+    /// A stop was requested while a retry waited; the worker does not start.
+    StopRequested,
 }
 
 fn compute_ordered_queues(
@@ -242,6 +258,9 @@ pub struct Worker {
     /// The buffered-dispatch probe skips these so a task still in its
     /// CLAIMED→RUNNING window is not re-fetched and re-dispatched next pass (P7).
     in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
+    /// Dispatches whose rows the runner-beat writer beats, with their claim
+    /// generations.
+    live_dispatches: LiveDispatches,
 }
 
 impl Worker {
@@ -272,6 +291,7 @@ impl Worker {
             cancel: CancellationToken::new(),
             hostname,
             in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            live_dispatches: LiveDispatches::default(),
         })
     }
 
@@ -306,27 +326,17 @@ impl Worker {
         self.run().await
     }
 
-    /// Run the worker until cancelled or a fatal error occurs.
-    pub async fn run(&self) -> Result<(), WorkerError> {
-        // Fleet authorization and partition coverage precede every runtime
-        // surface: no LISTEN, heartbeat, or claim may race an incomplete
-        // cutover or a missing current-hour heartbeat leaf.
+    /// Authorize the schema and ensure the partition coverage of the
+    /// current period: the database steps of the worker start. It does not
+    /// retry.
+    async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
-        let declared_classes: Vec<DeclaredRetentionClass> = self
-            .app_config
-            .retention
-            .registrable_classes()
-            .into_iter()
-            .map(|class| DeclaredRetentionClass {
-                class_key: class.key,
-                duration: class.duration,
-            })
-            .collect();
+        let declared_periods = self.app_config.retention.registrable_periods();
         let startup_coverage = ensure_startup_coverage_in_pool(
             self.broker.session_pool(),
             self.app_config.retention.history_leaf_horizon_days,
             self.app_config.retention.heartbeat_leaf_horizon_hours,
-            &declared_classes,
+            &declared_periods,
             &StagedLoaderPublisher,
         )
         .await?;
@@ -339,6 +349,59 @@ impl Worker {
                     "task-history startup coverage refused: {outcome:?}"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// Run [`Worker::start_database`] with each attempt bounded at
+    /// [`START_ATTEMPT_TIMEOUT`]. A timed-out attempt and a retryable error
+    /// are retried with the resilience backoff; a refusal, or a retryable
+    /// error after the retry budget, is returned. A stop request during a
+    /// backoff wait ends the start without an error.
+    async fn start_database_with_resilience(&self) -> Result<StartOutcome, WorkerError> {
+        let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
+        loop {
+            let error =
+                match tokio::time::timeout(START_ATTEMPT_TIMEOUT, self.start_database()).await {
+                    Ok(Ok(())) => return Ok(StartOutcome::Started),
+                    Ok(Err(error)) if !error.is_retryable() => return Err(error),
+                    Ok(Err(error)) => error,
+                    Err(_elapsed) => WorkerError::StartTimedOut {
+                        bound: START_ATTEMPT_TIMEOUT,
+                    },
+                };
+            if !backoff.can_retry() {
+                tracing::error!(
+                    %error,
+                    attempts = backoff.attempts(),
+                    "worker start failed and its retries are exhausted",
+                );
+                return Err(error);
+            }
+            let delay = backoff.next_delay_seconds();
+            tracing::error!(
+                %error,
+                attempt = backoff.attempts(),
+                delay_s = format!("{:.1}", delay),
+                "worker start failed; retrying",
+            );
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Ok(StartOutcome::StopRequested),
+                _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+            }
+        }
+    }
+
+    /// Run the worker until cancelled or a fatal error occurs.
+    pub async fn run(&self) -> Result<(), WorkerError> {
+        // Fleet authorization and partition coverage precede every runtime
+        // surface: no LISTEN, heartbeat, or claim may race an incomplete
+        // install or a missing current-hour heartbeat leaf. A transient
+        // failure or a slow attempt is retried with backoff (Python
+        // `_start_with_resilience_config`).
+        match self.start_database_with_resilience().await? {
+            StartOutcome::Started => {}
+            StartOutcome::StopRequested => return Ok(()),
         }
 
         // Print the startup banner before any log lines.
@@ -463,6 +526,29 @@ impl Worker {
             self.cancel.clone(),
         );
 
+        // Runner heartbeats: one fenced statement per interval for every held
+        // dispatch, on its own connection, and a fail-closed watchdog thread
+        // (exit 77). They run until the in-flight dispatches have drained, so
+        // they have their own token, cancelled after `shutdown`.
+        let beats_cancel = CancellationToken::new();
+        let (runner_beat_watch, runner_beats) = launch_runner_beats(
+            runner_beat_pool(self.broker.pool()),
+            BeatSender {
+                worker_id: self.worker_id.clone(),
+                hostname: self.hostname.clone(),
+                pid: std::process::id() as i32,
+            },
+            Duration::from_millis(self.app_config.recovery.runner_heartbeat_interval_ms),
+            StaleRunningRecovery::from_config(&self.app_config.recovery),
+            self.live_dispatches.clone(),
+            beats_cancel.clone(),
+        )
+        .map_err(|error| {
+            WorkerError::Config(format!(
+                "the runner heartbeat watchdog thread did not start: {error}"
+            ))
+        })?;
+
         // Supervise the service loops (C11-inverse): a loop that dies without
         // a shutdown request — panic or unexpected return; DB errors are
         // handled inside each loop — must not leave the worker claiming with
@@ -474,8 +560,9 @@ impl Worker {
         // the closed channel.
         let (fatal_tx, mut fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let services: [(&'static str, tokio::task::JoinHandle<()>); 3] = [
+        let services: [(&'static str, tokio::task::JoinHandle<()>); 4] = [
             ("claimer-heartbeat", claimer_hb),
+            ("runner-heartbeat", runner_beats),
             ("reaper", reaper),
             ("worker-state", state_loop),
         ];
@@ -591,6 +678,16 @@ impl Worker {
 
         // Graceful shutdown: wait for in-flight tasks.
         self.shutdown().await;
+
+        // No dispatch is held any more: stop the runner beats and their
+        // watchdog.
+        beats_cancel.cancel();
+        if tokio::task::spawn_blocking(move || runner_beat_watch.stop())
+            .await
+            .is_err()
+        {
+            tracing::error!("stopping the runner heartbeat watchdog failed");
+        }
 
         // A fatal claim error broke the loop; surface it so the process exits
         // non-zero for a supervisor restart. In-flight tasks were still
@@ -1033,6 +1130,10 @@ impl Worker {
             .expect("in_dispatch poisoned")
             .insert(task_id);
         let in_dispatch = Arc::clone(&self.in_dispatch);
+        // The runner-beat writer beats this row from here until its outcome
+        // is written; its fence lands a beat only while the row is RUNNING
+        // at this claim generation and has no finalizing marker.
+        let held_dispatch = self.live_dispatches.hold(task_id, row.claimed_at);
 
         self.tracker.spawn(async move {
             let phase2_work = execution::execute_and_finalize(
@@ -1045,6 +1146,9 @@ impl Worker {
                 payload_policy,
             )
             .await;
+
+            // The outcome is written: no more runner beats for this row.
+            drop(held_dispatch);
 
             // Release permit immediately after Phase 1 completes,
             // before potentially slow Phase 2 workflow callbacks.
@@ -1506,13 +1610,19 @@ mod tests {
             .find("pub async fn run(&self)")
             .expect("Worker::run source")
             .to_owned()..];
-        let schema = run
+        let start = run
+            .find("self.start_database_with_resilience().await")
+            .expect("database start with retry");
+        let database = &source[source
+            .find("async fn start_database(&self)")
+            .expect("database start steps")..];
+        let schema = database
             .find("ensure_schema_initialized().await")
             .expect("schema authorization");
-        let coverage = run
+        let coverage = database
             .find("ensure_startup_coverage_in_pool(")
             .expect("startup partition coverage");
-        let session_pool = run[coverage..]
+        let session_pool = database[coverage..]
             .find("self.broker.session_pool()")
             .map(|offset| coverage + offset)
             .expect("startup coverage session pool");
@@ -1530,11 +1640,22 @@ mod tests {
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
         assert!(schema < coverage);
         assert!(coverage < session_pool);
-        assert!(session_pool < banner);
-        assert!(coverage < banner);
-        assert!(coverage < listener);
-        assert!(coverage < heartbeats);
-        assert!(coverage < claims);
+        assert!(start < banner);
+        assert!(start < listener);
+        assert!(start < heartbeats);
+        assert!(start < claims);
+    }
+
+    /// A start attempt that does not finish in time is retryable, as in
+    /// Python, where `asyncio.TimeoutError` takes the retry path.
+    #[test]
+    fn a_timed_out_start_attempt_is_retryable() {
+        let error = WorkerError::StartTimedOut {
+            bound: START_ATTEMPT_TIMEOUT,
+        };
+        assert!(error.is_retryable());
+        assert_eq!(START_ATTEMPT_TIMEOUT, Duration::from_secs(30));
+        assert!(!WorkerError::Config("coverage refused".to_owned()).is_retryable());
     }
 
     /// Python `test_worker_helpers.py::test_hard_cap_returns_default_lease`:

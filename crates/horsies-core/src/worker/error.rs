@@ -28,6 +28,11 @@ pub enum WorkerError {
         service: &'static str,
         reason: String,
     },
+
+    /// One attempt of the worker's database start steps did not finish
+    /// within `bound`. Retryable: the start runs again after a backoff.
+    #[error("worker start attempt did not finish within {bound:?}")]
+    StartTimedOut { bound: std::time::Duration },
 }
 
 impl WorkerError {
@@ -42,6 +47,7 @@ impl WorkerError {
             Self::History(_) => false,
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
+            Self::StartTimedOut { .. } => true,
         }
     }
 }

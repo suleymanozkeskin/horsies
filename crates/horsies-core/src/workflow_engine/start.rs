@@ -1364,7 +1364,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row.0 == slow_id.to_string()));
         for row in rows {
-            assert_eq!(row.1, "q_bulk_7d");
+            assert_eq!(row.1, "standard_7d");
             assert_eq!(row.2, "NEVER_ELIGIBLE");
             assert_eq!(row.3, 32);
             assert_eq!(row.4, 32);

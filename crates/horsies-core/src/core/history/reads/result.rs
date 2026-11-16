@@ -3,6 +3,7 @@
 use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::TASK_RESULT_FUNCTION;
 
@@ -34,7 +35,9 @@ pub struct HistoryTaskResult {
     pub status: String,
     pub failed_reason: Option<String>,
     pub envelope_version: i16,
+    /// Implied by `envelope_version`: the baseline stores the version only.
     pub codec: String,
+    /// Implied by `envelope_version`.
     pub content_type: String,
     pub payload: HistoryResultPayload,
 }
@@ -55,8 +58,6 @@ pub struct ResultWireRow {
     pub live_result: Option<String>,
     pub failed_reason: Option<String>,
     pub result_envelope_version: Option<i16>,
-    pub result_codec: Option<String>,
-    pub result_content_type: Option<String>,
     pub result_payload: Option<Vec<u8>>,
     pub result_digest: Option<Vec<u8>>,
 }
@@ -74,8 +75,7 @@ pub async fn read_task_result(
 ) -> Result<TaskResultRead, HistoryError> {
     let sql = format!(
         "SELECT location, status, live_result, failed_reason,
-                result_envelope_version, result_codec, result_content_type,
-                result_payload, result_digest
+                result_envelope_version, result_payload, result_digest
          FROM {TASK_RESULT_FUNCTION}($1)"
     );
     let fetched = sqlx::query_as::<_, ResultWireRow>(&sql)
@@ -113,8 +113,9 @@ pub fn decode_result_row(
                 "result_envelope_version",
                 task_id,
             )?,
-            codec: required(row.result_codec, "result_codec", task_id)?,
-            content_type: required(row.result_content_type, "result_content_type", task_id)?,
+            // Version 1 implies these; the decode refuses any other version.
+            codec: JSON_UTF8_CODEC.to_owned(),
+            content_type: JSON_CONTENT_TYPE.to_owned(),
             payload: decode_payload(row.result_payload, row.result_digest, task_id)?,
         })),
         other => Err(HistoryError::contract(format!(
