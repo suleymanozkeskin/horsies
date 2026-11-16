@@ -28,6 +28,9 @@ use crate::core::{
     EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
 };
 
+use crate::broker::core_rows::{
+    expired_task_row, one_row, read_rows, stale_task_row, worker_state_snapshot, RowDecodeError,
+};
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
@@ -47,6 +50,12 @@ use crate::broker::task_lists::{
     BoundedTaskList, StaleMinutes, TASK_LIST_BOUND, TASK_LIST_READ_LIMIT,
 };
 use crate::broker::wait_limit::WaitLimit;
+
+use crate::broker::pools::{BrokerPools, PoolProfile};
+use crate::db::{
+    BoundStatement, CheckoutClass, ParameterType, Row, StatementBound, StatementFailure,
+    TypedStatement,
+};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -562,14 +571,50 @@ WHERE status = 'PENDING'
 ORDER BY good_until, id
 LIMIT $1";
 
+static GET_STALE_TASKS: TypedStatement = TypedStatement::new(
+    "get_stale_tasks",
+    GET_STALE_TASKS_SQL,
+    &[ParameterType::Int4, ParameterType::Int8],
+);
+
+static LIST_WORKER_STATES: TypedStatement =
+    TypedStatement::new("list_worker_states", LIST_WORKER_STATES_SQL, &[]);
+
+static GET_WORKER_STATE_LATEST: TypedStatement = TypedStatement::new(
+    "get_worker_state_latest",
+    GET_WORKER_STATE_LATEST_SQL,
+    &[ParameterType::Text],
+);
+
+static GET_WORKER_STATE_HISTORY: TypedStatement = TypedStatement::new(
+    "get_worker_state_history",
+    GET_WORKER_STATE_HISTORY_SQL,
+    &[ParameterType::Text, ParameterType::Int8],
+);
+
+static GET_EXPIRED_TASKS: TypedStatement = TypedStatement::new(
+    "get_expired_tasks",
+    GET_EXPIRED_TASKS_SQL,
+    &[ParameterType::Int8],
+);
+
+/// The worker ping broadcast: `$1` the ping channel, `$2` the request JSON.
+static NOTIFY_WORKER_PING: TypedStatement = TypedStatement::new(
+    "notify_worker_ping",
+    "SELECT pg_notify($1, $2)",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
+
+static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH_CHECK_SQL, &[]);
 
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
 /// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
 /// again within this time, and a new connection, are used with no ping.
-pub(crate) const PRE_PING_AFTER_IDLE: Duration = Duration::from_secs(1);
+pub(crate) const PRE_PING_AFTER_IDLE: Duration = crate::db::DEFAULT_IDLE_PING_AFTER;
 
 /// Connect options for every broker pool, including the runtime pool in
 /// PgBouncer transaction mode.
@@ -597,12 +642,10 @@ fn pg_connect_options(database_url: &str, echo: bool) -> Result<PgConnectOptions
     Ok(connect_options)
 }
 
-/// Session setting for every Horsies connection that keeps its session. The
-/// Horsies statements are short; PostgreSQL's JIT compiles them when a cost
-/// estimate passes `jit_above_cost`, and the compile time then exceeds the
-/// run time by orders of magnitude (the partition coverage probe: about 2 ms
-/// of work, 0.7 s or more of JIT compile).
-const DISABLE_JIT_SQL: &str = "SET jit = off";
+/// Session setting for every Horsies connection that keeps its session: the
+/// statement layer's rule ([`crate::db::KEPT_SESSION_SETUP_SQL`]), so the
+/// sqlx pools and the core pools set the same session.
+const DISABLE_JIT_SQL: &str = crate::db::KEPT_SESSION_SETUP_SQL;
 
 /// Whether a pool's connections keep their own session settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -756,10 +799,37 @@ pub enum SchemaInitializationMode {
     ObserveOnly,
 }
 
+/// Whether the broker logs each core statement it runs
+/// (`PostgresConfig::echo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementLog {
+    Off,
+    /// Statement name and SQL text at debug level, target `horsies.sql`.
+    Debug,
+}
+
+impl StatementLog {
+    fn from_echo(echo: bool) -> Self {
+        match echo {
+            true => Self::Debug,
+            false => Self::Off,
+        }
+    }
+}
+
 /// PostgreSQL-backed task broker.
 ///
-/// All operations are async and use connection pooling via `sqlx::PgPool`.
+/// Two sets of pools on the same URLs:
+/// - `core`: the statement layer's pools ([`crate::db::CorePool`], one per
+///   role). The broker's own moved call sites run on them.
+/// - `pool` and `session_pool`: sqlx pools. They are the adapter for the
+///   call sites that have not moved to the statement layer yet: the broker's
+///   lifecycle statements, the worker, the workflow engine, the scheduler,
+///   the web layer, migrations and the listeners, which borrow them through
+///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`].
 pub struct PostgresBroker {
+    core: BrokerPools,
+    statement_log: StatementLog,
     pool: PgPool,
     session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
@@ -779,10 +849,10 @@ pub struct PostgresBroker {
 }
 
 impl PostgresBroker {
-    /// Construct a broker from an existing pool.
-    ///
-    /// Useful for tests and for applications that already manage their own
-    /// `PgPool` lifecycle.
+    /// Construct a test broker on the database of a test's sqlx pool. The
+    /// sqlx pool is the adapter pool; the core pools connect to the same
+    /// database ([`crate::broker::pools::pools_for_test_pool`]).
+    #[cfg(test)]
     pub fn from_pool(pool: PgPool) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
@@ -790,17 +860,21 @@ impl PostgresBroker {
         )
     }
 
-    /// Construct a monitoring broker that never applies migrations or checks
-    /// the fleet cutover gate.
+    /// Construct a test monitoring broker that never applies migrations or
+    /// checks the fleet cutover gate.
+    #[cfg(test)]
     pub fn from_pool_observe_only(pool: PgPool) -> Self {
         Self::from_pool_with_schema_initialization_mode(pool, SchemaInitializationMode::ObserveOnly)
     }
 
+    #[cfg(test)]
     fn from_pool_with_schema_initialization_mode(
         pool: PgPool,
         schema_initialization_mode: SchemaInitializationMode,
     ) -> Self {
         Self {
+            core: crate::broker::pools::pools_for_test_pool(&pool),
+            statement_log: StatementLog::Off,
             session_pool: pool.clone(),
             pool,
             pgbouncer_transaction_mode: false,
@@ -819,8 +893,9 @@ impl PostgresBroker {
         }
     }
 
-    /// Construct from an existing pool with an explicit keyed-enqueue
-    /// reservation window. `None` selects the 24-hour contract default.
+    /// Construct a test broker with an explicit keyed-enqueue reservation
+    /// window. `None` selects the 24-hour contract default.
+    #[cfg(test)]
     pub fn from_pool_with_idempotency_reservation_window(
         pool: PgPool,
         window: Option<chrono::Duration>,
@@ -828,7 +903,8 @@ impl PostgresBroker {
         Self::from_pool_with_enqueue_policy(pool, false, window)
     }
 
-    /// Construct from an existing pool with both enqueue-time broker policies.
+    /// Construct a test broker with both enqueue-time broker policies.
+    #[cfg(test)]
     pub fn from_pool_with_enqueue_policy(
         pool: PgPool,
         retain_rerun_input_default: bool,
@@ -846,11 +922,7 @@ impl PostgresBroker {
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
     /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str) -> Result<Self, BrokerError> {
-        PostgresConfig::from_url(database_url).validate()?;
-        let pool = PgPool::connect(database_url)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(Self::from_pool(pool))
+        Self::connect_with(&PostgresConfig::from_url(database_url)).await
     }
 
     /// Connect using a `PostgresConfig` from horsies-core.
@@ -869,11 +941,34 @@ impl PostgresBroker {
             .await
     }
 
+    /// Connect a worker's broker: the main URL pool is the worker profile
+    /// pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from
+    /// batch checkouts for the reaper and the per-task writes.
+    pub async fn connect_worker_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(
+            config,
+            SchemaInitializationMode::MigrateAndValidate,
+            PoolProfile::Worker,
+        )
+        .await
+    }
+
     async fn connect_with_schema_initialization_mode(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
     ) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(config, schema_initialization_mode, PoolProfile::Producer).await
+    }
+
+    /// Checks the config, builds the core pools (no connection), then opens
+    /// the sqlx adapter pools (one connection each, as before).
+    async fn connect_with_profile(
+        config: &PostgresConfig,
+        schema_initialization_mode: SchemaInitializationMode,
+        profile: PoolProfile,
+    ) -> Result<Self, BrokerError> {
         config.validate()?;
+        let core = BrokerPools::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let pool = pg_pool_options(config)
             .connect_with(connect_options)
@@ -892,6 +987,8 @@ impl PostgresBroker {
         };
 
         Ok(Self {
+            core,
+            statement_log: StatementLog::from_echo(config.echo),
             pool,
             session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
@@ -1016,15 +1113,78 @@ impl PostgresBroker {
         self.schema_initialization_mode
     }
 
-    /// Get a reference to the underlying connection pool.
+    /// The sqlx pool on `database_url`: the adapter for call sites that
+    /// have not moved to the statement layer. Moved call sites use the core
+    /// pools.
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
-    /// Get the session-capable pool used for schema work, partition
-    /// maintenance, and LISTEN/NOTIFY.
+    /// The sqlx pool on the session URL, used for schema work, partition
+    /// maintenance, and LISTEN/NOTIFY: the adapter for call sites that have
+    /// not moved to the statement layer.
     pub fn session_pool(&self) -> &PgPool {
         &self.session_pool
+    }
+
+    /// Runs one statement on the main core pool and reads every row.
+    ///
+    /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
+    /// moved call sites are producer and monitoring work, never the reaper or
+    /// a per-task write. Bound: the connection's own timeouts, as the sqlx
+    /// path.
+    async fn query_main(
+        &self,
+        statement: &BoundStatement<'_>,
+    ) -> Result<Vec<Row>, StatementFailure> {
+        self.log_statement(statement.statement());
+        self.core
+            .main()
+            .query(
+                CheckoutClass::Batch,
+                statement,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+    }
+
+    /// Runs one statement on the main core pool and reads the count of
+    /// affected rows. Checkout and bound as [`PostgresBroker::query_main`].
+    async fn execute_main(&self, statement: &BoundStatement<'_>) -> Result<u64, StatementFailure> {
+        self.log_statement(statement.statement());
+        self.core
+            .main()
+            .execute(
+                CheckoutClass::Batch,
+                statement,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+    }
+
+    /// Runs one read on the main core pool and reads each row with `read`.
+    ///
+    /// Errors: [`BrokerError::Statement`] when the statement failed;
+    /// [`BrokerError::RowDecode`] for the first row that does not read.
+    async fn read_main<T>(
+        &self,
+        statement: &BoundStatement<'_>,
+        read: fn(&Row, &TypedStatement) -> Result<T, RowDecodeError>,
+    ) -> Result<Vec<T>, BrokerError> {
+        let rows = self.query_main(statement).await?;
+        Ok(read_rows(&rows, statement.statement(), read)?)
+    }
+
+    fn log_statement(&self, statement: &TypedStatement) {
+        match self.statement_log {
+            StatementLog::Off => {}
+            StatementLog::Debug => tracing::debug!(
+                target: "horsies.sql",
+                statement = statement.name(),
+                sql = statement.sql(),
+                "statement",
+            ),
+        }
     }
 
     /// Whether this broker's runtime pool is configured for PgBouncer
@@ -1034,11 +1194,18 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction.
+    ///
+    /// The handle checks its client family before the transaction: a
+    /// database of another family, or with no family row, is
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
         let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
         transaction.commit().await?;
@@ -1448,7 +1615,7 @@ impl PostgresBroker {
         );
         let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
         let result_json = serde_json::to_string(&task_result)
-            .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+            .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
 
         let outcomes = crate::broker::terminalization::terminalize(
             &self.pool,
@@ -2231,8 +2398,10 @@ impl PostgresBroker {
         Ok(row.is_some())
     }
 
-    /// Close the connection pool.
+    /// Close the core pools and the sqlx main pool. Later checkouts on them
+    /// fail as closed; neither reopens.
     pub async fn close(&self) {
+        self.core.close();
         self.pool.close().await;
     }
 
@@ -2249,16 +2418,8 @@ impl PostgresBroker {
     /// `ensure_listener_delivery_checked()` once during startup when configured
     /// for PgBouncer transaction pooling.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
-        let _: (i32,) = sqlx::query_as(HEALTH_CHECK_SQL)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|err| {
-                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
-                    prepared_statement_tracking_error(err)
-                } else {
-                    BrokerError::Database(err)
-                }
-            })?;
+        let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
+        let _row = one_row(rows, &HEALTH_CHECK)?;
         Ok(())
     }
 
@@ -2270,16 +2431,19 @@ impl PostgresBroker {
     /// for monitoring. Mirrors Python's `ping_database_async`.
     pub async fn ping_database(&self) -> BrokerResult<DatabasePing> {
         let start = std::time::Instant::now();
-        let probe: Result<(i32,), sqlx::Error> =
-            sqlx::query_as(HEALTH_CHECK_SQL).fetch_one(&self.pool).await;
+        let probe = self
+            .query_main(&HEALTH_CHECK.bind().finish())
+            .await
+            .map_err(BrokerError::Statement)
+            .and_then(|rows| one_row(rows, &HEALTH_CHECK).map_err(BrokerError::RowDecode));
         match probe {
-            Ok(_) => Ok(DatabasePing {
+            Ok(_row) => Ok(DatabasePing {
                 latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             }),
-            Err(e) => Err(BrokerOperationError {
+            Err(error) => Err(BrokerOperationError {
                 code: BrokerErrorCode::DbPingFailed,
-                message: format!("database ping failed: {}", e),
-                retryable: is_retryable_sqlx_error(&e),
+                message: format!("database ping failed: {error}"),
+                retryable: error.is_retryable(),
             }),
         }
     }
@@ -2344,12 +2508,18 @@ impl PostgresBroker {
         })?;
 
         let start = std::time::Instant::now();
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(WORKER_PING_CHANNEL)
-            .bind(&payload)
-            .execute(self.pool())
+        let _notified = self
+            .execute_main(
+                &NOTIFY_WORKER_PING
+                    .bind()
+                    .value(&WORKER_PING_CHANNEL)
+                    .value(&payload)
+                    .finish(),
+            )
             .await
-            .map_err(|e| worker_ping_error("ping notify", e))?;
+            .map_err(|failure| {
+                worker_ping_statement_error("ping notify", BrokerError::Statement(failure))
+            })?;
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2468,10 +2638,16 @@ impl PostgresBroker {
         stale_threshold_minutes: i32,
     ) -> BrokerResult<BoundedTaskList<StaleTaskRow>> {
         let threshold = StaleMinutes::parse(stale_threshold_minutes)?;
-        let rows: Vec<StaleTaskRow> = sqlx::query_as(GET_STALE_TASKS_SQL)
-            .bind(threshold.minutes())
-            .bind(TASK_LIST_READ_LIMIT)
-            .fetch_all(&self.pool)
+        let minutes = threshold.minutes();
+        let rows = self
+            .read_main(
+                &GET_STALE_TASKS
+                    .bind()
+                    .value(&minutes)
+                    .value(&TASK_LIST_READ_LIMIT)
+                    .finish(),
+                stale_task_row,
+            )
             .await
             .map_err(|error| monitoring_query_error("get_stale_tasks", error))?;
         Ok(BoundedTaskList::from_read(rows, TASK_LIST_BOUND))
@@ -2484,10 +2660,9 @@ impl PostgresBroker {
     /// retired `get_worker_stats` (which counted RUNNING tasks only and missed
     /// idle workers). Mirrors Python's `list_worker_states_async`.
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
-        sqlx::query_as(LIST_WORKER_STATES_SQL)
-            .fetch_all(&self.pool)
+        self.read_main(&LIST_WORKER_STATES.bind().finish(), worker_state_snapshot)
             .await
-            .map_err(|e| monitoring_query_error("list_worker_states", e))
+            .map_err(|error| monitoring_query_error("list_worker_states", error))
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.
@@ -2497,11 +2672,14 @@ impl PostgresBroker {
         &self,
         worker_id: &str,
     ) -> BrokerResult<Option<WorkerStateSnapshot>> {
-        sqlx::query_as(GET_WORKER_STATE_LATEST_SQL)
-            .bind(worker_id)
-            .fetch_optional(&self.pool)
+        let rows = self
+            .read_main(
+                &GET_WORKER_STATE_LATEST.bind().value(&worker_id).finish(),
+                worker_state_snapshot,
+            )
             .await
-            .map_err(|e| monitoring_query_error("get_worker_state", e))
+            .map_err(|error| monitoring_query_error("get_worker_state", error))?;
+        Ok(rows.into_iter().next())
     }
 
     /// State-snapshot history for one worker, newest first.
@@ -2519,12 +2697,16 @@ impl PostgresBroker {
                 "limit must be positive when set, got {refused}"
             )));
         }
-        sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
-            .bind(worker_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| monitoring_query_error("get_worker_state_history", e))
+        self.read_main(
+            &GET_WORKER_STATE_HISTORY
+                .bind()
+                .value(&worker_id)
+                .value(&limit)
+                .finish(),
+            worker_state_snapshot,
+        )
+        .await
+        .map_err(|error| monitoring_query_error("get_worker_state_history", error))
     }
 
     /// Find PENDING tasks that have expired (past their `good_until` deadline).
@@ -2538,9 +2720,14 @@ impl PostgresBroker {
     /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_expired_tasks()` in the Python library.
     pub async fn get_expired_tasks(&self) -> BrokerResult<BoundedTaskList<ExpiredTaskRow>> {
-        let rows: Vec<ExpiredTaskRow> = sqlx::query_as(GET_EXPIRED_TASKS_SQL)
-            .bind(TASK_LIST_READ_LIMIT)
-            .fetch_all(&self.pool)
+        let rows = self
+            .read_main(
+                &GET_EXPIRED_TASKS
+                    .bind()
+                    .value(&TASK_LIST_READ_LIMIT)
+                    .finish(),
+                expired_task_row,
+            )
             .await
             .map_err(|error| monitoring_query_error("get_expired_tasks", error))?;
         Ok(BoundedTaskList::from_read(rows, TASK_LIST_BOUND))
@@ -2744,6 +2931,25 @@ fn map_history_enqueue_error(error: HistoryError) -> BrokerError {
     }
 }
 
+/// The rerun error of a failed client-family check.
+///
+/// # Panics
+///
+/// `ensure_client_family_for_write` fails only with a database error or a
+/// family mismatch; any other error is a defect of that function.
+fn rerun_family_error(error: BrokerError) -> RerunError {
+    match error {
+        BrokerError::ClientFamilyMismatch { stored, own } => {
+            RerunError::ClientFamilyMismatch { stored, own }
+        }
+        BrokerError::Database(database) => RerunError::Database(database),
+        other => panic!(
+            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
+             error nor a family mismatch"
+        ),
+    }
+}
+
 fn map_history_read_error(error: HistoryError) -> BrokerError {
     match error {
         HistoryError::Database(error) => BrokerError::Database(error),
@@ -2918,7 +3124,7 @@ fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, Broker
         .transpose()?;
     Ok(TaskResultRow {
         id: detail.task_id,
-        status: detail.status,
+        status: detail.status.to_string(),
         result,
         failed_reason: detail.final_failed_reason,
     })
@@ -2960,8 +3166,7 @@ fn history_task_info(
     include_failed_reason: bool,
     include_attempts: bool,
 ) -> BrokerResult<TaskInfo> {
-    let status = crate::broker::row::task::parse_task_status(&detail.status)
-        .map_err(task_info_history_error)?;
+    let status = detail.status;
     let result = match include_result {
         false => None,
         true => decode_history_result_value(&detail)
@@ -3081,13 +3286,13 @@ fn is_terminal_status(status: &str) -> bool {
 }
 
 /// Build a `MONITORING_QUERY_FAILED` broker error for a failed read query.
-/// `retryable` is the driver classification of the cause, as Python's
+/// `retryable` is the classification of the cause, as Python's
 /// `_operation_failed`.
-fn monitoring_query_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
+fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperationError {
     BrokerOperationError {
         code: BrokerErrorCode::MonitoringQueryFailed,
-        message: format!("{} failed: {}", operation, err),
-        retryable: is_retryable_sqlx_error(&err),
+        message: format!("{operation} failed: {error}"),
+        retryable: error.is_retryable(),
     }
 }
 
@@ -3098,6 +3303,16 @@ fn worker_ping_error(operation: &str, err: sqlx::Error) -> BrokerOperationError 
         code: BrokerErrorCode::WorkerPingFailed,
         message: format!("ping_workers {} failed: {}", operation, err),
         retryable: is_retryable_sqlx_error(&err),
+    }
+}
+
+/// Build a `WORKER_PING_FAILED` broker error for a failed core statement of
+/// a ping. `retryable` is the classification of the cause.
+fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::WorkerPingFailed,
+        message: format!("ping_workers {operation} failed: {error}"),
+        retryable: error.is_retryable(),
     }
 }
 
@@ -3327,7 +3542,7 @@ mod tests {
 
     #[test]
     fn parse_failed_with_task_error() {
-        let err = TaskError::new("VALIDATION", "bad input");
+        let err = TaskError::new("VALIDATION", "bad input").unwrap();
         let wrapped: TaskResult<i32> = TaskResult::Err(err);
         let err_json = serde_json::to_string(&wrapped).unwrap();
         let row = TaskResultRow {
@@ -3486,7 +3701,7 @@ mod tests {
         let row = TaskResultRow {
             id: Uuid::nil(),
             status: "CANCELLED".to_owned(),
-            result: Some(r#"{"__type":"ok","value":42}"#.to_owned()),
+            result: Some(r#"{"__h_task_result__":true,"ok":42,"err":null}"#.to_owned()),
             failed_reason: None,
         };
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
@@ -4573,65 +4788,6 @@ mod fused_finalize_tests {
             cleanup(&pool, id).await;
         }
     }
-
-    /// C10: the retry requeue CAS is likewise fenced by `started_at`, so a stale
-    /// attempt cannot requeue a task the worker is re-running under a new claim.
-    #[tokio::test]
-    #[serial]
-    async fn requeue_in_tx_fenced_by_started_at() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
-
-        let current: DateTime<Utc> =
-            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
-                .bind(test_uuid(&id))
-                .fetch_one(&pool)
-                .await
-                .expect("started_at");
-        let stale = current - chrono::Duration::minutes(1);
-
-        // Stale generation: fenced out.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(stale),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(!applied, "stale started_at must not requeue");
-
-        // Current generation: applies.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(current),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(applied, "matching started_at must requeue");
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(test_uuid(&id))
-            .fetch_one(&pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "PENDING");
-
-        cleanup(&pool, &id).await;
-    }
 }
 
 #[cfg(test)]
@@ -5572,6 +5728,7 @@ mod session_settings_tests {
             session_database_url: None,
             pgbouncer_transaction_mode,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
@@ -5811,7 +5968,7 @@ mod broker_operation_error_tests {
     #[tokio::test]
     async fn a_database_ping_on_a_closed_pool_is_not_retryable() {
         let broker = unreachable_broker();
-        broker.pool().close().await;
+        broker.close().await;
 
         let Err(failed) = broker.ping_database().await else {
             panic!("a closed pool cannot ping");
@@ -5821,13 +5978,41 @@ mod broker_operation_error_tests {
         assert!(!failed.retryable);
     }
 
+    fn checkout_failed(cause: crate::db::CheckoutFailure) -> BrokerError {
+        BrokerError::Statement(StatementFailure::NotSent {
+            statement: "read",
+            cause: crate::db::NotSentCause::Checkout(cause),
+        })
+    }
+
+    fn checkout_timed_out() -> BrokerError {
+        checkout_failed(crate::db::CheckoutFailure::TimedOut {
+            role: crate::db::PoolRole::Main,
+            waited: Duration::from_secs(30),
+        })
+    }
+
+    fn pool_closed() -> BrokerError {
+        checkout_failed(crate::db::CheckoutFailure::PoolClosed {
+            role: crate::db::PoolRole::Main,
+        })
+    }
+
     #[test]
     fn a_monitoring_read_failure_carries_the_driver_classification() {
-        assert!(monitoring_query_error("read", sqlx::Error::PoolTimedOut).retryable);
-        assert!(!monitoring_query_error("read", sqlx::Error::PoolClosed).retryable);
-        assert!(!monitoring_query_error("read", sqlx::Error::RowNotFound).retryable);
+        assert!(monitoring_query_error("read", checkout_timed_out()).retryable);
+        assert!(!monitoring_query_error("read", pool_closed()).retryable);
+        assert!(
+            !monitoring_query_error(
+                "read",
+                BrokerError::RowDecode(RowDecodeError::NoRow { statement: "read" })
+            )
+            .retryable
+        );
         assert!(worker_ping_error("notify", sqlx::Error::PoolTimedOut).retryable);
         assert!(!worker_ping_error("notify", sqlx::Error::PoolClosed).retryable);
+        assert!(worker_ping_statement_error("notify", checkout_timed_out()).retryable);
+        assert!(!worker_ping_statement_error("notify", pool_closed()).retryable);
     }
 }
 
@@ -6277,3 +6462,6 @@ mod task_info_code_tests {
         assert!(mapped.retryable);
     }
 }
+
+#[cfg(test)]
+mod result_read_spec_tests;
