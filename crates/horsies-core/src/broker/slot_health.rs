@@ -14,42 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::broker::health::{stored_value_text, stored_whole_number, STORED_COUNT_LIMIT};
 
-/// The error text of a failed boot has at most this many characters (Python
-/// `MAX_BOOT_FAILURE_DETAIL_CHARS`, `horsies/core/models/boot_failure.py:54`).
-pub const MAX_BOOT_FAILURE_DETAIL_CHARS: usize = 2400;
-
-/// An errno that names an OS resource limit. A boot that failed with one can
-/// succeed later, when the resource is free again (Python `ShortageErrno`,
-/// `horsies/core/models/boot_failure.py:24-34`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ShortageErrno {
-    Emfile,
-    Enfile,
-    Enomem,
-    Eagain,
-}
-
-impl ShortageErrno {
-    /// The stored name: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Emfile => "EMFILE",
-            Self::Enfile => "ENFILE",
-            Self::Enomem => "ENOMEM",
-            Self::Eagain => "EAGAIN",
-        }
-    }
-
-    fn from_stored(value: &str) -> Option<Self> {
-        match value {
-            "EMFILE" => Some(Self::Emfile),
-            "ENFILE" => Some(Self::Enfile),
-            "ENOMEM" => Some(Self::Enomem),
-            "EAGAIN" => Some(Self::Eagain),
-            _ => None,
-        }
-    }
-}
+pub use crate::core::boot_failure::{ShortageErrno, MAX_BOOT_FAILURE_DETAIL_CHARS};
 
 /// A boot failure cause that can clear by itself. Only these causes keep a
 /// slot down (Python `ClearableBootCause`,
@@ -265,7 +230,7 @@ fn shortage_errno(cause: &Map<String, Value>) -> Result<ShortageErrno, SlotHealt
     let stored = cause.get("errno");
     stored
         .and_then(Value::as_str)
-        .and_then(ShortageErrno::from_stored)
+        .and_then(ShortageErrno::from_name)
         .ok_or_else(|| {
             unreadable(format!(
                 "cause: unknown errno name {}",
