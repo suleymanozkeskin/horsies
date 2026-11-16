@@ -17,7 +17,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
+use crate::broker::client_family::ClientFamily;
+use crate::broker::migrations::install_schema;
 use crate::broker::terminalization::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -91,8 +92,10 @@ pub(super) struct IsolatedDatabase {
 }
 
 impl IsolatedDatabase {
-    /// Creates, migrates and covers a new database. Inactive databases that
-    /// earlier runs left behind are dropped first.
+    /// Creates, migrates and covers a new database, and records the core's
+    /// client family in it (a workflow start, pause, resume and cancel refuse
+    /// a database with no family row). Inactive databases that earlier runs
+    /// left behind are dropped first.
     pub(super) async fn create() -> Self {
         let shared_url = crate::broker::terminalization_matrix::migrated_database_url().await;
         let base = PgConnectOptions::from_str(&shared_url).expect("parse the test database URL");
@@ -109,9 +112,9 @@ impl IsolatedDatabase {
         unlock_setup(&mut admin).await;
         let options = base.database(&name);
         let pool = connect(&options).await;
-        run_horsies_migrations(&pool)
+        install_schema(&pool, ClientFamily::Rust)
             .await
-            .expect("migrate the isolated database");
+            .expect("install the schema of the isolated database");
         let coverage = ensure_partition_coverage_in_pool(
             &pool,
             COVERAGE_HISTORY_DAYS,
