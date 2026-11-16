@@ -291,6 +291,66 @@ async def test_manifest_lower_bound_is_typed(
                 assert raised.value.diag.constraint_name == constraint
 
 
+_WORKFLOW_ROW_SQL: Final = """
+    INSERT INTO horsies_workflows (
+        id, name, status, on_error, depth, root_workflow_id, sent_at, created_at, updated_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000001', 'params_case', 'RUNNING', 'fail', 0,
+        '0193e5c4-0000-7000-8000-000000000001', now(), now(), now()
+    )
+"""
+
+_NODE_ROW_SQL: Final = """
+    INSERT INTO horsies_workflow_tasks (
+        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
+        allow_failed_deps, join_type, max_retries, execution, retention_class_key, status,
+        is_subworkflow, sub_workflow_params, created_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
+        'params.case', '{}', 'default', 100, '{}', FALSE, 'all', %(max_retries)s, %(execution)s,
+        %(retention_class_key)s, 'PENDING', %(is_subworkflow)s, %(sub_workflow_params)s, now()
+    )
+"""
+
+
+@pytest.mark.parametrize(
+    ('is_subworkflow', 'sub_workflow_params', 'violated'),
+    [
+        (False, None, None),
+        (True, 'NOT_GIVEN', None),
+        (True, 'GIVEN', None),
+        (True, None, 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (True, 'SOME', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (False, 'NOT_GIVEN', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (False, 'GIVEN', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_sub_workflow_params_are_set_exactly_on_sub_workflow_nodes(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    is_subworkflow: bool,
+    sub_workflow_params: str | None,
+    violated: str | None,
+) -> None:
+    # The task facts follow the node kind, so only the params CHECK decides.
+    params: dict[str, object] = {
+        'max_retries': None if is_subworkflow else 0,
+        'execution': None if is_subworkflow else 'ISOLATED',
+        'retention_class_key': None if is_subworkflow else 'forever',
+        'is_subworkflow': is_subworkflow,
+        'sub_workflow_params': sub_workflow_params,
+    }
+    async with installed.transaction(force_rollback=True):
+        await installed.execute(_WORKFLOW_ROW_SQL)
+        match violated:
+            case None:
+                await installed.execute(_NODE_ROW_SQL, params)
+            case constraint:
+                with pytest.raises(psycopg.errors.CheckViolation) as raised:
+                    await installed.execute(_NODE_ROW_SQL, params)
+                assert raised.value.diag.constraint_name == constraint
+
+
 @pytest.mark.asyncio(loop_scope='function')
 async def test_forever_leaf_starts_at_minvalue_with_an_open_catalog_bound(
     installed: psycopg.AsyncConnection[tuple[object, ...]],
