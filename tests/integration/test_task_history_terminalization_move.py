@@ -13,7 +13,7 @@ it.
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -26,7 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from horsies.core.history.archive.attempts import decode_attempt_snapshot
 from horsies.core.history.archive.versions import DecodedArchiveValue
 from tests.integration.task_history_harness import (
+    INSERT_HISTORY_ROW_SQL,
     HistorySchema,
+    create_workflow,
+    frozen_history_row,
     insert_live_task as insert_live_task_for,
     link_workflow_node,
     prepare_move_storage,
@@ -55,8 +58,7 @@ async def insert_live_task(
     worker: str | None = WORKER,
     key_digest: bytes | None = None,
     retain: bool = True,
-    prepared_disposition: str = 'DECLINED_BY_POLICY',
-    prepared_inline: bytes | None = None,
+    input_text: str = '{}',
 ) -> str:
     return await insert_live_task_for(
         connection,
@@ -65,8 +67,7 @@ async def insert_live_task(
         worker=worker,
         key_digest=key_digest,
         retain=retain,
-        prepared_disposition=prepared_disposition,
-        prepared_inline=prepared_inline,
+        input_text=input_text,
     )
 
 
@@ -142,7 +143,7 @@ class TestAppliedCompletion:
                 await connection.execute(
                     text(
                         'SELECT status, terminalization_kind, terminal_at, '
-                        'retention_anchor_at, result_payload, result_digest, '
+                        'result_payload, result_digest, '
                         'retry_count, last_claimed_worker_id, '
                         'attempt_snapshot, attempt_snapshot_digest, '
                         'attempt_archive_version '
@@ -153,15 +154,12 @@ class TestAppliedCompletion:
                 )
             ).one()
             assert history.status == 'COMPLETED'
-            assert history.retention_anchor_at == history.terminal_at
             assert bytes(history.result_payload) == b'{"ok":true}'
             assert bytes(history.result_digest) == sha256(b'{"ok":true}').digest()
             assert history.last_claimed_worker_id == WORKER
 
             decoded = decode_attempt_snapshot(
                 version=history.attempt_archive_version,
-                codec='json-utf8',
-                content_type='application/json',
                 payload=bytes(history.attempt_snapshot),
                 digest=bytes(history.attempt_snapshot_digest),
             )
@@ -192,20 +190,19 @@ class TestAppliedCompletion:
             assert (live_left, attempts_left) == (0, 0)
 
     @pytest.mark.asyncio
-    async def test_completed_is_never_eligible_even_with_prepared_inline(
+    async def test_completed_is_never_eligible_even_with_retained_input(
         self, terminalization_schema: HistorySchema
     ) -> None:
         """The reconciliation coverage obligation: the gate candidate is
         FAIL_RUNNING-only, so the completed eligibility branch is owned
         here — a completed request archives NEVER_ELIGIBLE with a null
-        envelope no matter what enqueue prepared."""
+        envelope even when its input is retained."""
         async with terminalization_schema.engine.begin() as connection:
             await prepare_storage(connection)
             task_id = await insert_live_task(
                 connection,
                 retain=True,
-                prepared_disposition='INLINE',
-                prepared_inline=b'{"precious":"input"}',
+                input_text='{"precious":"input"}',
             )
             outcome = await complete_fused(connection, task_id)
             assert outcome.outcome == 'APPLIED'
@@ -213,9 +210,7 @@ class TestAppliedCompletion:
                 await connection.execute(
                     text(
                         'SELECT rerun_input_disposition, rerun_input_version, '
-                        'rerun_input_codec, rerun_input_content_type, '
-                        'rerun_input_digest, rerun_input_inline, '
-                        'rerun_input_reference '
+                        'rerun_input_digest, rerun_input_inline '
                         'FROM horsies_task_history '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
@@ -224,11 +219,8 @@ class TestAppliedCompletion:
             ).one()
             assert row.rerun_input_disposition == 'NEVER_ELIGIBLE'
             assert row.rerun_input_version is None
-            assert row.rerun_input_codec is None
-            assert row.rerun_input_content_type is None
             assert row.rerun_input_digest is None
             assert row.rerun_input_inline is None
-            assert row.rerun_input_reference is None
 
     @pytest.mark.asyncio
     async def test_reservation_window_starts_at_terminalization(
@@ -379,7 +371,9 @@ class TestMoveInvariants:
             await link_workflow_node(
                 connection,
                 task_id,
-                workflow_id=str(uuid4()),
+                workflow_id=await create_workflow(
+                    connection, status='RUNNING'
+                ),
                 node_status='RUNNING',
             )
             with pytest.raises(DBAPIError) as raised:
@@ -408,38 +402,12 @@ class TestMoveInvariants:
             await prepare_storage(connection)
             task_id = await insert_live_task(connection)
             await connection.execute(
-                text(
-                    'INSERT INTO horsies_task_history ('
-                    'task_id, task_name, queue_name, priority, '
-                    'command_fingerprint_version, command_fingerprint, '
-                    'status, terminalization_kind, terminal_at, '
-                    'retention_anchor_at, retention_class_key, enqueued_at, '
-                    'created_at, retry_count, max_retries, '
-                    'result_envelope_version, result_codec, '
-                    'result_content_type, is_workflow_task, '
-                    'history_schema_version, attempt_archive_version, '
-                    'attempt_snapshot_codec, attempt_snapshot_content_type, '
-                    'attempt_snapshot, attempt_snapshot_digest, '
-                    'rerun_input_disposition'
-                    ') VALUES ('
-                    'CAST(:task_id AS uuid), \'it.move\', \'default\', 50, '
-                    '1, :fingerprint, '
-                    "'COMPLETED', 'COMPLETE_FUSED', statement_timestamp(), "
-                    'statement_timestamp(), :class_key, statement_timestamp(), '
-                    'statement_timestamp(), 0, 0, '
-                    "1, 'json-utf8', 'application/json', FALSE, "
-                    '1, 1, '
-                    "'json-utf8', 'application/json', "
-                    ':snapshot, :snapshot_digest, '
-                    "'NEVER_ELIGIBLE')"
+                text(INSERT_HISTORY_ROW_SQL),
+                frozen_history_row(
+                    task_id=task_id,
+                    class_key=CLASS_KEY,
+                    terminal_at=datetime.now(UTC),
                 ),
-                {
-                    'task_id': task_id,
-                    'fingerprint': sha256(task_id.encode()).digest(),
-                    'class_key': CLASS_KEY,
-                    'snapshot': b'[]',
-                    'snapshot_digest': sha256(b'[]').digest(),
-                },
             )
             with pytest.raises(DBAPIError, match='multiple locations'):
                 await complete_fused(connection, task_id)

@@ -152,23 +152,28 @@ async def _seed_pending_locator(
     anchor = ref.bounds.lower + timedelta(hours=1)
     workflow_id = await create_workflow(connection, status='RUNNING')
     node_row_id = await link_workflow_node(
-        connection, task_id, workflow_id=workflow_id, node_status='RUNNING',
+        connection,
+        task_id,
+        workflow_id=workflow_id,
+        node_status='RUNNING',
     )
     await connection.execute(
         text(
             """
             INSERT INTO horsies_workflow_phase2_pending (
                 task_id, workflow_id, workflow_node_row_id,
-                terminal_status, terminal_at, terminalization_kind,
+                terminalization_kind,
                 recovery_source, history_class, history_anchor,
                 history_schema_version, result_digest,
-                phase2_generation, created_at, attempt_count
+                quarantine_task_id, created_at, attempt_count,
+                last_attempt_at, last_failure_class
             ) VALUES (
                 :task_id, :workflow_id, :node_row_id,
-                'COMPLETED', :anchor, 'COMPLETE_FUSED',
+                'COMPLETE_LOCKED',
                 'HISTORY', :class_key, :anchor,
-                1, :digest, :generation,
-                statement_timestamp(), 0
+                1, :digest,
+                NULL, statement_timestamp(), 0,
+                NULL, NULL
             )
             """
         ),
@@ -179,7 +184,6 @@ async def _seed_pending_locator(
             'anchor': anchor,
             'class_key': CLASS_KEY,
             'digest': sha256(b'{}').digest(),
-            'generation': str(uuid4()),
         },
     )
 
@@ -409,7 +413,6 @@ class TestHistoryPruning:
                     ),
                     DetachExpiredHistoryLeaf(
                         leaf=expired,
-                        quarantine_horizon=None,
                         statement_timeout_ms=100,
                     ),
                     UnpublishedLoader(),

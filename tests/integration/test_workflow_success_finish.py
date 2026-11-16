@@ -234,19 +234,19 @@ async def _attempts(engine: AsyncEngine, task_id: str) -> tuple[AttemptRecord, .
         return await read_attempts(session, task_id)
 
 
-async def _pending_rows(engine: AsyncEngine, task_id: str) -> list[tuple[str, str]]:
+async def _pending_rows(engine: AsyncEngine, task_id: str) -> list[str]:
     async with engine.connect() as connection:
         rows = (
             await connection.execute(
                 text(
-                    'SELECT terminal_status, terminalization_kind '
+                    'SELECT terminalization_kind '
                     'FROM horsies_workflow_phase2_pending '
                     'WHERE task_id = CAST(:id AS uuid)'
                 ),
                 {'id': task_id},
             )
         ).all()
-    return [(str(row[0]), str(row[1])) for row in rows]
+    return [str(row[0]) for row in rows]
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -307,7 +307,7 @@ class TestApplied:
         )
         assert attempt.started_at <= attempt.finished_at
         assert await _pending_rows(engine, seeded.task_id) == [
-            ('COMPLETED', TerminalizationKind.COMPLETE_LOCKED.value),
+            TerminalizationKind.COMPLETE_LOCKED.value,
         ]
         assert await _payloads(wakes) == []
 
