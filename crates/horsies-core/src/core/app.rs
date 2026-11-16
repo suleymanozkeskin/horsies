@@ -10,7 +10,7 @@ use crate::core::config::QueueMode;
 use crate::core::error::{ErrorCode, HorsiesError};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::{
-    RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
+    BuilderHookName, RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
 };
 use crate::core::workflow::spec::{WorkflowSpec, WorkflowSpecBuilder};
 
@@ -84,7 +84,7 @@ impl Horsies {
         Ok(Self {
             config,
             registry: TaskRegistry::new(),
-            workflow_registry: WorkflowSpecRegistry::new(),
+            workflow_registry: WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER),
             workflow_builders: Vec::new(),
             role: "producer".to_owned(),
             suppress_sends: Arc::new(AtomicBool::new(false)),

@@ -1979,7 +1979,7 @@ mod cap_tests {
         pool.close().await;
         let error = recover_stuck_workflows(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             0,
             25,
             &PayloadPolicy::default(),
@@ -1998,7 +1998,7 @@ mod cap_tests {
         pool.close().await;
         let failure = recover_stuck_workflows_observed(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             0,
             25,
             &PayloadPolicy::default(),
@@ -2025,7 +2025,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         let error = recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2050,7 +2050,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(0),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2123,7 +2123,7 @@ mod cap_tests {
 
         let report = recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             workflow_id,
             0,
             &PayloadPolicy::default(),
@@ -2183,7 +2183,8 @@ mod cap_tests {
             insert_orphaned_workflow(&pool, *id).await;
         }
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
         let report = recover_stuck_workflows_with_cap(
@@ -2376,7 +2377,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2550,7 +2551,8 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let mut first = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
@@ -2634,7 +2636,8 @@ mod cap_tests {
             .await;
         }
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let mut first = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
@@ -2800,7 +2803,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2823,7 +2826,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2931,7 +2934,7 @@ mod cap_tests {
             engine::check_workflow_completion_with_recovery_claim(
                 &action_pool,
                 workflow_id,
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
                 claim_token,
@@ -2976,7 +2979,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -3031,7 +3034,7 @@ mod cap_tests {
             std::time::Duration::from_secs(1),
             recover_global_workflow_end_states(
                 &pool,
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 Some(200),
                 &mut report,
                 RecoveryFailurePolicy::LogOnly,
@@ -3058,7 +3061,7 @@ mod cap_tests {
 
         let report = recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             selected,
             0,
             &PayloadPolicy::default(),
@@ -3152,7 +3155,7 @@ mod cap_tests {
         let recovered = enqueue_ready_task(
             &pool,
             &row,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -3241,7 +3244,7 @@ mod cap_tests {
         assert!(enqueue_ready_task(
             &pool,
             &row,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &retention
         )

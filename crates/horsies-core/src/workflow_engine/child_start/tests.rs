@@ -53,7 +53,8 @@ fn registry_with_child() -> WorkflowSpecRegistry {
             .priority(100),
     );
     builder.output(node);
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register(RegisteredWorkflowSpec {
             spec: builder.build().expect("child spec"),
@@ -435,7 +436,8 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
             .priority(100),
     );
     child.output(node);
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register(RegisteredWorkflowSpec {
             spec: child.build().expect("child spec"),
@@ -557,7 +559,7 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
     seed_running_task_node(&pool, workflow_id, task_id).await;
     seed_subworkflow_node(&pool, workflow_id, 1, "PENDING", "{0}", None, CHILD_KEY).await;
     complete_task(&pool, task_id).await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let retention = RetentionConfig::default();
 
     let committed = node_finish_in_transaction(

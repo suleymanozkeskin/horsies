@@ -772,7 +772,9 @@ mod wait_tests {
         let handle = WorkflowHandle::<i32>::new(
             workflow_id,
             Arc::clone(&broker),
-            Arc::new(crate::core::registry::WorkflowSpecRegistry::new()),
+            Arc::new(crate::core::registry::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
         );
@@ -828,7 +830,9 @@ mod wait_tests {
         let handle = WorkflowHandle::<i32>::new(
             workflow_id,
             Arc::clone(&broker),
-            Arc::new(crate::core::registry::WorkflowSpecRegistry::new()),
+            Arc::new(crate::core::registry::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
         );
@@ -869,7 +873,9 @@ mod wait_tests {
         let handle = WorkflowHandle::<i32>::new(
             workflow_id,
             Arc::clone(&broker),
-            Arc::new(crate::core::registry::WorkflowSpecRegistry::new()),
+            Arc::new(crate::core::registry::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
         );

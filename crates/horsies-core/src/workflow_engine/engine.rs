@@ -3670,7 +3670,7 @@ mod p7_exact_error_tests {
             &mut transaction,
             workflow_id,
             &unresolved_subworkflow_node(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &HashMap::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -3746,7 +3746,7 @@ mod p7_exact_error_tests {
             &mut transaction,
             workflow_id,
             &unresolved_subworkflow_node(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &HashMap::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -3823,7 +3823,7 @@ mod p7_exact_error_tests {
             child_id,
             "FAILED",
             None,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -3878,7 +3878,7 @@ mod p7_exact_error_tests {
             Some("FAILED"),
             Some("pause"),
             Some("RUNNING"),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -3968,7 +3968,8 @@ mod guard_tests {
         insert_parent_workflow(&pool, &child_id).await;
         insert_subworkflow_task(&pool, &parent_id, &child_id).await;
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let result = on_subworkflow_complete(
             &pool,
             Uuid::parse_str(&parent_id).unwrap(),
@@ -4007,7 +4008,8 @@ mod guard_tests {
         insert_parent_workflow(&pool, &child_id).await;
         insert_subworkflow_task(&pool, &parent_id, &child_id).await;
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let result = on_subworkflow_complete(
             &pool,
             Uuid::parse_str(&parent_id).unwrap(),
@@ -4047,7 +4049,8 @@ mod guard_tests {
         insert_parent_workflow(&pool, &child_id).await;
         insert_subworkflow_task(&pool, &parent_id, &child_id).await;
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         // Child finalized with the terminal-results map (the outputless shape).
         let child_result = "{\"Ok\":{\"node_0\":{\"Ok\":42}}}";
         on_subworkflow_complete(
@@ -4508,7 +4511,8 @@ WHERE wt.workflow_id = $1
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -4626,7 +4630,8 @@ WHERE wt.workflow_id = $1
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         async fn seed(pool: &sqlx::PgPool, wf: &str, node_status: &str) {
             sqlx::query(
@@ -5090,7 +5095,8 @@ mod promotion_batch_tests {
     #[serial]
     async fn p6_workflow_enqueue_engine_batch_persists_never_eligible_facts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
@@ -5222,7 +5228,7 @@ mod promotion_batch_tests {
             &pool,
             test_uuid(&wf_id),
             0,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -5266,7 +5272,7 @@ mod promotion_batch_tests {
             &pool,
             test_uuid(&wf_id),
             0,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -5303,7 +5309,7 @@ mod promotion_batch_tests {
             &mut transaction,
             test_uuid(&wf_id),
             0,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -5331,7 +5337,8 @@ mod promotion_batch_tests {
     async fn an_args_from_conflict_fails_a_subworkflow_node_before_its_child_starts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let child_key = "tests.args_from_conflict.child.v1";
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         registry
             .register(crate::core::registry::workflow::RegisteredWorkflowSpec {
                 spec: crate::core::WorkflowSpec {
@@ -5406,7 +5413,8 @@ mod promotion_batch_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
@@ -5444,7 +5452,8 @@ mod promotion_batch_tests {
     #[serial]
     async fn a_promoted_node_holds_its_enqueue_time() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let level_wf = Uuid::new_v4().to_string();
         let phase2_wf = Uuid::new_v4().to_string();
         for wf_id in [&level_wf, &phase2_wf] {
@@ -5516,7 +5525,8 @@ mod promotion_batch_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
@@ -5548,7 +5558,8 @@ mod promotion_batch_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
@@ -5593,7 +5604,8 @@ mod finalization_contract_tests {
             .await
             .unwrap();
         listener.listen("workflow_done").await.unwrap();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let payload = PayloadPolicy::default();
         let retention = RetentionConfig::default();
         for deferred in [false, true] {
@@ -6097,7 +6109,7 @@ mod completion_rule_tests {
         check_workflow_completion(
             &pool,
             workflow_id,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )

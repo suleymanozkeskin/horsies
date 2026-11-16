@@ -601,7 +601,8 @@ mod resume_idempotency_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
@@ -634,7 +635,8 @@ mod resume_idempotency_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         let id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &id, "RUNNING", None).await;
@@ -698,7 +700,7 @@ mod resume_idempotency_tests {
         assert!(resume_workflow(
             &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -758,7 +760,7 @@ mod resume_idempotency_tests {
         assert!(resume_workflow(
             &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -901,7 +903,7 @@ mod p7_lifecycle_tests {
         assert!(resume_workflow(
             &PostgresBroker::from_pool(pool.clone()),
             root_id,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -968,7 +970,7 @@ mod p7_lifecycle_tests {
         assert!(resume_workflow(
             &PostgresBroker::from_pool(pool.clone()),
             workflow_id,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1096,7 +1098,7 @@ mod p7_lifecycle_tests {
         );
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             parent_id,
             0,
             &PayloadPolicy::default(),
@@ -1212,7 +1214,7 @@ mod p7_lifecycle_tests {
 
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             parent_id,
             0,
             &PayloadPolicy::default(),
@@ -1279,7 +1281,7 @@ mod p7_lifecycle_tests {
             child_id,
             "COMPLETED",
             None,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1694,7 +1696,7 @@ mod client_family_tests {
             resume_workflow(
                 &python,
                 workflow_id,
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
             )

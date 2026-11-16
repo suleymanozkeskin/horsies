@@ -243,7 +243,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
     let broker = PostgresBroker::from_pool(unpinged.clone());
     let result = finalize_workflow_phase(
         &broker,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         Uuid::new_v4(),
         QUEUE,
         false,

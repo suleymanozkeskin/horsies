@@ -64,7 +64,8 @@ fn registry_with_child() -> WorkflowSpecRegistry {
             .priority(100),
     );
     builder.output(node);
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register(RegisteredWorkflowSpec {
             spec: builder.build().expect("child spec"),
@@ -96,7 +97,7 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
     let arguments = start_arguments(
         &spec,
         workflow_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .expect("arguments");
@@ -175,7 +176,7 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
     let arguments = start_arguments(
         &spec,
         workflow_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .expect("arguments");
@@ -207,7 +208,8 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
 #[test]
 fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
     let workflow_id = Uuid::new_v4();
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let mut builder = WorkflowSpecBuilder::new("start_statement_child");
     builder.definition_key(CHILD_KEY);
     let node = builder.task(
@@ -262,7 +264,7 @@ fn a_task_node_without_a_resolved_queue_refuses_the_start() {
     let refused = start_arguments(
         &spec,
         Uuid::new_v4(),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     );
 

@@ -806,7 +806,9 @@ async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     seed_workflow(&pool, child, "RUNNING", Some(root)).await;
     seed_claimed_node(&pool, child, claimed_task).await;
     assert!(pause_workflow(&broker, root).await.expect("pause"));
-    let registry = crate::core::WorkflowSpecRegistry::new();
+    let registry = crate::core::WorkflowSpecRegistry::new(
+        crate::core::registry::BuilderHookName::SPEC_BUILDER,
+    );
     let payload = crate::core::config::payload::PayloadPolicy::default();
     let retention = crate::core::config::retention::RetentionConfig::default();
 

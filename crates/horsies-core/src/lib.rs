@@ -33,6 +33,7 @@ pub(crate) mod workflow_engine;
 pub(crate) use horsies_macros::WorkflowInput;
 
 // core re-exports
+pub use crate::core::BuilderHookName;
 pub use crate::core::RegisteredTask;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,

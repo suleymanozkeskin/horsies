@@ -39,7 +39,9 @@ async fn a_live_worker_answers_a_ping_and_lists_its_state() {
     let worker = Worker::new(
         Arc::clone(&broker),
         Arc::new(TaskRegistry::new()),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         app_config,
         WorkerConfig {
             queues: vec!["default".to_owned()],

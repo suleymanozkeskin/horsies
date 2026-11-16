@@ -560,7 +560,9 @@ mod tests {
         drive_phase2_recovery(
             pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             grace_ms,
             max_rows,
             attempt_bound,
@@ -761,7 +763,9 @@ mod tests {
             &pool,
             task_id,
             "COMPLETED",
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -803,7 +807,9 @@ mod tests {
             &pool,
             task_id,
             "COMPLETED",
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1084,7 +1090,9 @@ mod tests {
             &pool,
             current_task,
             "FAILED",
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1136,7 +1144,9 @@ mod tests {
                 &pool,
                 task_id,
                 "COMPLETED",
-                &crate::core::WorkflowSpecRegistry::new(),
+                &crate::core::WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
             )
@@ -1347,7 +1357,9 @@ mod tests {
             &pool,
             task_id,
             "COMPLETED",
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
