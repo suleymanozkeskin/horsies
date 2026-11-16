@@ -316,6 +316,18 @@ async fn seed_running(pool: &PgPool, task: &LiveTask) -> String {
 /// task with no worker runs under [`MOVING_WORKER`], and its history row
 /// then names no worker. A cancelled task is cancelled from PENDING.
 pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending) {
+    seed_terminal_with_attempts(pool, task, ending, &[]).await;
+}
+
+/// [`seed_terminal`], with attempt rows written between the live seed and
+/// the move, so the move folds them into the attempt snapshot. Each entry
+/// is `(attempt, will_retry, text)`.
+pub(super) async fn seed_terminal_with_attempts(
+    pool: &PgPool,
+    task: &LiveTask,
+    ending: Ending,
+    attempts: &[(i32, bool, AttemptText)],
+) {
     let command = match &ending {
         Ending::Cancelled => {
             let mut pending = task.clone();
@@ -345,6 +357,9 @@ pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending
             failed_reason: Some("seeded failure".to_owned()),
         },
     };
+    for (attempt, will_retry, text) in attempts {
+        seed_attempt(pool, task.id, *attempt, *will_retry, text).await;
+    }
     let outcome = terminalize(pool, &command)
         .await
         .expect("run the terminal write");
