@@ -345,7 +345,6 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
         &WorkflowSpecRegistry::new(),
         Phase2Work {
             task_id: Uuid::new_v4(),
-            is_success: true,
             queue_name: "default".to_owned(),
             is_workflow_task: true,
             capacity_notified: true,
