@@ -1440,8 +1440,7 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
         .execute(&mut *connection)
         .await
         .expect("drop rendered guard");
-    let interim_functions =
-        include_str!("../../../../migrations/1000_baseline/0003_interim_functions.sql");
+    let interim_functions = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
     let guard_start = interim_functions
         .find("CREATE FUNCTION horsies_task_history_duplicate_staged(")
         .expect("first guard version in the baseline");
