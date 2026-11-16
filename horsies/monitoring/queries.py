@@ -16,12 +16,13 @@ states:
 
 Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
 error. ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the
-reason the reads know. ``get_task_detail`` and ``get_workflow_node`` read in
-one REPEATABLE READ snapshot, so the live read and the history read see the
-same rows.
+reason the reads know. ``get_task_detail``, ``get_workflow_node`` and
+``list_tasks`` each send one statement, so the live read and the history
+read see the same rows.
 
-Sort and group columns are resolved through allowlist mappings keyed by
-``Literal`` types, so no caller-supplied string reaches SQL.
+Sort keys and group columns are ``Literal`` types; each passes as a bound
+argument, and the monitoring function maps it to a fixed column text, so no
+caller-supplied string reaches SQL text.
 
 The live table holds no end time, error code, failed reason or result: a
 task moves to history when it ends. The live side reads these facts as NULL,
@@ -38,42 +39,25 @@ multiplies the load.
 
 from __future__ import annotations
 
+import typing
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any, Final, Literal, NamedTuple, assert_never
+from dataclasses import dataclass
+from typing import Final, Literal
 
 import psycopg
 
 from sqlalchemy import (
-    ColumnElement,
-    DateTime,
-    Interval,
-    Select,
-    SQLColumnExpression,
     TextClause,
-    cast,
-    false,
-    func,
-    null,
-    nulls_last,
-    select,
     text,
 )
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import BrokerResources, EventLoopLimit
-from horsies.core.models.task_pg import (
-    ScheduleStateModel,
-    TaskAttemptModel,
-    TaskModel,
-)
 from horsies.core.models.tasks import (
-    BUILTIN_CODE_REGISTRY,
     Execution,
     ContractCode,
     OperationalErrorCode,
@@ -82,29 +66,22 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.history.archive.attempts import (
     AttemptRecord as ArchiveAttemptRecord,
+    decode_attempt_encoding,
+    decode_attempt_snapshot,
+)
+from horsies.core.history.archive.versions import (
+    ArchiveDecodeResult,
+    DecodedArchiveValue,
 )
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.logging import get_logger
 from horsies.core.history.reads.aggregates import (
-    HISTORY_NONEMPTY_PROBE_SQL,
-    HistoryScope,
-    history_count_statement,
-    history_estimate_statement,
     plan_rows_from_explain,
 )
-from horsies.core.history.reads.detail import (
-    HistoryTaskDetail,
-    LiveTaskLocation,
-    TaskDetailAbsent,
-    read_task_detail,
-    staged_detail_published,
-)
-from horsies.core.history.reads.pages import (
-    HistoryPageQuery,
-    HistoryWindow,
-    history_page_statement,
-    history_sort_expression,
-)
-from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
+from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.typed import decode_task_error, validate_task_result_envelope
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
@@ -143,6 +120,12 @@ from horsies.monitoring.models import (
     WorkflowTaskDetail,
 )
 
+logger = get_logger('monitoring')
+
+# The most rows that ``list_workflow_names`` and ``list_schedules`` return. A
+# longer list is cut, and the cut is logged as a warning.
+LIST_ROW_BOUND: Final = 10_000
+
 # --------------------------------------------------------------------------- #
 # Allowlists and vocabularies
 # --------------------------------------------------------------------------- #
@@ -163,44 +146,6 @@ type TaskSortField = Literal[
 type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 
 type SortDirection = Literal['asc', 'desc']
-
-# Sort key -> the expression it orders by, tagged with nullability.
-# ``queue_s`` and ``exec_s`` sort by the pure-SQL spans (dispatch->start,
-# start->finish) so the table can be triaged by where time is spent. A live
-# row's displayed duration counts up while its sort key stays NULL; that
-# divergence is intentional.
-#
-# ``nulls_last`` wraps only nullable expressions: on a NOT NULL column the
-# wrapper is semantically inert but changes the requested ordering
-# (DESC NULLS LAST) away from what a plain btree provides (DESC implies
-# NULLS FIRST), which blocks index-order scans. Measured at 1M rows: the
-# wrapper alone keeps the default sort on a full seq scan + top-N sort with
-# idx_horsies_tasks_enqueued_at present.
-class _SortKey(NamedTuple):
-    expression: SQLColumnExpression[Any]
-    nullable: bool
-
-
-# A live row has no end time, so the sort keys built on one are NULL for every
-# live row: the live side sorts them as NULL, after every history row.
-_LIVE_END_TIME: SQLColumnExpression[Any] = cast(null(), DateTime(timezone=True))
-_LIVE_EXECUTION_SPAN: SQLColumnExpression[Any] = cast(null(), Interval())
-
-_SORT_COLUMNS: dict[str, _SortKey] = {
-    'enqueued_at': _SortKey(TaskModel.enqueued_at, nullable=False),
-    'started_at': _SortKey(TaskModel.started_at, nullable=True),
-    'completed_at': _SortKey(_LIVE_END_TIME, nullable=True),
-    'failed_at': _SortKey(_LIVE_END_TIME, nullable=True),
-    'status': _SortKey(TaskModel.status, nullable=False),
-    'task_name': _SortKey(TaskModel.task_name, nullable=False),
-    'queue_name': _SortKey(TaskModel.queue_name, nullable=False),
-    'priority': _SortKey(TaskModel.priority, nullable=False),
-    'retry_count': _SortKey(TaskModel.retry_count, nullable=False),
-    'queue_s': _SortKey(
-        TaskModel.started_at - TaskModel.enqueued_at, nullable=True
-    ),
-    'exec_s': _SortKey(_LIVE_EXECUTION_SPAN, nullable=True),
-}
 
 # Display order for the status overview cards. Stable rather than
 # count-ordered, so cards never reorder as counts shift between polls.
@@ -236,25 +181,6 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     **{member.value: ErrorCategory.RETRIEVAL for member in RetrievalCode},
     **{member.value: ErrorCategory.OUTCOME for member in OutcomeCode},
 }
-
-# The codes each built-in family selects when filtering, inverted from the
-# mapping above so a filter selects exactly the codes that mapping labels.
-_CATEGORY_TO_CODES: dict[ErrorCategory, tuple[str, ...]] = {
-    category: tuple(
-        code for code, member in _CODE_TO_CATEGORY.items() if member is category
-    )
-    for category in (
-        ErrorCategory.OPERATIONAL,
-        ErrorCategory.CONTRACT,
-        ErrorCategory.RETRIEVAL,
-        ErrorCategory.OUTCOME,
-    )
-}
-
-# Every code horsies defines. DOMAIN is the complement of this set, read from
-# core's registry rather than a copy, so a code added to the library leaves the
-# DOMAIN filter the moment it is registered.
-_BUILTIN_CODES: tuple[str, ...] = tuple(BUILTIN_CODE_REGISTRY)
 
 
 # --------------------------------------------------------------------------- #
@@ -371,300 +297,20 @@ def _contract_err(
 # --------------------------------------------------------------------------- #
 # Row -> model mappers
 # --------------------------------------------------------------------------- #
-def _task_spans(task: TaskModel) -> tuple[int | None, int | None]:
-    """``(queue_s, exec_s)`` for a live task row.
+def _live_spans(
+    status: TaskStatus,
+    enqueued_at: datetime | None,
+    started_at: datetime | None,
+) -> tuple[int | None, int | None]:
+    """``(queue_s, exec_s)`` of a live task.
 
     A live row has no end time. The queue span counts up only while the
     task is still waiting to start, and the execution span only while it is
     running.
     """
-    queue_s = span_s(
-        task.enqueued_at,
-        task.started_at,
-        live=task.status in _QUEUEING_STATUSES,
-    )
-    exec_s = span_s(task.started_at, None, live=task.status is TaskStatus.RUNNING)
+    queue_s = span_s(enqueued_at, started_at, live=status in _QUEUEING_STATUSES)
+    exec_s = span_s(started_at, None, live=status is TaskStatus.RUNNING)
     return queue_s, exec_s
-
-
-# The exact column set ``_task_summary`` reads. ``list_tasks`` loads only
-# these; the payload columns (input, task_options) stay unfetched, so a list
-# page never ships or detoasts task payloads. ``raiseload=True`` turns any
-# future access to an unlisted column into an immediate error instead of a
-# silent lazy load.
-_SUMMARY_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
-    TaskModel.id,
-    TaskModel.task_name,
-    TaskModel.queue_name,
-    TaskModel.priority,
-    TaskModel.status,
-    TaskModel.retry_count,
-    TaskModel.max_retries,
-    TaskModel.is_workflow_task,
-    TaskModel.worker_hostname,
-    TaskModel.claimed_by_worker_id,
-    TaskModel.enqueued_at,
-    TaskModel.started_at,
-)
-
-# The exact column set ``_leaf_task`` reads, loaded as ``_SUMMARY_COLUMNS``.
-_LEAF_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
-    TaskModel.id,
-    TaskModel.task_name,
-    TaskModel.queue_name,
-    TaskModel.priority,
-    TaskModel.status,
-    TaskModel.retry_count,
-    TaskModel.max_retries,
-    TaskModel.is_workflow_task,
-    TaskModel.worker_hostname,
-    TaskModel.enqueued_at,
-    TaskModel.started_at,
-    TaskModel.good_until,
-    TaskModel.execution,
-)
-
-
-def _live_task_statement(task_id: str) -> Select[tuple[TaskModel]]:
-    """The live row of one task, with the leaf columns only."""
-    return (
-        select(TaskModel)
-        .options(load_only(*_LEAF_COLUMNS, raiseload=True))
-        .where(TaskModel.id == task_id)
-    )
-
-
-def _task_summary(task: TaskModel) -> TaskSummary:
-    """Map a live task row to its list-view shape.
-
-    A live row has no error code and no end time, so these read None.
-    """
-    queue_s, exec_s = _task_spans(task)
-    return TaskSummary(
-        id=task.id,
-        task_name=task.task_name,
-        queue_name=task.queue_name,
-        status=task.status.value,
-        priority=task.priority,
-        retry_count=task.retry_count,
-        max_retries=task.max_retries,
-        is_workflow_task=task.is_workflow_task,
-        error_code=None,
-        error_category=None,
-        worker_hostname=task.worker_hostname,
-        worker_id=task.claimed_by_worker_id,
-        enqueued_at=task.enqueued_at,
-        started_at=task.started_at,
-        completed_at=None,
-        failed_at=None,
-        queue_s=queue_s,
-        exec_s=exec_s,
-    )
-
-
-def _history_summary(row: Any) -> TaskSummary:
-    """Map one history page row to the list-view shape."""
-    status = str(row.status)
-    completed_at = row.terminal_at if status == 'COMPLETED' else None
-    failed_at = row.terminal_at if status != 'COMPLETED' else None
-    return TaskSummary(
-        id=str(row.task_id),
-        task_name=row.task_name,
-        queue_name=row.queue_name,
-        status=status,
-        priority=row.priority,
-        retry_count=row.retry_count,
-        max_retries=row.max_retries,
-        is_workflow_task=row.is_workflow_task,
-        error_code=nz(row.error_code),
-        error_category=_category_value(row.error_code),
-        worker_hostname=row.last_worker_hostname,
-        worker_id=row.last_claimed_worker_id,
-        enqueued_at=row.enqueued_at,
-        started_at=row.started_at,
-        completed_at=completed_at,
-        failed_at=failed_at,
-        queue_s=span_s(
-            row.enqueued_at, row.started_at or row.terminal_at, live=False
-        ),
-        exec_s=span_s(row.started_at, row.terminal_at, live=False),
-    )
-
-
-def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
-    """The merge key for one allowlisted sort field.
-
-    ``queue_s``/``exec_s`` mirror the pure-SQL sort expressions
-    (start - enqueue, terminal end - start), not the displayed spans: a
-    live row's displayed duration counts up while its sort key stays
-    NULL, exactly as the SQL side orders.
-    """
-    match field:
-        case 'queue_s':
-            if summary.started_at is None or summary.enqueued_at is None:
-                return None
-            return summary.started_at - summary.enqueued_at
-        case 'exec_s':
-            end = summary.completed_at or summary.failed_at
-            if end is None or summary.started_at is None:
-                return None
-            return end - summary.started_at
-        case _:
-            return getattr(summary, field)
-
-
-def _leaf_task(task: TaskModel) -> LeafTaskInfo:
-    """Map a live task row to the detail shape shared by tasks and workflow nodes.
-
-    A live row has no error code, failed reason or end time, so these read
-    None.
-    """
-    queue_s, exec_s = _task_spans(task)
-    return LeafTaskInfo(
-        task_id=task.id,
-        status=task.status.value,
-        error_code=None,
-        failed_reason=None,
-        retry_count=task.retry_count,
-        max_retries=task.max_retries,
-        enqueued_at=task.enqueued_at,
-        started_at=task.started_at,
-        completed_at=None,
-        failed_at=None,
-        queue_s=queue_s,
-        exec_s=exec_s,
-        worker_hostname=task.worker_hostname,
-        good_until=task.good_until,
-        execution=Execution(task.execution),
-    )
-
-
-type _AttemptRow = tuple[
-    int,
-    str,
-    bool,
-    str | None,
-    str | None,
-    str | None,
-    str,
-    datetime,
-    datetime,
-]
-"""``attempt, outcome, will_retry, error_code, error_message, failed_reason,
-worker_hostname, started_at, finished_at`` of one attempt row."""
-
-
-def _attempts_statement(task_id: str) -> Select[_AttemptRow]:
-    """The attempt rows of one task, oldest first, with the read columns only."""
-    return (
-        select(
-            TaskAttemptModel.attempt,
-            TaskAttemptModel.outcome,
-            TaskAttemptModel.will_retry,
-            TaskAttemptModel.error_code,
-            TaskAttemptModel.error_message,
-            TaskAttemptModel.failed_reason,
-            TaskAttemptModel.worker_hostname,
-            TaskAttemptModel.started_at,
-            TaskAttemptModel.finished_at,
-        )
-        .where(TaskAttemptModel.task_id == task_id)
-        .order_by(TaskAttemptModel.attempt)
-    )
-
-
-def _attempt(row: _AttemptRow) -> TaskAttemptInfo:
-    """Map an attempt row to its response shape."""
-    (
-        attempt,
-        outcome,
-        will_retry,
-        error_code,
-        error_message,
-        failed_reason,
-        worker_hostname,
-        started_at,
-        finished_at,
-    ) = row
-    return TaskAttemptInfo(
-        attempt=attempt,
-        outcome=outcome,
-        will_retry=will_retry,
-        error_code=nz(error_code),
-        error_message=nz(error_message),
-        failed_reason=nz(failed_reason),
-        worker_hostname=worker_hostname,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
-
-
-def _history_attempt(record: 'ArchiveAttemptRecord') -> TaskAttemptInfo:
-    """Map one snapshot-preserved attempt to the same response shape."""
-    return TaskAttemptInfo(
-        attempt=record.attempt,
-        outcome=record.outcome,
-        will_retry=record.will_retry,
-        error_code=nz(record.error_code),
-        error_message=nz(record.error_message),
-        failed_reason=nz(record.failed_reason),
-        worker_hostname=record.worker_hostname,
-        started_at=record.started_at,
-        finished_at=record.finished_at,
-    )
-
-
-def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
-    """Map a history detail to the leaf shape the routes already serve.
-
-    The terminal instant is authoritative: it lands in ``completed_at``
-    for COMPLETED and in ``failed_at`` for every other terminal status,
-    which is strictly more end-stamp information than the pre-history
-    live rows carried for cancelled and expired tasks.
-    """
-    completed_at = (
-        detail.terminal_at if detail.status is TaskStatus.COMPLETED else None
-    )
-    failed_at = (
-        detail.terminal_at
-        if detail.status is not TaskStatus.COMPLETED
-        else None
-    )
-    end = detail.terminal_at
-    queue_s = span_s(
-        detail.enqueued_at, detail.started_at or end, live=False
-    )
-    exec_s = span_s(detail.started_at, end, live=False)
-    return LeafTaskInfo(
-        task_id=detail.task_id,
-        status=detail.status.value,
-        error_code=nz(detail.error_code),
-        failed_reason=nz(detail.final_failed_reason),
-        retry_count=detail.retry_count,
-        max_retries=detail.max_retries,
-        enqueued_at=detail.enqueued_at,
-        started_at=detail.started_at,
-        completed_at=completed_at,
-        failed_at=failed_at,
-        queue_s=queue_s,
-        exec_s=exec_s,
-        worker_hostname=detail.last_worker_hostname,
-        good_until=detail.good_until,
-        execution=None,
-    )
-
-
-def _run_summary(run: WorkflowModel) -> WorkflowRunSummary:
-    """Map a workflow row to its summary shape."""
-    return WorkflowRunSummary(
-        id=run.id,
-        name=run.name,
-        definition_key=run.definition_key,
-        status=run.status,
-        created_at=run.created_at,
-        completed_at=run.completed_at,
-        wall_s=elapsed_s(run.created_at, run.completed_at),
-    )
 
 
 def _node_exec_s(
@@ -688,80 +334,6 @@ def _node_exec_s(
             return elapsed_s(started_at, completed_at)
         case _:
             return None
-
-
-# --------------------------------------------------------------------------- #
-# Filter assembly
-# --------------------------------------------------------------------------- #
-def _history_scope(
-    *,
-    statuses: list[TaskStatus],
-    task_names: list[str],
-    queues: list[str],
-    workers: list[str],
-    error_codes: list[str],
-    error_categories: list[ErrorCategory],
-    retried_only: bool,
-) -> HistoryScope:
-    """The live filter set expressed in history-primitive terms.
-
-    Taxonomy families resolve to their code lists here — the primitive
-    carries codes, never the taxonomy — and DOMAIN becomes the
-    complement of every built-in code, exactly the live predicate's
-    semantics.
-    """
-    families: list[tuple[str, ...]] = []
-    domain_complement: tuple[str, ...] | None = None
-    for category in error_categories:
-        if category is ErrorCategory.DOMAIN:
-            domain_complement = _BUILTIN_CODES
-        else:
-            families.append(_CATEGORY_TO_CODES[category])
-    return HistoryScope(
-        statuses=tuple(status.value for status in statuses),
-        task_names=tuple(task_names),
-        queue_names=tuple(queues),
-        workers=tuple(workers),
-        error_codes=tuple(error_codes),
-        category_families=tuple(families),
-        domain_complement=domain_complement,
-        retried_only=retried_only,
-    )
-
-
-def _scope_conditions(
-    *,
-    statuses: list[TaskStatus],
-    task_names: list[str],
-    queues: list[str],
-    workers: list[str],
-    error_codes: list[str],
-    error_categories: list[ErrorCategory],
-    retried_only: bool,
-) -> list[ColumnElement[bool]]:
-    """Build the live-table WHERE conditions for the given task filters.
-
-    Each dimension is multi-select: values within a dimension are OR-combined
-    and dimensions are AND-combined. An empty list means no filter on that
-    dimension. ``error_codes`` and ``error_categories`` select by error code,
-    and a live row has none, so either filter selects no live row; the
-    history side applies them (``_history_scope``). ``retried_only`` keeps
-    only tasks retried at least once.
-    """
-    conditions: list[ColumnElement[bool]] = []
-    if statuses:
-        conditions.append(TaskModel.status.in_(statuses))
-    if task_names:
-        conditions.append(TaskModel.task_name.in_(task_names))
-    if queues:
-        conditions.append(TaskModel.queue_name.in_(queues))
-    if workers:
-        conditions.append(TaskModel.claimed_by_worker_id.in_(workers))
-    if error_codes or error_categories:
-        conditions.append(false())
-    if retried_only:
-        conditions.append(TaskModel.retry_count > 0)
-    return conditions
 
 
 # --------------------------------------------------------------------------- #
@@ -1156,93 +728,132 @@ async def task_breakdown(
     return Ok(_breakdown(group_by, rows))
 
 
-def list_rows_statement(
-    *,
-    scope: list[ColumnElement[bool]],
-    sort_by: TaskSortField,
-    sort_dir: SortDirection,
-    offset: int,
-    limit: int,
-) -> Select[tuple[TaskModel]]:
-    """The list page's row statement.
-
-    Separated from ``list_tasks`` so the plan tests EXPLAIN exactly the
-    statement production executes — ordering form and projection included.
-    ``nulls_last`` wraps only nullable sort keys (see ``_SortKey``).
-    """
-    sort_key = _SORT_COLUMNS[sort_by]
-    directed = (
-        sort_key.expression.asc()
-        if sort_dir == 'asc'
-        else sort_key.expression.desc()
+# Rows come ordered by row_position: the TOTALS row (0), then the page rows.
+_TASK_LIST_SQL = text("""
+    SELECT row_kind, row_position, total_kind, live_total, history_total,
+           history_estimate_plan, location, task_id, task_name, queue_name,
+           priority, status, retry_count, max_retries, is_workflow_task,
+           error_code, worker_id, worker_hostname, enqueued_at, started_at,
+           terminal_at
+    FROM horsies_monitoring_task_list(
+        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
+        CAST(:statuses AS text[]), CAST(:task_names AS text[]),
+        CAST(:queue_names AS text[]), CAST(:worker_ids AS text[]),
+        CAST(:error_codes AS text[]), CAST(:error_categories AS text[]),
+        CAST(:retried_only AS boolean),
+        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[]),
+        CAST(:sort_key AS text), CAST(:sort_direction AS text),
+        CAST(:page_offset AS integer), CAST(:page_limit AS integer)
     )
-    ordering = nulls_last(directed) if sort_key.nullable else directed
-    return (
-        select(TaskModel)
-        .options(load_only(*_SUMMARY_COLUMNS, raiseload=True))
-        .where(*scope)
-        .order_by(ordering)
-        .limit(limit)
-        .offset(offset)
+    ORDER BY row_position
+""")
+
+
+def _sort_direction(sort_dir: SortDirection) -> str:
+    """The sort direction as ``horsies_monitoring_task_list`` takes it."""
+    match sort_dir:
+        case 'asc':
+            return 'ASC'
+        case 'desc':
+            return 'DESC'
+
+
+def _list_total(row: RowMapping) -> int:
+    """The total of the TOTALS row.
+
+    ``EXACT``: the two counts. ``ESTIMATE_HISTORY_EMPTY``: the live
+    estimate (the history table has no row). ``ESTIMATE_HISTORY_PLAN``: the
+    live estimate plus the planner's row estimate of the history window.
+
+    Raises:
+        HistoryContractError: the EXPLAIN text of the history estimate does
+            not carry a top plan row estimate.
+    """
+    assert _column(row, 'row_kind', str) == 'TOTALS', row['row_kind']
+    live_total = _column(row, 'live_total', int)
+    match _column(row, 'total_kind', str):
+        case 'EXACT' | 'ESTIMATE_HISTORY_EMPTY':
+            return live_total + _column(row, 'history_total', int)
+        case 'ESTIMATE_HISTORY_PLAN':
+            return live_total + plan_rows_from_explain(
+                _column(row, 'history_estimate_plan', str),
+            )
+        case other:
+            raise AssertionError(f'task list total kind {other!r} is not known')
+
+
+def _live_list_row(row: RowMapping) -> TaskSummary:
+    """A LIVE page row: no error code and no end time."""
+    task_id = _column(row, 'task_id', str)
+    stored_status = _column(row, 'status', str)
+    status = _STATUS_BY_VALUE.get(stored_status)
+    assert status is not None, f'live task {task_id} has status {stored_status!r}'
+    enqueued_at = _column(row, 'enqueued_at', datetime)
+    started_at = _optional_time(row, 'started_at')
+    queue_s, exec_s = _live_spans(status, enqueued_at, started_at)
+    return TaskSummary(
+        id=task_id,
+        task_name=_column(row, 'task_name', str),
+        queue_name=_column(row, 'queue_name', str),
+        status=status.value,
+        priority=_column(row, 'priority', int),
+        retry_count=_column(row, 'retry_count', int),
+        max_retries=_column(row, 'max_retries', int),
+        is_workflow_task=_column(row, 'is_workflow_task', bool),
+        error_code=None,
+        error_category=None,
+        worker_hostname=_optional_text(row, 'worker_hostname'),
+        worker_id=_optional_text(row, 'worker_id'),
+        enqueued_at=enqueued_at,
+        started_at=started_at,
+        completed_at=None,
+        failed_at=None,
+        queue_s=queue_s,
+        exec_s=exec_s,
     )
 
 
-# Planner row estimate for the unfiltered task count. ``reltuples`` is
-# refreshed by VACUUM / ANALYZE / autovacuum; -1 means the table was never
-# sampled.
-_ESTIMATED_TOTAL_SQL = text(
-    'SELECT reltuples::bigint FROM pg_class WHERE oid = cast(:tablename AS regclass)'
-)
+def _history_list_row(row: RowMapping) -> TaskSummary:
+    """A HISTORY page row: the stored status text, and the terminal time as
+    ``completed_at`` for COMPLETED, else as ``failed_at``."""
+    status = _column(row, 'status', str)
+    terminal_at = _column(row, 'terminal_at', datetime)
+    enqueued_at = _column(row, 'enqueued_at', datetime)
+    started_at = _optional_time(row, 'started_at')
+    error_code = _optional_text(row, 'error_code')
+    completed = status == TaskStatus.COMPLETED.value
+    return TaskSummary(
+        id=_column(row, 'task_id', str),
+        task_name=_column(row, 'task_name', str),
+        queue_name=_column(row, 'queue_name', str),
+        status=status,
+        priority=_column(row, 'priority', int),
+        retry_count=_column(row, 'retry_count', int),
+        max_retries=_column(row, 'max_retries', int),
+        is_workflow_task=_column(row, 'is_workflow_task', bool),
+        error_code=nz(error_code),
+        error_category=_category_value(error_code),
+        worker_hostname=_optional_text(row, 'worker_hostname'),
+        worker_id=_optional_text(row, 'worker_id'),
+        enqueued_at=enqueued_at,
+        started_at=started_at,
+        completed_at=terminal_at if completed else None,
+        failed_at=None if completed else terminal_at,
+        queue_s=span_s(enqueued_at, started_at or terminal_at, live=False),
+        exec_s=span_s(started_at, terminal_at, live=False),
+    )
 
 
-async def _estimated_task_total(session: AsyncSession) -> int:
-    """Estimated row count of ``horsies_tasks``; exact only when unsampled.
-
-    Falls back to an exact count when the estimate is -1 (never sampled) —
-    the one case where the estimate carries no information.
-    """
-    estimate: int = (
-        await session.execute(
-            _ESTIMATED_TOTAL_SQL, {'tablename': TaskModel.__tablename__}
-        )
-    ).scalar_one()
-    if estimate >= 0:
-        return estimate
-    exact: int = (
-        await session.execute(select(func.count()).select_from(TaskModel))
-    ).scalar_one()
-    return exact
-
-
-async def _estimated_history_total(
-    session: AsyncSession,
-    window: HistoryWindow,
-    scope: HistoryScope,
-) -> int:
-    """Planner row estimate for the windowed history side.
-
-    The history sibling of ``_estimated_task_total``, by a different
-    mechanism: ``reltuples`` is whole-relation and the history side is
-    always window-scoped, so the estimate is the planner's own — EXPLAIN
-    over exactly the predicate the exact count would run. A provably
-    empty parent reports zero before any estimate: the planner clamps
-    every scanned relation to at least one row, so its figure there is
-    clamp noise, not information (the sibling of the live arm's
-    ``reltuples = -1`` rule). A payload the decoder does not recognize
-    raises ``HistoryContractError``; ``list_tasks`` returns it as
-    ``MonitoringQueryHistoryContractViolation``, never a silent exact
-    fallback.
-    """
-    nonempty = (
-        await session.execute(text(HISTORY_NONEMPTY_PROBE_SQL))
-    ).scalar_one()
-    if not bool(nonempty):
-        return 0
-    estimate_sql, estimate_params = history_estimate_statement(window, scope)
-    payload = (
-        await session.execute(text(estimate_sql), estimate_params)
-    ).scalar_one()
-    return plan_rows_from_explain(payload)
+def _list_row(row: RowMapping) -> TaskSummary:
+    """One TASK row of ``horsies_monitoring_task_list``, by its location."""
+    assert _column(row, 'row_kind', str) == 'TASK', row['row_kind']
+    match _column(row, 'location', str):
+        case 'LIVE':
+            return _live_list_row(row)
+        case 'HISTORY':
+            return _history_list_row(row)
+        case other:
+            raise AssertionError(f'task list location {other!r} is not LIVE or HISTORY')
 
 
 async def list_tasks(
@@ -1267,51 +878,37 @@ async def list_tasks(
     is exact; on the unfiltered view it is the planner's row estimate
     (an exact count would rescan the table on every poll for a number the
     UI only uses to size the pager).
-    """
-    scope = _scope_conditions(
-        statuses=statuses,
-        task_names=task_names,
-        queues=queues,
-        workers=workers,
-        error_codes=error_codes,
-        error_categories=error_categories,
-        retried_only=retried_only,
-    )
-    # Each side over-fetches the page's reach (offset + limit) sorted
-    # by the SAME key, and the merge re-sorts and slices — correct for
-    # any page within the capped reach, with cost bounded by the caps.
-    reach = page.reach
-    rows_stmt = list_rows_statement(
-        scope=scope,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-        offset=0,
-        limit=reach,
-    )
-    history_scope = _history_scope(
-        statuses=statuses,
-        task_names=task_names,
-        queues=queues,
-        workers=workers,
-        error_codes=error_codes,
-        error_categories=error_categories,
-        retried_only=retried_only,
-    )
-    page_sql, page_params = history_page_statement(
-        HistoryPageQuery(
-            window=window.history,
-            limit=reach,
-            offset=0,
-            scope=history_scope,
-            order_by=history_sort_expression(
-                sort_by, descending=sort_dir == 'desc'
-            ),
-        )
-    )
-    count_sql, count_params = history_count_statement(
-        window.history, history_scope
-    )
 
+    Order: the sort value in the database collation (NULL last in both
+    directions), then a live row before a history row, then the task id
+    ascending. The order is total, so a page does not reorder between
+    polls.
+
+    Outcomes:
+        - ``Ok(TaskListPage)``: the page rows and the total.
+        - ``Err(MonitoringQueryHistoryContractViolation)``: the EXPLAIN text
+          of the unfiltered history estimate does not decode.
+        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed.
+        - ``Err(MonitoringQueryEventLoopLimit)``: nothing ran.
+
+    One statement (``horsies_monitoring_task_list``), so the page and the
+    total read one snapshot: a task that moves to history during the read is
+    on the page once or not at all.
+    """
+    parameters = _scope_parameters(
+        window,
+        statuses=statuses,
+        task_names=task_names,
+        queues=queues,
+        workers=workers,
+        error_codes=error_codes,
+        error_categories=error_categories,
+        retried_only=retried_only,
+    )
+    parameters['sort_key'] = sort_by
+    parameters['sort_direction'] = _sort_direction(sort_dir)
+    parameters['page_offset'] = page.offset
+    parameters['page_limit'] = page.limit
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task list query', loop_limit)
@@ -1319,55 +916,251 @@ async def list_tasks(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            # Both sides follow the documented total contract together:
-            # filters active means exact on both, the unfiltered view is
-            # a planner estimate on both. The branch is on ``scope`` —
-            # the history statements' terminal-domain predicate is not a
-            # filter.
-            match scope:
-                case []:
-                    live_total = await _estimated_task_total(session)
-                    history_total = await _estimated_history_total(
-                        session, window.history, history_scope
-                    )
-                case _:
-                    count_stmt = (
-                        select(func.count()).select_from(TaskModel).where(*scope)
-                    )
-                    live_total = (
-                        await session.execute(count_stmt)
-                    ).scalar_one()
-                    history_total = int(
-                        (
-                            await session.execute(
-                                text(count_sql), count_params
-                            )
-                        ).scalar_one()
-                    )
-            tasks = (await session.execute(rows_stmt)).scalars().all()
-            history_rows = (
-                await session.execute(text(page_sql), page_params)
-            ).all()
+        rows = await _call_function(resources, _TASK_LIST_SQL, parameters)
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
+    match rows:
+        case [totals_row, *task_rows]:
+            pass
+        case _:
+            raise AssertionError('the task list function answered no TOTALS row')
+    try:
+        total = _list_total(totals_row)
     except HistoryContractError as exc:
         return _contract_err('task list estimate decode', exc)
+    return Ok(TaskListPage(rows=[_list_row(row) for row in task_rows], total=total))
 
-    summaries = [_task_summary(task) for task in tasks]
-    summaries.extend(_history_summary(row) for row in history_rows)
-    keyed = [
-        (_summary_sort_value(summary, sort_by), summary)
-        for summary in summaries
-    ]
-    non_null = [pair for pair in keyed if pair[0] is not None]
-    nulls = [summary for value, summary in keyed if value is None]
-    non_null.sort(key=lambda pair: pair[0], reverse=sort_dir == 'desc')
-    # Nulls last in BOTH directions, matching the live SQL's
-    # nulls_last discipline.
-    ordered = [summary for _, summary in non_null] + nulls
-    rows = ordered[page.offset : page.reach]
-    return Ok(TaskListPage(rows=rows, total=live_total + history_total))
+
+# The detail columns that the task detail and the workflow node functions
+# share, under the same names. The detail reads no result envelope.
+_DETAIL_COLUMNS: Final = (
+    'location, task_id, task_name, queue_name, priority, status, is_workflow_task, '
+    'retry_count, max_retries, enqueued_at, started_at, good_until, worker_hostname, '
+    'execution, terminal_at, error_code, final_failed_reason, attempt_archive_version, '
+    'attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index, '
+    'absence_reason'
+)
+
+_TASK_DETAIL_SQL = text(
+    f'SELECT {_DETAIL_COLUMNS} '
+    'FROM horsies_monitoring_task_detail(CAST(:task_id AS uuid), FALSE, TRUE)'
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _FoundTask:
+    """A task that the detail function found, live or in history, decoded."""
+
+    leaf: LeafTaskInfo
+    task_name: str
+    queue_name: str
+    priority: int
+    is_workflow_task: bool
+    error_code: str | None
+    attempts: list[TaskAttemptInfo]
+    workflow_id: str | None
+    workflow_task_index: int | None
+
+
+def _attempt_info(record: ArchiveAttemptRecord) -> TaskAttemptInfo:
+    """Map one decoded attempt to its response shape."""
+    return TaskAttemptInfo(
+        attempt=record.attempt,
+        outcome=record.outcome,
+        will_retry=record.will_retry,
+        error_code=nz(record.error_code),
+        error_message=nz(record.error_message),
+        failed_reason=nz(record.failed_reason),
+        worker_hostname=record.worker_hostname,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+    )
+
+
+def _decoded_attempts(
+    task_id: str,
+    decoded: ArchiveDecodeResult[tuple[ArchiveAttemptRecord, ...]],
+) -> list[TaskAttemptInfo]:
+    """The attempts, oldest first.
+
+    Raises:
+        HistoryContractError: the attempt bytes do not decode.
+    """
+    match decoded:
+        case DecodedArchiveValue(value=records):
+            return [_attempt_info(record) for record in records]
+        case _:
+            raise HistoryContractError(
+                f'the attempts of task {task_id} failed to decode: {decoded!r}'
+            )
+
+
+def _bytes_column(row: RowMapping, name: str) -> bytes:
+    """A non-NULL bytea column as bytes."""
+    value: object = row[name]
+    match value:
+        case bytes():
+            return value
+        case memoryview():
+            return value.tobytes()
+        case _:
+            raise AssertionError(f'column {name}: expected bytes, got {value!r}')
+
+
+def _optional_text(row: RowMapping, name: str) -> str | None:
+    value: object = row[name]
+    match value:
+        case None | str():
+            return value
+        case _:
+            raise AssertionError(f'column {name}: expected text, got {value!r}')
+
+
+def _optional_time(row: RowMapping, name: str) -> datetime | None:
+    value: object = row[name]
+    match value:
+        case None | datetime():
+            return value
+        case _:
+            raise AssertionError(f'column {name}: expected a time, got {value!r}')
+
+
+def _optional_int(row: RowMapping, name: str) -> int | None:
+    value: object = row[name]
+    match value:
+        case None | int():
+            return value
+        case _:
+            raise AssertionError(f'column {name}: expected an integer, got {value!r}')
+
+
+def _live_found(row: RowMapping) -> _FoundTask:
+    """A LIVE detail row: the live row and its attempts, encoded on read.
+
+    The live table has no end time, error code or failed reason.
+
+    Raises:
+        HistoryContractError: the attempt bytes do not decode.
+    """
+    task_id = _column(row, 'task_id', str)
+    stored_status = _column(row, 'status', str)
+    status = _STATUS_BY_VALUE.get(stored_status)
+    assert status is not None, f'live task {task_id} has status {stored_status!r}'
+    enqueued_at = _column(row, 'enqueued_at', datetime)
+    started_at = _optional_time(row, 'started_at')
+    queue_s, exec_s = _live_spans(status, enqueued_at, started_at)
+    return _FoundTask(
+        leaf=LeafTaskInfo(
+            task_id=task_id,
+            status=status.value,
+            error_code=None,
+            failed_reason=None,
+            retry_count=_column(row, 'retry_count', int),
+            max_retries=_column(row, 'max_retries', int),
+            enqueued_at=enqueued_at,
+            started_at=started_at,
+            completed_at=None,
+            failed_at=None,
+            queue_s=queue_s,
+            exec_s=exec_s,
+            worker_hostname=_optional_text(row, 'worker_hostname'),
+            good_until=_optional_time(row, 'good_until'),
+            execution=Execution(_column(row, 'execution', str)),
+        ),
+        task_name=_column(row, 'task_name', str),
+        queue_name=_column(row, 'queue_name', str),
+        priority=_column(row, 'priority', int),
+        is_workflow_task=_column(row, 'is_workflow_task', bool),
+        error_code=None,
+        attempts=_decoded_attempts(
+            task_id,
+            decode_attempt_encoding(
+                version=_column(row, 'attempt_archive_version', int),
+                payload=_bytes_column(row, 'attempt_snapshot'),
+            ),
+        ),
+        workflow_id=_optional_text(row, 'workflow_id'),
+        workflow_task_index=_optional_int(row, 'workflow_task_index'),
+    )
+
+
+def _history_found(row: RowMapping) -> _FoundTask:
+    """A HISTORY detail row: the history row and its attempt snapshot.
+
+    The terminal time lands in ``completed_at`` for COMPLETED and in
+    ``failed_at`` for every other terminal status.
+
+    Raises:
+        HistoryContractError: the stored status is not a task status, or
+            the attempt snapshot does not decode or match its digest.
+    """
+    task_id = _column(row, 'task_id', str)
+    stored_status = _column(row, 'status', str)
+    match _STATUS_BY_VALUE.get(stored_status):
+        case TaskStatus() as status:
+            pass
+        case None:
+            raise HistoryContractError(
+                f'history row {task_id} has status {stored_status!r}, which is not '
+                'a task status'
+            )
+    terminal_at = _column(row, 'terminal_at', datetime)
+    enqueued_at = _column(row, 'enqueued_at', datetime)
+    started_at = _optional_time(row, 'started_at')
+    error_code = _optional_text(row, 'error_code')
+    completed = status is TaskStatus.COMPLETED
+    return _FoundTask(
+        leaf=LeafTaskInfo(
+            task_id=task_id,
+            status=status.value,
+            error_code=nz(error_code),
+            failed_reason=nz(_optional_text(row, 'final_failed_reason')),
+            retry_count=_column(row, 'retry_count', int),
+            max_retries=_column(row, 'max_retries', int),
+            enqueued_at=enqueued_at,
+            started_at=started_at,
+            completed_at=terminal_at if completed else None,
+            failed_at=None if completed else terminal_at,
+            queue_s=span_s(enqueued_at, started_at or terminal_at, live=False),
+            exec_s=span_s(started_at, terminal_at, live=False),
+            worker_hostname=_optional_text(row, 'worker_hostname'),
+            good_until=_optional_time(row, 'good_until'),
+            execution=None,
+        ),
+        task_name=_column(row, 'task_name', str),
+        queue_name=_column(row, 'queue_name', str),
+        priority=_column(row, 'priority', int),
+        is_workflow_task=_column(row, 'is_workflow_task', bool),
+        error_code=error_code,
+        attempts=_decoded_attempts(
+            task_id,
+            decode_attempt_snapshot(
+                version=_column(row, 'attempt_archive_version', int),
+                payload=_bytes_column(row, 'attempt_snapshot'),
+                digest=_bytes_column(row, 'attempt_snapshot_digest'),
+            ),
+        ),
+        workflow_id=_optional_text(row, 'workflow_id'),
+        workflow_task_index=_optional_int(row, 'workflow_task_index'),
+    )
+
+
+def _found_or_absent(row: RowMapping) -> _FoundTask | TaskAbsenceReason:
+    """A detail row by its location: the task, or the reason it is absent.
+
+    Raises:
+        HistoryContractError: a history row does not decode, or attempt
+            bytes do not decode.
+    """
+    match _column(row, 'location', str):
+        case 'LIVE':
+            return _live_found(row)
+        case 'HISTORY':
+            return _history_found(row)
+        case 'ABSENT':
+            return TaskAbsenceReason(_column(row, 'absence_reason', str))
+        case other:
+            raise AssertionError(f'task detail location {other!r} is not LIVE, HISTORY or ABSENT')
 
 
 async def get_task_detail(
@@ -1381,27 +1174,23 @@ async def get_task_detail(
 
     Outcomes:
         - ``Ok(TaskDetail)``: the live row, or the history row when the live
-          table has no row.
+          table has no row. Attempts are oldest first.
         - ``Ok(TaskDetailNotFound)``: no table holds the id. ``reason`` says
-          whether retention can explain it.
+          whether retention can explain it: an id that is not a UUIDv7 is
+          not classified; a UUIDv7 born before the latest upper bound of a
+          detached leaf of a period class (plus 5 s) predates retained
+          history; any other UUIDv7 is within it.
         - ``Err(MonitoringQueryHistoryContractViolation)``: the history row
-          does not decode, or the staged read reports the task live in the
-          snapshot where the live read found no row.
+          or the attempts do not decode, or the history reader reports the
+          task live in the snapshot where the live read found no row.
 
-    Every read runs in one REPEATABLE READ snapshot.
+    One statement (``horsies_monitoring_task_detail``), so every part comes
+    from one snapshot.
     """
     if not _is_uuid_text(task_id):
         return Ok(TaskDetailNotFound(
             task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
         ))
-    task_stmt = _live_task_statement(task_id)
-    attempts_stmt = _attempts_statement(task_id)
-    # One indexed hop to the node this task backs, if any. Kept as its own
-    # statement rather than a join onto the task row: a standalone task is
-    # the common case and this returns nothing for it.
-    node_stmt = select(
-        WorkflowTaskModel.workflow_id, WorkflowTaskModel.task_index
-    ).where(WorkflowTaskModel.task_id == task_id)
 
     match await broker.select_resources():
         case Err(loop_limit):
@@ -1410,151 +1199,135 @@ async def get_task_detail(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            await _begin_one_snapshot(session)
-            task = (await session.execute(task_stmt)).scalar_one_or_none()
-            if task is None:
-                match await _history_detail(session, task_id):
-                    case TaskAbsenceReason() as reason:
-                        return Ok(TaskDetailNotFound(
-                            task_id=task_id, reason=reason,
-                        ))
-                    case HistoryTaskDetail() as history:
-                        pass
-                node = (await session.execute(node_stmt)).tuples().first()
-                workflow_id, workflow_task_index = (
-                    node if node is not None else (None, None)
-                )
-                return Ok(
-                    TaskDetail(
-                        leaf=_history_leaf(history),
-                        task_name=history.task_name,
-                        queue_name=history.queue_name,
-                        priority=history.priority,
-                        is_workflow_task=history.is_workflow_task,
-                        error_category=_category_value(history.error_code),
-                        attempts=[
-                            _history_attempt(record)
-                            for record in history.attempts
-                        ],
-                        workflow_id=workflow_id,
-                        workflow_task_index=workflow_task_index,
-                    )
-                )
-            attempt_rows = (await session.execute(attempts_stmt)).tuples().all()
-            node = (await session.execute(node_stmt)).tuples().first()
+        rows = await _call_function(resources, _TASK_DETAIL_SQL, {'task_id': task_id})
     except SQLAlchemyError as exc:
-        return _db_err('task detail query', exc)
+        return _function_err('task detail query', exc)
+    match rows:
+        case [row]:
+            pass
+        case _:
+            raise AssertionError(f'the detail function answered {len(rows)} rows')
+    try:
+        found = _found_or_absent(row)
     except HistoryContractError as exc:
         return _contract_err('task detail history read', exc)
-
-    workflow_id, workflow_task_index = node if node is not None else (None, None)
-    return Ok(
-        TaskDetail(
-            leaf=_leaf_task(task),
-            task_name=task.task_name,
-            queue_name=task.queue_name,
-            priority=task.priority,
-            is_workflow_task=task.is_workflow_task,
-            # A live row has no error code.
-            error_category=None,
-            attempts=[_attempt(row) for row in attempt_rows],
-            workflow_id=workflow_id,
-            workflow_task_index=workflow_task_index,
-        )
-    )
-
-
-async def _begin_one_snapshot(session: AsyncSession) -> None:
-    """Begin the session's transaction in REPEATABLE READ.
-
-    Call it before the first statement. Every later statement of the
-    session sees the snapshot of the first one, so the live read and the
-    staged history read agree on where a task row is. A read-only
-    REPEATABLE READ transaction gets no serialization failure. The
-    isolation level resets when the connection goes back to the pool.
-    """
-    _ = await session.connection(
-        execution_options={'isolation_level': 'REPEATABLE READ'},
-    )
-
-
-async def _history_detail(
-    session: AsyncSession, task_id: str
-) -> HistoryTaskDetail | TaskAbsenceReason:
-    """The history side of a detail read, after the live read found no row.
-
-    Terminalization moves finished rows out of the live table, so an
-    absent live row is the normal terminal case, not an error. A database
-    without the staged detail function has no history to read:
-    ``NOT_CLASSIFIED``. The session reads in one snapshot
-    (``_begin_one_snapshot``), so the staged read cannot find the task live.
-
-    Raises:
-        HistoryContractError: the history row does not decode, or the
-            staged read reports the task live in the snapshot where the
-            live read found no row.
-    """
-    connection = await session.connection()
-    if not await staged_detail_published(connection):
-        return TaskAbsenceReason.NOT_CLASSIFIED
-    detail = await read_task_detail(connection, task_id=task_id)
-    match detail:
-        case HistoryTaskDetail():
-            return detail
-        case TaskDetailAbsent(reason=reason):
-            return reason
-        case LiveTaskLocation():
-            raise HistoryContractError(
-                f'staged detail reports task {task_id} live in the snapshot '
-                'where the live read found no row'
+    match found:
+        case TaskAbsenceReason() as reason:
+            return Ok(TaskDetailNotFound(task_id=task_id, reason=reason))
+        case _FoundTask():
+            return Ok(
+                TaskDetail(
+                    leaf=found.leaf,
+                    task_name=found.task_name,
+                    queue_name=found.queue_name,
+                    priority=found.priority,
+                    is_workflow_task=found.is_workflow_task,
+                    error_category=_category_value(found.error_code),
+                    attempts=found.attempts,
+                    workflow_id=found.workflow_id,
+                    workflow_task_index=found.workflow_task_index,
+                )
             )
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 # --------------------------------------------------------------------------- #
 # Workflow queries
 # --------------------------------------------------------------------------- #
-# The node columns each read maps. The payload columns (input, result) stay
-# unfetched; ``raiseload=True`` turns an access to any other column into an
-# immediate error.
-_RUN_NODE_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
-    WorkflowTaskModel.id,
-    WorkflowTaskModel.task_index,
-    WorkflowTaskModel.node_id,
-    WorkflowTaskModel.task_name,
-    WorkflowTaskModel.status,
-    WorkflowTaskModel.dependencies,
-    WorkflowTaskModel.allow_failed_deps,
-    WorkflowTaskModel.is_subworkflow,
-    WorkflowTaskModel.sub_workflow_id,
-    WorkflowTaskModel.started_at,
-    WorkflowTaskModel.completed_at,
+
+
+def _node_error(task_index: int, stored: str | None) -> str | None:
+    """The message of the error that a node's stored result holds.
+
+    A node has no error column of its own: its stored result holds the
+    error. No result, a result with a value, and an error with no message
+    give None.
+
+    Raises:
+        HistoryContractError: the stored result is not a task result
+            envelope, or its error does not decode.
+    """
+    match loads_json(stored):
+        case Err(cause):
+            raise HistoryContractError(
+                f'workflow node {task_index}: the stored result is not JSON: {cause}'
+            )
+        case Ok(None):
+            return None
+        case Ok(raw):
+            pass
+    try:
+        err_slot = validate_task_result_envelope(raw).get('err')
+        match err_slot:
+            case None:
+                return None
+            case _:
+                return nz(decode_task_error(err_slot).message)
+    except (StrictJsonError, ValueValidationError) as exc:
+        raise HistoryContractError(
+            f'workflow node {task_index}: the stored result does not decode: {exc}'
+        ) from exc
+
+
+_WORKFLOW_NAMES_SQL = text(
+    'SELECT row_kind, row_position, workflow_name, list_state, row_bound '
+    'FROM horsies_monitoring_workflow_names() ORDER BY row_position NULLS LAST'
 )
-_NODE_DETAIL_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
-    WorkflowTaskModel.id,
-    WorkflowTaskModel.task_index,
-    WorkflowTaskModel.node_id,
-    WorkflowTaskModel.task_name,
-    WorkflowTaskModel.status,
-    WorkflowTaskModel.is_subworkflow,
-    WorkflowTaskModel.task_id,
-    WorkflowTaskModel.error,
+
+_WORKFLOW_RUNS_SQL = text(
+    'SELECT row_position, workflow_id, workflow_name, definition_key, status, '
+    'created_at, completed_at '
+    'FROM horsies_monitoring_workflow_runs('
+    'CAST(:name AS text), CAST(:status AS text), CAST(:run_limit AS integer)) '
+    'ORDER BY row_position'
 )
+
+_WORKFLOW_RUN_SQL = text(
+    'SELECT row_kind, row_position, workflow_id, workflow_name, definition_key, '
+    'status, created_at, started_at, completed_at, task_index, node_id, task_name, '
+    'dependencies, allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, '
+    'child_failed '
+    'FROM horsies_monitoring_workflow_run(CAST(:workflow_id AS uuid)) '
+    'ORDER BY row_position NULLS FIRST'
+)
+
+_SCHEDULES_SQL = text(
+    'SELECT row_kind, row_position, schedule_name, last_run_at, next_run_at, '
+    'last_task_id, run_count, updated_at, list_state, row_bound '
+    'FROM horsies_monitoring_schedules() ORDER BY row_position NULLS LAST'
+)
+
+
+def _list_end(rows: Sequence[RowMapping], item_kind: str) -> tuple[Sequence[RowMapping], bool]:
+    """The item rows of a bounded list, and whether the function cut the list.
+
+    The last row is the LIST_END row; its bound is ``LIST_ROW_BOUND``.
+    """
+    match rows:
+        case [*items, end]:
+            pass
+        case _:
+            raise AssertionError('the list function answered no LIST_END row')
+    assert _column(end, 'row_kind', str) == 'LIST_END', end['row_kind']
+    assert _column(end, 'row_bound', int) == LIST_ROW_BOUND, end['row_bound']
+    assert all(_column(item, 'row_kind', str) == item_kind for item in items), item_kind
+    match _column(end, 'list_state', str):
+        case 'COMPLETE':
+            return items, False
+        case 'TRUNCATED':
+            return items, True
+        case other:
+            raise AssertionError(f'list state {other!r} is not COMPLETE or TRUNCATED')
 
 
 async def list_workflow_names(
     broker: PostgresBroker,
 ) -> MonitoringResult[list[str]]:
-    """Distinct names of root workflow runs, for the run-picker filter."""
-    stmt = (
-        select(WorkflowModel.name)
-        .where(WorkflowModel.parent_workflow_id.is_(None))
-        .distinct()
-        .order_by(WorkflowModel.name)
-    )
+    """Distinct names of root workflow runs, for the run-picker filter.
 
+    At most ``LIST_ROW_BOUND`` names, in the database collation; a longer
+    list is cut, and the cut is logged as a warning. One statement
+    (``horsies_monitoring_workflow_names``).
+    """
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('workflow names query', loop_limit)
@@ -1562,12 +1335,39 @@ async def list_workflow_names(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            names = (await session.execute(stmt)).scalars().all()
+        rows = await _call_function(resources, _WORKFLOW_NAMES_SQL, {})
     except SQLAlchemyError as exc:
         return _db_err('workflow names query', exc)
 
-    return Ok(list(names))
+    items, cut = _list_end(rows, 'NAME')
+    if cut:
+        _log_cut_list('workflow names', 'root workflow names')
+    return Ok([_column(row, 'workflow_name', str) for row in items])
+
+
+def _log_cut_list(read: str, rows: str) -> None:
+    """Warn that a list read returned ``LIST_ROW_BOUND`` rows and more exist."""
+    logger.warning(
+        '%s: the list is cut at %d %s; more exist and are not returned',
+        read,
+        LIST_ROW_BOUND,
+        rows,
+    )
+
+
+def _run_summary(row: RowMapping) -> WorkflowRunSummary:
+    """A run's summary from a runs row or a RUN row."""
+    created_at = _column(row, 'created_at', datetime)
+    completed_at = _optional_time(row, 'completed_at')
+    return WorkflowRunSummary(
+        id=_column(row, 'workflow_id', str),
+        name=_column(row, 'workflow_name', str),
+        definition_key=_optional_text(row, 'definition_key'),
+        status=_column(row, 'status', str),
+        created_at=created_at,
+        completed_at=completed_at,
+        wall_s=elapsed_s(created_at, completed_at),
+    )
 
 
 async def list_workflow_runs(
@@ -1579,21 +1379,11 @@ async def list_workflow_runs(
 ) -> MonitoringResult[list[WorkflowRunSummary]]:
     """Recent root workflow runs, newest first.
 
-    ``name`` and ``status`` are independent exact-match filters combined with
-    AND; a status no run carries yields an empty list.
+    Runs created at one time come by id, highest first, so a page does not
+    reorder between polls. ``name`` and ``status`` are independent
+    exact-match filters combined with AND; a status no run carries yields an
+    empty list. One statement (``horsies_monitoring_workflow_runs``).
     """
-    conditions: list[ColumnElement[bool]] = [WorkflowModel.parent_workflow_id.is_(None)]
-    if name is not None:
-        conditions.append(WorkflowModel.name == name)
-    if status is not None:
-        conditions.append(WorkflowModel.status == status)
-    stmt = (
-        select(WorkflowModel)
-        .where(*conditions)
-        .order_by(WorkflowModel.created_at.desc())
-        .limit(limit.value)
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('workflow runs query', loop_limit)
@@ -1601,12 +1391,72 @@ async def list_workflow_runs(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            runs = (await session.execute(stmt)).scalars().all()
+        rows = await _call_function(
+            resources,
+            _WORKFLOW_RUNS_SQL,
+            {'name': name, 'status': status, 'run_limit': limit.value},
+        )
     except SQLAlchemyError as exc:
         return _db_err('workflow runs query', exc)
 
-    return Ok([_run_summary(run) for run in runs])
+    return Ok([_run_summary(row) for row in rows])
+
+
+def _run_node(row: RowMapping) -> WorkflowNodeInfo:
+    """One NODE row of ``horsies_monitoring_workflow_run``."""
+    assert _column(row, 'row_kind', str) == 'NODE', row['row_kind']
+    node_status = _column(row, 'status', str)
+    started_at = _optional_time(row, 'started_at')
+    completed_at = _optional_time(row, 'completed_at')
+    return WorkflowNodeInfo(
+        task_index=_column(row, 'task_index', int),
+        node_id=_optional_text(row, 'node_id'),
+        task_name=_column(row, 'task_name', str),
+        node_status=node_status,
+        is_subworkflow=_column(row, 'is_subworkflow', bool),
+        sub_workflow_id=_optional_text(row, 'sub_workflow_id'),
+        allow_failed_deps=_column(row, 'allow_failed_deps', bool),
+        started_at=started_at,
+        completed_at=completed_at,
+        exec_s=_node_exec_s(node_status, started_at, completed_at),
+        child_total=_optional_int(row, 'child_total'),
+        child_failed=_optional_int(row, 'child_failed'),
+    )
+
+
+def _dependencies(row: RowMapping) -> list[int]:
+    """The task indexes a node depends on."""
+    value: object = row['dependencies']
+    assert isinstance(value, list), f'dependencies: expected a list, got {value!r}'
+    dependencies: list[int] = []
+    for each in typing.cast(list[object], value):
+        assert isinstance(each, int), f'dependency {each!r} is not an index'
+        dependencies.append(each)
+    return dependencies
+
+
+def _run_detail(run_row: RowMapping, node_rows: Sequence[RowMapping]) -> WorkflowRunDetail:
+    """The run, its nodes in task_index order, its edges and its failed nodes.
+
+    An edge joins a dependency to the node that names it; a dependency on an
+    index the run does not have makes no edge.
+    """
+    nodes = [_run_node(row) for row in node_rows]
+    known_indices = {node.task_index for node in nodes}
+    edges = [
+        WorkflowEdge(from_index=dependency, to_index=node.task_index)
+        for node, row in zip(nodes, node_rows, strict=True)
+        for dependency in _dependencies(row)
+        if dependency in known_indices
+    ]
+    failed_indices = [node.task_index for node in nodes if node.node_status == 'FAILED']
+    return WorkflowRunDetail(
+        run=_run_summary(run_row),
+        nodes=nodes,
+        edges=edges,
+        failed_count=len(failed_indices),
+        failed_indices=failed_indices,
+    )
 
 
 async def get_workflow_run(
@@ -1617,17 +1467,12 @@ async def get_workflow_run(
 
     Works for any run id, root or subworkflow, so a subworkflow node is
     drilled into by calling this again with that node's ``sub_workflow_id``.
-    Edges pointing at an index the run does not have are dropped.
+    Edges pointing at an index the run does not have are dropped. One
+    statement (``horsies_monitoring_workflow_run``), so the run, its nodes and
+    the child counts come from one snapshot.
     """
     if not _is_uuid_text(workflow_id):
         return Ok(None)
-    run_stmt = select(WorkflowModel).where(WorkflowModel.id == workflow_id)
-    nodes_stmt = (
-        select(WorkflowTaskModel)
-        .options(load_only(*_RUN_NODE_COLUMNS, raiseload=True))
-        .where(WorkflowTaskModel.workflow_id == workflow_id)
-        .order_by(WorkflowTaskModel.task_index)
-    )
 
     match await broker.select_resources():
         case Err(loop_limit):
@@ -1636,80 +1481,70 @@ async def get_workflow_run(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            run = (await session.execute(run_stmt)).scalar_one_or_none()
-            if run is None:
-                return Ok(None)
-            node_rows = (await session.execute(nodes_stmt)).scalars().all()
-
-            # Direct-child status rollup for subworkflow nodes: one grouped
-            # count over the child runs' node rows, keyed by child run id.
-            sub_ids = [
-                row.sub_workflow_id
-                for row in node_rows
-                if row.is_subworkflow and row.sub_workflow_id is not None
-            ]
-            child_rollup: dict[str, tuple[int, int]] = {}
-            if sub_ids:
-                rollup_stmt = (
-                    select(
-                        WorkflowTaskModel.workflow_id,
-                        func.count(),
-                        func.count().filter(WorkflowTaskModel.status == 'FAILED'),
-                    )
-                    .where(WorkflowTaskModel.workflow_id.in_(sub_ids))
-                    .group_by(WorkflowTaskModel.workflow_id)
-                )
-                child_rollup = {
-                    child_id: (total, failed)
-                    for child_id, total, failed in (
-                        (await session.execute(rollup_stmt)).tuples().all()
-                    )
-                }
+        rows = await _call_function(
+            resources, _WORKFLOW_RUN_SQL, {'workflow_id': workflow_id},
+        )
     except SQLAlchemyError as exc:
-        return _db_err('workflow run detail query', exc)
+        return _function_err('workflow run detail query', exc)
 
-    known_indices = {row.task_index for row in node_rows}
-    nodes: list[WorkflowNodeInfo] = []
-    edges: list[WorkflowEdge] = []
-    for row in node_rows:
-        counts = (
-            child_rollup.get(row.sub_workflow_id)
-            if row.is_subworkflow and row.sub_workflow_id is not None
-            else None
-        )
-        child_total, child_failed = counts if counts is not None else (None, None)
-        nodes.append(
-            WorkflowNodeInfo(
-                task_index=row.task_index,
-                node_id=row.node_id,
-                task_name=row.task_name,
-                node_status=row.status,
-                is_subworkflow=row.is_subworkflow,
-                sub_workflow_id=row.sub_workflow_id,
-                allow_failed_deps=row.allow_failed_deps,
-                started_at=row.started_at,
-                completed_at=row.completed_at,
-                exec_s=_node_exec_s(row.status, row.started_at, row.completed_at),
-                child_total=child_total,
-                child_failed=child_failed,
-            )
-        )
-        for dep_index in row.dependencies:
-            if dep_index in known_indices:
-                edges.append(
-                    WorkflowEdge(from_index=dep_index, to_index=row.task_index)
-                )
+    match rows:
+        case [first, *node_rows]:
+            pass
+        case _:
+            raise AssertionError('the run function answered no row')
+    match _column(first, 'row_kind', str):
+        case 'ABSENT':
+            assert not node_rows, 'an ABSENT run has no node row'
+            return Ok(None)
+        case 'RUN':
+            return Ok(_run_detail(first, node_rows))
+        case other:
+            raise AssertionError(f'workflow run row kind {other!r} is not RUN or ABSENT')
 
-    failed_indices = [node.task_index for node in nodes if node.node_status == 'FAILED']
-    return Ok(
-        WorkflowRunDetail(
-            run=_run_summary(run),
-            nodes=nodes,
-            edges=edges,
-            failed_count=len(failed_indices),
-            failed_indices=failed_indices,
-        )
+
+_WORKFLOW_NODE_SQL = text(
+    'SELECT row_kind, node_task_index, node_id, node_task_name, node_status, '
+    f'node_is_subworkflow, node_task_id, node_result, {_DETAIL_COLUMNS} '
+    'FROM horsies_monitoring_workflow_node('
+    'CAST(:workflow_id AS uuid), CAST(:task_index AS integer))'
+)
+
+
+def _node_detail(row: RowMapping) -> WorkflowTaskDetail:
+    """A NODE row: the node, its error, and its backing task with the task's attempts.
+
+    A node with no backing task (a sub-workflow node, or a task node before
+    its task exists) and a node whose task is in neither place have no leaf
+    and no attempt.
+
+    Raises:
+        HistoryContractError: the stored node result, the history row or the
+            attempts do not decode.
+    """
+    task_index = _column(row, 'node_task_index', int)
+    node_error = _node_error(task_index, _optional_text(row, 'node_result'))
+    found: _FoundTask | TaskAbsenceReason | None
+    match row['location']:
+        case None:
+            found = None
+        case _:
+            found = _found_or_absent(row)
+    match found:
+        case _FoundTask():
+            leaf: LeafTaskInfo | None = found.leaf
+            attempts = found.attempts
+        case TaskAbsenceReason() | None:
+            leaf = None
+            attempts = []
+    return WorkflowTaskDetail(
+        task_index=task_index,
+        node_id=_optional_text(row, 'node_id'),
+        task_name=_column(row, 'node_task_name', str),
+        node_status=_column(row, 'node_status', str),
+        is_subworkflow=_column(row, 'node_is_subworkflow', bool),
+        node_error=node_error,
+        leaf=leaf,
+        attempts=attempts,
     )
 
 
@@ -1720,24 +1555,21 @@ async def get_workflow_node(
 ) -> MonitoringResult[WorkflowTaskDetail | None]:
     """Detail for one node: node error, backing task, and attempt history.
 
+    ``node_error`` is the message of the error that the node's stored
+    result holds; a stored result that does not decode returns
+    ``MonitoringQueryHistoryContractViolation``.
+
     Returns None when the run has no node at that index. Subworkflow nodes
-    have no backing task; drill into the child run instead. ``leaf`` is also
-    None when the backing task row has been removed by retention, while its
-    attempt rows are still reported if present. A history row of the
-    backing task that does not decode returns
-    ``MonitoringQueryHistoryContractViolation``. Every read runs in one
-    REPEATABLE READ snapshot.
+    have no backing task; drill into the child run instead. ``leaf`` is
+    None, with no attempts, when no table holds the backing task (retention
+    removed it). A history row of the backing task that does not decode
+    returns ``MonitoringQueryHistoryContractViolation``.
+
+    One statement (``horsies_monitoring_workflow_node``), so the node and
+    its task come from one snapshot.
     """
     if not _is_uuid_text(workflow_id):
         return Ok(None)
-    node_stmt = (
-        select(WorkflowTaskModel)
-        .options(load_only(*_NODE_DETAIL_COLUMNS, raiseload=True))
-        .where(
-            WorkflowTaskModel.workflow_id == workflow_id,
-            WorkflowTaskModel.task_index == task_index,
-        )
-    )
 
     match await broker.select_resources():
         case Err(loop_limit):
@@ -1746,55 +1578,29 @@ async def get_workflow_node(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            await _begin_one_snapshot(session)
-            node = (await session.execute(node_stmt)).scalar_one_or_none()
-            if node is None:
-                return Ok(None)
-
-            task: TaskModel | None = None
-            history: HistoryTaskDetail | None = None
-            attempt_rows: list[_AttemptRow] = []
-            if node.task_id is not None:
-                task = (
-                    await session.execute(_live_task_statement(node.task_id))
-                ).scalar_one_or_none()
-                if task is None:
-                    match await _history_detail(session, str(node.task_id)):
-                        case HistoryTaskDetail() as found:
-                            history = found
-                        case TaskAbsenceReason():
-                            history = None
-                attempt_rows = list(
-                    (
-                        await session.execute(_attempts_statement(node.task_id))
-                    )
-                    .tuples()
-                    .all()
-                )
+        rows = await _call_function(
+            resources,
+            _WORKFLOW_NODE_SQL,
+            {'workflow_id': workflow_id, 'task_index': task_index},
+        )
     except SQLAlchemyError as exc:
-        return _db_err('workflow node detail query', exc)
+        return _function_err('workflow node detail query', exc)
+    match rows:
+        case [row]:
+            pass
+        case _:
+            raise AssertionError(f'the node function answered {len(rows)} rows')
+    match _column(row, 'row_kind', str):
+        case 'ABSENT':
+            return Ok(None)
+        case 'NODE':
+            pass
+        case other:
+            raise AssertionError(f'workflow node row kind {other!r} is not NODE or ABSENT')
+    try:
+        return Ok(_node_detail(row))
     except HistoryContractError as exc:
         return _contract_err('workflow node history read', exc)
-
-    if history is not None:
-        leaf = _history_leaf(history)
-        attempts = [_history_attempt(record) for record in history.attempts]
-    else:
-        leaf = _leaf_task(task) if task is not None else None
-        attempts = [_attempt(row) for row in attempt_rows]
-    return Ok(
-        WorkflowTaskDetail(
-            task_index=node.task_index,
-            node_id=node.node_id,
-            task_name=node.task_name,
-            node_status=node.status,
-            is_subworkflow=node.is_subworkflow,
-            node_error=nz(node.error),
-            leaf=leaf,
-            attempts=attempts,
-        )
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1803,11 +1609,13 @@ async def get_workflow_node(
 async def list_schedules(
     broker: PostgresBroker,
 ) -> MonitoringResult[list[ScheduleStateInfo]]:
-    """Recurring schedule states, soonest next-run first."""
-    stmt = select(ScheduleStateModel).order_by(
-        nulls_last(ScheduleStateModel.next_run_at.asc())
-    )
+    """Recurring schedule states, soonest next-run first, then by name.
 
+    Schedules due at one time come by name, so the list does not reorder
+    between polls. At most ``LIST_ROW_BOUND`` schedules; a longer list is
+    cut, and the cut is logged as a warning. One statement
+    (``horsies_monitoring_schedules``).
+    """
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('schedule state query', loop_limit)
@@ -1815,21 +1623,23 @@ async def list_schedules(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            rows = (await session.execute(stmt)).scalars().all()
+        rows = await _call_function(resources, _SCHEDULES_SQL, {})
     except SQLAlchemyError as exc:
         return _db_err('schedule state query', exc)
 
+    items, cut = _list_end(rows, 'SCHEDULE')
+    if cut:
+        _log_cut_list('schedule state', 'schedules')
     return Ok(
         [
             ScheduleStateInfo(
-                schedule_name=row.schedule_name,
-                last_run_at=row.last_run_at,
-                next_run_at=row.next_run_at,
-                last_task_id=row.last_task_id,
-                run_count=row.run_count,
-                updated_at=row.updated_at,
+                schedule_name=_column(row, 'schedule_name', str),
+                last_run_at=_optional_time(row, 'last_run_at'),
+                next_run_at=_column(row, 'next_run_at', datetime),
+                last_task_id=_optional_text(row, 'last_task_id'),
+                run_count=_column(row, 'run_count', int),
+                updated_at=_column(row, 'updated_at', datetime),
             )
-            for row in rows
+            for row in items
         ]
     )

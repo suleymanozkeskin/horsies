@@ -49,16 +49,18 @@ from horsies.monitoring.models import (
 )
 from horsies.monitoring.pages import BreakdownLimit
 from horsies.monitoring.queries import (
-    _CATEGORY_TO_CODES,
     _ERROR_FACET_CAP,
     _STATUS_BY_VALUE,
     _STATUS_ORDER,
     TaskGroupBy,
     _contract_err,
     _db_err,
-    _history_scope,
     _loop_limit_err,
-    _scope_conditions,
+)
+from tests.dualrun.monitoring_list_reference import (
+    _CATEGORY_TO_CODES,
+    history_scope,
+    scope_conditions,
 )
 
 
@@ -268,7 +270,7 @@ async def task_stats(
     window whose status is not a task status answers
     ``MonitoringQueryHistoryContractViolation`` and no count.
     """
-    scope = _scope_conditions(
+    scope = scope_conditions(
         statuses=[],
         task_names=task_names,
         queues=queues,
@@ -282,7 +284,7 @@ async def task_stats(
     )
     history_sql, history_params = history_scoped_status_counts_statement(
         window.history,
-        _history_scope(
+        history_scope(
             statuses=[],
             task_names=task_names,
             queues=queues,
@@ -423,7 +425,7 @@ async def task_breakdown(
     ``'unknown'``.
     """
     column = _GROUP_COLUMNS[group_by]
-    scope = _scope_conditions(
+    scope = scope_conditions(
         statuses=statuses,
         task_names=task_names,
         queues=queues,
@@ -464,7 +466,7 @@ async def task_breakdown(
     }[group_by]
     history_sql, history_params = _history_breakdown_statement(
         window.history,
-        _history_scope(
+        history_scope(
             statuses=statuses,
             task_names=task_names,
             queues=queues,

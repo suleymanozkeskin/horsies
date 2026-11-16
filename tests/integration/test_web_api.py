@@ -265,7 +265,7 @@ def make_node(*, workflow_id: str, status: str, task_id: str | None) -> NodeRow:
         dependencies=(),
         allow_failed_deps=False,
         kind=TaskNode(task_id=task_id),
-        error=None,
+        result=None,
         created_at=datetime.now(UTC) - timedelta(seconds=120),
         started_at=None,
         completed_at=None,
