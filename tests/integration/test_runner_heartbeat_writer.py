@@ -29,7 +29,7 @@ from horsies.core.worker.runner_heartbeat import (
     PostgresBeatWriter,
 )
 from tests.broker_resources_support import listener_of
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
 
@@ -48,27 +48,25 @@ async def _insert_running_task(
 ) -> str:
     """Insert one task row that started long ago, with no heartbeat."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='runner_beat_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='runner_beat_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at, claimed_by_worker_id, started_at,
-                 finalizing_at, enqueue_sha, is_workflow_task,
-                 worker_hostname, worker_pid, worker_process_name,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'runner_beat_test', 'default', 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, :claimed_at, :worker_id, :started_at,
-                 :finalizing_at, :enqueue_sha, FALSE,
-                 'beat-host', 4242, 'beat-proc',
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, claimed_at,
+                    claimed_by_worker_id, started_at, finalizing_at, is_workflow_task,
+                    worker_hostname, worker_pid, worker_process_name,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    claim_expires_at
+                ) VALUES (
+                    :id, 'runner_beat_test', 'default', 100, '{}', :status, :sent_at,
+                    NOW(), NOW(), 0, 0, :claimed_at, :worker_id, :started_at,
+                    :finalizing_at, FALSE, 'beat-host', 4242, 'beat-proc',
+                    'standard_30d', 1, :command_fingerprint, FALSE, 'ISOLATED', NOW(),
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END
+                )
         """),
         {
             'id': task_id,
@@ -78,7 +76,7 @@ async def _insert_running_task(
             'worker_id': worker_id,
             'started_at': datetime.now(timezone.utc) - STARTED_LONG_AGO,
             'finalizing_at': finalizing_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     return task_id

@@ -189,8 +189,7 @@ _CLAIM_COLUMNS = [
     'row_kind',
     'id',
     'task_name',
-    'args',
-    'kwargs',
+    'input',
     'queue_name',
     'is_workflow_task',
     'task_options',
@@ -206,7 +205,6 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
         'CLAIMED',
         task_id,
         'task',
-        '[]',
         '{}',
         'default',
         True,
@@ -219,7 +217,7 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
 
 def _short_row(short_by: int) -> tuple[object, ...]:
     """The 'SHORT' row of HORSIES_CLAIM_SQL."""
-    return ('SHORT', None, None, None, None, None, None, None, None, None, short_by)
+    return ('SHORT', None, None, None, None, None, None, None, None, short_by)
 
 
 
@@ -1042,12 +1040,12 @@ class TestClaimBatchLockedReturnsPayload:
         worker = _make_worker()
 
         fake_rows = [
-            ('task-1', 'my_app.add', '[]', '{}'),
-            ('task-2', 'my_app.mul', '[1, 2]', '{"x": 3}'),
+            ('task-1', 'my_app.add', '{}'),
+            ('task-2', 'my_app.mul', '{"x": 3}'),
         ]
 
         fake_result = MagicMock()
-        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.keys.return_value = ['id', 'task_name', 'input']
         fake_result.fetchall.return_value = fake_rows
 
         session = AsyncMock()
@@ -1059,14 +1057,12 @@ class TestClaimBatchLockedReturnsPayload:
         assert rows[0] == {
             'id': 'task-1',
             'task_name': 'my_app.add',
-            'args': '[]',
-            'kwargs': '{}',
+            'input': '{}',
         }
         assert rows[1] == {
             'id': 'task-2',
             'task_name': 'my_app.mul',
-            'args': '[1, 2]',
-            'kwargs': '{"x": 3}',
+            'input': '{"x": 3}',
         }
 
     @pytest.mark.asyncio
@@ -1074,7 +1070,7 @@ class TestClaimBatchLockedReturnsPayload:
         worker = _make_worker()
 
         fake_result = MagicMock()
-        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.keys.return_value = ['id', 'task_name', 'input']
         fake_result.fetchall.return_value = []
 
         session = AsyncMock()
@@ -1089,7 +1085,7 @@ class TestClaimBatchLockedReturnsPayload:
         worker = _make_worker(claim_lease_ms=None)
 
         fake_result = MagicMock()
-        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.keys.return_value = ['id', 'task_name', 'input']
         fake_result.fetchall.return_value = []
 
         session = AsyncMock()
