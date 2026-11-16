@@ -123,8 +123,7 @@ def _seed_expired(
 
 
 def _broker(database: DualRunDatabase) -> PostgresBroker:
-    url = database.url.replace('postgresql://', 'postgresql+psycopg://', 1)
-    return PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
+    return PostgresBroker(PostgresConfig(database_url=SecretStr(database.url)))
 
 
 async def _install(database: DualRunDatabase) -> None:
