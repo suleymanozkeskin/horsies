@@ -38,7 +38,7 @@ const DRIVE_STEPS: usize = 64;
 pub(super) const CHILD_FAIL_CODE: &str = "E2E_SUB_CHILD_FAIL";
 
 const FAILED_INPUT_KEY: &str = "tests.port.e2e_sub_failed_input.v1";
-const SLOW_KEY: &str = "tests.port.e2e_sub_slow.v1";
+pub(super) const SLOW_KEY: &str = "tests.port.e2e_sub_slow.v1";
 
 // ---------------------------------------------------------------------------
 // Children (Python `tests/e2e/tasks/workflows.py`)
@@ -353,7 +353,7 @@ pub(super) async fn get(pool: &PgPool, workflow_id: Uuid) -> TaskResult<serde_js
     handle(pool, workflow_id).get(Some(GET_WAIT)).await
 }
 
-fn node_result(text: Option<String>) -> TaskResult<serde_json::Value> {
+pub(super) fn node_result(text: Option<String>) -> TaskResult<serde_json::Value> {
     stored_result(&text.expect("a terminal node stores its result"))
 }
 
@@ -363,7 +363,7 @@ fn summary_of(text: Option<&str>) -> SubWorkflowSummary {
 }
 
 /// The entry of `node_id` in the ok map of an outputless workflow's `get()`.
-fn outputless_entry(
+pub(super) fn outputless_entry(
     got: &TaskResult<serde_json::Value>,
     node_id: &str,
 ) -> TaskResult<serde_json::Value> {
@@ -400,7 +400,7 @@ pub(super) async fn tree(pool: &PgPool, root_id: Uuid) -> Vec<TreeRow> {
 // Read surfaces
 // ---------------------------------------------------------------------------
 
-fn success_surface_parent() -> WorkflowSpec {
+pub(super) fn success_surface_parent() -> WorkflowSpec {
     parent(
         "subworkflow_success_full_surface",
         vec![sub_workflow_node(0, &ok_child())],
@@ -588,7 +588,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
     assert_eq!(summary.failed_tasks, 1);
 }
 
-fn outputless_parent() -> WorkflowSpec {
+pub(super) fn outputless_parent() -> WorkflowSpec {
     let mut outputless = parent(
         "subworkflow_outputless_success_policy",
         vec![mark(0, "required_ok"), sub_workflow_node(1, &fail_child())],

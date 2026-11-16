@@ -841,6 +841,26 @@ pub(super) async fn try_finish_task(
     outcome: &TaskResult<serde_json::Value>,
     registry: &WorkflowSpecRegistry,
 ) -> Result<(), WorkflowError> {
+    let result_json = finish_phase1(pool, task_id, outcome).await;
+    on_workflow_task_complete(
+        pool,
+        task_id,
+        &result_json,
+        outcome.is_ok(),
+        registry,
+        &PayloadPolicy::default(),
+        &RetentionConfig::default(),
+    )
+    .await
+}
+
+/// Phase 1 of [`finish_task`] alone: the task moves to history with
+/// `outcome` and phase 2 stays owed. Returns the stored result text.
+pub(super) async fn finish_phase1(
+    pool: &PgPool,
+    task_id: Uuid,
+    outcome: &TaskResult<serde_json::Value>,
+) -> String {
     hold_running(pool, task_id).await;
     let result_json = serde_json::to_string(outcome).expect("encode the task outcome");
     let fence = PriorLockedRead {
@@ -870,16 +890,7 @@ pub(super) async fn try_finish_task(
         ),
         "phase 1 of task {task_id}: {outcomes:?}"
     );
-    on_workflow_task_complete(
-        pool,
-        task_id,
-        &result_json,
-        outcome.is_ok(),
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
+    result_json
 }
 
 /// Finishes the task of node `task_index` of `workflow_id` (see [`finish_task`])
