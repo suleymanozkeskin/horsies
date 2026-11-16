@@ -17,6 +17,7 @@ pub(crate) mod broker;
 pub mod catalog;
 #[doc(hidden)]
 pub mod core;
+pub mod db;
 pub mod manifest;
 pub mod monitoring;
 #[cfg(feature = "web")]

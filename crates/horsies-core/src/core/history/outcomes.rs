@@ -110,54 +110,6 @@ pub enum LeafDrop {
     Inspection(LeafInspection),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HealthFault {
-    CoverageBelowFloor {
-        class_key: String,
-        complete_future_intervals: i64,
-        coverage_until: Option<DateTime<Utc>>,
-    },
-    MissingDdlPrivilege {
-        schema_create: bool,
-        owns_parent: bool,
-    },
-    LeafNonconformant {
-        leaf_name: String,
-        kind: CatalogConflictKind,
-        detail: String,
-    },
-    DetachAwaitingFinalize {
-        leaf_name: String,
-    },
-    RetentionClassAbsent {
-        class_key: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassCoverage {
-    pub class_key: String,
-    pub attached_leaf_count: i64,
-    pub coverage_until: Option<DateTime<Utc>>,
-    pub complete_future_intervals: i64,
-    pub detachable_leaf_count: i64,
-    pub pending_blocked_leaf_count: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartitionHealthReport {
-    pub class_key: String,
-    pub checked_at: DateTime<Utc>,
-    pub coverage: Option<ClassCoverage>,
-    pub faults: Vec<HealthFault>,
-}
-
-impl PartitionHealthReport {
-    pub fn is_healthy(&self) -> bool {
-        self.faults.is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,55 +232,5 @@ mod tests {
             }),
         ];
         assert_eq!(drops.len(), 4);
-    }
-
-    #[test]
-    fn every_health_fault_is_unhealthy_and_empty_faults_are_healthy() {
-        let faults = vec![
-            HealthFault::CoverageBelowFloor {
-                class_key: "finite".into(),
-                complete_future_intervals: 1,
-                coverage_until: Some(now()),
-            },
-            HealthFault::MissingDdlPrivilege {
-                schema_create: false,
-                owns_parent: true,
-            },
-            HealthFault::LeafNonconformant {
-                leaf_name: "leaf".into(),
-                kind: CatalogConflictKind::PhysicalNonconformant,
-                detail: "bound mismatch".into(),
-            },
-            HealthFault::DetachAwaitingFinalize {
-                leaf_name: "leaf".into(),
-            },
-            HealthFault::RetentionClassAbsent {
-                class_key: "finite".into(),
-            },
-        ];
-        assert_eq!(faults.len(), 5);
-        for fault in faults {
-            assert!(!PartitionHealthReport {
-                class_key: "finite".into(),
-                checked_at: now(),
-                coverage: None,
-                faults: vec![fault],
-            }
-            .is_healthy());
-        }
-        assert!(PartitionHealthReport {
-            class_key: "finite".into(),
-            checked_at: now(),
-            coverage: Some(ClassCoverage {
-                class_key: "finite".into(),
-                attached_leaf_count: 3,
-                coverage_until: Some(now()),
-                complete_future_intervals: 2,
-                detachable_leaf_count: 0,
-                pending_blocked_leaf_count: 0,
-            }),
-            faults: Vec::new(),
-        }
-        .is_healthy());
     }
 }

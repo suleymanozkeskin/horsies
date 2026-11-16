@@ -35,7 +35,7 @@ use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
 use super::spa::{inject, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig};
-use super::task_stats_cache::TaskStatsCache;
+use super::task_stats_cache::{ReadCache, TaskStatsCache};
 
 fn lazy_pool() -> PgPool {
     PgPoolOptions::new()
@@ -107,6 +107,8 @@ fn test_state(
         auth_policy,
         schema_probe,
         task_stats_cache: Arc::new(TaskStatsCache::new()),
+        task_facets_cache: Arc::new(ReadCache::new()),
+        task_breakdown_cache: Arc::new(ReadCache::new()),
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
@@ -842,6 +844,8 @@ async fn migrated_state() -> WebState {
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
+        task_facets_cache: Arc::new(ReadCache::new()),
+        task_breakdown_cache: Arc::new(ReadCache::new()),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
         auth_policy: Arc::new(AllowAll),

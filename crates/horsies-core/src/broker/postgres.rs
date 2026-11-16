@@ -1832,8 +1832,7 @@ impl PostgresBroker {
                         include_failed_reason,
                         include_attempts,
                     )
-                    .map(Some)
-                    .map_err(task_info_history_error),
+                    .map(Some),
                     Some(TaskDetailResult::Live { .. }) | None => Ok(None),
                     Some(TaskDetailResult::Absent { .. }) => Ok(None),
                 }
@@ -2718,11 +2717,16 @@ fn map_history_read_error(error: HistoryError) -> BrokerError {
     }
 }
 
+/// The task info code of a read error, by Python's rule
+/// (`horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`): only a
+/// stored result that fails its check is `INVALID_JSON_PAYLOAD`; a status or
+/// an attempt snapshot that does not decode, and a database failure, are
+/// `TASK_INFO_QUERY_FAILED`, retryable by the driver classification. A
+/// history result is checked in [`history_task_info`]; on the live path the
+/// only `Serialization` error is the stored result's.
 fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
     let code = match &error {
-        BrokerError::Serialization(_)
-        | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidStatus(_) => BrokerErrorCode::InvalidJsonPayload,
+        BrokerError::Serialization(_) => BrokerErrorCode::InvalidJsonPayload,
         _ => BrokerErrorCode::TaskInfoQueryFailed,
     };
     BrokerOperationError {
@@ -2912,19 +2916,33 @@ fn history_task_result_row(
     })
 }
 
+/// The task info of a history row. A stored result that fails its digest or
+/// does not decode is `INVALID_JSON_PAYLOAD`; a status or an attempt snapshot
+/// that does not decode is `TASK_INFO_QUERY_FAILED`, not retryable (Python
+/// `horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`).
 fn history_task_info(
     detail: HistoryTaskDetail,
     include_result: bool,
     include_failed_reason: bool,
     include_attempts: bool,
-) -> Result<TaskInfo, BrokerError> {
-    let status = crate::broker::row::task::parse_task_status(&detail.status)?;
-    let result = if include_result {
-        decode_history_result_value(&detail)?
-            .map(serde_json::from_value)
-            .transpose()?
-    } else {
-        None
+) -> BrokerResult<TaskInfo> {
+    let status = crate::broker::row::task::parse_task_status(&detail.status)
+        .map_err(task_info_history_error)?;
+    let result = match include_result {
+        false => None,
+        true => decode_history_result_value(&detail)
+            .and_then(|value| {
+                value
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(BrokerError::Serialization)
+            })
+            .map_err(|error| {
+                invalid_raw_result(format!(
+                    "stored result of task {} does not decode: {error}",
+                    detail.task_id
+                ))
+            })?,
     };
     let terminal_at = detail.terminal_at;
     let attempts = include_attempts
@@ -2935,7 +2953,8 @@ fn history_task_info(
                 .map(|record| task_attempt_info_from_record(detail.task_id, record))
                 .collect::<Result<Vec<_>, _>>()
         })
-        .transpose()?;
+        .transpose()
+        .map_err(task_info_history_error)?;
     Ok(TaskInfo {
         task_id: detail.task_id,
         task_name: detail.task_name,
@@ -6075,5 +6094,43 @@ mod pool_options_tests {
 
         assert!(failed.is_err(), "the dead connection serves the statement");
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod task_info_code_tests {
+    //! Python's task info codes (`horsies/core/brokers/postgres.py:4889-4904`,
+    //! `:4973-4977`): only a stored result that fails its check is
+    //! `INVALID_JSON_PAYLOAD`.
+    use super::*;
+
+    #[test]
+    fn a_result_that_does_not_parse_is_invalid_json_payload() {
+        let parse_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+
+        let error = task_info_history_error(BrokerError::Serialization(parse_error));
+
+        assert_eq!(error.code, BrokerErrorCode::InvalidJsonPayload);
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn a_status_or_attempt_that_does_not_decode_is_task_info_query_failed() {
+        for error in [
+            BrokerError::InvalidStatus("BOGUS".to_owned()),
+            BrokerError::HistoryReadContract("unknown task-attempt outcome".to_owned()),
+        ] {
+            let mapped = task_info_history_error(error);
+            assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
+            assert!(!mapped.retryable);
+        }
+    }
+
+    #[test]
+    fn a_database_failure_is_task_info_query_failed_with_the_driver_flag() {
+        let mapped = task_info_history_error(BrokerError::Database(sqlx::Error::PoolTimedOut));
+
+        assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(mapped.retryable);
     }
 }
