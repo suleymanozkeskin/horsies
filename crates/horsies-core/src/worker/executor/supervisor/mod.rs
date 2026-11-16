@@ -30,7 +30,7 @@ pub use boot::{
 };
 pub use channel::{
     ChildChannel, ChildLost, FrameWait, LossCause, MailboxBound, PartialFrame, SendFailure,
-    CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
+    WorkerKillMark, CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
 };
 pub use exit::{ChildExit, ExitMeaning, ExitState, ReapedExit};
 pub use exit_watch::POLLED_EXIT_INTERVAL;
