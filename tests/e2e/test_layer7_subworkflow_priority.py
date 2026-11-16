@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import text
@@ -100,6 +101,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             queue_name='serial',
             task_id=str(uuid4()),
             enqueue_sha=f'pb-blocker-{uuid4().hex[:8]}',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
         )).unwrap()
         await wait_for_status(
