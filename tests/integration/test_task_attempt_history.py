@@ -41,7 +41,7 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.autocommit_support import use_pooled_runners
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
 
@@ -139,7 +139,7 @@ async def _insert_running_task(
 ) -> str:
     """Insert a RUNNING task with worker identity for attempt context."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name=task_name,
         good_until=good_until,
         task_options=task_options,
@@ -147,29 +147,26 @@ async def _insert_running_task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha,
-                 claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
-                 worker_process_name, good_until, task_options,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, :task_name, 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, :retry_count,
-                 :max_retries, NOW(), :enqueue_sha,
-                 :worker_id, :claimed_at, :worker_hostname, :worker_pid,
-                 :worker_process_name, :good_until, :task_options,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
+                    worker_process_name, good_until, task_options, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, :task_name, 'default', 100, '{}', 'RUNNING', :sent_at, NOW(),
+                    NOW(), :retry_count, :max_retries, NOW(), :worker_id, :claimed_at,
+                    :worker_hostname, :worker_pid, :worker_process_name, :good_until,
+                    :task_options, 'standard_30d', 1, :command_fingerprint, FALSE,
+                    'ISOLATED', NOW(), FALSE
+                )
         """),
         {
             'id': task_id,
             'task_name': task_name,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'retry_count': retry_count,
             'max_retries': max_retries,
             'worker_id': worker_id,
@@ -593,33 +590,30 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
 ) -> None:
     """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='stale_attempt_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
     # Insert a RUNNING task with started_at far in the past and no heartbeat
     stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha,
-                 claimed_by_worker_id, worker_hostname, worker_pid,
-                 worker_process_name,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'stale_attempt_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, :stale_started_at, :enqueue_sha,
-                 'w-stale-1', 'stale-host', 1234, 'stale-proc',
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, worker_hostname, worker_pid,
+                    worker_process_name, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, 'stale_attempt_test', 'default', 100, '{}', 'RUNNING',
+                    :sent_at, NOW(), NOW(), 0, 0, :stale_started_at, 'w-stale-1',
+                    'stale-host', 1234, 'stale-proc', 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'stale_started_at': stale_started_at,
         },
     )
@@ -664,7 +658,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
 ) -> None:
     """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='stale_retry_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_retry_test')
     stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
     task_options = json.dumps(
         {
@@ -681,27 +675,24 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, task_options,
-                 claimed_by_worker_id, worker_hostname, worker_pid,
-                 worker_process_name,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'stale_retry_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, :stale_started_at, :enqueue_sha, :task_options,
-                 'w-stale-retry', 'stale-host', 9999, 'stale-proc',
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    task_options, claimed_by_worker_id, worker_hostname, worker_pid,
+                    worker_process_name, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, 'stale_retry_test', 'default', 100, '{}', 'RUNNING', :sent_at,
+                    NOW(), NOW(), 0, 3, :stale_started_at, :task_options,
+                    'w-stale-retry', 'stale-host', 9999, 'stale-proc', 'standard_30d',
+                    1, :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'stale_started_at': stale_started_at,
             'task_options': task_options,
         },
@@ -956,29 +947,27 @@ async def test_expire_pending_task_transitions_to_expired(
 ) -> None:
     """expire_pending_tasks transitions PENDING + past good_until to EXPIRED."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='expire_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='expire_test')
     past_good_until = datetime.now(timezone.utc) - timedelta(minutes=10)
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, enqueue_sha, good_until,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'expire_test', 'default', 100, '[]', '{}',
-                 'PENDING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, :enqueue_sha, :good_until,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, good_until,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    is_workflow_task
+                ) VALUES (
+                    :id, 'expire_test', 'default', 100, '{}', 'PENDING', :sent_at,
+                    NOW(), NOW(), 0, 0, :good_until, 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'good_until': past_good_until,
         },
     )

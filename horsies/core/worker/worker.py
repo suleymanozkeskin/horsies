@@ -119,7 +119,6 @@ from horsies.core.worker.sql import (  # noqa: F401
     UNCLAIM_CLAIMED_TASK_SQL as UNCLAIM_CLAIMED_TASK_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL as RESET_PAUSED_WORKFLOW_TASKS_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL as SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
-    UPSERT_TASK_ATTEMPT_SQL as UPSERT_TASK_ATTEMPT_SQL,
     NOTIFY_TASK_QUEUE_SQL as NOTIFY_TASK_QUEUE_SQL,
     NOTIFY_DELAYED_SQL as NOTIFY_DELAYED_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL as INSERT_CLAIMER_HEARTBEAT_SQL,
@@ -184,7 +183,7 @@ _HOOK_FAILURE_MESSAGE = (
 from horsies.core.worker.claiming import ClaimMixin as ClaimMixin  # noqa: E402
 from horsies.core.worker.dispatch import DispatchMixin as DispatchMixin  # noqa: E402
 from horsies.core.worker.finalize import (  # noqa: E402
-    GET_TASK_STATUS_RESULT_SQL as GET_TASK_STATUS_RESULT_SQL,
+    GET_TASK_STATUS_SQL as GET_TASK_STATUS_SQL,
     FinalizeMixin as FinalizeMixin,
 )
 from horsies.core.worker.health import HealthMixin as HealthMixin  # noqa: E402

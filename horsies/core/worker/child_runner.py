@@ -11,6 +11,7 @@ from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from importlib import import_module
 from typing import Any, Final, LiteralString, Optional, Tuple, assert_never, cast
 
@@ -663,24 +664,6 @@ def finish_shared_child_start(app: Horsies) -> None:
 # them on a sync connection here; a shared async child runs the same text on
 # an async connection (``horsies.core.worker.shared_lifecycle``).
 
-WORKFLOW_STATUS_OF_TASK_SQL: Final[LiteralString] = """
-        SELECT w.status FROM horsies_workflows w
-        JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
-        WHERE wt.task_id = %s
-        """
-
-CLAIM_STILL_STARTABLE_SQL: Final[LiteralString] = """
-        SELECT EXISTS (
-            SELECT 1 FROM horsies_tasks
-            WHERE id = %s
-              AND status = 'CLAIMED'
-              AND claimed_by_worker_id = %s
-              AND claimed_at = %s::timestamptz
-              AND (claim_expires_at IS NULL OR claim_expires_at > now())
-              AND (good_until IS NULL OR good_until > now())
-        ) AS startable
-        """
-
 RESET_PAUSED_NODE_SQL: Final[LiteralString] = """
                         UPDATE horsies_workflow_tasks
                         SET status = 'READY',
@@ -698,87 +681,65 @@ SKIP_CANCELLED_NODE_SQL: Final[LiteralString] = """
                           AND status IN ('ENQUEUED', 'READY')
                         """
 
-# The start and the finalizing marker read their row by id alone, in a
-# MATERIALIZED CTE that locks it FOR NO KEY UPDATE (the lock of the UPDATE)
-# and computes the fence as one boolean. The UPDATE joins on id and checks
-# that boolean, so only the primary key serves either scan whatever the
-# statistics say. A row that fails the fence stays locked until the
-# transaction ends. The move functions take the task advisory lock before
-# the row lock, so no move function runs in a transaction that holds this
-# lock: a workflow start that returns no row ends its transaction before
-# its miss path (``_end_start_when_workflow``), and the marker is one
-# statement in autocommit.
-_SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
-                WITH target AS MATERIALIZED (
-                    SELECT id,
-                           (
-                               status = 'CLAIMED'
-                               AND claimed_by_worker_id = %s
-                               AND claimed_at = %s::timestamptz
-                               AND (claim_expires_at IS NULL OR claim_expires_at > now())
-                               AND (good_until IS NULL OR good_until > now())
-                           ) IS TRUE AS startable
-                    FROM horsies_tasks
-                    WHERE id = %s
-                    FOR NO KEY UPDATE
-                ),
-                started AS (
-                    UPDATE horsies_tasks t
-                    SET status = 'RUNNING',
-                        claimed = FALSE,
-                        claim_expires_at = NULL,
-                        started_at = NOW(),
-                        worker_pid = %s,
-                        worker_hostname = %s,
-                        worker_process_name = %s,
-                        updated_at = NOW()
-                    FROM target
-                    WHERE t.id = target.id
-                      AND target.startable
-                """
-
-_SET_RUNNING_WORKFLOW_GUARD_SQL: Final[LiteralString] = """
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM horsies_workflow_tasks wt
-                      JOIN horsies_workflows w ON w.id = wt.workflow_id
-                      WHERE wt.task_id = %s
-                        AND w.status IN ('PAUSED', 'CANCELLED')
-                  )
-            """
-
-_SET_RUNNING_TAIL_SQL: Final[LiteralString] = """
-                    RETURNING t.id
-                ),
-                first_beat AS (
-                    INSERT INTO horsies_heartbeats (
-                        task_id, sender_id, role, sent_at, hostname, pid
-                    )
-                    SELECT id, %s, 'runner', NOW(), %s, %s
-                    FROM started
+# The start: one statement in autocommit. The function locks the row by id
+# alone (FOR NO KEY UPDATE), checks the claim generation, the lease, the
+# deadline and, for a workflow task, its workflow and node, and writes the
+# RUNNING row, the first runner beat and the node in the same statement. A
+# miss writes nothing, returns the first guard that failed, and its row lock
+# ends with the statement, so the miss path never runs under it.
+START_ATTEMPT_SQL: Final[LiteralString] = """
+                SELECT outcome, miss_reason
+                FROM horsies_start_attempt(
+                    %s::uuid, %s, %s::timestamptz, %s, %s, %s, %s
                 )
-                SELECT id FROM started
                 """
 
-START_WORKFLOW_NODE_SQL: Final[LiteralString] = """
-                    WITH linked AS MATERIALIZED (
-                        SELECT id, status
-                        FROM horsies_workflow_tasks
-                        WHERE task_id = %s
-                          AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-                        FOR UPDATE
-                    ),
-                    changed AS (
-                        UPDATE horsies_workflow_tasks node
-                        SET status = 'RUNNING',
-                            started_at = NOW()
-                        FROM linked
-                        WHERE node.id = linked.id
-                          AND linked.status <> 'RUNNING'
-                        RETURNING node.id
-                    )
-                    SELECT EXISTS (SELECT 1 FROM linked) AS node_linked
-                    """
+
+class StartMiss(Enum):
+    """Why ``horsies_start_attempt`` did not start the row: the first guard
+    that failed, in the function's order."""
+
+    DEADLINE_PASSED = 'DEADLINE_PASSED'
+    """CLAIMED by this worker at any generation, ``good_until`` passed: the
+    expiry applies."""
+    NOT_HELD = 'NOT_HELD'
+    """Absent, or the status, owner or claim generation differs."""
+    LEASE_EXPIRED = 'LEASE_EXPIRED'
+    WORKFLOW_PAUSED = 'WORKFLOW_PAUSED'
+    WORKFLOW_CANCELLED = 'WORKFLOW_CANCELLED'
+    NODE_NOT_LINKED = 'NODE_NOT_LINKED'
+    """A workflow task whose node is absent or not in a runnable status."""
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptStarted:
+    """The row is RUNNING with its first runner beat (and its node, for a
+    workflow task)."""
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptMissed:
+    """Nothing was written; ``reason`` names the guard."""
+
+    reason: StartMiss
+
+
+type StartOutcome = AttemptStarted | AttemptMissed
+
+
+def read_start_outcome(row: Sequence[object] | None, task_id: str) -> StartOutcome:
+    """The outcome of ``START_ATTEMPT_SQL``. A row outside the function's
+    contract is a defect (``AssertionError``). Pure."""
+    match row:
+        case ('STARTED', None):
+            return AttemptStarted()
+        case ('MISSED', str() as reason) if reason in StartMiss.__members__:
+            return AttemptMissed(reason=StartMiss[reason])
+        case _:
+            raise AssertionError(
+                f'horsies_start_attempt returned {row!r} for task {task_id}'
+            )
+
 
 BEGIN_SQL: Final[LiteralString] = 'BEGIN'
 """Opens a transaction on a connection of a child pool, which is in
@@ -817,75 +778,13 @@ def mark_finalizing_params(
     return (worker_id, claimed_at, task_id, worker_id)
 
 
-def set_running_sql(is_workflow_task: bool) -> LiteralString:
-    """The RUNNING transition with its first runner heartbeat. A workflow task
-    adds the guard against a paused or cancelled workflow."""
-    match is_workflow_task:
-        case True:
-            return (
-                _SET_RUNNING_HEAD_SQL
-                + _SET_RUNNING_WORKFLOW_GUARD_SQL
-                + _SET_RUNNING_TAIL_SQL
-            )
-        case False:
-            return _SET_RUNNING_HEAD_SQL + _SET_RUNNING_TAIL_SQL
-
-
-def _begin_when_workflow(cursor: Cursor[Any], is_workflow_task: bool) -> None:
-    """Open the transaction of the RUNNING transition of a workflow task.
-
-    The pool of a child is in autocommit. The transition of a plain task is
-    one statement, its own transaction, and its miss path runs one function
-    that writes only when it applies: nothing is opened. A workflow task also
-    writes its node (``START_WORKFLOW_NODE_SQL``), and a node that is not
-    linked must undo the row update. So a workflow task sends ``BEGIN_SQL``
-    before the update, and each branch ends the transaction with
-    ``commit()`` or ``rollback()``.
-
-    The update can lock the row and return no row: its fence fails after
-    the row is locked, and the lock lasts until this transaction ends. The
-    move functions of the miss path take the task advisory lock before the
-    row lock, so a start that returns no row ends this transaction before
-    them (``_end_start_when_workflow``).
-
-    Raises:
-        Exception: what the driver raises for the BEGIN.
-    """
-    match is_workflow_task:
-        case True:
-            cursor.execute(BEGIN_SQL)
-        case False:
-            pass
-
-
-def _end_start_when_workflow(conn: Connection[Any], is_workflow_task: bool) -> None:
-    """End the transaction of a workflow start that returned no row.
-
-    A workflow task rolls back the transaction of its start. The rollback
-    releases the row lock that the start can hold, and loses no write: the
-    update and the first beat apply only to a started row. The expiry of
-    the miss path then runs alone in autocommit, as for a plain task, so
-    its task advisory lock and row lock end with its statement. A plain
-    task sends nothing: its start ran in autocommit, and its lock ended
-    with the statement.
-
-    Raises:
-        Exception: what the driver raises for the ROLLBACK.
-    """
-    match is_workflow_task:
-        case True:
-            conn.rollback()
-        case False:
-            pass
-
-
 def _begin_workflow_stop(cursor: Cursor[Any]) -> None:
     """Open the transaction of the workflow part of a miss path.
 
-    The workflow read, then the abandon or the cancel of the task and the
-    write of its node, which commit together. The expiry before it ran in
-    autocommit, so this transaction holds no task lock when the abandon
-    asks for the workflow row. The abandon locks the workflow row before
+    The abandon or the cancel of the task and the write of its node, which
+    commit together. The start before it ran in autocommit, so this
+    transaction holds no task lock when the abandon asks for the workflow
+    row. The abandon locks the workflow row before
     the task locks, as the cancel of a workflow and the expiry of a paused
     workflow do (``LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL``, then the backing task
     rows).
@@ -896,68 +795,37 @@ def _begin_workflow_stop(cursor: Cursor[Any]) -> None:
     cursor.execute(BEGIN_SQL)
 
 
-def set_running_params(
+def start_attempt_params(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
 ) -> tuple[object, ...]:
-    """The parameters of ``set_running_sql(is_workflow_task)``, in order.
+    """The parameters of ``START_ATTEMPT_SQL``, in order.
 
-    The row and the first beat name this process: its pid, its host, and the
-    sender ``<worker_id>:<pid>``. Reads the pid and the host name; no I/O.
+    The row and the first beat name this process: its pid, its host, the
+    process name ``worker-<pid>`` and the sender ``<worker_id>:<pid>``.
+    Reads the pid and the host name; no I/O.
     """
     pid = os.getpid()
     hostname = socket.gethostname()
-    params: list[object] = [
+    return (
+        task_id,
         worker_id,
         claimed_at,
-        task_id,
         pid,
         hostname,
         f'worker-{pid}',
-    ]
-    if is_workflow_task:
-        params.append(task_id)
-    params += [f'{worker_id}:{pid}', hostname, pid]
-    return tuple(params)
-
-
-def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | None:
-    """Read the owning workflow's status for a task (None if not in one).
-
-    Raises:
-        Exception: DB errors propagate to the wrapped caller,
-            _confirm_ownership_and_set_running, which folds them into
-            OWNERSHIP_UNCONFIRMED.
-    """
-    cursor.execute(WORKFLOW_STATUS_OF_TASK_SQL, (task_id,))
-    row = cursor.fetchone()
-    if row is None:
-        return None
-    status = row.status
-    if isinstance(status, str):
-        return status
-    return None
-
-
-def _claim_still_startable(
-    cursor: Cursor[Any],
-    task_id: str,
-    worker_id: str,
-    claimed_at: datetime,
-) -> bool:
-    """Whether every guard of the RUNNING transition but the workflow holds.
-
-    The same claim, lease, and deadline predicates as the transition.
-    """
-    cursor.execute(
-        CLAIM_STILL_STARTABLE_SQL,
-        (task_id, worker_id, claimed_at),
+        f'{worker_id}:{pid}',
     )
-    row = cursor.fetchone()
-    assert row is not None, 'SELECT EXISTS returns one row'
-    return bool(row[0])
+
+
+def _claim_lost(task_id: str) -> Tuple[bool, str, Optional[str]]:
+    """The wire tuple of a start whose claim is gone. Logs a warning."""
+    logger.warning(
+        f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
+        f'Aborting execution to prevent double-execution.'
+    )
+    return (False, '', 'CLAIM_LOST')
 
 
 def _handle_workflow_stop_before_start(
@@ -1153,12 +1021,16 @@ def _confirm_ownership_and_set_running(
 ):
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
-    ``start_check`` runs once the pool gave a connection, before the
-    update: a shared thread seat waits for that connection, and its
-    deadline can fire meanwhile. ``DeadlineBeforeStart`` then returns with
-    no statement run, so the row stays CLAIMED. ``statements`` bounds the
-    statements after the wait for the connection; a cancelled statement
-    gives OWNERSHIP_UNCONFIRMED, as a database error does.
+    One ``horsies_start_attempt`` statement in autocommit; the function
+    reads ``is_workflow_task`` from the locked row, so the argument is not
+    sent. A miss runs its path (``_after_missed_start``) after the
+    statement, with no lock held. ``start_check`` runs once the pool gave a
+    connection, before the statement: a shared thread seat waits for that
+    connection, and its deadline can fire meanwhile. ``DeadlineBeforeStart``
+    then returns with no statement run, so the row stays CLAIMED.
+    ``statements`` bounds the statements after the wait for the connection;
+    a cancelled statement gives OWNERSHIP_UNCONFIRMED, as a database error
+    does.
     """
     try:
         pool = _get_worker_pool()
@@ -1171,87 +1043,75 @@ def _confirm_ownership_and_set_running(
                 case _ as unreachable:
                     assert_never(unreachable)
             cursor = conn.cursor(row_factory=namedtuple_row)
-            _begin_when_workflow(cursor, is_workflow_task)
-            # The first runner heartbeat is part of the transition: the row can
-            # never be observed RUNNING without heartbeat coverage, and a
-            # transition that does not apply inserts no beat. The worker
-            # process writes the later beats while this child holds the task.
             # The claimed_at pair is the claim-generation fence: the dispatch
             # that submitted this child carries the claim's own claimed_at; a
             # row requeued and re-claimed since then (same worker or not) no
             # longer matches, so the stale child aborts with CLAIM_LOST
             # instead of double-running the task.
             cursor.execute(
-                set_running_sql(is_workflow_task),
-                set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
+                START_ATTEMPT_SQL,
+                start_attempt_params(task_id, worker_id, claimed_at),
             )
-            updated_row = cursor.fetchone()
-            if updated_row is None:
-                _end_start_when_workflow(conn, is_workflow_task)
-                expired_result = _expire_claimed_task_before_start(
-                    cursor,
-                    conn,
-                    task_id,
-                    worker_id,
-                )
-                if expired_result is not None:
-                    return expired_result
-
-                if is_workflow_task:
-                    _begin_workflow_stop(cursor)
-                    workflow_status = _get_workflow_status_for_task(cursor, task_id)
-                    match workflow_status:
-                        case 'PAUSED' | 'CANCELLED':
-                            return _handle_workflow_stop_before_start(
-                                cursor,
-                                conn,
-                                task_id,
-                                workflow_status,
-                                worker_id,
-                                claimed_at,
-                            )
-                        case 'RUNNING' if _claim_still_startable(
-                            cursor,
-                            task_id,
-                            worker_id,
-                            claimed_at,
-                        ):
-                            # The transition missed on the paused guard, and
-                            # a resume committed before this read.
-                            conn.rollback()
-                            return _WorkflowResumedBeforeStart(
-                                workflow_status=workflow_status,
-                            )
-                        case _:
-                            pass
-                conn.rollback()
-                logger.warning(
-                    f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
-                    f'Aborting execution to prevent double-execution.'
-                )
-                return (False, '', 'CLAIM_LOST')
-
-            if is_workflow_task:
-                # A retried attempt finds its node already RUNNING: the node
-                # keeps its tuple and its first started_at. Only a node that
-                # is not RUNNING yet is written. A node in none of the four
-                # statuses (or no node) fails the workflow check.
-                cursor.execute(START_WORKFLOW_NODE_SQL, (task_id,))
-                handoff_row = cursor.fetchone()
-                assert handoff_row is not None, 'SELECT EXISTS returns one row'
-                node_linked = bool(handoff_row[0])
-                if not node_linked:
-                    conn.rollback()
-                    logger.error(
-                        f'Failed to update workflow_tasks to RUNNING for task {task_id}'
+            match read_start_outcome(cursor.fetchone(), task_id):
+                case AttemptStarted():
+                    return None
+                case AttemptMissed(reason=reason):
+                    return _after_missed_start(
+                        cursor, conn, task_id, worker_id, reason, claimed_at,
                     )
-                    return (False, '', 'WORKFLOW_CHECK_FAILED')
-
-            conn.commit()
-        return None
+                case _ as unreachable:
+                    assert_never(unreachable)
     except Exception as e:
         logger.error(f'Failed to transition task {task_id} to RUNNING: {e}')
         return (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+
+def _after_missed_start(
+    cursor: Cursor[Any],
+    conn: Connection[Any],
+    task_id: str,
+    worker_id: str,
+    reason: StartMiss,
+    claimed_at: datetime,
+) -> Tuple[bool, str, Optional[str]] | _WorkflowResumedBeforeStart:
+    """The path of a start that missed, by its reason.
+
+    ``DEADLINE_PASSED`` expires the claim (a refused expiry means the claim
+    is gone); ``NOT_HELD`` and ``LEASE_EXPIRED`` lose the claim; a paused or
+    cancelled workflow stops the task (``_handle_workflow_stop_before_start``,
+    which judges the workflow again under its lock); a node that is not
+    linked fails the workflow check.
+
+    Raises:
+        Exception: DB errors propagate to the wrapped caller,
+            _confirm_ownership_and_set_running, which folds them into
+            OWNERSHIP_UNCONFIRMED.
+    """
+    match reason:
+        case StartMiss.DEADLINE_PASSED:
+            expired = _expire_claimed_task_before_start(cursor, conn, task_id, worker_id)
+            if expired is not None:
+                return expired
+            return _claim_lost(task_id)
+        case StartMiss.NOT_HELD | StartMiss.LEASE_EXPIRED:
+            return _claim_lost(task_id)
+        case StartMiss.WORKFLOW_PAUSED:
+            _begin_workflow_stop(cursor)
+            return _handle_workflow_stop_before_start(
+                cursor, conn, task_id, 'PAUSED', worker_id, claimed_at,
+            )
+        case StartMiss.WORKFLOW_CANCELLED:
+            _begin_workflow_stop(cursor)
+            return _handle_workflow_stop_before_start(
+                cursor, conn, task_id, 'CANCELLED', worker_id, claimed_at,
+            )
+        case StartMiss.NODE_NOT_LINKED:
+            logger.error(
+                f'Failed to update workflow_tasks to RUNNING for task {task_id}'
+            )
+            return (False, '', 'WORKFLOW_CHECK_FAILED')
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _mark_task_finalizing(

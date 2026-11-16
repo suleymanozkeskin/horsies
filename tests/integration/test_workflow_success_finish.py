@@ -43,7 +43,7 @@ from horsies.core.worker.workflow_success import (
     finish_workflow_success,
     success_statement,
 )
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
@@ -77,31 +77,35 @@ async def seed(
     ) -> _Seeded:
         task_id = str(uuid.uuid4())
         claimed_at = datetime.now(timezone.utc) - timedelta(seconds=30)
-        sent_at, sha = compute_test_enqueue_sha(task_name=TASK_NAME, queue_name=QUEUE)
+        sent_at, fingerprint = compute_test_command_fingerprint(
+            task_name=TASK_NAME, queue_name=QUEUE,
+        )
         async with AsyncSession(engine) as session:
             await session.execute(
                 text("""
                     INSERT INTO horsies_tasks
-                        (id, task_name, queue_name, priority, args, kwargs,
-                         status, sent_at, created_at, updated_at, claimed,
-                         retry_count, max_retries, started_at,
-                         enqueue_sha, claimed_by_worker_id, claimed_at,
-                         is_workflow_task, worker_hostname, worker_pid,
-                         worker_process_name, retention_class_key,
-                         command_fingerprint_version, command_fingerprint,
-                         retain_rerun_input, prepared_rerun_input_disposition)
-                    VALUES
-                        (:id, :task_name, :queue, 100, '[]', '{}',
-                         CAST(:status AS varchar), :sent_at, NOW(), NOW(),
-                         CAST(:status AS varchar) = 'CLAIMED',
-                         :retry_count, 3,
-                         CASE WHEN CAST(:status AS varchar) = 'RUNNING'
+                        (
+                            id, task_name, queue_name, priority, input, status,
+                            sent_at, created_at, updated_at, retry_count, max_retries,
+                            started_at, claimed_by_worker_id, claimed_at,
+                            is_workflow_task, worker_hostname, worker_pid,
+                            worker_process_name, retention_class_key,
+                            command_fingerprint_version, command_fingerprint,
+                            retain_rerun_input, execution, enqueued_at,
+                            claim_expires_at
+                        ) VALUES (
+                            :id, :task_name, :queue, 100, '{}',
+                            CAST(:status AS varchar), :sent_at, NOW(), NOW(),
+                            :retry_count, 3,
+                            CASE WHEN CAST(:status AS varchar) = 'RUNNING'
                               THEN NOW() END,
-                         :sha, :worker, :claimed_at,
-                         :is_workflow_task, 'host-1', 4242, 'child-1',
-                         'standard_30d', 1,
-                         sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                         FALSE, 'NEVER_ELIGIBLE')
+                            :worker, :claimed_at, :is_workflow_task, 'host-1', 4242,
+                            'child-1', 'standard_30d',
+                            CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+                            CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE :command_fingerprint END,
+                            FALSE, 'ISOLATED', NOW(),
+                            CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END
+                        )
                 """),
                 {
                     'id': task_id,
@@ -110,7 +114,7 @@ async def seed(
                     'status': status,
                     'sent_at': sent_at,
                     'retry_count': retry_count,
-                    'sha': sha,
+                    'command_fingerprint': fingerprint,
                     'worker': WORKER,
                     'claimed_at': claimed_at,
                     'is_workflow_task': is_workflow_task,
@@ -131,7 +135,7 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'workflow_success_wf', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'workflow_success_wf', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},
@@ -139,13 +143,15 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
-            VALUES (:id, :wf, 0, 'node-0', :task_name, '[]', '{}', :queue,
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES (:id, :wf, 0, 'node-0', :task_name, '{}', :queue,
                     100, '{}', FALSE, 'all', FALSE, 'RUNNING',
-                    CAST(:task_id AS uuid), NOW())
+                    CAST(:task_id AS uuid), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'id': str(uuid.uuid4()),
@@ -341,29 +347,31 @@ class TestApplied:
             (3, 'COMPLETED', False),
         ]
 
-    async def test_a_null_generation_disables_the_generation_half_of_the_fence(
+    async def test_a_null_generation_is_refused(
         self,
         engine: AsyncEngine,
         seed: Any,
     ) -> None:
-        """The stored function keeps its contract: a NULL claimed_at
-        disables the generation half of its fence. The worker never sends
-        one (``OwnedClaim`` requires a claim time), so the statement runs
-        with NULL in its place."""
+        """The claim generation is required: a NULL claimed_at is refused
+        before any lock, and nothing is written. The worker never sends one
+        (``OwnedClaim`` requires a claim time), so the statement runs with
+        NULL in its place."""
         seeded = await seed()
         statement = success_statement(_command(seeded))
+        before = await _live_row(engine, seeded.task_id)
 
-        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-            result = await session.execute(
-                statement.statement,
-                {**statement.parameters, 'claimed_at': None},
-            )
-            outcome = decode_workflow_success_row(
-                {str(key): value for key, value in result.mappings().one().items()},
-            )
-            await session.commit()
+        with pytest.raises(DBAPIError) as raised:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                await session.execute(
+                    statement.statement,
+                    {**statement.parameters, 'claimed_at': None},
+                )
 
-        assert isinstance(outcome, SuccessApplied)
+        original = raised.value.orig
+        assert isinstance(original, psycopg.Error)
+        assert original.sqlstate == '22023'
+        assert await _live_row(engine, seeded.task_id) == before
+        assert await _attempts(engine, seeded.task_id) == ()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -484,7 +492,8 @@ class TestNoWrite:
 
 _DIRECT_SQL: Final = """
     SELECT * FROM horsies_finish_workflow_success(
-        CAST(:id AS uuid), :worker, NULL, :result
+        CAST(:id AS uuid), :worker,
+        (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)), :result
     )
 """
 

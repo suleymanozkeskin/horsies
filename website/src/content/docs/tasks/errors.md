@@ -52,6 +52,7 @@ Errors from task execution, broker, and worker internals.
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | The engine did not start a child workflow, because its depth would pass 32 | No |
 | `TASK_BLOCKED_LOOP` | The task held the event loop of its shared async child for the block limit (5 s) or longer, before its `timeout_ms`. The worker killed the child. The retry runs in an isolated child. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#a-blocked-event-loop) | Yes, if in `auto_retry_for` |
 | `NEIGHBOUR_BLOCKED_LOOP` | Another task held the event loop of this task's shared async child for the block limit (5 s) or longer, before this task's `timeout_ms`. The worker killed the child, with this task in it. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#a-blocked-event-loop) | Yes, if in `auto_retry_for` |
+| `WORKFLOW_START_INCOMPLETE` | A RUNNING workflow has no node rows: its start did not finish. Recovery fails the workflow with this code | No |
 
 #### ContractCode
 
@@ -127,6 +128,8 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `enqueue_async()` | `Result[str, BrokerEnqueueError]` |
 | `enqueue()` | `Result[str, BrokerEnqueueError \| BrokerSyncCallError]` |
 | `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed \| BrokerEventLoopLimit]` |
+
+`enqueue()` and `enqueue_async()` require `sent_at`, the call time of the send, which the row stores. A send that repeats a task id is the same send when the stored command fingerprint and `sent_at` equal its own, and answers with that task id; otherwise it is `PAYLOAD_MISMATCH`. A resend therefore passes the `sent_at` of the first send.
 
 `BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`. `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`: the failures that the sync form adds, where nothing ran. Both are exported from `horsies`.
 
@@ -285,7 +288,7 @@ For a validation failure, the cause names the field, the message and the type, n
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | Refused |
 | `LOOP_RUNNER_FAILED` | Sync send/schedule (or sync retry variant) could not run the enqueue on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran and nothing was written. A stopped runner does not start again, so a sync retry returns the same error; `retry_*_async(err)` completes the same dispatch | Accepted |
 
-`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These four variants carry a `TaskSendPayload` with an `enqueue_sha` field, and the retry methods send that exact payload again. The SHA guarantees same-payload idempotency.
+`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These four variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row.
 
 #### Workflow Errors
 
