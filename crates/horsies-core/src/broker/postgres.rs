@@ -44,7 +44,8 @@ use crate::broker::row::task::{
 };
 
 use crate::broker::process_listener::{
-    default_payload_capacity, fixed_channel, ListenError, ListenerDisabledCause, ProcessListener,
+    default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ListenerDisabledCause,
+    ProcessListener, SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
     TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
@@ -694,12 +695,6 @@ fn config_listener(
     }
 }
 
-fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
-    BrokerError::ConnectionFailed(format!(
-        "Postgres LISTEN delivery probe failed; session_database_url must be direct/session-capable and able to preserve LISTEN/NOTIFY session state: {err}",
-    ))
-}
-
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
     // String-sniff deliberately: PgBouncer prepared-statement tracking failures
     // do not have one stable SQLSTATE across "missing prepared statement",
@@ -783,7 +778,6 @@ pub struct PostgresBroker {
     retain_rerun_input_default: bool,
     idempotency_reservation_window_seconds: i64,
     listener: ProcessListener,
-    listener_delivery_checked: tokio::sync::OnceCell<()>,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
 }
@@ -841,7 +835,6 @@ impl PostgresBroker {
             )
             .num_seconds(),
             listener,
-            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
         }
@@ -932,7 +925,6 @@ impl PostgresBroker {
                 schema_initialization_mode,
                 config.effective_session_database_url(),
             ),
-            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
         })
@@ -2236,9 +2228,9 @@ impl PostgresBroker {
     /// Returns `Ok(())` if the database is reachable, `Err(BrokerError)` otherwise.
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
     ///
-    /// This intentionally does not probe LISTEN/NOTIFY. Workers call
-    /// `ensure_listener_delivery_checked()` once during startup when configured
-    /// for PgBouncer transaction pooling.
+    /// This does not check LISTEN/NOTIFY. Workers run
+    /// [`check_session_delivery`](Self::check_session_delivery) at every
+    /// boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let _: (i32,) = sqlx::query_as(HEALTH_CHECK_SQL)
             .fetch_one(&self.pool)
@@ -2387,70 +2379,52 @@ impl PostgresBroker {
         Ok(pongs)
     }
 
-    /// Verify LISTEN/NOTIFY delivery once per broker in PgBouncer mode.
+    /// The session check of a worker boot: the session URL keeps session
+    /// state when a LISTEN on it receives a NOTIFY. Runs at every worker boot,
+    /// with or without PgBouncer mode (Python `validate_worker_database_paths`,
+    /// `horsies/core/brokers/postgres.py:1436-1460`).
     ///
-    /// Reconnect loops may call this repeatedly; successful probes are cached so
-    /// transient listener reconnects do not open another direct connection.
-    pub async fn ensure_listener_delivery_checked(&self) -> Result<(), BrokerError> {
-        if !self.pgbouncer_transaction_mode {
-            return Ok(());
-        }
-        self.listener_delivery_checked
-            .get_or_try_init(|| async {
-                self.check_listener_delivery().await?;
-                Ok::<(), BrokerError>(())
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Verify that the session pool can actually receive LISTEN/NOTIFY.
+    /// Steps: subscribe a wake on `horsies_check_<32 hex>` on the broker's
+    /// listener, the connection that carries the claim wakes and the pings;
+    /// one autocommit `SELECT pg_notify($1, 'ok')` on the main pool; wait at
+    /// most [`SESSION_CAPABILITY_TIMEOUT`]. The subscription is dropped at the
+    /// end, and the listener UNLISTENs the channel.
     ///
-    /// PgBouncer transaction mode may accept `LISTEN` syntactically but drop
-    /// the session state when the transaction ends. A bounded delivery probe
-    /// catches that misconfiguration with a clear startup error.
-    pub async fn check_listener_delivery(&self) -> Result<(), BrokerError> {
-        let mut listener = sqlx::postgres::PgListener::connect_with(&self.session_pool)
+    /// Outcomes: `Ok` when the NOTIFY arrives; `NotCapable` (not retryable)
+    /// when it does not arrive in time; `Subscribe`, `Notify` and
+    /// `Interrupted` carry their retry rule (a database that cannot be
+    /// reached is retryable).
+    pub async fn check_session_delivery(&self) -> Result<(), SessionCheckFailure> {
+        let listener = self
+            .listener
+            .start()
             .await
-            .map_err(listener_probe_failed)?;
-        let channel = format!("horsies_probe_{}", Uuid::new_v4().simple());
-        let payload = Uuid::new_v4().to_string();
-
-        listener
-            .listen(&channel)
+            .map_err(SessionCheckFailure::Subscribe)?;
+        let channel = fixed_channel(&format!(
+            "{SESSION_CHECK_CHANNEL_PREFIX}{}",
+            Uuid::new_v4().simple()
+        ));
+        let delivery = listener
+            .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
             .await
-            .map_err(listener_probe_failed)?;
-
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(&channel)
-            .bind(&payload)
+            .map_err(SessionCheckFailure::Subscribe)?;
+        sqlx::query("SELECT pg_notify($1, 'ok')")
+            .bind(channel.as_str())
             .execute(&self.pool)
             .await
-            .map_err(|err| {
-                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
-                    prepared_statement_tracking_error(err)
-                } else {
-                    listener_probe_failed(err)
-                }
-            })?;
-
-        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let notification = listener.recv().await.map_err(listener_probe_failed)?;
-                if notification.channel() == channel && notification.payload() == payload {
-                    return Ok::<(), BrokerError>(());
-                }
-            }
-        })
-        .await;
-
-        let _ = listener.unlisten(&channel).await;
-
-        match delivered {
-            Ok(result) => result,
-            Err(_) => Err(BrokerError::ConnectionFailed(
-                "Postgres LISTEN delivery probe timed out; session_database_url appears to be transaction-pooled or otherwise unable to preserve LISTEN/NOTIFY session state".to_owned(),
+            .map_err(SessionCheckFailure::Notify)?;
+        match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
+            Ok(WakeEvent::Notified) => Ok(()),
+            Ok(WakeEvent::Gap) => Err(SessionCheckFailure::Interrupted(
+                CheckInterruption::Reconnected,
             )),
+            Ok(WakeEvent::Stopped) => {
+                Err(SessionCheckFailure::Interrupted(CheckInterruption::Stopped))
+            }
+            Err(_elapsed) => Err(SessionCheckFailure::NotCapable {
+                session_url: listener.masked_url().clone(),
+                waited: SESSION_CAPABILITY_TIMEOUT,
+            }),
         }
     }
 
