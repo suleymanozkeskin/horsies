@@ -439,6 +439,19 @@ TaskResult(err=TaskError(
 
 This applies to both `args_from` kwargs and `workflow_ctx_from` context data.
 
+### A dependency with no stored result
+
+A COMPLETED or FAILED dependency always stores its result. If its stored result is missing (for example a row changed by hand), the dependent task receives this entry in `args_from` kwargs and in `workflow_ctx_from` context data, in place of no entry:
+
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
+```python
+TaskResult(err=TaskError(
+    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+    message="Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result",
+    data={"dependency_index": <index>},
+))
+```
+
 ### args_from with join='any' / 'quorum'
 
 With a non-`all` join, the node becomes ready while some dependencies may
