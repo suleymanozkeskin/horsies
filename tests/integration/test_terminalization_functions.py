@@ -20,9 +20,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -2157,24 +2159,30 @@ class TestAbandonOwnedNode:
         assert isinstance(outcome, LostClaim)
         assert outcome.observed.claimed_at == GENERATION
 
-    async def test_a_null_generation_keeps_the_worker_fence(
+    async def test_a_null_generation_is_refused(
         self,
         session: AsyncSession,
     ) -> None:
-        """The stored function keeps its contract: a NULL claimed_at fences
-        on the worker alone. The worker never sends one (``OwnedClaim``
-        requires a claim time), so the statement runs with NULL in its
-        place."""
+        """The claim generation is required: a NULL claimed_at is refused
+        (22023) before any lock, and the row stays CLAIMED. The worker never
+        sends one (``OwnedClaim`` requires a claim time), so the statement
+        runs with NULL in its place."""
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
-        statement, parameters = call_for(_abandon_owned(task_id))
-        result = await session.execute(statement, {**parameters, 'claimed_at': None})
-        outcome = decode_outcome_row(
-            {str(key): value for key, value in result.mappings().one().items()},
-        )
         await session.commit()
-        assert isinstance(outcome, Applied)
-        assert outcome.observed.worker_id == WORKER
-        assert outcome.observed.claimed_at == GENERATION
+        statement, parameters = call_for(_abandon_owned(task_id))
+        with pytest.raises(DBAPIError) as raised:
+            await session.execute(statement, {**parameters, 'claimed_at': None})
+        await session.rollback()
+        original = raised.value.orig
+        assert isinstance(original, psycopg.Error)
+        assert original.sqlstate == '22023'
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert status == 'CLAIMED'
 
     async def test_pause_kinds_are_equivalent_but_workflow_cancel_is_not(
         self,

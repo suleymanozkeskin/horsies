@@ -347,11 +347,11 @@ async def test_real_claim_path_arms_the_fence(
 ) -> None:
     """Rows from the production claim path carry a usable generation.
 
-    A NULL generation disables the fence for that task, so a dispatch path
-    that stopped reporting claimed_at would silently restore the unfenced
-    behavior while every test that pre-arms generations kept passing. This
-    claims through the real statement, then proves the fence engages on the
-    generation that claim produced.
+    The functions refuse a NULL generation, so a dispatch path that stopped
+    reporting claimed_at would fail every terminal write while every test
+    that pre-arms generations kept passing. This claims through the real
+    statement, then proves the fence engages on the generation that claim
+    produced.
     """
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='fence_test')

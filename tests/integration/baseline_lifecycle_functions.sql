@@ -1412,3 +1412,148 @@ SELECT lc_expect(
 );
 SELECT lc_expect_sqlstate('cancel: a NULL running choice', $q$SELECT * FROM horsies_cancel_task(
     gen_random_uuid(), NULL)$q$, '22023');
+
+------------------------------------------------------------------------------------------------------------------------
+-- The claim generation of the interim terminal functions (#697) and the history kind vocabulary (#695)
+------------------------------------------------------------------------------------------------------------------------
+
+-- Every owned-claim function refuses a NULL generation before any lock; the batch functions refuse a NULL element.
+SELECT lc_expect_sqlstate('generation (#697): abandon_owned_node refuses NULL', $q$SELECT * FROM horsies_abandon_owned_node(
+    gen_random_uuid(), 'w1', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('generation (#697): cancel_owned_node refuses NULL', $q$SELECT * FROM horsies_cancel_owned_node(
+    gen_random_uuid(), 'w1', NULL, TRUE)$q$, '22023');
+SELECT lc_expect_sqlstate('generation (#697): cancel_owned_orphan refuses NULL', $q$SELECT * FROM horsies_cancel_owned_orphan(
+    gen_random_uuid(), 'w1', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('generation (#697): abandon_owned_nodes refuses a NULL element', $q$
+    SELECT * FROM horsies_abandon_owned_nodes(ARRAY[gen_random_uuid()], ARRAY[NULL::timestamptz], 'w1')$q$, '22023');
+SELECT lc_expect_sqlstate('generation (#697): cancel_owned_nodes refuses a NULL element', $q$
+    SELECT * FROM horsies_cancel_owned_nodes(ARRAY[gen_random_uuid()], ARRAY[NULL::timestamptz], 'w1')$q$, '22023');
+
+-- A claim of another generation is never ended by a stale dispatch of the same worker.
+SELECT lc_task('00000000-0000-7000-8000-000000007001', 'CLAIMED', 'w1', TRUE);
+SELECT lc_expect(
+    'generation (#697): cancel_owned_orphan of another generation is a lost claim',
+    (SELECT outcome FROM horsies_cancel_owned_orphan(
+        '00000000-0000-7000-8000-000000007001', 'w1', now() - interval '9 seconds')),
+    'LOST_CLAIM'
+);
+SELECT lc_expect(
+    'generation (#697): the orphan of the current generation is cancelled',
+    (SELECT outcome FROM horsies_cancel_owned_orphan(
+        '00000000-0000-7000-8000-000000007001', 'w1', now() - interval '1 second')),
+    'APPLIED'
+);
+
+-- The miss classifier takes the caller's fence as a closed kind.
+SELECT lc_task('00000000-0000-7000-8000-000000007002', 'CLAIMED');
+SELECT lc_expect(
+    'miss (#697): OWNER held by the same worker at another generation is a conflict, not a lost claim',
+    (SELECT outcome FROM horsies_terminalization_miss(
+        '00000000-0000-7000-8000-000000007002', ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[], 'OWNER', 'w1',
+        NULL)),
+    'SOURCE_STATE_CONFLICT'
+);
+SELECT lc_expect(
+    'miss (#697): OWNER of another worker is a lost claim',
+    (SELECT outcome FROM horsies_terminalization_miss(
+        '00000000-0000-7000-8000-000000007002', ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[], 'OWNER', 'w2',
+        NULL)),
+    'LOST_CLAIM'
+);
+SELECT lc_expect(
+    'miss (#697): OWNER_AND_GENERATION of another generation is a lost claim',
+    (SELECT outcome FROM horsies_terminalization_miss(
+        '00000000-0000-7000-8000-000000007002', ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1',
+        now() - interval '9 seconds')),
+    'LOST_CLAIM'
+);
+SELECT lc_expect(
+    'miss (#697): OWNER_AND_GENERATION that holds is a conflict',
+    (SELECT outcome FROM horsies_terminalization_miss(
+        '00000000-0000-7000-8000-000000007002', ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1',
+        now() - interval '1 second')),
+    'SOURCE_STATE_CONFLICT'
+);
+SELECT lc_expect(
+    'miss (#697): NONE on a live row is a conflict',
+    (SELECT outcome FROM horsies_terminalization_miss(
+        '00000000-0000-7000-8000-000000007002', ARRAY['CANCEL_ADMIN']::text[], 'NONE', NULL, NULL)),
+    'SOURCE_STATE_CONFLICT'
+);
+SELECT lc_expect_sqlstate('miss (#697): an unknown fence kind', $q$SELECT * FROM horsies_terminalization_miss(
+    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'WORKER', 'w1', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('miss (#697): a NULL fence kind', $q$SELECT * FROM horsies_terminalization_miss(
+    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], NULL, NULL, NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('miss (#697): NONE with a worker', $q$SELECT * FROM horsies_terminalization_miss(
+    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'NONE', 'w1', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('miss (#697): OWNER with a generation', $q$SELECT * FROM horsies_terminalization_miss(
+    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'OWNER', 'w1', now())$q$, '22023');
+SELECT lc_expect_sqlstate('miss (#697): OWNER_AND_GENERATION without a generation', $q$
+    SELECT * FROM horsies_terminalization_miss(
+        gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1', NULL)$q$, '22023');
+
+-- The owner-only expiry before start: a miss on a claim the worker still holds is a conflict.
+SELECT lc_task('00000000-0000-7000-8000-000000007003', 'CLAIMED');
+UPDATE horsies_tasks SET status = 'RUNNING', claim_expires_at = NULL, started_at = now(), worker_pid = 1,
+    worker_hostname = 'h', worker_process_name = 'p'
+WHERE id = '00000000-0000-7000-8000-000000007003';
+SELECT lc_expect(
+    'expiry (#697): a held row that is not CLAIMED is a conflict',
+    (SELECT outcome FROM horsies_expire_owned_claim('00000000-0000-7000-8000-000000007003', 'w1', '{}', 'E')),
+    'SOURCE_STATE_CONFLICT'
+);
+SELECT lc_expect(
+    'expiry (#697): a row of another worker is a lost claim',
+    (SELECT outcome FROM horsies_expire_owned_claim('00000000-0000-7000-8000-000000007003', 'w2', '{}', 'E')),
+    'LOST_CLAIM'
+);
+
+-- History rows take only the 15 kinds (#695); every leaf inherits the CHECK.
+CREATE FUNCTION lc_history_row(p_kind text) RETURNS void LANGUAGE sql AS $$
+    INSERT INTO horsies_task_history (
+        task_id, task_name, queue_name, priority, command_fingerprint_version, command_fingerprint,
+        retention_class_key, is_workflow_task, workflow_id, rerun_of_task_id, rerun_root_task_id, sent_at, created_at,
+        enqueued_at, claimed_at, started_at, good_until, terminal_at, status, terminalization_kind, retry_count,
+        max_retries, last_claimed_worker_id, last_worker_hostname, last_worker_pid, last_worker_process_name,
+        error_code, final_failed_reason, result_envelope_version, result_payload, result_digest,
+        history_schema_version, attempt_archive_version, attempt_snapshot, attempt_snapshot_digest,
+        rerun_input_disposition, rerun_input_version, rerun_input_digest, rerun_input_inline
+    ) VALUES (
+        gen_random_uuid(), 'lc.task', 'q_lc', 100, 1, sha256('k'::bytea),
+        'forever', FALSE, NULL, NULL, NULL, now(), now(),
+        now(), NULL, NULL, NULL, now(), 'CANCELLED', p_kind, 0,
+        0, NULL, NULL, NULL, NULL,
+        'TASK_CANCELLED', NULL, 1, NULL, NULL,
+        1, 1, '\x5b5d'::bytea, sha256('\x5b5d'::bytea),
+        'NEVER_ELIGIBLE', NULL, NULL, NULL
+    )
+$$;
+SELECT lc_expect_sqlstate('history (#695): a kind outside the vocabulary',
+    $q$SELECT lc_history_row('NOT_A_KIND')$q$, '23514');
+SELECT lc_history_row('CANCEL_ORPHAN_SWEEP');
+SELECT lc_expect(
+    'history (#695): a kind of the vocabulary is stored',
+    (SELECT count(*)::text FROM horsies_task_history_forever_open WHERE terminalization_kind = 'CANCEL_ORPHAN_SWEEP'),
+    '1'
+);
+SELECT lc_expect(
+    'history (#695): the CHECK lists the 15 kinds',
+    (SELECT (
+        SELECT count(*) FROM unnest(ARRAY[
+            'COMPLETE_LOCKED', 'COMPLETE_FUSED', 'FAIL_RUNNING', 'FAIL_STALE', 'EXPIRE_CLAIMED', 'EXPIRE_PENDING',
+            'CANCEL_ADMIN', 'CANCEL_ORPHAN', 'CANCEL_ORPHAN_SWEEP', 'PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH',
+            'PAUSE_ABANDON_WORKFLOW', 'WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW'
+        ]) AS k(kind)
+        WHERE position('''' || k.kind || '''' IN pg_get_constraintdef(c.oid)) > 0
+    )::text
+     FROM pg_constraint c
+     WHERE c.conname = 'horsies_task_history_kind_known' AND c.conrelid = 'horsies_task_history'::regclass),
+    '15'
+);
+SELECT lc_expect(
+    'history (#695): the forever leaf inherits the CHECK',
+    (SELECT count(*)::text FROM pg_constraint c
+     WHERE c.conname = 'horsies_task_history_kind_known'
+       AND c.conrelid = 'horsies_task_history_forever_open'::regclass),
+    '1'
+);

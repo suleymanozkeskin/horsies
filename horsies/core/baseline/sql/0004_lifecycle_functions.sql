@@ -1012,7 +1012,8 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], p_worker_id, p_claimed_at
+            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
+            p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1191,7 +1192,8 @@ BEGIN
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::text, NULL::boolean
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], p_worker_id, p_claimed_at
+            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
+            p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1413,7 +1415,7 @@ BEGIN
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[], p_worker_id, p_claimed_at
+            p_task_id, ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1705,7 +1707,7 @@ BEGIN
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_STALE']::text[], NULL::text, NULL::timestamptz
+            p_task_id, ARRAY['FAIL_STALE']::text[], 'NONE', NULL::text, NULL::timestamptz
         ) AS m;
         RETURN;
     END IF;

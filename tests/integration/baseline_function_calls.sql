@@ -254,7 +254,8 @@ SELECT fixture_node(
 );
 SELECT expect_value(
     'abandon_owned_node',
-    (SELECT outcome FROM horsies_abandon_owned_node('00000000-0000-7000-8000-00000000000d', 'w1', NULL)),
+    (SELECT outcome FROM horsies_abandon_owned_node(
+        '00000000-0000-7000-8000-00000000000d', 'w1', (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000d'))),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-00000000000e', 'CLAIMED', 'w1', TRUE);
@@ -265,7 +266,8 @@ SELECT fixture_node(
 SELECT expect_value(
     'abandon_owned_nodes',
     (SELECT string_agg(outcome, ',') FROM horsies_abandon_owned_nodes(
-        ARRAY['00000000-0000-7000-8000-00000000000e'::uuid], ARRAY[NULL::timestamptz], 'w1')),
+        ARRAY['00000000-0000-7000-8000-00000000000e'::uuid],
+        ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000e')], 'w1')),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-00000000000f', 'CLAIMED', 'w1', TRUE);
@@ -275,7 +277,8 @@ SELECT fixture_node(
 );
 SELECT expect_value(
     'cancel_owned_node',
-    (SELECT outcome FROM horsies_cancel_owned_node('00000000-0000-7000-8000-00000000000f', 'w1', NULL, FALSE)),
+    (SELECT outcome FROM horsies_cancel_owned_node(
+        '00000000-0000-7000-8000-00000000000f', 'w1', (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000f'), FALSE)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000010', 'CLAIMED', 'w1', TRUE);
@@ -286,13 +289,15 @@ SELECT fixture_node(
 SELECT expect_value(
     'cancel_owned_nodes',
     (SELECT string_agg(outcome, ',') FROM horsies_cancel_owned_nodes(
-        ARRAY['00000000-0000-7000-8000-000000000010'::uuid], ARRAY[NULL::timestamptz], 'w1')),
+        ARRAY['00000000-0000-7000-8000-000000000010'::uuid],
+        ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000010')], 'w1')),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000011', 'CLAIMED', 'w1', TRUE);
 SELECT expect_value(
     'cancel_owned_orphan',
-    (SELECT outcome FROM horsies_cancel_owned_orphan('00000000-0000-7000-8000-000000000011', 'w1', NULL)),
+    (SELECT outcome FROM horsies_cancel_owned_orphan(
+        '00000000-0000-7000-8000-000000000011', 'w1', (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000011'))),
     'APPLIED'
 );
 
@@ -331,7 +336,7 @@ SELECT count(*) FROM horsies_cancel_orphaned_tasks(10);
 SELECT expect_value(
     'terminalization_miss',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-0000000000ff', ARRAY['FAIL_RUNNING'], NULL, NULL)),
+        '00000000-0000-7000-8000-0000000000ff', ARRAY['FAIL_RUNNING'], 'NONE', NULL, NULL)),
     'TASK_ABSENT'
 );
 SELECT expect_value(
