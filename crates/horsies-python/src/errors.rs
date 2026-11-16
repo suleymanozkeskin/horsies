@@ -15,7 +15,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyBaseException, PyException};
 use pyo3::prelude::*;
 
-use crate::process_core::{CallRefusal, StartFailure};
+use crate::process_core::{CallRefusal, PanicRuleFixed as RuleFixed, StartFailure};
 
 create_exception!(
     horsies._core,
@@ -70,6 +70,13 @@ create_exception!(
     CoreDefect,
     "The core refused a manifest. args: (field_path, cause)."
 );
+create_exception!(
+    horsies._core,
+    PanicRuleFixed,
+    CoreDefect,
+    "The panic rule of this process was set to another rule before, or fixed when the core \
+     started. args: (current_rule,)."
+);
 
 /// The advice of `ForkedAfterCoreStart`.
 pub const FORK_ADVICE: &str =
@@ -86,6 +93,11 @@ pub fn refusal_error(refusal: CallRefusal) -> PyErr {
             CoreStartFailed::new_err((start_failure_text(&failure),))
         }
     }
+}
+
+/// The Python error of a refused panic rule.
+pub fn panic_rule_error(refused: RuleFixed) -> PyErr {
+    PanicRuleFixed::new_err((refused.current.as_str(),))
 }
 
 fn start_failure_text(failure: &StartFailure) -> String {
@@ -117,6 +129,7 @@ pub fn add_errors(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("TooManyPendingCalls", py.get_type::<TooManyPendingCalls>())?;
     module.add("CoreDefect", py.get_type::<CoreDefect>())?;
     module.add("ManifestRefused", py.get_type::<ManifestRefused>())?;
+    module.add("PanicRuleFixed", py.get_type::<PanicRuleFixed>())?;
     module.add(
         "PanicException",
         py.get_type::<pyo3::panic::PanicException>(),
