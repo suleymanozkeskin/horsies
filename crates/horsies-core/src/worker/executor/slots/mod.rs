@@ -49,7 +49,9 @@ mod isolated_verdict_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod placement_tests;
 #[cfg(test)]
-mod scripted;
+mod plain_success_tests;
+#[cfg(test)]
+pub(crate) mod scripted;
 #[cfg(test)]
 mod settle_tests;
 #[cfg(test)]
@@ -72,6 +74,8 @@ mod stop_and_loss_tests;
 mod tests;
 #[cfg(test)]
 mod timeout_order_tests;
+#[cfg(test)]
+mod worker_children_tests;
 
 pub use board::{
     ChildBaseline, ChildLayout, DownState, PoolBoard, PoolFailure, PoolHealth, ReadyChild,
@@ -85,13 +89,14 @@ pub use dispatch::{
     AttemptEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause, RetryFacts,
     Settlement, TaskKind,
 };
-pub use outcome::OutcomeWriter;
+pub use outcome::{OrphanSelfHeal, OutcomeWriter};
 pub use pool::{
     ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,
     TaskLimit,
 };
 pub use route::{
-    dispatch_route, ClaimPlan, ClaimRoute, DispatchRoute, IsolatedDeadline, UnservedClass,
+    describe_claim_plan, dispatch_route, unserved_classes_line, ClaimPlan, ClaimRoute,
+    DispatchRoute, IsolatedDeadline, UnservedClass,
 };
 pub use shared::{SharedPool, SharedPoolConfig};
 pub use start::{

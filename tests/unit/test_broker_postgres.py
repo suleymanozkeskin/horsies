@@ -837,6 +837,7 @@ class TestEnqueueAsync:
             task_id='test-task-id',
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
+            send_kind=SendKind.FIRST,
             kwargs_json='{"x":1,"x":2}',
         )
 

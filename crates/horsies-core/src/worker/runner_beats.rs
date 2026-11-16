@@ -895,6 +895,9 @@ fn watch_and_log(late_after: Duration, coverage: &SharedCoverage, stop: &Receive
 }
 
 #[cfg(test)]
+mod fail_closed_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
