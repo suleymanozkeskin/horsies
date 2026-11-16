@@ -215,6 +215,10 @@ pub async fn cancel_task(
     task_id: Uuid,
     include_running: bool,
 ) -> TaskActionResult<TaskCancelled> {
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(|error| broker_failure(task_id, error))?;
     let mut transaction = broker
         .pool()
         .begin()
