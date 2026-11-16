@@ -2610,7 +2610,7 @@ mod tests {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
-        let task_error_code = OperationalErrorCode::UnhandledError.to_string();
+        let task_error_code = OperationalErrorCode::UnhandledException.to_string();
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
@@ -2904,7 +2904,7 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -3148,7 +3148,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         })
         .await
@@ -3197,7 +3197,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         };
         let broker = Arc::new(
@@ -3306,7 +3306,7 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -3417,7 +3417,7 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,

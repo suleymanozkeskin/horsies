@@ -207,9 +207,9 @@ fn decode_history_detail(row: &sqlx::postgres::PgRow) -> Result<HistoryTaskDetai
     history_detail_from_wire(HistoryDetailWireRow::from_row(row)?)
 }
 
-/// The detail of a history row from its stored columns: parses the stored
-/// status, decodes the attempt snapshot (digest first) and adds the codec and
-/// content type that the stored versions imply. Pure.
+/// The detail of a history row from its stored columns: reads the stored
+/// status as a `TaskStatus`, decodes the attempt snapshot (digest first) and
+/// adds the codec and content type that the stored versions imply. Pure.
 pub(crate) fn history_detail_from_wire(
     row: HistoryDetailWireRow,
 ) -> Result<HistoryTaskDetail, HistoryError> {
