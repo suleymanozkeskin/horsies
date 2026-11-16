@@ -30,7 +30,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, node_task_facts, require_subworkflow_node_keys,
-    stored_queue_and_priority,
+    stored_queue_and_priority, ChildSpecError,
 };
 use crate::workflow_engine::steps::{
     run_alone, run_in_transaction, step_row_select, step_rows, ChildBuild, OwedParentAdvances,
@@ -274,16 +274,12 @@ fn tree_arguments(
             .filter(|node| node.is_subworkflow && node.dependencies.is_empty())
         {
             let task_index = node_index(node.index)?;
-            let spec_name = node
-                .task_name
-                .strip_prefix("__sub_workflow:")
-                .unwrap_or(&node.task_name);
             let built = build_child(
                 ChildOfNode {
                     parent_workflow_id: workflow.workflow_id,
+                    parent_workflow_name: &workflow.spec.name,
                     task_index,
                     parent_depth: workflow.depth,
-                    spec_name,
                     definition_key: node.sub_definition_key.as_deref(),
                 },
                 || Ok(NodeInput::Input(node.input_json.clone())),
@@ -315,10 +311,11 @@ fn tree_arguments(
 /// The sub-workflow node whose child the host build makes.
 pub(crate) struct ChildOfNode<'a> {
     pub(crate) parent_workflow_id: Uuid,
+    /// The name of the parent workflow: the node errors name the workflow by
+    /// it (Python's `parent_workflow_name`, `core/workflows/engine.py:1014-1016`).
+    pub(crate) parent_workflow_name: &'a str,
     pub(crate) task_index: i32,
     pub(crate) parent_depth: i32,
-    /// The child workflow's name, for the load failure message.
-    pub(crate) spec_name: &'a str,
     pub(crate) definition_key: Option<&'a str>,
 }
 
@@ -341,17 +338,22 @@ pub(crate) fn build_child<F>(
 where
     F: FnOnce() -> Result<NodeInput, WorkflowError>,
 {
-    let depth =
-        match child_workflow_depth(node.parent_depth, node.parent_workflow_id, node.task_index) {
-            Ok(depth) => depth,
-            Err(error) => return Ok(ChildBuildOutcome::NodeFails(error)),
-        };
+    let depth = match child_workflow_depth(
+        node.parent_depth,
+        node.parent_workflow_id,
+        node.parent_workflow_name,
+        node.task_index,
+    ) {
+        Ok(depth) => depth,
+        Err(error) => return Ok(ChildBuildOutcome::NodeFails(error)),
+    };
     let Some(registered) = node
         .definition_key
         .and_then(|key| registry.resolve_child_registration(key))
     else {
         return Ok(ChildBuildOutcome::NodeFails(subworkflow_load_failed_error(
-            node.spec_name,
+            node.parent_workflow_name,
+            node.task_index,
             node.definition_key,
         )));
     };
@@ -363,6 +365,7 @@ where
         Ok(spec) => Ok(ChildBuildOutcome::Built { spec, depth }),
         Err(error) => Ok(ChildBuildOutcome::NodeFails(build_failed_error(
             node.parent_workflow_id,
+            node.parent_workflow_name,
             node.task_index,
             &error,
         ))),
@@ -377,20 +380,18 @@ pub(crate) enum NodeInput {
     NodeFails(TaskError),
 }
 
-/// The error of a sub-workflow node whose registered builder failed:
-/// `WORKFLOW_ENQUEUE_FAILED`, with the workflow and the node in `data`
-/// (Python `core/workflows/engine.py:1161-1212`). The workflow is named by
-/// its id: the core has no workflow name at the child start.
+/// The error of the sub-workflow node `task_index` of the workflow
+/// `workflow_id` (named `workflow_name`) whose registered child gave no spec:
+/// `WORKFLOW_ENQUEUE_FAILED`,
+/// `Subworkflow build failed: <class>: <text, 200 characters> (workflow <name>:<index>)`,
+/// with the workflow id and the node in `data` (Python
+/// `core/workflows/engine.py:1196-1211`, `_fail_enqueued_task` at `:507-512`).
 pub(crate) fn build_failed_error(
     workflow_id: Uuid,
+    workflow_name: &str,
     task_index: i32,
-    error: &WorkflowError,
+    error: &ChildSpecError,
 ) -> TaskError {
-    let cause = match error {
-        WorkflowError::Validation(message) => message.clone(),
-        other => other.to_string(),
-    };
-    let cause: String = cause.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
     TaskError {
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
@@ -398,9 +399,19 @@ pub(crate) fn build_failed_error(
         })),
         ..TaskError::builtin(
             OperationalErrorCode::WorkflowEnqueueFailed,
-            format!("Subworkflow build failed: {cause} (workflow {workflow_id}:{task_index})"),
+            format!(
+                "Subworkflow build failed: {} (workflow {workflow_name}:{task_index})",
+                child_spec_failure_text(error),
+            ),
         )
     }
+}
+
+/// The text of a registered child that gave no spec: `<class>: <text, 200 characters>` (Python
+/// `f'{type(exc).__name__}: {str(exc)[:200]}'`, `core/workflows/engine.py:1246`). Pure.
+pub(crate) fn child_spec_failure_text(error: &ChildSpecError) -> String {
+    let text: String = error.text.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
+    format!("{}: {text}", error.error_type.as_str())
 }
 
 /// The stored result of a node that fails with `error`: the error in its

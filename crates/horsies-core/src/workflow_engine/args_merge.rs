@@ -338,22 +338,36 @@ fn args_from_inner(
         })
 }
 
+/// A stored node input from which [`child_builder_input`] cannot make the builder input: the text does not
+/// read under the strict reader, or an `args_from` entry is malformed. The engine wrote that text, so this is
+/// corrupt stored data, not a user error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredInputRefused {
+    /// Why the text is refused.
+    pub(crate) refusal: String,
+}
+
 /// The input that a child workflow's spec builder reads: each `args_from` entry of an object input replaced by
 /// its `inner` result envelope. The builder runs in the engine, so it gets the result itself, not the wrap that
 /// crosses to a worker (Python `core/workflows/engine.py:1164-1173`). An input with no entry is returned
 /// unchanged.
-pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> {
-    let parsed: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
-        WorkflowError::Validation(format!("stored node input refused: {error}"))
-    })?;
+///
+/// Errors: [`StoredInputRefused`] for a text that does not read or a malformed entry. Pure.
+pub(crate) fn child_builder_input(input: &str) -> Result<String, StoredInputRefused> {
+    let parsed: serde_json::Value =
+        crate::core::codec::from_json_str(input).map_err(|error| StoredInputRefused {
+            refusal: error.to_string(),
+        })?;
     let serde_json::Value::Object(mut object) = parsed else {
         return Ok(input.to_owned());
     };
-    let unwrapped = unwrap_args_from_entries(&mut object)
-        .map_err(|refusal| WorkflowError::Validation(refusal.to_string()))?;
+    let unwrapped =
+        unwrap_args_from_entries(&mut object).map_err(|refusal| StoredInputRefused {
+            refusal: refusal.to_string(),
+        })?;
     match unwrapped.is_empty() {
         true => Ok(input.to_owned()),
-        false => Ok(serde_json::to_string(&object)?),
+        false => Ok(serde_json::Value::Object(object).to_string()),
     }
 }
 

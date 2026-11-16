@@ -164,7 +164,9 @@ fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
 
 /// A sub-workflow root whose child has no registration under its key gets
 /// no pre-built child: a failed-node record carries its error envelope
-/// (`SUBWORKFLOW_LOAD_FAILED`), and the start runs in a transaction.
+/// (`SUBWORKFLOW_LOAD_FAILED`, Python's message with the workflow name and
+/// the definition key in `data`, `core/workflows/engine.py:577-581`), and the
+/// start runs in a transaction.
 #[test]
 fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
     let workflow_id = Uuid::new_v4();
@@ -188,10 +190,20 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
         panic!("a failed record stores an error");
     };
     assert_eq!(error.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Failed to load subworkflow definition for orphan_parent:0")
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"definition_key": CHILD_KEY}))
+    );
 }
 
 /// A sub-workflow root whose registered builder fails gets a failed-node
-/// record with `WORKFLOW_ENQUEUE_FAILED`, naming the workflow and the node.
+/// record with `WORKFLOW_ENQUEUE_FAILED`: the Python class of the builder's
+/// error, its text, and the workflow by name in the message; the workflow id
+/// and the node in `data` (Python `core/workflows/engine.py:1196-1211`).
 #[test]
 fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
     let workflow_id = Uuid::new_v4();
@@ -228,12 +240,12 @@ fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
         panic!("a failed record stores an error");
     };
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
-    assert!(
-        error
-            .message
-            .as_deref()
-            .is_some_and(|message| message.starts_with("Subworkflow build failed: ")),
-        "{error:?}"
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Subworkflow build failed: HorsiesError: error: the builder refuses \
+             (workflow failing_builder_parent:0)"
+        )
     );
     assert_eq!(
         error.data,

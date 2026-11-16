@@ -17,6 +17,7 @@ use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
 };
+use crate::workflow_engine::start_statement::child_spec_failure_text;
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -255,7 +256,7 @@ FROM horsies_workflows
 WHERE id = $1";
 
 const GET_WORKFLOW_DEPTH_SQL: &str = "\
-SELECT depth, root_workflow_id
+SELECT depth, root_workflow_id, name
 FROM horsies_workflows
 WHERE id = $1";
 
@@ -473,6 +474,7 @@ struct ParentWorkflowRow {
 struct DepthRow {
     depth: Option<i32>,
     root_workflow_id: Option<Uuid>,
+    name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -647,20 +649,22 @@ impl NodeRefusal {
     }
 
     /// The error that a refused sub-workflow node stores, `WORKFLOW_ENQUEUE_FAILED` in both cases: the build
-    /// failure with the child's name (Python `horsies/core/workflows/engine.py:1180-1215`), or the
-    /// `args_from` conflict (`:1151-1163`).
+    /// failure with the name of the workflow that holds the node, `workflow_name` (Python
+    /// `horsies/core/workflows/engine.py:1180-1251`), or the `args_from` conflict (`:1151-1163`).
     pub(crate) fn subworkflow_node_error(
         self,
         workflow_id: Uuid,
         task_index: i32,
-        spec_name: &str,
+        workflow_name: &str,
     ) -> TaskError {
         match self {
             NodeRefusal::NotPrepared(message) => node_not_prepared_error(
                 workflow_id,
                 task_index,
                 OperationalErrorCode::WorkflowEnqueueFailed,
-                format!("Subworkflow build failed: {message} (workflow {spec_name}:{task_index})"),
+                format!(
+                    "Subworkflow build failed: {message} (workflow {workflow_name}:{task_index})"
+                ),
             ),
             NodeRefusal::StaticMemberConflict(conflict) => {
                 conflict.node_error(workflow_id, task_index, MergedNodeKind::SubWorkflow)
@@ -735,12 +739,9 @@ pub(crate) fn prepare_child_spec(
 ) -> Result<crate::core::WorkflowSpec, PreparationStop> {
     let merged_input = merged_input_or_refusal(merge?)?;
     let params = stored_sub_workflow_params(sub_workflow_params)?;
-    Ok(materialize_child_spec(
-        registered,
-        params,
-        &merged_input,
-        registry,
-    )?)
+    materialize_child_spec(registered, params, &merged_input, registry).map_err(|error| {
+        PreparationStop::Refused(NodeRefusal::NotPrepared(child_spec_failure_text(&error)))
+    })
 }
 
 /// The error that a node stores when the promotion cannot prepare it (Python `_fail_enqueued_task`,
@@ -1104,31 +1105,30 @@ async fn enqueue_phase2_subworkflow_in_tx(
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<PromotionStep, WorkflowError> {
-    let spec_name = node
-        .task_name
-        .strip_prefix("__sub_workflow:")
-        .or(node.sub_workflow_name.as_deref())
-        .unwrap_or(&node.task_name);
     let depth: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
         .bind(workflow_id)
         .fetch_one(transaction.as_mut())
         .await?;
-    let child_depth =
-        match child_workflow_depth(depth.depth.unwrap_or(0), workflow_id, node.task_index) {
-            Ok(child_depth) => child_depth,
-            Err(error) => {
-                return fail_phase2_node_in_tx(
-                    transaction,
-                    workflow_id,
-                    node.task_index,
-                    error,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await;
-            }
-        };
+    let child_depth = match child_workflow_depth(
+        depth.depth.unwrap_or(0),
+        workflow_id,
+        &depth.name,
+        node.task_index,
+    ) {
+        Ok(child_depth) => child_depth,
+        Err(error) => {
+            return fail_phase2_node_in_tx(
+                transaction,
+                workflow_id,
+                node.task_index,
+                error,
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
     let Some(registered) = node
         .sub_definition_key
         .as_deref()
@@ -1138,7 +1138,11 @@ async fn enqueue_phase2_subworkflow_in_tx(
             transaction,
             workflow_id,
             node.task_index,
-            subworkflow_load_failed_error(spec_name, node.sub_definition_key.as_deref()),
+            subworkflow_load_failed_error(
+                &depth.name,
+                node.task_index,
+                node.sub_definition_key.as_deref(),
+            ),
             registry,
             payload,
             retention,
@@ -1158,7 +1162,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
                 transaction,
                 workflow_id,
                 node.task_index,
-                refusal.subworkflow_node_error(workflow_id, node.task_index, spec_name),
+                refusal.subworkflow_node_error(workflow_id, node.task_index, &depth.name),
                 registry,
                 payload,
                 retention,
@@ -1194,7 +1198,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
                 transaction,
                 workflow_id,
                 node.task_index,
-                refusal.subworkflow_node_error(workflow_id, node.task_index, spec_name),
+                refusal.subworkflow_node_error(workflow_id, node.task_index, &depth.name),
                 registry,
                 payload,
                 retention,
@@ -1272,12 +1276,14 @@ async fn fail_phase2_node_in_tx(
     }
 }
 
-/// The error of a sub-workflow node whose child definition is not registered under its definition key.
-/// A child is resolved only by its key (Python `core/workflows/engine.py:1069-1078`, `:4091-4097`). Its
+/// The error of the sub-workflow node `task_index` of the workflow named `parent_workflow_name` whose
+/// child definition is not registered under its definition key. A child is resolved only by its key
+/// (Python `core/workflows/engine.py:1034-1045`). The message names the parent workflow and the node;
 /// `data` holds the definition key (`null` when the node has none), as Python's `_fail_subworkflow_load`
 /// does (`core/workflows/engine.py:577-581`).
 pub(crate) fn subworkflow_load_failed_error(
-    spec_name: &str,
+    parent_workflow_name: &str,
+    task_index: i32,
     definition_key: Option<&str>,
 ) -> TaskError {
     TaskError {
@@ -1285,7 +1291,7 @@ pub(crate) fn subworkflow_load_failed_error(
         ..TaskError::builtin(
             OperationalErrorCode::SubworkflowLoadFailed,
             format!(
-                "failed to load sub-workflow definition (definition_key={definition_key:?}, name='{spec_name}')",
+                "Failed to load subworkflow definition for {parent_workflow_name}:{task_index}"
             ),
         )
     }
@@ -2408,23 +2414,27 @@ async fn enqueue_subworkflow_task(
         .bind(workflow_id)
         .fetch_one(pool)
         .await?;
-    let child_depth =
-        match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
-            Ok(child_depth) => child_depth,
-            Err(error) => {
-                return fail_workflow_node(
-                    pool,
-                    workflow_id,
-                    task.task_index,
-                    error,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await
-                .map(|_step| ());
-            }
-        };
+    let child_depth = match child_workflow_depth(
+        depth_row.depth.unwrap_or(0),
+        workflow_id,
+        &depth_row.name,
+        task.task_index,
+    ) {
+        Ok(child_depth) => child_depth,
+        Err(error) => {
+            return fail_workflow_node(
+                pool,
+                workflow_id,
+                task.task_index,
+                error,
+                registry,
+                payload,
+                retention,
+            )
+            .await
+            .map(|_step| ());
+        }
+    };
 
     let Some(registered) = task
         .sub_definition_key
@@ -2439,7 +2449,11 @@ async fn enqueue_subworkflow_task(
             pool,
             workflow_id,
             task.task_index,
-            subworkflow_load_failed_error(spec_name, task.sub_definition_key.as_deref()),
+            subworkflow_load_failed_error(
+                &depth_row.name,
+                task.task_index,
+                task.sub_definition_key.as_deref(),
+            ),
             registry,
             payload,
             retention,
@@ -2465,7 +2479,7 @@ async fn enqueue_subworkflow_task(
                 pool,
                 workflow_id,
                 task.task_index,
-                refusal.subworkflow_node_error(workflow_id, task.task_index, spec_name),
+                refusal.subworkflow_node_error(workflow_id, task.task_index, &depth_row.name),
                 registry,
                 payload,
                 retention,
@@ -2504,7 +2518,7 @@ async fn enqueue_subworkflow_task(
                 pool,
                 workflow_id,
                 task.task_index,
-                refusal.subworkflow_node_error(workflow_id, task.task_index, spec_name),
+                refusal.subworkflow_node_error(workflow_id, task.task_index, &depth_row.name),
                 registry,
                 payload,
                 retention,
