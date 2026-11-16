@@ -15,7 +15,9 @@ use crate::core::{
     TaskError, TaskResult, WorkflowSpecRegistry, WorkflowTaskStatus,
 };
 
-use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
+use crate::workflow_engine::start::{
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -886,49 +888,41 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .strip_prefix("__sub_workflow:")
         .or(node.sub_workflow_name.as_deref())
         .unwrap_or(&node.task_name);
-    let Some(registered) =
-        registry.resolve_child_registration(spec_name, node.sub_definition_key.as_deref())
-    else {
-        let error = TaskError::builtin(
-            OperationalErrorCode::SubworkflowLoadFailed,
-            format!(
-                "failed to load sub-workflow definition (definition_key={:?}, name={spec_name:?})",
-                node.sub_definition_key,
-            ),
-        );
-        let error_json = serde_json::to_string(&error)?;
-        let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
-        let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_FAILED_SQL)
-            .bind(&result_json)
-            .bind(&error_json)
-            .bind(workflow_id)
-            .bind(node.task_index)
-            .fetch_optional(transaction.as_mut())
-            .await?;
-        if let Some(updated) = updated {
-            let context: Option<(String, String)> =
-                sqlx::query_as("SELECT on_error, status FROM horsies_workflows WHERE id = $1")
-                    .bind(workflow_id)
-                    .fetch_optional(transaction.as_mut())
-                    .await?;
-            if let Some((on_error, status)) = context {
-                Box::pin(apply_phase2_progression_in_tx(
+    let depth: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
+        .bind(workflow_id)
+        .fetch_one(transaction.as_mut())
+        .await?;
+    let child_depth =
+        match child_workflow_depth(depth.depth.unwrap_or(0), workflow_id, node.task_index) {
+            Ok(child_depth) => child_depth,
+            Err(error) => {
+                return fail_phase2_subworkflow_node_in_tx(
                     transaction,
                     workflow_id,
-                    Some(updated.id),
                     node.task_index,
-                    "FAILED",
-                    None,
-                    Some(&on_error),
-                    Some(&status),
+                    error,
                     registry,
                     payload,
                     retention,
-                ))
-                .await?;
+                )
+                .await;
             }
-        }
-        return Ok(());
+        };
+    let Some(registered) = node
+        .sub_definition_key
+        .as_deref()
+        .and_then(|key| registry.resolve_child_registration(key))
+    else {
+        return fail_phase2_subworkflow_node_in_tx(
+            transaction,
+            workflow_id,
+            node.task_index,
+            subworkflow_load_failed_error(spec_name, node.sub_definition_key.as_deref()),
+            registry,
+            payload,
+            retention,
+        )
+        .await;
     };
     let merged_kwargs = merge_args_from(node.task_kwargs.as_deref(), &node.args_from, dep_results)?;
     let has_inputs =
@@ -940,17 +934,13 @@ async fn enqueue_phase2_subworkflow_in_tx(
         merged_kwargs.as_deref(),
         registry,
     )?;
-    let depth: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
-        .bind(workflow_id)
-        .fetch_one(transaction.as_mut())
-        .await?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
     let child_id = start_child_workflow_in_tx(
         transaction,
         &child_spec,
         workflow_id,
         node.task_index,
-        depth.depth.unwrap_or(0) + 1,
+        child_depth,
         root,
         registry,
         retention,
@@ -968,6 +958,68 @@ async fn enqueue_phase2_subworkflow_in_tx(
         ));
     }
     Ok(())
+}
+
+/// Fails a sub-workflow node whose child cannot start, inside the phase-2 transaction, and applies the
+/// failure as a node finish (failure policy, dependents, completion). Nothing is written when the node is
+/// already terminal.
+async fn fail_phase2_subworkflow_node_in_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    workflow_id: Uuid,
+    task_index: i32,
+    error: TaskError,
+    registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
+    retention: &RetentionConfig,
+) -> Result<(), WorkflowError> {
+    let error_json = serde_json::to_string(&error)?;
+    let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
+    let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_FAILED_SQL)
+        .bind(&result_json)
+        .bind(&error_json)
+        .bind(workflow_id)
+        .bind(task_index)
+        .fetch_optional(transaction.as_mut())
+        .await?;
+    let Some(updated) = updated else {
+        return Ok(());
+    };
+    let context: Option<(String, String)> =
+        sqlx::query_as("SELECT on_error, status FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .fetch_optional(transaction.as_mut())
+            .await?;
+    let Some((on_error, status)) = context else {
+        return Ok(());
+    };
+    Box::pin(apply_phase2_progression_in_tx(
+        transaction,
+        workflow_id,
+        Some(updated.id),
+        task_index,
+        "FAILED",
+        None,
+        Some(&on_error),
+        Some(&status),
+        registry,
+        payload,
+        retention,
+    ))
+    .await
+}
+
+/// The error of a sub-workflow node whose child definition is not registered under its definition key.
+/// A child is resolved only by its key (Python `core/workflows/engine.py:1069-1078`, `:4091-4097`).
+pub(crate) fn subworkflow_load_failed_error(
+    spec_name: &str,
+    definition_key: Option<&str>,
+) -> TaskError {
+    TaskError::builtin(
+        OperationalErrorCode::SubworkflowLoadFailed,
+        format!(
+            "failed to load sub-workflow definition (definition_key={definition_key:?}, name='{spec_name}')",
+        ),
+    )
 }
 
 async fn complete_phase2_workflow_in_tx(
@@ -2005,30 +2057,25 @@ async fn enqueue_workflow_task(
 /// Launch a child workflow for a sub-workflow node.
 ///
 /// Looks up the child spec in the registry, builds it dynamically if a
-/// Mark a sub-workflow node FAILED when its child definition cannot be resolved.
+/// Mark a sub-workflow node FAILED when its child cannot start: the child definition is not registered
+/// under the node's key (`SUBWORKFLOW_LOAD_FAILED`), or the child would pass the depth limit
+/// (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`).
 ///
-/// Mirrors Python's `_fail_subworkflow_load`: writes FAILED via the terminal-state
+/// Mirrors Python's `_fail_subworkflow_load` and `_fail_enqueued_task`: writes FAILED via the terminal-state
 /// CAS guard (`UPDATE_WORKFLOW_TASK_FAILED_SQL`), then runs the failure-propagation
 /// chain (handle failure policy → process dependents → check completion). On a
 /// CAS-miss (row already terminal), skips propagation because whichever path set
 /// the terminal state has already propagated the appropriate outcome.
-async fn fail_subworkflow_load(
+pub(crate) async fn fail_subworkflow_node(
     pool: &PgPool,
     workflow_id: Uuid,
     task_index: i32,
-    spec_name: &str,
-    sub_definition_key: Option<&str>,
+    error: TaskError,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
-    let error = TaskError::builtin(
-        OperationalErrorCode::SubworkflowLoadFailed,
-        format!(
-            "failed to load sub-workflow definition (definition_key={:?}, name='{}')",
-            sub_definition_key, spec_name,
-        ),
-    );
+    let error_code = error.error_code.as_ref().map(ToString::to_string);
     let error_json = serde_json::to_string(&error)?;
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
 
@@ -2054,8 +2101,8 @@ async fn fail_subworkflow_load(
     tracing::error!(
         workflow_id = %workflow_id,
         task_index,
-        spec_name,
-        "sub-workflow definition load failed, parent task marked FAILED",
+        error_code = ?error_code,
+        "sub-workflow child did not start, parent task marked FAILED",
     );
 
     // Run the failure-propagation chain (same shape as on_workflow_task_complete).
@@ -2111,19 +2158,43 @@ async fn enqueue_subworkflow_task(
         .or(task.sub_workflow_name.as_deref())
         .unwrap_or(&task.task_name);
 
-    let Some(registered) =
-        registry.resolve_child_registration(spec_name, task.sub_definition_key.as_deref())
+    // Get parent depth and root_workflow_id. A child past the depth limit is not started: its node fails
+    // (Python core/workflows/engine.py:1052-1066, checked before the definition load).
+    let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await?;
+    let child_depth =
+        match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
+            Ok(child_depth) => child_depth,
+            Err(error) => {
+                return fail_subworkflow_node(
+                    pool,
+                    workflow_id,
+                    task.task_index,
+                    error,
+                    registry,
+                    payload,
+                    retention,
+                )
+                .await;
+            }
+        };
+
+    let Some(registered) = task
+        .sub_definition_key
+        .as_deref()
+        .and_then(|key| registry.resolve_child_registration(key))
     else {
-        // Child definition is not registered on this worker. Mark the parent
+        // Child definition is not registered on this worker under the node's key. Mark the parent
         // workflow_task FAILED and propagate, rather than returning an error
         // that leaves the parent stuck in READY and the workflow RUNNING
         // forever (parity with Python's _fail_subworkflow_load / PR #39).
-        return fail_subworkflow_load(
+        return fail_subworkflow_node(
             pool,
             workflow_id,
             task.task_index,
-            spec_name,
-            task.sub_definition_key.as_deref(),
+            subworkflow_load_failed_error(spec_name, task.sub_definition_key.as_deref()),
             registry,
             payload,
             retention,
@@ -2145,13 +2216,6 @@ async fn enqueue_subworkflow_task(
         registry,
     )?;
 
-    // Get parent depth and root_workflow_id.
-    let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
-        .bind(workflow_id)
-        .fetch_one(pool)
-        .await?;
-
-    let parent_depth = depth_row.depth.unwrap_or(0);
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
     // Start child workflow + link parent in a single transaction.
@@ -2164,7 +2228,7 @@ async fn enqueue_subworkflow_task(
         &child_spec,
         workflow_id,
         task.task_index,
-        parent_depth + 1,
+        child_depth,
         root_wf_id,
         registry,
         retention,
@@ -3387,6 +3451,86 @@ mod p7_exact_error_tests {
                 OperationalErrorCode::SubworkflowLoadFailed,
             )),
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn phase2_child_past_the_depth_limit_fails_its_node() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let root_id = Uuid::new_v4();
+        let workflow_id = Uuid::new_v4();
+        seed_workflow(&pool, root_id, "RUNNING", "fail", None).await;
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth,
+                 root_workflow_id, parent_workflow_id, parent_task_index,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'p7_depth_limit', 'RUNNING', 'fail', $2, 32, $3, $3, 0,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(format!("test.p7.depth-limit.{workflow_id}"))
+        .bind(root_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 priority, dependencies, allow_failed_deps, join_type, status,
+                 is_subworkflow, sub_workflow_name, sub_definition_key, created_at
+             ) VALUES ($1, $2, 1, 'missing_child', 'p7_missing_child', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'READY', TRUE,
+                       'p7_missing_child', 'missing.definition', NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut transaction = pool.begin().await.unwrap();
+        enqueue_phase2_subworkflow_in_tx(
+            &mut transaction,
+            workflow_id,
+            &unresolved_subworkflow_node(),
+            &WorkflowSpecRegistry::new(),
+            &HashMap::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+
+        let (status, result): (String, String) = sqlx::query_as(
+            "SELECT status, result FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "FAILED");
+        let parsed: TaskResult<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let TaskResult::Err(error) = parsed else {
+            panic!("the node result must be an error envelope");
+        };
+        // The depth check runs before the definition load, as in Python.
+        assert_eq!(
+            error.error_code,
+            Some(TaskErrorCode::from(
+                OperationalErrorCode::SubworkflowDepthLimitReached,
+            )),
+        );
+        let child_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(child_count, 0);
     }
 
     #[tokio::test]

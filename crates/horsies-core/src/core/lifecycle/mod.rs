@@ -9,11 +9,16 @@
 //! projection of this vocabulary; the catalog-conformance test pins the two
 //! against each other.
 
+pub mod attempt_outcomes;
 pub mod commands;
 pub mod fences;
 pub mod operations;
 pub mod outcomes;
 
+pub use attempt_outcomes::{
+    decode_failed_attempt_row, decode_workflow_success_row, AfterFailure, AttemptWriteRefusal,
+    FailedAttemptOutcome, PhaseTwoOwed, RetryRefusal, WorkflowSuccessOutcome,
+};
 pub use commands::{BatchSize, TerminalizationCommand};
 pub use fences::{
     CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead, TerminalFence, WorkerOwned,
