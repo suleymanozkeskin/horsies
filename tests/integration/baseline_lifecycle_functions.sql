@@ -9,19 +9,15 @@
 -- Fixtures
 ------------------------------------------------------------------------------------------------------------------------
 
--- The published provenance reader is rendered at run time. This stand-in reads the history parent.
-CREATE OR REPLACE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql STABLE AS $$
-    SELECT COALESCE(
-        (
-            SELECT ROW(TRUE, 'HISTORY', h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text)
-                ::horsies_task_provenance
-            FROM horsies_task_history h
-            WHERE h.task_id = p_task_id
-            LIMIT 1
-        ),
-        ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
-    )
+-- The published provenance reader is rendered by horsies_publish_history_readers. This stand-in reads the
+-- history parent: one row when history holds the id, no row otherwise.
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task
+    FROM horsies_task_history h
+    WHERE h.task_id = p_task_id
+    LIMIT 1
 $$;
 
 -- One heartbeat leaf around NOW(), with the probe index of the run-time leaves.
@@ -373,7 +369,8 @@ SELECT lc_expect(
 SELECT lc_task('00000000-0000-7000-8000-000000000b21', 'PENDING');
 UPDATE horsies_tasks SET command_fingerprint = sha256('b21'::bytea) WHERE id = '00000000-0000-7000-8000-000000000b21';
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-000000000b21'::uuid, 'CANCELLED', 'CANCEL_ADMIN', now(), NULL, 'TASK_CANCELLED', 'r');
+    (SELECT t FROM horsies_tasks AS t WHERE t.id = '00000000-0000-7000-8000-000000000b21' FOR UPDATE),
+    'CANCELLED', 'CANCEL_ADMIN', now(), NULL, 'TASK_CANCELLED', 'r');
 SELECT lc_expect(
     'enqueue: a repeat of a finished task with the same command',
     lc_send('00000000-0000-7000-8000-000000000b21', 'b21', now(), 'REPEAT'), 'SAME_COMMAND'

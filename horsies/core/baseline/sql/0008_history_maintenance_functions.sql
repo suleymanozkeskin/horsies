@@ -8,8 +8,8 @@
 -- The published readers. horsies_publish_history_readers renders four functions from the leaf catalog:
 -- horsies_task_history_duplicate_staged(uuid), horsies_task_provenance_staged(uuid), horsies_task_detail_staged(uuid)
 -- and horsies_task_result_staged(uuid). It is the one renderer: the Python client publishes through it, and the
--- terminal writes of 0003_interim_functions.sql pass their kind and fence kind to horsies_terminalization_miss,
--- which reads history through the provenance reader.
+-- terminal writes of 0003_interim_functions.sql and 0004_lifecycle_functions.sql pass their kind and fence kind
+-- to horsies_terminalization_miss, which reads history through the provenance reader.
 --
 -- Results are plain rows of built-in types. Closed sets of values are text columns; each function lists its values.
 -- Leaf names and bounds are UTC in any session time zone.

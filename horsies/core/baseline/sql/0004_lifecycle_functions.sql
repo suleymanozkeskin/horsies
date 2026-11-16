@@ -21,6 +21,11 @@
 -- there): horsies_claim, horsies_claim_candidates, horsies_claim_in_flight, horsies_complete_task_fused,
 -- horsies_complete_tasks_fused, horsies_finish_workflow_success, horsies_finish_failed_attempt.
 --
+-- History calls: each terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...)
+-- (0006_history_functions.sql); each miss passes the writer's kind and fence kind to horsies_terminalization_miss
+-- (0008_history_maintenance_functions.sql); history is probed through the published reader
+-- horsies_task_provenance_staged(uuid), which returns no row for an id that history does not hold.
+--
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
 
@@ -382,12 +387,8 @@ BEGIN
     -- 2. A repeat probes history under the task advisory lock.
     IF p_send_kind = 'REPEAT' THEN
         PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
-        SELECT * INTO v_provenance FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF v_provenance.found THEN
-            IF v_provenance.location <> 'HISTORY' THEN
-                RAISE EXCEPTION 'horsies_enqueue_task: provenance reported a location other than history'
-                    USING ERRCODE = 'data_corrupted';
-            END IF;
+        SELECT p.* INTO v_provenance FROM horsies_task_provenance_staged(p_task_id) AS p;
+        IF FOUND THEN
             SELECT h.command_fingerprint_version, h.command_fingerprint, h.sent_at
             INTO v_history
             FROM horsies_task_history h
@@ -996,9 +997,10 @@ BEGIN
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- The whole locked row (task): the move takes it as read here.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.queue_name,
-           clock_timestamp() AS db_now
+           clock_timestamp() AS db_now, t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1012,8 +1014,7 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
-            p_claimed_at
+            p_task_id, 'COMPLETE_FUSED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1042,7 +1043,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_FUSED', v_terminal_at, p_result, NULL, NULL
+        v_ctx.task, 'COMPLETED', 'COMPLETE_FUSED', v_terminal_at, p_result, NULL, NULL
     );
     IF p_wake THEN
         PERFORM pg_notify('task_queue_' || v_ctx.queue_name, 'capacity');
@@ -1175,9 +1176,10 @@ BEGIN
             USING ERRCODE = 'not_null_violation';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- The whole locked row (task): the move takes it as read here.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.is_workflow_task, t.queue_name, t.task_name,
-           clock_timestamp() AS db_now
+           clock_timestamp() AS db_now, t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1192,8 +1194,7 @@ BEGIN
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::text, NULL::boolean
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
-            p_claimed_at
+            p_task_id, 'COMPLETE_LOCKED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1227,7 +1228,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at, p_result, NULL, NULL
+        v_ctx.task, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at, p_result, NULL, NULL
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'COMPLETE_LOCKED'::text,
@@ -1369,9 +1370,10 @@ BEGIN
     END IF;
 
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- The whole locked row (task): the move takes it as read here.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.good_until, t.is_workflow_task,
-           t.queue_name, t.task_name, clock_timestamp() AS db_now
+           t.queue_name, t.task_name, clock_timestamp() AS db_now, t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1416,7 +1418,7 @@ BEGIN
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+            p_task_id, 'FAIL_RUNNING', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1483,7 +1485,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'FAILED', 'FAIL_RUNNING', v_terminal_at, p_result, p_error_code, p_failed_reason
+        v_ctx.task, 'FAILED', 'FAIL_RUNNING', v_terminal_at, p_result, p_error_code, p_failed_reason
     );
     IF NOT v_ctx.is_workflow_task AND p_wake THEN
         PERFORM pg_notify('task_queue_' || v_ctx.queue_name, 'capacity');
@@ -1679,7 +1681,8 @@ BEGIN
 
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
     -- One capture: the locked row, the beat read beside it, and the instant both thresholds are judged at. Nothing
-    -- is read again after a refusal, so the evidence cannot show a beat that the judgement did not see.
+    -- is read again after a refusal, so the evidence cannot show a beat that the judgement did not see. The whole
+    -- locked row (task) is the row that the move takes.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.finalizing_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.good_until, t.is_workflow_task,
            t.queue_name, t.task_name,
@@ -1695,7 +1698,8 @@ BEGIN
                LIMIT 1
            ) AS last_heartbeat,
            NOW() AS evaluated_at,
-           clock_timestamp() AS db_now
+           clock_timestamp() AS db_now,
+           t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1708,7 +1712,7 @@ BEGIN
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_STALE']::text[], 'NONE', NULL::text, NULL::timestamptz
+            p_task_id, 'FAIL_STALE', 'NONE', NULL::text, NULL::timestamptz
         ) AS m;
         RETURN;
     END IF;
@@ -1812,7 +1816,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'FAILED', 'FAIL_STALE', v_terminal_at, p_result, p_error_code, p_failed_reason
+        v_ctx.task, 'FAILED', 'FAIL_STALE', v_terminal_at, p_result, p_error_code, p_failed_reason
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'FAIL_STALE'::text,
@@ -2043,7 +2047,6 @@ CREATE FUNCTION horsies_cancel_task(p_task_id uuid, p_include_running boolean) R
 DECLARE
     v_task record;
     v_provenance record;
-    v_history_is_workflow boolean;
     v_terminal_at timestamptz;
 BEGIN
     IF num_nulls(p_task_id, p_include_running) <> 0 THEN
@@ -2051,30 +2054,15 @@ BEGIN
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at, t.is_workflow_task
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at, t.is_workflow_task, t AS task
     INTO v_task
     FROM horsies_tasks t
     WHERE t.id = p_task_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        SELECT * INTO v_provenance FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF NOT v_provenance.found THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'TASK_ABSENT'::text, NULL::timestamptz, NULL::text,
-                NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        IF v_provenance.location <> 'HISTORY' THEN
-            RAISE EXCEPTION 'horsies_cancel_task: provenance reported a location other than history after a live miss'
-                USING ERRCODE = 'data_corrupted';
-        END IF;
-        SELECT h.is_workflow_task INTO v_history_is_workflow
-        FROM horsies_task_history h
-        WHERE h.task_id = p_task_id
-          AND h.terminal_at = v_provenance.terminal_at;
+        SELECT p.* INTO v_provenance FROM horsies_task_provenance_staged(p_task_id) AS p;
         IF NOT FOUND THEN
-            -- The leaf that held the row was dropped between the two reads.
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'TASK_ABSENT'::text, NULL::timestamptz, NULL::text,
                 NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::jsonb;
@@ -2083,14 +2071,14 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint,
             CASE
-                WHEN NOT v_history_is_workflow AND v_provenance.terminalization_kind = 'CANCEL_ADMIN'
+                WHEN NOT v_provenance.is_workflow_task AND v_provenance.terminalization_kind = 'CANCEL_ADMIN'
                 THEN 'ALREADY_APPLIED'
                 ELSE 'SOURCE_STATE_CONFLICT'
             END::text,
             v_provenance.terminal_at, v_provenance.terminalization_kind::text,
             v_provenance.status::text, NULL::text, NULL::timestamptz,
             CASE
-                WHEN v_history_is_workflow THEN 'WORKFLOW_TASK'
+                WHEN v_provenance.is_workflow_task THEN 'WORKFLOW_TASK'
                 WHEN v_provenance.terminalization_kind = 'CANCEL_ADMIN' THEN NULL
                 ELSE 'FOREIGN_TERMINALIZATION'
             END::text,
@@ -2114,7 +2102,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'CANCELLED', 'CANCEL_ADMIN', v_terminal_at, NULL, 'TASK_CANCELLED', 'Cancelled via monitoring API'
+        v_task.task, 'CANCELLED', 'CANCEL_ADMIN', v_terminal_at, NULL, 'TASK_CANCELLED', 'Cancelled via monitoring API'
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ADMIN'::text,
