@@ -217,6 +217,13 @@ class WorkflowTaskModel(Base):
         String(255), nullable=True
     )
 
+    # The client's choice for the node's params: 'GIVEN' or 'NOT_GIVEN' on a
+    # SubWorkflowNode row, NULL on a TaskNode row
+    # (horsies_workflow_tasks_sub_workflow_params_by_kind).
+    sub_workflow_params: Mapped[Optional[str]] = mapped_column(
+        String(9), nullable=True
+    )
+
     # Summary of subworkflow execution (serialized SubWorkflowSummary)
     sub_workflow_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

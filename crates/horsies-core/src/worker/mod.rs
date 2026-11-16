@@ -3,6 +3,7 @@
 pub mod backoff;
 pub mod cli;
 pub mod config;
+pub mod connection_fit;
 pub mod error;
 pub mod execution;
 pub mod executor;

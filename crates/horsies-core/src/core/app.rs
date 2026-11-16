@@ -1470,23 +1470,21 @@ fn decode_parameterized_workflow_input<P>(
 where
     P: DeserializeOwned,
 {
-    crate::core::codec::check_json_text(input_json).map_err(|e| {
+    // The core's strict reader: 300 levels of room, so a user value of 200
+    // levels inside the params reads (serde_json alone stops at 128).
+    let value: serde_json::Value = crate::core::codec::from_json_str(input_json).map_err(|e| {
         HorsiesError::new(format!(
             "params of workflow '{}' are refused: {}",
             workflow_name, e,
         ))
     })?;
-    serde_json::from_str::<serde_json::Value>(input_json)
-        .and_then(serde_json::from_value::<P>)
-        .map_err(|e| {
-            HorsiesError::new(format!(
-                "failed to decode params for workflow '{}': {}",
-                workflow_name, e,
-            ))
-            .with_help(
-                "ensure the child workflow params type matches the parent-provided input shape",
-            )
-        })
+    serde_json::from_value::<P>(value).map_err(|e| {
+        HorsiesError::new(format!(
+            "failed to decode params for workflow '{}': {}",
+            workflow_name, e,
+        ))
+        .with_help("ensure the child workflow params type matches the parent-provided input shape")
+    })
 }
 
 /// Builder for registering typed workflow builders on the app.
@@ -1668,7 +1666,7 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -1997,7 +1995,7 @@ mod tests {
         let opts_json: serde_json::Value =
             serde_json::from_str(node_0.task_options_json.as_ref().unwrap()).unwrap();
         assert!(opts_json.get("retry_policy").is_some());
-        assert!(opts_json.get("auto_retry_for").is_some());
+        assert!(opts_json["retry_policy"].get("auto_retry_for").is_some());
         assert!(
             opts_json.get("task_name").is_none(),
             "task_name should be excluded"
