@@ -57,3 +57,5 @@ mod list_detail_spec_tests;
 mod spec_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workflow_schedule_spec_tests;
