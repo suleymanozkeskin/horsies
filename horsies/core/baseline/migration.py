@@ -28,7 +28,9 @@ BASELINE_SQL_FILES: Final = (
     '0001_tables.sql',
     '0002_indexes.sql',
     '0003_interim_functions.sql',
+    '0006_history_functions.sql',
     '0007_scheduler_monitoring_functions.sql',
+    '0008_history_maintenance_functions.sql',
 )
 """The SQL files of the migration, in the order they run."""
 

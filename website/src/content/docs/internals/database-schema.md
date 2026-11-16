@@ -15,7 +15,9 @@ The schema is one migration, version 1000: the SQL files in
 | `0001_tables.sql` | Tables, constraints, seed rows, `horsies_uuidv7()`, the notification triggers |
 | `0002_indexes.sql` | The indexes that no constraint creates |
 | `0003_interim_functions.sql` | The SQL functions the client calls, and their composite types |
-| `0007_scheduler_monitoring_functions.sql` | The schedule fire and slot id functions, and the monitoring task detail, list, facets, stale and expired reads |
+| `0006_history_functions.sql` | The history functions: the move of one locked row and of a batch, the absence reason, the rerun read, and the transactional parts of pruning |
+| `0007_scheduler_monitoring_functions.sql` | The schedule fire and the monitoring reads (task detail, task list and facets, stale and expired lists) |
+| `0008_history_maintenance_functions.sql` | The history maintenance functions: the coverage probe, retention class registration, leaf creation, the reader publication and the miss classifier |
 
 The broker installs the schema at its first initialization (`ensure_schema_initialized`, or the first
 enqueue, result wait, task info read, workflow start or scheduler start):
