@@ -1,115 +1,110 @@
-"""Shared retry utilities used by both Worker and Broker.
+"""The retry rules shared by the worker and the broker.
 
-Pure functions — no DB access, no I/O. Callers provide pre-fetched data.
+Pure functions: no database access, no I/O. Callers pass the facts they read.
+
+A stored retry policy is read with the rule of enqueue
+(``stored_retry_policy``): it validates as ``RetryPolicy`` or it is refused.
+The claim refuses to run a row whose policy is refused (``read_claimed_options``
+in ``core/worker/stored_timeout.py``), so a task with such a policy fails
+before it runs. No rule here falls back to default intervals, backoff or
+jitter.
 """
 
 from __future__ import annotations
 
-import math
 import random
-import sys
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, cast
+from typing import assert_never
 
 from horsies.core.codec.json_io import loads_json
-from horsies.core.types.result import is_err
+from horsies.core.codec.task_options import (
+    InvalidRetryPolicy,
+    NoRetryPolicy,
+    stored_retry_policy,
+)
+from horsies.core.models.tasks import RetryPolicy
+from horsies.core.types.result import Err, Ok
 
-# 1min, 5min, 15min
-_DEFAULT_RETRY_INTERVALS: list[float] = [60.0, 300.0, 900.0]
 
+@dataclass(frozen=True, slots=True)
+class OptionsNotAnObject:
+    """The stored ``task_options`` text does not parse, or is not a JSON object.
 
-def _sanitize_intervals(raw: Any) -> list[float]:
-    """Return validated retry intervals.
-
-    The intervals come from an untrusted deserialized dict; anything that is
-    not a non-empty list of finite, float-representable numbers falls back to
-    the defaults, so delay calculation is total. Ints are range-checked
-    before conversion: ``float()``/``math.isfinite()`` raise OverflowError on
-    ints beyond float range.
+    ``reason`` names the cause and holds no stored value.
     """
-    if not isinstance(raw, list) or not raw:
-        return list(_DEFAULT_RETRY_INTERVALS)
-    entries = cast('list[Any]', raw)
-    sanitized: list[float] = []
-    for value in entries:
-        match value:
-            case bool():
-                return list(_DEFAULT_RETRY_INTERVALS)
-            case int() if -sys.float_info.max <= value <= sys.float_info.max:
-                sanitized.append(float(value))
-            case float() if math.isfinite(value):
-                sanitized.append(value)
-            case _:
-                return list(_DEFAULT_RETRY_INTERVALS)
-    return sanitized
+
+    reason: str
 
 
-def calculate_retry_delay(
-    retry_attempt: int,
-    retry_policy_data: dict[str, Any],
-) -> float:
-    """Calculate the delay in seconds for a retry attempt.
+type StoredRetryPolicy = (
+    RetryPolicy | NoRetryPolicy | InvalidRetryPolicy | OptionsNotAnObject
+)
+"""Everything a stored ``task_options`` text gives as its retry policy."""
 
-    Total: corrupt policy data (missing, empty, or non-numeric intervals,
-    unknown backoff strategy) falls back to defaults instead of raising.
 
-    Args:
-        retry_attempt: 1-based attempt number (retry_count + 1).
-        retry_policy_data: Deserialized retry_policy dict from task_options.
+def read_stored_retry_policy(task_options_json: str | None) -> StoredRetryPolicy:
+    """Read the retry policy of a stored ``task_options`` text. Pure.
 
-    Returns:
-        Delay in seconds (minimum 1.0).
+    None or an empty text is ``NoRetryPolicy``, as enqueue stores no options.
+    A text that does not parse, or is not a JSON object, is
+    ``OptionsNotAnObject``. The ``retry_policy`` of an object is read by
+    ``stored_retry_policy``.
     """
-    intervals = _sanitize_intervals(retry_policy_data.get('intervals'))
-    backoff_strategy = retry_policy_data.get('backoff_strategy', 'fixed')
-    jitter = retry_policy_data.get('jitter', True)
-    max_delay_seconds = retry_policy_data.get('max_delay_seconds')
+    match task_options_json:
+        case None | '':
+            return NoRetryPolicy()
+        case str():
+            pass
+    match loads_json(task_options_json):
+        case Err(err_value=error):
+            return OptionsNotAnObject(
+                reason=f'stored task_options do not parse: {error}',
+            )
+        case Ok(ok_value=dict() as options):
+            pass
+        case Ok(ok_value=other):
+            return OptionsNotAnObject(
+                reason=(
+                    'stored task_options are a JSON '
+                    f'{type(other).__name__}, not an object'
+                ),
+            )
+    match stored_retry_policy(options):
+        case Ok(ok_value=read):
+            return read
+        case Err(err_value=refused):
+            return refused
 
-    match backoff_strategy:
+
+def calculate_retry_delay(retry_attempt: int, policy: RetryPolicy) -> float:
+    """The delay in seconds before retry ``retry_attempt`` (1-based). Pure.
+
+    ``fixed`` takes the interval of the attempt, and the last interval past
+    the end of the list; ``exponential`` doubles the one base interval per
+    attempt. Jitter adds up to 25% upward. ``max_delay_seconds`` caps the
+    result after jitter. The result is at least 1.0.
+    """
+    intervals = policy.intervals
+    match policy.backoff_strategy:
         case 'exponential':
-            base_delay = intervals[0] * (2 ** (retry_attempt - 1))
+            base_delay = float(intervals[0] * (2 ** (retry_attempt - 1)))
         case 'fixed':
-            base_delay = intervals[min(retry_attempt - 1, len(intervals) - 1)]
-        case _:
-            base_delay = intervals[0]
+            base_delay = float(intervals[min(retry_attempt - 1, len(intervals) - 1)])
 
     # Floor before jitter so 1.0 is the bottom of the spread, not a clamp
     # that collapses the lower half of a symmetric window onto 1.0 (which
     # destroys uniformity at small base delays). Jitter is applied upward.
     base_delay = max(1.0, base_delay)
 
-    if jitter:
+    if policy.jitter:
         base_delay += random.uniform(0.0, base_delay * 0.25)
 
-    if isinstance(max_delay_seconds, int) and max_delay_seconds > 0:
-        base_delay = min(base_delay, float(max_delay_seconds))
-
-    return float(base_delay)
-
-
-def parse_retry_policy(
-    task_options_json: str | None,
-) -> dict[str, Any] | None:
-    """Extract retry_policy dict from serialized task_options JSON.
-
-    Returns None if task_options is missing, corrupt, or has no retry_policy.
-    """
-    if not task_options_json:
-        return None
-    try:
-        opts_r = loads_json(task_options_json)
-        if is_err(opts_r):
-            return None
-        task_options_data = opts_r.ok_value
-        if not isinstance(task_options_data, dict):
-            return None
-        retry_policy_raw = task_options_data.get('retry_policy')
-        if not isinstance(retry_policy_raw, dict):
-            return None
-        return retry_policy_raw
-    except Exception:
-        return None
+    match policy.max_delay_seconds:
+        case None:
+            return base_delay
+        case cap:
+            return min(base_delay, float(cap))
 
 
 def admitted_retry_policy(
@@ -118,72 +113,33 @@ def admitted_retry_policy(
     max_retries: int,
     task_options_json: str | None,
     error_code: str | Enum | None,
-) -> dict[str, Any] | None:
+) -> RetryPolicy | None:
     """The retry policy of a task when it retries ``error_code`` now. Pure.
 
     None when the retries are spent (``retry_count >= max_retries``, or
-    ``max_retries`` is 0), when the options hold no policy, or when the
-    policy's ``auto_retry_for`` does not name the code. The deadline is not
-    judged here.
+    ``max_retries`` is 0), when the options hold no policy or a policy that
+    does not validate (the claim refused to run such a task, and its failure
+    is terminal), or when ``auto_retry_for`` does not name the code. The
+    deadline is not judged here.
     """
     if max_retries == 0 or retry_count >= max_retries:
         return None
 
-    retry_policy = parse_retry_policy(task_options_json)
-    if retry_policy is None:
-        return None
-
-    auto_retry_for = retry_policy.get('auto_retry_for')
-    if not isinstance(auto_retry_for, list) or not auto_retry_for:
-        return None
+    match read_stored_retry_policy(task_options_json):
+        case RetryPolicy() as policy:
+            pass
+        case NoRetryPolicy() | InvalidRetryPolicy() | OptionsNotAnObject():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
     code = error_code.value if isinstance(error_code, Enum) else error_code
-    if not code or code not in auto_retry_for:
+    if not code:
         return None
-    return retry_policy
-
-
-def check_retry_eligibility(
-    *,
-    retry_count: int,
-    max_retries: int,
-    task_options_json: str | None,
-    error_code: str | Enum | None,
-    good_until: datetime | None,
-    db_now: datetime,
-) -> bool:
-    """Determine if a failed task is eligible for retry.
-
-    Pure check — does not touch the database or modify any state.
-
-    Args:
-        retry_count: Current retry count from the task row.
-        max_retries: Maximum retries allowed from the task row.
-        task_options_json: Serialized task_options (contains retry_policy).
-        error_code: The error code from the failure (enum member or string).
-        good_until: Task expiry deadline (None = no expiry).
-        db_now: Current database time for good_until comparison.
-
-    Returns:
-        True if the task should be retried, False otherwise.
-    """
-    admitted = admitted_retry_policy(
-        retry_count=retry_count,
-        max_retries=max_retries,
-        task_options_json=task_options_json,
-        error_code=error_code,
-    )
-    if admitted is None:
-        return False
-
-    if good_until is not None:
-        _good_until = good_until
-        _db_now = db_now
-        if _good_until.tzinfo is None:
-            _good_until = _good_until.replace(tzinfo=timezone.utc)
-        if _db_now.tzinfo is None:
-            _db_now = _db_now.replace(tzinfo=timezone.utc)
-        if _good_until <= _db_now:
-            return False
-
-    return True
+    named = {
+        entry.value if isinstance(entry, Enum) else entry
+        for entry in policy.auto_retry_for
+    }
+    if code not in named:
+        return None
+    return policy

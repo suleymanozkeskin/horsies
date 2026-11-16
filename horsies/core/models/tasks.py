@@ -432,6 +432,9 @@ class TaskInfo:
 
     ``execution`` is the stored ``Execution`` of a live task. It is ``None``
     for a task read from the history archive, which does not keep the class.
+
+    ``attempts`` lists the attempts newest first (highest attempt number
+    first), for a live task and for a task read from the history archive.
     """
 
     task_id: UUID

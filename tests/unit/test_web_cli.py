@@ -28,7 +28,7 @@ from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
 
 pytestmark = [pytest.mark.unit]
 
-DB_URL = 'postgresql+psycopg://user:pw@localhost:5432/horsies'
+DB_URL = 'postgresql://user:pw@localhost:5432/horsies'
 
 
 def web_args(**overrides: Any) -> argparse.Namespace:
@@ -90,7 +90,7 @@ class TestAppSourceIsExclusive:
         assert config.pgbouncer_transaction_mode is False
 
     def test_pooling_flags_reach_the_broker_config(self) -> None:
-        session_url = 'postgresql+psycopg://user:pw@localhost:5432/direct'
+        session_url = 'postgresql://user:pw@localhost:5432/direct'
 
         app = cli.resolve_web_app(
             web_args(
@@ -227,7 +227,7 @@ class TestAppPathBootLoadsTheRegistry:
         broken = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                    database_url=SecretStr('postgresql://u:p@localhost/db'),
                 ),
             ),
         )

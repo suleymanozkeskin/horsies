@@ -159,7 +159,7 @@ Set a global mapper on `AppConfig` to apply to all tasks:
 from pydantic import SecretStr
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",

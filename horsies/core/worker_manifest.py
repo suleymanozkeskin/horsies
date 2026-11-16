@@ -163,7 +163,8 @@ def python_child_launch(
 def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManifest:
     """The database section of a worker. `pool_size` and `max_overflow` do not
     apply: the pool of the worker process is the resolved pool of its
-    profile with no overflow. Pure.
+    profile with no overflow. The TCP keepalive and user timeout settings
+    apply to every core connection of the worker. Pure.
     """
     return wire.WorkerDatabaseManifest(
         database_url=core_database_url(config.database_url.get_secret_value()),
@@ -174,6 +175,8 @@ def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManif
         pool_timeout=config.pool_timeout,
         pool_recycle=_pool_recycle(config.pool_recycle),
         echo=config.echo,
+        tcp_keepalives=tcp_keepalives_of(config),
+        tcp_user_timeout=tcp_user_timeout_of(config.tcp_user_timeout_ms),
     )
 
 
@@ -423,6 +426,56 @@ def _pool_recycle(value: int) -> wire.PoolRecycle:
                 'admits only -1 and a number of seconds'
             )
             return wire.PoolRecycleAfterSeconds(seconds=value)
+
+
+def tcp_keepalives_of(config: PostgresConfig) -> wire.TcpKeepalivesConfig:
+    """The typed form of the validated keepalive settings (as
+    `horsies.core.manifest.tcp_keepalives_of`, with the classes of this
+    module): off, or on with the idle time, the interval and the probe
+    count. The three values are not read when `tcp_keepalives` is False.
+
+    The `PostgresConfig` validator admits only values of at least 1 when
+    keepalives are on, so another value is a defect and raises
+    `AssertionError`. Pure.
+    """
+    match config.tcp_keepalives:
+        case False:
+            return wire.TcpKeepalivesConfigOff()
+        case True:
+            values = (
+                config.tcp_keepalives_idle,
+                config.tcp_keepalives_interval,
+                config.tcp_keepalives_count,
+            )
+            assert min(values) >= 1, (
+                f'keepalive values {values} passed the PostgresConfig validator, '
+                'which admits only values of at least 1 when tcp_keepalives is True'
+            )
+            return wire.TcpKeepalivesConfigOn(
+                idle_seconds=config.tcp_keepalives_idle,
+                interval_seconds=config.tcp_keepalives_interval,
+                probes=config.tcp_keepalives_count,
+            )
+
+
+def tcp_user_timeout_of(milliseconds: int) -> wire.TcpUserTimeoutConfig:
+    """The typed form of a validated `tcp_user_timeout_ms` (as
+    `horsies.core.manifest.tcp_user_timeout_of`, with the classes of this
+    module): `0` is the operating system's timeout, any other value a number
+    of milliseconds.
+
+    The `PostgresConfig` validator admits only values of at least 0, so
+    another value is a defect and raises `AssertionError`. Pure.
+    """
+    match milliseconds:
+        case 0:
+            return wire.TcpUserTimeoutConfigSystemDefault()
+        case _:
+            assert milliseconds > 0, (
+                f'tcp_user_timeout_ms={milliseconds} passed the PostgresConfig '
+                'validator, which admits only values of at least 0'
+            )
+            return wire.TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
 
 
 def _task_limit(setting: TaskLimit | NoTaskLimit) -> wire.TaskLimit:

@@ -67,7 +67,6 @@ from ..names import (
     RETENTION_CLASSES,
     TASK_HISTORY_FOREVER,
     TASK_HISTORY_PARENT,
-    TASK_LOOKUP_MANIFEST,
 )
 from ..outcomes import (
     CoveredByOpenEndedLeaf,
@@ -88,12 +87,7 @@ from ..partitions.locks import (
     try_lock_coverage_for_transaction,
 )
 from ..partitions.publication import UnpublishedLoader
-from ..reads.publisher import (
-    READERS_STAMPED_SQL,
-    StagedLoaderPublisher,
-    published_manifest_matches_catalog,
-    published_readers_stamped,
-)
+from ..reads.publisher import StagedLoaderPublisher
 from .database import PartitionMaintenanceDatabase
 
 
@@ -394,63 +388,12 @@ leaf_health AS (
       ON inheritance.inhrelid = child.oid
      AND inheritance.inhparent = parent.oid
 ),
-attached_history AS (
-    SELECT
-        catalog.leaf_name,
-        row_number() OVER (
-            ORDER BY catalog.lower_anchor NULLS FIRST, catalog.leaf_name
-        ) - 1 AS probe_position,
-        catalog.lower_bound_kind,
-        catalog.lower_anchor,
-        catalog.upper_anchor
-    FROM {LEAF_CATALOG} AS catalog
-    WHERE catalog.class_key <> :heartbeat_class
-      AND catalog.detached_at IS NULL
-      AND catalog.dropped_at IS NULL
-      AND to_regclass(catalog.leaf_name) IS NOT NULL
-),
 publication_health AS (
+    -- The readers serve the current catalog: horsies_history_readers_current()
+    -- compares the published manifest with the attached history leaves and
+    -- checks the stamp of every published reader.
     SELECT
-        {READERS_STAMPED_SQL}
-        AND NOT EXISTS (
-            SELECT 1
-            FROM {TASK_LOOKUP_MANIFEST} AS manifest
-            WHERE to_regclass(manifest.leaf_name) IS NULL
-        )
-        AND NOT EXISTS (
-            SELECT
-                leaf_name,
-                probe_position,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM attached_history
-            EXCEPT
-            SELECT
-                leaf_name,
-                probe_position::bigint,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM {TASK_LOOKUP_MANIFEST}
-        )
-        AND NOT EXISTS (
-            SELECT
-                leaf_name,
-                probe_position::bigint,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM {TASK_LOOKUP_MANIFEST}
-            EXCEPT
-            SELECT
-                leaf_name,
-                probe_position,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM attached_history
-        ) AS healthy,
+        horsies_history_readers_current() AS healthy,
         ARRAY(
             SELECT catalog.leaf_name
             FROM {LEAF_CATALOG} AS catalog
@@ -925,11 +868,7 @@ async def ensure_partition_coverage(
     # broken function.
     republished = False
     absent_leaves: tuple[str, ...] = ()
-    if (
-        created_history > 0
-        or not await published_manifest_matches_catalog(connection)
-        or not await published_readers_stamped(connection)
-    ):
+    if created_history > 0 or not await publisher.is_current(connection):
         republication = await publisher.republish(connection)
         republished = True
         absent_leaves = republication.absent_leaves

@@ -399,17 +399,17 @@ static STEP_ROWS_WITH_CHILD_START: TypedStatement = TypedStatement::new(
     r#"SELECT * FROM (VALUES
          ('SOURCE'::text, NULL::text, $1::uuid, NULL::text, NULL::uuid, NULL::text, $4::integer,
           NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer,
-          2::integer, 'COMPLETED'::text, 'source_task'::text, NULL::text,
+          2::integer, 'source'::text, 'COMPLETED'::text, 'source_task'::text, NULL::text,
           '{"__h_task_result__":true,"ok":7,"err":null}'::text),
          ('CHILD_START', NULL, $1, $5::text, NULL, NULL, 3,
           '{"base": 1}', '{"value": 2}', 'child', 'tests.child.v1', $3::text, 4,
-          NULL, NULL, NULL, NULL, NULL),
+          NULL, NULL, NULL, NULL, NULL, NULL),
          ('OUTCOME', 'APPLIED', $1, NULL, $2::uuid, NULL, NULL,
-          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
      ) AS r(row_kind, disposition, workflow_id, workflow_name, advance_child_workflow_id, detail,
             task_index, node_input, args_from, sub_workflow_name, sub_definition_key,
-            sub_workflow_params, parent_depth, source_task_index, source_status, source_task_name,
-            source_definition_key, source_result)"#,
+            sub_workflow_params, parent_depth, source_task_index, source_node_id, source_status,
+            source_task_name, source_definition_key, source_result)"#,
     &[
         ParameterType::Uuid,
         ParameterType::Uuid,
@@ -520,6 +520,7 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
                 parent_depth: 4,
                 sources: vec![ChildStartSource {
                     task_index: 2,
+                    node_id: Some("source".to_owned()),
                     status: "COMPLETED".to_owned(),
                     task_name: "source_task".to_owned(),
                     definition_key: None,

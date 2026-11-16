@@ -31,7 +31,7 @@ def _worker(release: _RequeueOutcome) -> tuple[Worker, AsyncMock]:
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
         ),

@@ -4,8 +4,9 @@
 horsies-core (`horsies/_catalog/worker_manifest.py`). These tests pin that
 the bounds of the profile models are the bounds of the manifest, that every
 profile field is mapped with each Pydantic default as a value, that the
-drain timeout becomes whole milliseconds, which claim values the manifest
-cannot hold, and the form of the dumped document.
+drain timeout becomes whole milliseconds, that every `PostgresConfig` field
+is mapped or named as outside the worker manifest, which claim values the
+manifest cannot hold, and the form of the dumped document.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from annotated_types import Ge, Le
 from pydantic import SecretStr
 
 from horsies._catalog import worker_manifest as wire
+from horsies.core.errors import ConfigurationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import (
@@ -70,6 +72,8 @@ from horsies.core.worker_manifest import (
     log_level_of,
     profile_request,
     python_child_launch,
+    tcp_keepalives_of,
+    tcp_user_timeout_of,
     to_worker_manifest,
     worker_claim_manifest,
     worker_database_manifest,
@@ -78,8 +82,8 @@ from horsies.core.worker_manifest import (
 
 pytestmark = [pytest.mark.unit]
 
-MAIN_URL: Final = 'postgresql+psycopg://user:secret@pooler:6432/app'
-SESSION_URL: Final = 'postgresql+psycopg://user:secret@direct:5432/app'
+MAIN_URL: Final = 'postgresql://user:secret@pooler:6432/app'
+SESSION_URL: Final = 'postgresql://user:secret@direct:5432/app'
 
 # WorkerProfile field -> the WorkerProfileManifest field it fills.
 PROFILE_FIELDS: Final[dict[str, str]] = {
@@ -92,6 +96,30 @@ PROFILE_FIELDS: Final[dict[str, str]] = {
     'preload': 'preload',
     'parent_cpu': 'parent_cpu',
 }
+
+# PostgresConfig field -> the worker manifest path it fills.
+BROKER_FIELDS: Final[dict[str, str]] = {
+    'database_url': 'database.database_url',
+    'session_database_url': 'database.session_database',
+    'pgbouncer_transaction_mode': 'database.pgbouncer_transaction_mode',
+    'pool_pre_ping': 'database.pool_pre_ping',
+    'worker_pool_pre_ping': 'database.worker_pool_pre_ping',
+    'pool_timeout': 'database.pool_timeout',
+    'pool_recycle': 'database.pool_recycle',
+    'echo': 'database.echo',
+    'tcp_keepalives': 'database.tcp_keepalives',
+    'tcp_keepalives_idle': 'database.tcp_keepalives.idle_seconds',
+    'tcp_keepalives_interval': 'database.tcp_keepalives.interval_seconds',
+    'tcp_keepalives_count': 'database.tcp_keepalives.probes',
+    'tcp_user_timeout_ms': 'database.tcp_user_timeout',
+    'retain_rerun_input_default': 'send.retain_rerun_input_default',
+}
+
+# PostgresConfig fields that the worker manifest does not hold: the pool of
+# the worker process is the resolved pool of its profile with no overflow.
+OUTSIDE_WORKER_MANIFEST: Final[frozenset[str]] = frozenset(
+    {'pool_size', 'max_overflow'},
+)
 
 WINDOW: Final = timedelta(hours=24)
 
@@ -476,6 +504,12 @@ class TestDatabase:
             pool_timeout=11,
             pool_recycle=wire.PoolRecycleNever(),
             echo=True,
+            tcp_keepalives=wire.TcpKeepalivesConfigOn(
+                idle_seconds=30,
+                interval_seconds=10,
+                probes=3,
+            ),
+            tcp_user_timeout=wire.TcpUserTimeoutConfigAfter(milliseconds=30_000),
         )
 
     def test_the_pool_size_and_overflow_of_the_app_do_not_reach_a_worker(self) -> None:
@@ -484,6 +518,94 @@ class TestDatabase:
         }
         assert 'pool_size' not in names
         assert 'max_overflow' not in names
+
+    def test_every_broker_field_is_mapped_or_named_as_outside(self) -> None:
+        assert set(BROKER_FIELDS).isdisjoint(OUTSIDE_WORKER_MANIFEST)
+        assert set(PostgresConfig.model_fields) == (
+            set(BROKER_FIELDS) | OUTSIDE_WORKER_MANIFEST
+        )
+
+    def test_every_database_field_has_a_broker_field_as_its_source(self) -> None:
+        names = {
+            field.name for field in dataclasses.fields(wire.WorkerDatabaseManifest)
+        }
+        assert {f'database.{name}' for name in names} <= set(BROKER_FIELDS.values())
+
+    def test_keepalives_on_carry_the_three_values(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            tcp_keepalives=True,
+            tcp_keepalives_idle=45,
+            tcp_keepalives_interval=7,
+            tcp_keepalives_count=5,
+        )
+        assert worker_database_manifest(config).tcp_keepalives == (
+            wire.TcpKeepalivesConfigOn(idle_seconds=45, interval_seconds=7, probes=5)
+        )
+
+    def test_keepalives_off_is_the_off_variant_whatever_the_three_values(self) -> None:
+        config = PostgresConfig.model_validate(
+            {
+                'database_url': MAIN_URL,
+                'tcp_keepalives': False,
+                'tcp_keepalives_idle': 0,
+                'tcp_keepalives_interval': 0,
+                'tcp_keepalives_count': 0,
+            },
+        )
+        assert worker_database_manifest(config).tcp_keepalives == (
+            wire.TcpKeepalivesConfigOff()
+        )
+
+    def test_a_tcp_user_timeout_of_zero_is_the_system_default(self) -> None:
+        config = PostgresConfig(database_url=SecretStr(MAIN_URL), tcp_user_timeout_ms=0)
+        assert worker_database_manifest(config).tcp_user_timeout == (
+            wire.TcpUserTimeoutConfigSystemDefault()
+        )
+
+    @pytest.mark.parametrize('milliseconds', [1, 30_000])
+    def test_a_tcp_user_timeout_is_a_number_of_milliseconds(
+        self,
+        milliseconds: int,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            tcp_user_timeout_ms=milliseconds,
+        )
+        assert worker_database_manifest(config).tcp_user_timeout == (
+            wire.TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
+        )
+
+    def test_a_keepalive_value_that_the_validator_refuses_is_a_defect_here(
+        self,
+    ) -> None:
+        with pytest.raises(ConfigurationError):
+            PostgresConfig.model_validate(
+                {
+                    'database_url': MAIN_URL,
+                    'tcp_keepalives': True,
+                    'tcp_keepalives_count': 0,
+                },
+            )
+        unvalidated = PostgresConfig.model_construct(
+            database_url=SecretStr(MAIN_URL),
+            tcp_keepalives=True,
+            tcp_keepalives_idle=30,
+            tcp_keepalives_interval=10,
+            tcp_keepalives_count=0,
+        )
+        with pytest.raises(AssertionError, match='keepalive values'):
+            tcp_keepalives_of(unvalidated)
+
+    def test_a_tcp_user_timeout_that_the_validator_refuses_is_a_defect_here(
+        self,
+    ) -> None:
+        with pytest.raises(ConfigurationError):
+            PostgresConfig.model_validate(
+                {'database_url': MAIN_URL, 'tcp_user_timeout_ms': -1},
+            )
+        with pytest.raises(AssertionError, match='tcp_user_timeout_ms=-1'):
+            tcp_user_timeout_of(-1)
 
 
 class TestValues:
@@ -555,6 +677,16 @@ class TestDocument:
             'retain_rerun_input_default': False,
             'idempotency_reservation_window': WINDOW // timedelta(microseconds=1),
         }
+
+    def test_the_tcp_settings_are_written_in_the_form_the_core_parses(self) -> None:
+        database = self._document()['database']
+        assert database['tcp_keepalives'] == {
+            'kind': 'ON',
+            'idle_seconds': 30,
+            'interval_seconds': 10,
+            'probes': 3,
+        }
+        assert database['tcp_user_timeout'] == {'kind': 'AFTER', 'milliseconds': 30_000}
 
     def test_a_profile_is_written_with_its_kinds_and_milliseconds(self) -> None:
         profile = self._document()['profiles']['batch']

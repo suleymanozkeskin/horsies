@@ -46,18 +46,13 @@ LISTEN_SQL: Final[tuple[LiteralString, ...]] = (
 """The channels that the wake case listens on: the queue of its tasks and the three event channels."""
 
 PREPARE_SQL: Final[LiteralString] = """
-CREATE OR REPLACE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql STABLE AS $$
-    SELECT COALESCE(
-        (
-            SELECT ROW(TRUE, 'HISTORY', h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text)
-                ::horsies_task_provenance
-            FROM horsies_task_history h
-            WHERE h.task_id = p_task_id
-            LIMIT 1
-        ),
-        ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
-    )
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task
+    FROM horsies_task_history h
+    WHERE h.task_id = p_task_id
+    LIMIT 1
 $$;
 DO $$
 BEGIN

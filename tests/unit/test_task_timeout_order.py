@@ -96,6 +96,7 @@ _LOST_EXIT_UNKNOWN = ChildLost(
 _TIMEOUT_RETRY_OPTIONS = json.dumps(
     {
         'retry_policy': {
+            'max_retries': 1,
             'auto_retry_for': [OutcomeCode.TASK_TIMEOUT.value],
             'intervals': [30],
             'backoff_strategy': 'fixed',
@@ -282,7 +283,7 @@ class _Rig:
             session_factory=MagicMock(),
             listener=MagicMock(),
             cfg=WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 recovery_config=recovery,
