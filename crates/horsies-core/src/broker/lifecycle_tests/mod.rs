@@ -6,8 +6,11 @@
 //! the core does not have yet is `#[ignore]` and names its issue.
 
 mod autocommit_outcomes;
+mod failed_attempt_finish;
+mod failed_attempt_round_trips;
 mod finalize_status_guard;
 mod support;
+mod task_attempt_history;
 mod terminal_writer_characterization;
 mod terminalization_claim_fence;
 mod terminalization_functions;
