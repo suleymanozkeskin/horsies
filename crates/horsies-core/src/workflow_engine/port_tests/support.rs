@@ -405,6 +405,7 @@ pub(super) struct NodeSeed {
     pub(super) join: JoinType,
     pub(super) min_success: Option<i32>,
     pub(super) task_options: Option<String>,
+    pub(super) queue_name: &'static str,
     pub(super) status: &'static str,
     pub(super) task_id: Option<Uuid>,
     pub(super) kind: NodeKind,
@@ -429,6 +430,7 @@ impl NodeSeed {
             join: JoinType::All,
             min_success: None,
             task_options: None,
+            queue_name: "default",
             status,
             task_id: None,
             kind: NodeKind::Task {
@@ -537,7 +539,7 @@ pub(super) async fn seed_node(pool: &PgPool, seed: &NodeSeed) -> Uuid {
              downstream_subworkflow, sub_workflow_summary, result,
              created_at, started_at, completed_at
          ) VALUES (
-             $1, $2, $3, $4, $5, $6, 'default', 100, $7, $8, $9, $10, $11, $12, $13,
+             $1, $2, $3, $4, $5, $6, $27, 100, $7, $8, $9, $10, $11, $12, $13,
              $14, $15, NULL, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
              NOW(),
              CASE WHEN $17 IN ('ENQUEUED', 'RUNNING', 'COMPLETED', 'FAILED') THEN NOW() END,
@@ -570,6 +572,7 @@ pub(super) async fn seed_node(pool: &PgPool, seed: &NodeSeed) -> Uuid {
     .bind(seed.downstream_subworkflow)
     .bind(&seed.sub_workflow_summary)
     .bind(&seed.result)
+    .bind(seed.queue_name)
     .execute(pool)
     .await
     .expect("seed the node row");
@@ -580,6 +583,7 @@ pub(super) async fn seed_node(pool: &PgPool, seed: &NodeSeed) -> Uuid {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LiveStatus {
     Pending,
+    Claimed,
     Running,
 }
 
@@ -587,15 +591,22 @@ impl LiveStatus {
     fn as_sql(self) -> &'static str {
         match self {
             Self::Pending => "PENDING",
+            Self::Claimed => "CLAIMED",
             Self::Running => "RUNNING",
         }
     }
 }
 
 /// Inserts the live task row of a workflow node: an engine-minted row with no
-/// fingerprint, key or retained input. A RUNNING row is held by [`WORKER`].
-pub(super) async fn seed_node_task(pool: &PgPool, task_id: Uuid, status: LiveStatus) {
-    sqlx::query(
+/// fingerprint, key or retained input. A CLAIMED or RUNNING row is held by
+/// [`WORKER`] since `NOW()`; a CLAIMED row's claim runs one more minute.
+/// Returns the claim generation (`claimed_at`), `None` for a PENDING row.
+pub(super) async fn seed_node_task(
+    pool: &PgPool,
+    task_id: Uuid,
+    status: LiveStatus,
+) -> Option<DateTime<Utc>> {
+    sqlx::query_scalar(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -608,19 +619,20 @@ pub(super) async fn seed_node_task(pool: &PgPool, task_id: Uuid, status: LiveSta
          ) VALUES (
              $1, 'port_task', 'default', 100, '{}', NULL, 'ISOLATED', 'forever',
              NOW(), NOW(), NULL, NULL, NULL, $2, NOW(),
-             CASE WHEN $2 = 'RUNNING' THEN NOW() END,
-             CASE WHEN $2 = 'RUNNING' THEN $3 END,
-             NULL,
+             CASE WHEN $2 = 'PENDING' THEN NULL ELSE NOW() END,
+             CASE WHEN $2 = 'PENDING' THEN NULL ELSE $3 END,
+             CASE WHEN $2 = 'CLAIMED' THEN NOW() + INTERVAL '1 minute' END,
              CASE WHEN $2 = 'RUNNING' THEN NOW() END,
              NULL, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, TRUE, NOW(), FALSE, NULL, NULL
-         )",
+         )
+         RETURNING claimed_at",
     )
     .bind(task_id)
     .bind(status.as_sql())
     .bind(WORKER)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .expect("seed the workflow task row");
+    .expect("seed the workflow task row")
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,6 +1025,74 @@ pub(super) async fn workflow_error_code(pool: &PgPool, workflow_id: Uuid) -> Opt
         .map(stored_error)
         .as_ref()
         .and_then(code)
+}
+
+/// The status and the terminalization kind of a task's history row, or `None`
+/// when the task has no history row.
+pub(super) async fn history_row(pool: &PgPool, task_id: Uuid) -> Option<(String, String)> {
+    sqlx::query_as(
+        "SELECT status, terminalization_kind FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .expect("read the history row")
+}
+
+/// The parameters of one claim pass of [`WORKER`] over `queue`, with no cap.
+pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParams {
+    crate::broker::postgres::ClaimPassParams {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        processes: 10,
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("a positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
+/// How long a listener collects notifications after the action.
+const NOTIFICATION_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Bound of the notifications one collection reads.
+const NOTIFICATION_LIMIT: usize = 100;
+
+/// A connection that listens on `workflow_done` (Python's fixture of the same name).
+pub(super) struct WorkflowDoneListener {
+    listener: sqlx::postgres::PgListener,
+}
+
+impl WorkflowDoneListener {
+    pub(super) async fn listen(pool: &PgPool) -> Self {
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+            .await
+            .expect("connect the workflow_done listener");
+        listener
+            .listen("workflow_done")
+            .await
+            .expect("LISTEN workflow_done");
+        Self { listener }
+    }
+
+    /// The payloads that arrive within [`NOTIFICATION_WAIT`] of the last one,
+    /// at most [`NOTIFICATION_LIMIT`].
+    pub(super) async fn received(&mut self) -> Vec<String> {
+        let mut payloads = Vec::new();
+        while payloads.len() < NOTIFICATION_LIMIT {
+            match tokio::time::timeout(NOTIFICATION_WAIT, self.listener.recv()).await {
+                Ok(Ok(notification)) => payloads.push(notification.payload().to_owned()),
+                Ok(Err(error)) => panic!("the workflow_done listener failed: {error}"),
+                Err(_) => break,
+            }
+        }
+        payloads
+    }
 }
 
 /// Ends seeded workflows that a test leaves RUNNING or PAUSED on the shared
