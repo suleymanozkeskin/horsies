@@ -96,6 +96,16 @@ pub(crate) static CHILD_FINISH: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid],
 );
 
+/// `horsies_workflow_phase2_recover(task_id, attempt_bound)`: phase-2
+/// recovery of one record, in the caller's transaction. A retaining
+/// disposition adds one attempt to the record and, at the bound, quarantines
+/// its evidence (`detail`: the verdict).
+pub(crate) static PHASE2_RECOVER: TypedStatement = TypedStatement::new(
+    "horsies_workflow_phase2_recover",
+    step_row_select!("horsies_workflow_phase2_recover($1, $2)"),
+    &[ParameterType::Uuid, ParameterType::Int4],
+);
+
 /// `horsies_workflow_resume(workflow_id)`: resumes a PAUSED workflow tree, in
 /// the caller's transaction.
 pub(crate) static RESUME: TypedStatement = TypedStatement::new(
@@ -621,6 +631,33 @@ pub(crate) async fn node_finish_in_transaction(
             .value(&task_id)
             .value(&wake)
             .value(&dependents_text)
+            .finish(),
+        build,
+    )
+    .await
+}
+
+/// Phase-2 recovery of one record in a transaction, on the reserve
+/// ([`CheckoutClass::Reserved`], the reaper's class): `BEGIN`,
+/// `horsies_workflow_phase2_recover` (the body of the node finish with no
+/// wake and the dependents read), one `horsies_workflow_child_start` per
+/// owed child start, `COMMIT`. `attempt_bound` is the quarantine bound of a
+/// retaining record (3 to 1000; the function refuses others with 22023).
+///
+/// Errors as [`run_in_transaction`].
+pub(crate) async fn phase2_recover(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    attempt_bound: i32,
+    build: ChildBuild<'_>,
+) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
+    run_in_transaction(
+        broker,
+        CheckoutClass::Reserved,
+        &PHASE2_RECOVER
+            .bind()
+            .value(&task_id)
+            .value(&attempt_bound)
             .finish(),
         build,
     )

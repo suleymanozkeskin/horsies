@@ -107,11 +107,16 @@ pub(crate) enum RecoveryCase {
     CompletedChildParentNotUpdated { parent_task_index: i32 },
     /// Cases 2 and 3: a RUNNING workflow whose nodes are all terminal.
     TerminalWorkflowRunning,
+    /// The progression of a phase-2 record (phase-2 recovery). Only the limit error of a raised record names
+    /// it: phase-2 recovery counts a raise on the record (`attempt_count`), never in
+    /// `horsies_workflow_recovery_failures`, whose CHECK names the five other values. Python:
+    /// `RecoveryCase.PHASE2_PROGRESSION`.
+    Phase2Progression { task_index: i32 },
 }
 
 impl RecoveryCase {
-    /// The value stored in `last_case`; the baseline CHECK `horsies_workflow_recovery_failures_case_known` names
-    /// the same five values.
+    /// The value stored in `last_case` (the baseline CHECK `horsies_workflow_recovery_failures_case_known` names
+    /// the five workflow recovery cases), and the case that a limit error names.
     pub(crate) fn stored_name(self) -> &'static str {
         match self {
             Self::PendingTerminalDeps { .. } => "pending_terminal_deps",
@@ -119,6 +124,7 @@ impl RecoveryCase {
             Self::ReadySubworkflowNotStarted { .. } => "ready_subworkflow_not_started",
             Self::CompletedChildParentNotUpdated { .. } => "completed_child_parent_not_updated",
             Self::TerminalWorkflowRunning => "terminal_workflow_running",
+            Self::Phase2Progression { .. } => "phase2_progression",
         }
     }
 
@@ -127,7 +133,8 @@ impl RecoveryCase {
         match self {
             Self::PendingTerminalDeps { task_index }
             | Self::ReadyNotEnqueued { task_index }
-            | Self::ReadySubworkflowNotStarted { task_index } => Some(task_index),
+            | Self::ReadySubworkflowNotStarted { task_index }
+            | Self::Phase2Progression { task_index } => Some(task_index),
             Self::CompletedChildParentNotUpdated { parent_task_index } => Some(parent_task_index),
             Self::TerminalWorkflowRunning => None,
         }
@@ -307,14 +314,9 @@ pub(crate) async fn run_recovery_candidate<T, F>(
 where
     F: Future<Output = Result<T, WorkflowError>>,
 {
-    let failure = match (CatchPanic {
-        candidate: Box::pin(candidate),
-    })
-    .await
-    {
-        Ok(Ok(value)) => return CandidateOutcome::Finished(value),
-        Ok(Err(error)) => CandidateFailure::Error(error),
-        Err(payload) => CandidateFailure::Panic(panic_text(&*payload)),
+    let failure = match run_catching_panic(candidate).await {
+        Ok(value) => return CandidateOutcome::Finished(value),
+        Err(failure) => failure,
     };
     tracing::error!(
         case = case.stored_name(),
@@ -327,6 +329,26 @@ where
     CandidateOutcome::Failed(
         record_candidate_failure(pool, policy, workflow_id, case, &failure).await,
     )
+}
+
+/// Runs `candidate` and catches a panic inside its polls: the boundary of one recovery candidate. The
+/// candidate's open transaction rolls back when it is dropped during the unwind.
+///
+/// Returns the candidate's value, or its failure: its error ([`CandidateFailure::Error`]) or its panic
+/// ([`CandidateFailure::Panic`]). Logs nothing.
+pub(crate) async fn run_catching_panic<T, F>(candidate: F) -> Result<T, CandidateFailure>
+where
+    F: Future<Output = Result<T, WorkflowError>>,
+{
+    match (CatchPanic {
+        candidate: Box::pin(candidate),
+    })
+    .await
+    {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(CandidateFailure::Error(error)),
+        Err(payload) => Err(CandidateFailure::Panic(panic_text(&*payload))),
+    }
 }
 
 /// Decides whether a failure counts, and counts it.
@@ -751,6 +773,11 @@ mod tests {
                 RecoveryCase::TerminalWorkflowRunning,
                 "terminal_workflow_running",
                 None,
+            ),
+            (
+                RecoveryCase::Phase2Progression { task_index: 5 },
+                "phase2_progression",
+                Some(5),
             ),
         ];
         for (case, name, task_index) in cases {

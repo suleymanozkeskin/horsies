@@ -503,6 +503,7 @@ impl Worker {
         // The reaper's gate and pass run on the worker reserve, which the
         // runtime pool's users cannot exhaust.
         let reaper = spawn_reaper(
+            Arc::clone(&self.broker),
             self.broker.reserve_pool().clone(),
             self.broker.reserve_maintenance_pool().clone(),
             Arc::clone(&self.workflow_registry),
@@ -1639,6 +1640,7 @@ mod tests {
         let claims = run.find("claim_batch(").expect("claim loop");
         let reaper = run.find("spawn_reaper(").expect("reaper startup");
         let reaper_call = &run[reaper..reaper + 500];
+        assert!(reaper_call.contains("Arc::clone(&self.broker)"));
         assert!(reaper_call.contains("self.broker.reserve_pool().clone()"));
         assert!(reaper_call.contains("self.broker.reserve_maintenance_pool().clone()"));
         assert!(schema < coverage);

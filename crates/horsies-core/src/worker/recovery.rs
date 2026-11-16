@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::broker::listener::notify_task_queue;
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -346,6 +347,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -413,6 +415,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -603,6 +606,7 @@ mod p7_maintenance_tests {
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -916,6 +920,7 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// as FAILED or requeuing them respectively.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
+    broker: Arc<PostgresBroker>,
     runtime_pool: PgPool,
     maintenance_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
@@ -953,6 +958,7 @@ pub fn spawn_reaper(
                 }
                 GatePass::Ungated => {
                     run_reaper_pass(
+                        &broker,
                         &runtime_pool,
                         &maintenance_pool,
                         &registry,
@@ -968,6 +974,7 @@ pub fn spawn_reaper(
                 }
                 GatePass::Held(tx) => {
                     run_reaper_pass(
+                        &broker,
                         &runtime_pool,
                         &maintenance_pool,
                         &registry,
@@ -1072,6 +1079,7 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 /// audit, stale-RUNNING recovery, PENDING expiry, workflow recovery, then
 /// periodic retention cleanup and partition maintenance.
 async fn run_reaper_pass(
+    broker: &PostgresBroker,
     runtime_pool: &PgPool,
     maintenance_pool: &PgPool,
     registry: &WorkflowSpecRegistry,
@@ -1217,13 +1225,15 @@ async fn run_reaper_pass(
         }
     });
 
+    // Discovery reads the reserve pool; each record runs on the main core
+    // pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
         runtime_pool,
+        broker,
         registry,
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
         config.phase2_quarantine_after_attempts,
-        payload,
         retention,
     )
     .await;
@@ -2098,6 +2108,7 @@ mod tests {
         let pass = tokio::time::timeout(
             Duration::from_secs(30),
             run_reaper_pass(
+                &broker,
                 broker.reserve_pool(),
                 broker.reserve_maintenance_pool(),
                 &WorkflowSpecRegistry::new(),
