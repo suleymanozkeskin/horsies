@@ -1754,13 +1754,13 @@ class FinalizeMixin:
                 result=None,
             )
         try:
-            UUID(task_id)
+            history_task_id = UUID(task_id)
         except ValueError:
             return None
         connection = await session.connection()
         if not await staged_detail_published(connection):
             return None
-        detail = await read_task_detail(connection, task_id=task_id)
+        detail = await read_task_detail(connection, task_id=history_task_id)
         match detail:
             case HistoryTaskDetail():
                 return _PersistedTaskRow(

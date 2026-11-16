@@ -79,7 +79,7 @@ def enqueue_fingerprint(
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def schedule_slot_task_id(schedule_name: str, slot_time: datetime) -> str:
+def schedule_slot_task_id(schedule_name: str, slot_time: datetime) -> uuid.UUID:
     """The task id of one schedule slot: the rule of ``horsies_schedule_slot_task_id``.
 
     A pure function of the schedule name and the slot instant, with the
@@ -117,7 +117,7 @@ def schedule_slot_task_id(schedule_name: str, slot_time: datetime) -> str:
     tail[0] = 0x70 | (tail[0] & 0x0F)
     tail[2] = 0x80 | (tail[2] & 0x3F)
     milliseconds = microseconds // 1000
-    return str(uuid.UUID(bytes=milliseconds.to_bytes(6, 'big') + bytes(tail)))
+    return uuid.UUID(bytes=milliseconds.to_bytes(6, 'big') + bytes(tail))
 
 
 def _unix_microseconds(value: datetime) -> int:

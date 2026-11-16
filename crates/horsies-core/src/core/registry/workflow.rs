@@ -14,8 +14,28 @@ use crate::core::workflow::spec::WorkflowSpec;
 ///
 /// The default behavior (when `spec_builder` is `None`) is to use the
 /// static registered spec.
+///
+/// Errors: [`SpecBuildError`]. A decode of the input that refuses the value
+/// of one member returns [`SpecBuildError::MemberRefused`] and does not run
+/// the builder.
 pub type SpecBuilderFn =
-    Arc<dyn Fn(&str) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static>;
+    Arc<dyn Fn(&str) -> Result<WorkflowSpec, SpecBuildError> + Send + Sync + 'static>;
+
+/// Why a registered child builder gave no spec.
+#[derive(Debug, Clone)]
+pub enum SpecBuildError {
+    /// The value of the top-level input member `key` does not decode to the
+    /// type of the builder parameter of that name; the builder did not run.
+    /// `cause` is the decode's text with the path of the value. The node
+    /// fails with `WORKER_SERIALIZATION_ERROR`, as Python's decode against the
+    /// `build_with` signature (`core/workflows/engine.py:1063-1080`,
+    /// `:1134-1157`).
+    MemberRefused { key: String, cause: String },
+    /// The builder failed, or the decode refused the input as a whole (not
+    /// at one member: a missing member, an input that is not an object). The
+    /// node fails with `WORKFLOW_ENQUEUE_FAILED`.
+    Failed(HorsiesError),
+}
 
 /// A registered dynamic workflow definition for runtime-built child workflows.
 #[derive(Clone)]
@@ -1208,7 +1228,7 @@ mod tests {
             spec_builder: Arc::new(|_| {
                 let mut b = WorkflowSpecBuilder::new("dummy");
                 b.task(TaskNode::<()>::raw("dummy_task", "null"));
-                b.build()
+                b.build().map_err(SpecBuildError::Failed)
             }),
             declared_children: declared_children.iter().map(|s| s.to_string()).collect(),
         }

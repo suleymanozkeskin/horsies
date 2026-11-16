@@ -192,7 +192,7 @@ async def shared_sends(*, x: int) -> TaskResult[str, TaskError]:
     """Send a task with ``send_async`` from a shared task. Return its id."""
     match await simple_task.send_async(x=x):
         case Ok(handle):
-            return TaskResult(ok=handle.task_id)
+            return TaskResult(ok=str(handle.task_id))
         case Err(send_err):
             return TaskResult(
                 err=TaskError(error_code='SEND_FAILED', message=send_err.message),

@@ -8,7 +8,7 @@
 //! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
-//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; a task whose node is not linked is cancelled as an owned orphan (`horsies_cancel_owned_orphan`) when the app's `auto_terminate_orphaned_workflow_tasks` is on |
+//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); a task whose node is not linked is cancelled as an owned orphan (`horsies_cancel_owned_orphan`) when the app's `auto_terminate_orphaned_workflow_tasks` is on |
 //! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
@@ -842,16 +842,29 @@ impl OutcomeWriter {
         }
     }
 
-    /// The child stopped before RUNNING and wrote what the case needs (Python
-    /// `horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`). An
-    /// expired workflow task replays phase 2. A task whose node is not
-    /// linked is cancelled as an owned orphan when the app turns the
-    /// self-heal on; with it off the row stays CLAIMED for inspection.
+    /// The child stopped before RUNNING; no task code ran (Python
+    /// `horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`).
+    ///
+    /// - An expired workflow task replays phase 2.
+    /// - An unconfirmed start releases the claim at once with the fenced
+    ///   release (Python `ReleaseUnconfirmedClaim`): the row goes back to the
+    ///   queue with its class only while it is CLAIMED by this worker at this
+    ///   claim generation. A row outside the fence, such as a start that
+    ///   committed before its reply was lost, is left to recovery. A release
+    ///   that fails is logged, and the claim lease returns the row.
+    /// - A task whose node is not linked is cancelled as an owned orphan when
+    ///   the app turns the self-heal on; with it off the row stays CLAIMED
+    ///   for inspection.
+    /// - Every other stop wrote what its case needs in the child.
     async fn after_stop(&self, task: &ClaimedTask, reason: StopReason) -> Settlement {
         match (reason, task.kind.is_workflow_task(), self.orphan_self_heal) {
             (StopReason::TaskExpired, true, _) => {
-                self.phase_two(task, false, false).await;
+                self.phase_two(task, false, PhaseTwoForm::NotKnown).await;
                 Settlement::NothingOwed
+            }
+            (StopReason::OwnershipUnconfirmed, _, _) => {
+                self.release(task, "the start of the attempt was not confirmed")
+                    .await
             }
             (StopReason::NodeNotLinked, _, OrphanSelfHeal::On) => {
                 self.phase_one(
@@ -871,10 +884,7 @@ impl OutcomeWriter {
                 Settlement::NothingOwed
             }
             (
-                StopReason::TaskExpired
-                | StopReason::ClaimLost
-                | StopReason::OwnershipUnconfirmed
-                | StopReason::WorkflowStopped,
+                StopReason::TaskExpired | StopReason::ClaimLost | StopReason::WorkflowStopped,
                 _,
                 _,
             ) => Settlement::NothingOwed,
