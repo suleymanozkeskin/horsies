@@ -543,7 +543,8 @@ class ReaperMixin:
                         f'{prune.detached_count} detached, '
                         f'{prune.dropped_count} dropped, '
                         f'{len(prune.refusals)} refusal(s), '
-                        f'{len(prune.errors)} error(s)'
+                        f'{len(prune.errors)} error(s), '
+                        f'reach {prune.reach.value}'
                     )
                     if prune.errors:
                         logger.warning(summary)
@@ -555,6 +556,7 @@ class ReaperMixin:
                     'dropped': prune.dropped_count,
                     'refusals': list(prune.refusals),
                     'errors': list(prune.errors),
+                    'reach': prune.reach.value,
                 }
             except Exception as prune_err:
                 logger.error(f'Partition pruning error: {prune_err}')

@@ -15,8 +15,9 @@
 -- - Results are plain rows of built-in types. A step function returns SETOF horsies_workflow_step_row: one OUTCOME
 --   row, and one CHILD_START row per owed child start with one SOURCE row per terminal dependency of that node.
 -- - A task row that SQL mints has PENDING status, is_workflow_task TRUE, no command fingerprint (the named "no
---   fingerprint" variant), retain_rerun_input FALSE, retry_count 0, sent_at of its workflow, and max_retries,
---   execution, good_until and retention_class_key from its node row. Its id is horsies_uuidv7().
+--   fingerprint" variant), retain_rerun_input FALSE, retry_count 0, sent_at of its workflow, max_retries, execution
+--   and retention_class_key from its node row, and good_until from the good_until of its stored task options. Its id
+--   is horsies_uuidv7().
 -- - Row-set arguments are parallel arrays of built-in types. A function refuses arrays of different lengths, a NULL
 --   element where the column needs a value, and duplicate keys with SQLSTATE 22023.
 -- - Every PL/pgSQL function that runs table statements uses generic plans (plan_cache_mode = force_generic_plan).
@@ -107,7 +108,7 @@ BEGIN
         p_error_code IN (
             'UPSTREAM_SKIPPED', 'WORKFLOW_OUTPUT_SKIPPED', 'WORKFLOW_SUCCESS_CASE_NOT_MET',
             'RESULT_DESERIALIZATION_ERROR', 'SUBWORKFLOW_FAILED', 'SUBWORKFLOW_DEPTH_LIMIT_REACHED',
-            'WORKFLOW_ENQUEUE_FAILED', 'WORKFLOW_RECOVERY_LIMIT_REACHED'
+            'WORKFLOW_ENQUEUE_FAILED', 'WORKFLOW_RECOVERY_LIMIT_REACHED', 'WORKER_SERIALIZATION_ERROR'
         ),
         format('engine error code %L is not in the engine catalog', p_error_code)
     );
@@ -350,14 +351,20 @@ $$;
 -- ENQUEUED with no task: the rows are built here (ids from horsies_uuidv7() in index order, the input of
 -- horsies_workflow_task_input) and inserted through horsies_insert_task_rows, the one column list of a new task row,
 -- with the values of a workflow task row: is_workflow_task TRUE, no command fingerprint (the "no fingerprint"
--- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at of the workflow, enqueued_at now(), and
--- max_retries, execution, good_until and retention_class_key from the node row. Then one link UPDATE of the nodes.
--- The insert trigger sends the wake of each queue. An outcome other than INSERTED (a conflict on a freshly minted
--- id) is a defect: it raises unique_violation (23505), as the plain insert did, and nothing commits.
+-- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at of the workflow, enqueued_at now(),
+-- max_retries, execution and retention_class_key from the node row, and good_until cast from the good_until member of
+-- the stored task options (NULL for no options, empty options, or a null or absent member). Then one link UPDATE of
+-- the nodes. The insert trigger sends the wake of each queue.
+-- Raises, and nothing commits:
+-- - a good_until that the timestamptz input cannot read (22007 or 22008), as the database refuses Python's text;
+-- - an outcome other than INSERTED (a conflict on a freshly minted id), a defect: unique_violation (23505), as the
+--   plain insert did.
 -- Returns the number of rows minted.
--- Precondition: the caller holds the workflow row FOR UPDATE, so no other transaction links these nodes.
+-- Precondition: the caller holds the workflow row FOR UPDATE, so no other transaction links these nodes. The stored
+-- task options of each node parse (horsies_workflow_unbuildable_nodes failed every node whose options do not).
 -- Python: the INSERT_AND_LINK_WORKFLOW_TASK_SQL executemany (core/workflows/sql.py:194-206;
--- core/workflows/engine.py:2406-2461), INSERT_TASK_FOR_WORKFLOW_SQL at start (core/workflows/lifecycle.py:758).
+-- core/workflows/engine.py:2406-2461), INSERT_TASK_FOR_WORKFLOW_SQL at start (core/workflows/lifecycle.py:758); the
+-- task row's good_until is str() of the options member (core/workflows/engine.py:832-835).
 -- Locks: the new task rows and the linked node rows (the workflow row is held by the caller).
 CREATE FUNCTION horsies_workflow_node_tasks_insert(p_workflow_id uuid, p_task_indexes integer[]) RETURNS integer
     LANGUAGE plpgsql
@@ -380,7 +387,8 @@ BEGIN
                horsies_uuidv7() AS task_id,
                n.task_index, n.task_name, n.queue_name, n.priority,
                horsies_workflow_task_input(n) AS input,
-               n.task_options, n.execution, n.retention_class_key, n.max_retries, n.good_until
+               n.task_options, n.execution, n.retention_class_key, n.max_retries,
+               (nullif(n.task_options, '')::jsonb ->> 'good_until')::timestamptz AS good_until
         FROM horsies_workflow_tasks n
         WHERE n.workflow_id = p_workflow_id
           AND n.task_index = ANY(p_task_indexes)
@@ -431,6 +439,451 @@ BEGIN
             USING ERRCODE = 'unique_violation';
     END IF;
     RETURN v_minted;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Internal helpers: the stored task options of a task node
+------------------------------------------------------------------------------------------------------------------------
+
+-- The name of the Python type that json.loads gives for p_value: dict, list, str, int, float, bool or NoneType; NULL
+-- for NULL. A number is a float when its literal has a fraction or an exponent (the number rule of Python's json
+-- module), else an int. The json type keeps the literal; jsonb does not (it reads 1e2 as 100).
+-- Locks: none. Python: type(value).__name__ in the texts of core/codec/task_options.py.
+CREATE FUNCTION horsies_workflow_json_type_name(p_value json) RETURNS text
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT CASE json_typeof(p_value)
+        WHEN 'object' THEN 'dict'
+        WHEN 'array' THEN 'list'
+        WHEN 'string' THEN 'str'
+        WHEN 'boolean' THEN 'bool'
+        WHEN 'null' THEN 'NoneType'
+        WHEN 'number' THEN CASE WHEN p_value::text ~ '[.eE]' THEN 'float' ELSE 'int' END
+    END
+$$;
+
+-- p_value as a number when it is a JSON integer literal (an int for Python's json module), else NULL.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_json_int(p_value json) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT CASE WHEN horsies_workflow_json_type_name(p_value) = 'int' THEN p_value::text::numeric END
+$$;
+
+-- TRUE when the parsed text p_doc breaks a rule of Python's loads_json (core/codec/json_io.py) that the PostgreSQL
+-- json and jsonb inputs do not apply:
+-- - an object repeats a key;
+-- - an integer literal has more than 4300 digits (Python's limit for an int conversion);
+-- - a float literal rounds to infinity: its magnitude is at least 2^1024 - 2^970, the midpoint between the largest
+--   double and 2^1024;
+-- - lists and objects nest deeper than 300 levels (MAX_JSON_DEPTH of core/codec/json_value.py).
+-- The walk expands containers down to depth 300 only, so it is bounded by the size of p_doc.
+-- Precondition: the text of p_doc also parses as jsonb, so every number literal casts to numeric.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_json_breaks_strict_rules(p_doc json) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+AS $$
+    WITH RECURSIVE walk (value, kind, depth) AS (
+        SELECT p_doc, json_typeof(p_doc), 1
+        UNION ALL
+        SELECT c.value, json_typeof(c.value), w.depth + 1
+        FROM walk w
+        CROSS JOIN LATERAL (
+            SELECT e.value FROM json_each(CASE WHEN w.kind = 'object' THEN w.value END) AS e
+            UNION ALL
+            SELECT a.value FROM json_array_elements(CASE WHEN w.kind = 'array' THEN w.value END) AS a
+        ) AS c
+        WHERE w.kind IN ('object', 'array') AND w.depth <= 300
+    )
+    SELECT EXISTS (
+        SELECT 1
+        FROM walk w
+        WHERE CASE w.kind
+            WHEN 'object' THEN w.depth > 300
+                OR (SELECT count(*) <> count(DISTINCT k) FROM json_object_keys(w.value) AS k)
+            WHEN 'array' THEN w.depth > 300
+            WHEN 'number' THEN CASE
+                WHEN w.value::text ~ '[.eE]' THEN abs(w.value::text::numeric) >= '1797693134862315807937289714053034'
+                    '1507993413271003782693617377898044496829276475094664901797758720709633028641669288791094655554'
+                    '7851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959'
+                    '622842914819860834936475292719074168444365510704342711559699508093042880177904174497792'::numeric
+                ELSE length(regexp_replace(w.value::text, '[^0-9]', '', 'g')) > 4300
+            END
+            ELSE FALSE
+        END
+    )
+$$;
+
+-- The stored task options p_text parsed by the rules of Python's loads_json, or NULL when it does not parse. The text
+-- must parse as json and as jsonb (jsonb also refuses an unpaired UTF-16 surrogate escape) and keep the rules of
+-- horsies_workflow_json_breaks_strict_rules. The json value keeps the literals and the member order of the text.
+-- The walk of those rules runs only when one of them can be broken. With the string literals removed from the text:
+-- the member count (one ':' per member) differs from the member count of the jsonb value, which keeps one member per
+-- key; or more than 300 '[' and '{' are left; or a digit is followed by '.', 'e' or 'E' (a float literal); or more
+-- than 4300 characters are left.
+-- PostgreSQL refuses two kinds of text that Python reads: the escape \u0000 (text cannot hold U+0000), and a number
+-- literal whose exponent is outside the range of numeric (Python reads 1e-20000 as the float 0.0).
+-- The parse runs in a subtransaction. Precondition: p_text is not NULL or empty (Python reads no options then).
+-- Locks: none. Python: _deser_json (core/workflows/engine.py:415-423) and loads_json (core/codec/json_io.py:97-137).
+CREATE FUNCTION horsies_workflow_options_json(p_text text) RETURNS json
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_max_depth CONSTANT integer := 300;
+    c_max_int_digits CONSTANT integer := 4300;
+    v_doc json;
+    v_distinct_members integer;
+    v_bare text;
+BEGIN
+    v_doc := p_text::json;
+    v_distinct_members := jsonb_array_length(
+        jsonb_path_query_array(p_text::jsonb, 'strict $.** ? (@.type() == "object").keyvalue()')
+    );
+    -- The E'' literal keeps its backslashes whatever standard_conforming_strings is.
+    v_bare := regexp_replace(p_text, E'"(\\\\.|[^"\\\\])*"', '', 'g');
+    IF length(v_bare) - length(replace(v_bare, ':', '')) <> v_distinct_members
+       OR length(v_bare) - length(translate(v_bare, '[{', '')) > c_max_depth
+       OR v_bare ~ '[0-9][.eE]'
+       OR length(v_bare) > c_max_int_digits
+    THEN
+        IF horsies_workflow_json_breaks_strict_rules(v_doc) THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+    RETURN v_doc;
+EXCEPTION
+    WHEN data_exception OR statement_too_complex THEN
+        RETURN NULL;
+END;
+$$;
+
+-- The validation entries of the intervals member p_intervals of a retry_policy object, as validation_summary writes
+-- them: none when absent; one list_type entry for a value that is not a list; one too_long entry (with the length) for
+-- a list longer than 20, whatever its items; one too_short entry for an empty list; else one entry per item that is
+-- not an int from 1 to 86400, at 'intervals.<position from 0>'. Strict mode refuses a bool or a float for an int.
+-- A list whose text holds only int literals from 1 to 86400 has no item entry, and its items are not walked.
+-- Locks: none. Python: RetryPolicy.intervals (core/models/tasks.py:549-557).
+CREATE FUNCTION horsies_workflow_retry_interval_entries(p_intervals json) RETURNS text[]
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+BEGIN
+    CASE
+        WHEN p_intervals IS NULL THEN
+            RETURN ARRAY[]::text[];
+        WHEN json_typeof(p_intervals) <> 'array' THEN
+            RETURN ARRAY['intervals: Input should be a valid list [list_type]'];
+        WHEN json_array_length(p_intervals) > 20 THEN
+            RETURN ARRAY[format(
+                'intervals: List should have at most 20 items after validation, not %s [too_long]',
+                json_array_length(p_intervals)
+            )];
+        WHEN json_array_length(p_intervals) = 0 THEN
+            RETURN ARRAY['intervals: List should have at least 1 item after validation, not 0 [too_short]'];
+        -- An int literal from 1 to 86400 is one of 1-9999, 10000-79999, 80000-85999, 86000-86399 and 86400.
+        WHEN p_intervals::text ~ (
+            '^[[][[:space:]]*([1-9][0-9]{0,3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400)'
+            '([[:space:]]*,[[:space:]]*([1-9][0-9]{0,3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400))*'
+            '[[:space:]]*[]]$'
+        ) THEN
+            RETURN ARRAY[]::text[];
+        ELSE
+            RETURN ARRAY(
+                SELECT format('intervals.%s: %s', i.position - 1, CASE
+                    WHEN horsies_workflow_json_int(i.value) IS NULL THEN 'Input should be a valid integer [int_type]'
+                    WHEN horsies_workflow_json_int(i.value) < 1 THEN 'Input should be greater than 0 [greater_than]'
+                    ELSE 'Input should be less than or equal to 86400 [less_than_equal]'
+                END)
+                FROM json_array_elements(p_intervals) WITH ORDINALITY AS i(value, position)
+                WHERE horsies_workflow_json_int(i.value) IS NULL
+                   OR horsies_workflow_json_int(i.value) NOT BETWEEN 1 AND 86400
+                ORDER BY i.position
+            );
+    END CASE;
+END;
+$$;
+
+-- TRUE when the text of p_codes is a list of one or more UPPER_SNAKE_CASE string literals with no escape: each item
+-- is a str that matches ERROR_CODE_RE (core/exception_mapper.py:14) and, having no lowercase letter, cannot match
+-- EXCEPTION_NAME_RE. FALSE says nothing: the caller then walks the items. Locks: none.
+CREATE FUNCTION horsies_workflow_retry_codes_plain(p_codes json) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT p_codes::text ~ (
+        '^[[][[:space:]]*"[A-Z][A-Z0-9_]*"([[:space:]]*,[[:space:]]*"[A-Z][A-Z0-9_]*")*[[:space:]]*[]]$'
+    )
+$$;
+
+-- The validation entries of the auto_retry_for member p_codes of a retry_policy object, as validation_summary writes
+-- them: one missing entry when absent; one list_type entry for a value that is not a list; one too_short entry for an
+-- empty list; else five entries per item that is not a str, at 'auto_retry_for.<position from 0>': the str member and
+-- the four str enums of BuiltInTaskCode of Union[str, BuiltInTaskCode], in pydantic's order. Plain codes
+-- (horsies_workflow_retry_codes_plain) have no item entry, and their items are not walked.
+-- Locks: none. Python: RetryPolicy.auto_retry_for (core/models/tasks.py:564-567), BuiltInTaskCode (:58).
+CREATE FUNCTION horsies_workflow_retry_code_entries(p_codes json) RETURNS text[]
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+BEGIN
+    CASE
+        WHEN p_codes IS NULL THEN
+            RETURN ARRAY['auto_retry_for: Field required [missing]'];
+        WHEN json_typeof(p_codes) <> 'array' THEN
+            RETURN ARRAY['auto_retry_for: Input should be a valid list [list_type]'];
+        WHEN json_array_length(p_codes) = 0 THEN
+            RETURN ARRAY['auto_retry_for: List should have at least 1 item after validation, not 0 [too_short]'];
+        WHEN horsies_workflow_retry_codes_plain(p_codes) THEN
+            RETURN ARRAY[]::text[];
+        ELSE
+            RETURN ARRAY(
+                SELECT format('auto_retry_for.%s.%s', c.position - 1, m.entry)
+                FROM json_array_elements(p_codes) WITH ORDINALITY AS c(value, position)
+                CROSS JOIN (
+                    SELECT 0 AS member, 'str: Input should be a valid string [string_type]' AS entry
+                    UNION ALL
+                    SELECT e.member, format(
+                        'union[str-enum[OperationalErrorCode],str-enum[ContractCode],str-enum[RetrievalCode],'
+                        'str-enum[OutcomeCode]].str-enum[%1$s]: Input should be an instance of %1$s [is_instance_of]',
+                        e.enum_name
+                    )
+                    FROM unnest(ARRAY['OperationalErrorCode', 'ContractCode', 'RetrievalCode', 'OutcomeCode'])
+                        WITH ORDINALITY AS e(enum_name, member)
+                ) AS m
+                WHERE json_typeof(c.value) <> 'string'
+                ORDER BY c.position, m.member
+            );
+    END CASE;
+END;
+$$;
+
+-- The field entries of a retry_policy object p_policy, as Python's validation_summary writes the field errors of
+-- RetryPolicy.model_validate(policy, strict=True) (core/codec/validation_errors.py:95-115): one '<loc>: <msg> [<type>]'
+-- per error, the fields in declaration order (max_retries: an int from 1 to 20; intervals; backoff_strategy: 'fixed'
+-- or 'exponential'; jitter: a bool; max_delay_seconds: null or an int above 0; auto_retry_for), then one entry per
+-- member that is not a field, in the order of the text (an empty key has no '<loc>: '). Empty when the fields
+-- validate. Precondition: p_policy is an object with no repeated key.
+-- Locks: none. Python: RetryPolicy (core/models/tasks.py:522-567, extra='forbid').
+CREATE FUNCTION horsies_workflow_retry_policy_entries(p_policy json) RETURNS text[]
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_fields CONSTANT text[] := ARRAY[
+        'max_retries', 'intervals', 'backoff_strategy', 'jitter', 'max_delay_seconds', 'auto_retry_for'
+    ];
+    v_max_retries json := p_policy -> 'max_retries';
+    v_backoff_strategy json := p_policy -> 'backoff_strategy';
+    v_jitter json := p_policy -> 'jitter';
+    v_max_delay_seconds json := p_policy -> 'max_delay_seconds';
+    v_extras text[] := ARRAY[]::text[];
+BEGIN
+    IF p_policy::jsonb - c_fields <> '{}'::jsonb THEN
+        v_extras := ARRAY(
+            SELECT CASE WHEN e.key = '' THEN '' ELSE e.key || ': ' END
+                || 'Extra inputs are not permitted [extra_forbidden]'
+            FROM json_each(p_policy) WITH ORDINALITY AS e(key, value, position)
+            WHERE e.key <> ALL (c_fields)
+            ORDER BY e.position
+        );
+    END IF;
+    RETURN array_remove(ARRAY[
+               CASE
+                   WHEN v_max_retries IS NULL THEN NULL
+                   WHEN horsies_workflow_json_int(v_max_retries) IS NULL
+                       THEN 'max_retries: Input should be a valid integer [int_type]'
+                   WHEN horsies_workflow_json_int(v_max_retries) < 1
+                       THEN 'max_retries: Input should be greater than or equal to 1 [greater_than_equal]'
+                   WHEN horsies_workflow_json_int(v_max_retries) > 20
+                       THEN 'max_retries: Input should be less than or equal to 20 [less_than_equal]'
+               END
+           ], NULL)
+        || horsies_workflow_retry_interval_entries(p_policy -> 'intervals')
+        || array_remove(ARRAY[
+               CASE
+                   WHEN v_backoff_strategy IS NULL THEN NULL
+                   WHEN json_typeof(v_backoff_strategy) = 'string'
+                        AND (v_backoff_strategy #>> '{}') IN ('fixed', 'exponential') THEN NULL
+                   ELSE 'backoff_strategy: Input should be ''fixed'' or ''exponential'' [literal_error]'
+               END,
+               CASE
+                   WHEN v_jitter IS NULL OR json_typeof(v_jitter) = 'boolean' THEN NULL
+                   ELSE 'jitter: Input should be a valid boolean [bool_type]'
+               END,
+               CASE
+                   WHEN v_max_delay_seconds IS NULL OR json_typeof(v_max_delay_seconds) = 'null' THEN NULL
+                   WHEN horsies_workflow_json_int(v_max_delay_seconds) IS NULL
+                       THEN 'max_delay_seconds: Input should be a valid integer [int_type]'
+                   WHEN horsies_workflow_json_int(v_max_delay_seconds) < 1
+                       THEN 'max_delay_seconds: Input should be greater than 0 [greater_than]'
+               END
+           ], NULL)
+        || horsies_workflow_retry_code_entries(p_policy -> 'auto_retry_for')
+        || v_extras;
+END;
+$$;
+
+-- The model validator error of a retry_policy object p_policy whose fields validate, as validation_summary writes it
+-- ('Value error, <text> [value_error]'), or NULL. The validators run in Python's order; the first error ends the
+-- validation:
+-- 1. validate_strategy_consistency: 'fixed' needs as many intervals as max_retries, 'exponential' needs one interval.
+--    An absent field has its default: max_retries 3, intervals [60, 300, 900], backoff_strategy 'fixed'.
+-- 2. validate_error_code_fields: each auto_retry_for code in order, by validate_error_code_string
+--    (core/exception_mapper.py:64-84): not empty, not an exception class name (EXCEPTION_NAME_RE), UPPER_SNAKE_CASE
+--    (ERROR_CODE_RE), and not in RESERVED_NON_TASK_CODES (WORKFLOW_STOPPED). Plain codes
+--    (horsies_workflow_retry_codes_plain) other than WORKFLOW_STOPPED pass all four checks and are not walked.
+-- Precondition: horsies_workflow_retry_policy_entries(p_policy) is empty.
+-- Locks: none. Python: RetryPolicy (core/models/tasks.py:569-600).
+CREATE FUNCTION horsies_workflow_retry_policy_value_error(p_policy json) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_backoff_strategy text := coalesce(p_policy ->> 'backoff_strategy', 'fixed');
+    v_max_retries integer := coalesce((p_policy ->> 'max_retries')::integer, 3);
+    v_interval_count integer := coalesce(json_array_length(p_policy -> 'intervals'), 3);
+    v_codes json := p_policy -> 'auto_retry_for';
+    v_error text;
+BEGIN
+    v_error := CASE v_backoff_strategy
+        WHEN 'fixed' THEN CASE WHEN v_interval_count <> v_max_retries THEN format(
+            'Fixed backoff strategy requires intervals length (%s) to match max_retries (%s). '
+            'Either adjust intervals list or use exponential strategy.', v_interval_count, v_max_retries) END
+        WHEN 'exponential' THEN CASE WHEN v_interval_count <> 1 THEN format(
+            'Exponential backoff strategy requires exactly one base interval, got %s intervals. '
+            'Use intervals=[base_seconds] for exponential backoff.', v_interval_count) END
+    END;
+    IF v_error IS NULL AND NOT (
+        horsies_workflow_retry_codes_plain(v_codes) AND strpos(v_codes::text, '"WORKFLOW_STOPPED"') = 0
+    ) THEN
+        SELECT CASE
+            WHEN c.code = '' THEN 'auto_retry_for must be a non-empty string, got '''''
+            WHEN c.code ~ '^[A-Z][A-Za-z0-9_]*(Error|Exception)$' THEN format(
+                'auto_retry_for ''%s'' looks like an exception class name; retry matching is '
+                'error-code-only, use UPPER_SNAKE_CASE code names', c.code)
+            WHEN c.code !~ '^[A-Z][A-Z0-9_]*$' THEN format(
+                'auto_retry_for ''%s'' is invalid; expected UPPER_SNAKE_CASE (e.g. RATE_LIMITED)', c.code)
+            ELSE format(
+                'auto_retry_for ''%s'' is a reserved error code name and is not a task code; '
+                'use another UPPER_SNAKE_CASE code', c.code)
+        END
+        INTO v_error
+        FROM json_array_elements_text(v_codes) WITH ORDINALITY AS c(code, position)
+        WHERE c.code = '' OR c.code ~ '^[A-Z][A-Za-z0-9_]*(Error|Exception)$' OR c.code !~ '^[A-Z][A-Z0-9_]*$'
+           OR c.code = 'WORKFLOW_STOPPED'
+        ORDER BY c.position
+        LIMIT 1;
+    END IF;
+    RETURN 'Value error, ' || v_error || ' [value_error]';
+END;
+$$;
+
+-- The refusal of the retry_policy member p_policy of task options, as Python's stored_retry_policy writes it, or NULL
+-- when it reads: none for an absent or null member; 'retry_policy is not an object: <type>' for a value that is not an
+-- object; else the field entries of horsies_workflow_retry_policy_entries joined by '; ' (at most 10, then
+-- '(+<count> more)', MAX_VALIDATION_ERRORS_IN_TEXT), or when the fields validate, the model validator error.
+-- Locks: none. Python: stored_retry_policy and stored_max_retries (core/codec/task_options.py:85-136).
+CREATE FUNCTION horsies_workflow_retry_policy_refusal(p_policy json) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_max_entries CONSTANT integer := 10;
+    v_entries text[];
+BEGIN
+    IF p_policy IS NULL OR json_typeof(p_policy) = 'null' THEN
+        RETURN NULL;
+    END IF;
+    IF json_typeof(p_policy) <> 'object' THEN
+        RETURN 'retry_policy is not an object: ' || horsies_workflow_json_type_name(p_policy);
+    END IF;
+    v_entries := horsies_workflow_retry_policy_entries(p_policy);
+    IF cardinality(v_entries) = 0 THEN
+        RETURN horsies_workflow_retry_policy_value_error(p_policy);
+    END IF;
+    RETURN array_to_string(v_entries[1:c_max_entries], '; ')
+        || CASE
+            WHEN cardinality(v_entries) > c_max_entries
+                THEN format('; (+%s more)', cardinality(v_entries) - c_max_entries)
+            ELSE ''
+        END;
+END;
+$$;
+
+-- The refusal of the execution class of a task options object p_options, as Python's stored_execution writes it, or
+-- NULL when it reads. An absent execution member is ISOLATED; a present one must be one of the Execution values.
+-- cancel_grace_ms (absent is null) must then fit the class: an int from 100 to 10000 for SHARED_ASYNC
+-- (MIN_CANCEL_GRACE_MS and MAX_CANCEL_GRACE_MS, core/models/tasks.py:479-487), null for the other classes.
+-- Locks: none. Python: stored_execution and its helpers (core/codec/task_options.py:147-240).
+CREATE FUNCTION horsies_workflow_execution_refusal(p_options json) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_min_grace_ms CONSTANT integer := 100;
+    c_max_grace_ms CONSTANT integer := 10000;
+    v_execution json := p_options -> 'execution';
+    v_grace json := coalesce(p_options -> 'cancel_grace_ms', 'null');
+    v_class text;
+BEGIN
+    IF v_execution IS NOT NULL AND json_typeof(v_execution) <> 'string' THEN
+        RETURN format('execution is a JSON %s, not a string', horsies_workflow_json_type_name(v_execution));
+    END IF;
+    v_class := coalesce(v_execution #>> '{}', 'ISOLATED');
+    CASE v_class
+        WHEN 'ISOLATED', 'SHARED_THREAD' THEN
+            RETURN CASE
+                WHEN json_typeof(v_grace) = 'null' THEN NULL
+                ELSE format('cancel_grace_ms is set for execution %s; only SHARED_ASYNC has one', v_class)
+            END;
+        WHEN 'SHARED_ASYNC' THEN
+            RETURN CASE
+                WHEN json_typeof(v_grace) = 'null' THEN 'cancel_grace_ms is absent for execution SHARED_ASYNC'
+                WHEN json_typeof(v_grace) = 'boolean' THEN 'cancel_grace_ms is a bool, not an int'
+                WHEN horsies_workflow_json_int(v_grace) IS NULL
+                    THEN format('cancel_grace_ms is a JSON %s, not an int', horsies_workflow_json_type_name(v_grace))
+                WHEN horsies_workflow_json_int(v_grace) < c_min_grace_ms
+                    THEN format('cancel_grace_ms is below %s ms', c_min_grace_ms)
+                WHEN horsies_workflow_json_int(v_grace) > c_max_grace_ms
+                    THEN format('cancel_grace_ms is above %s ms', c_max_grace_ms)
+            END;
+        ELSE
+            RETURN 'execution is not one of ISOLATED, SHARED_ASYNC, SHARED_THREAD';
+    END CASE;
+END;
+$$;
+
+-- The message with which the promotion fails a task node whose stored task options p_task_options do not read, as
+-- Python's _build_enqueued_task_params writes it for node p_task_index, or NULL when they read (NULL and empty options
+-- read as no options). The checks run in Python's order; the first refusal is the message:
+-- 1. text that does not parse, or the JSON null (horsies_workflow_options_json): 'Corrupt task_options JSON for task
+--    <index>';
+-- 2. a value that is not an object: 'Invalid task_options payload for task <index>: expected object';
+-- 3. the retry_policy member (horsies_workflow_retry_policy_refusal): 'Invalid retry_policy for task <index>:
+--    <detail>';
+-- 4. the execution class (horsies_workflow_execution_refusal): 'Invalid execution for task <index>: <detail>'.
+-- The good_until member is not checked here: the task row insert casts it (horsies_workflow_node_tasks_insert).
+-- Locks: none. Python: _build_enqueued_task_params (core/workflows/engine.py:795-835).
+CREATE FUNCTION horsies_workflow_task_options_refusal(p_task_options text, p_task_index integer) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_options json;
+    v_detail text;
+BEGIN
+    IF p_task_options IS NULL OR p_task_options = '' THEN
+        RETURN NULL;
+    END IF;
+    v_options := horsies_workflow_options_json(p_task_options);
+    IF v_options IS NULL OR json_typeof(v_options) = 'null' THEN
+        RETURN format('Corrupt task_options JSON for task %s', p_task_index);
+    END IF;
+    IF json_typeof(v_options) <> 'object' THEN
+        RETURN format('Invalid task_options payload for task %s: expected object', p_task_index);
+    END IF;
+    v_detail := horsies_workflow_retry_policy_refusal(v_options -> 'retry_policy');
+    IF v_detail IS NOT NULL THEN
+        RETURN format('Invalid retry_policy for task %s: %s', p_task_index, v_detail);
+    END IF;
+    v_detail := horsies_workflow_execution_refusal(v_options);
+    IF v_detail IS NOT NULL THEN
+        RETURN format('Invalid execution for task %s: %s', p_task_index, v_detail);
+    END IF;
+    RETURN NULL;
 END;
 $$;
 
@@ -538,13 +991,15 @@ END;
 $$;
 
 -- The nodes among p_task_indexes (ENQUEUED, of p_workflow_id) whose task row or child cannot be built, with the
--- engine error of each, in index order:
+-- engine error of each, in index order. The first refusal of a node in Python's order:
+-- - a task node whose stored task options do not read: WORKER_SERIALIZATION_ERROR with the message of
+--   horsies_workflow_task_options_refusal (Python: _build_enqueued_task_params, core/workflows/engine.py:795-831);
 -- - a task node with an args_from key that is also a member of its static input: WORKFLOW_ENQUEUE_FAILED
---   (Python: _build_enqueued_task_params, core/workflows/engine.py:835-841; the spec refuses the overlap when it is
+--   (Python: _build_enqueued_task_params, core/workflows/engine.py:867-872; the spec refuses the overlap when it is
 --   built, this check guards stored rows);
 -- - a sub-workflow node of a workflow at depth 32: SUBWORKFLOW_DEPTH_LIMIT_REACHED (Python:
 --   enqueue_subworkflow_task, core/workflows/engine.py:1052-1066).
--- data names the workflow and the node, as Python's _fail_enqueued_task (core/workflows/engine.py:472-555).
+-- data names the workflow and the node, as Python's _fail_enqueued_task (core/workflows/engine.py:514-555).
 -- Locks: none. Returns (task_index, error_result) rows.
 CREATE FUNCTION horsies_workflow_unbuildable_nodes(p_workflow_id uuid, p_task_indexes integer[])
     RETURNS TABLE (task_index integer, error_result text)
@@ -552,11 +1007,16 @@ CREATE FUNCTION horsies_workflow_unbuildable_nodes(p_workflow_id uuid, p_task_in
 AS $$
     SELECT n.task_index,
            horsies_task_error_envelope(
-               CASE WHEN n.is_subworkflow THEN 'SUBWORKFLOW_DEPTH_LIMIT_REACHED' ELSE 'WORKFLOW_ENQUEUE_FAILED' END,
+               CASE
+                   WHEN n.is_subworkflow THEN 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+                   WHEN o.refusal IS NOT NULL THEN 'WORKER_SERIALIZATION_ERROR'
+                   ELSE 'WORKFLOW_ENQUEUE_FAILED'
+               END,
                CASE
                    WHEN n.is_subworkflow THEN format(
                        'Subworkflow not started: the child workflow would have depth %s, and the limit is 32 '
                        '(workflow %s:%s)', w.depth + 1, w.name, n.task_index)
+                   WHEN o.refusal IS NOT NULL THEN o.refusal
                    ELSE format(
                        'args_from key %L conflicts with static kwarg (task %s)',
                        (SELECT k FROM jsonb_object_keys(n.args_from) AS k
@@ -568,11 +1028,19 @@ AS $$
            )
     FROM horsies_workflow_tasks n
     JOIN horsies_workflows w ON w.id = n.workflow_id
+    -- OFFSET 0 keeps the subquery apart, so the options are read once per node.
+    CROSS JOIN LATERAL (
+        SELECT CASE
+            WHEN NOT n.is_subworkflow THEN horsies_workflow_task_options_refusal(n.task_options, n.task_index)
+        END AS refusal
+        OFFSET 0
+    ) AS o
     WHERE n.workflow_id = p_workflow_id
       AND n.task_index = ANY(p_task_indexes)
       AND n.status = 'ENQUEUED'
       AND (
           (n.is_subworkflow AND w.depth >= 32)
+          OR o.refusal IS NOT NULL
           OR (
               NOT n.is_subworkflow
               AND n.args_from IS NOT NULL
