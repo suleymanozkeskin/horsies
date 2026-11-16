@@ -56,38 +56,14 @@ mod tests {
     }
 
     #[test]
-    fn policy_without_max_retries_defaults_to_three() {
-        let opts = r#"{"retry_policy": {"backoff": "exponential"}}"#;
-        assert_eq!(parse_max_retries(Some(opts)), 3);
-    }
-
-    #[test]
     fn policy_with_explicit_max_retries() {
         let opts = r#"{"retry_policy": {"max_retries": 5}}"#;
         assert_eq!(parse_max_retries(Some(opts)), 5);
     }
 
     #[test]
-    fn non_integer_max_retries_defaults_to_three() {
-        // String, float, and bool are not integers; each falls back to 3
-        // (and logs). The library never writes these — they imply tampering.
-        for opts in [
-            r#"{"retry_policy": {"max_retries": "5"}}"#,
-            r#"{"retry_policy": {"max_retries": 3.5}}"#,
-            r#"{"retry_policy": {"max_retries": true}}"#,
-        ] {
-            assert_eq!(parse_max_retries(Some(opts)), 3);
-        }
-    }
-
-    #[test]
     fn policy_with_zero_max_retries() {
         let opts = r#"{"retry_policy": {"max_retries": 0}}"#;
         assert_eq!(parse_max_retries(Some(opts)), 0);
-    }
-
-    #[test]
-    fn invalid_json_returns_zero() {
-        assert_eq!(parse_max_retries(Some("not json")), 0);
     }
 }

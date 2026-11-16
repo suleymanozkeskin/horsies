@@ -14,9 +14,14 @@ import psycopg
 import pytest
 import pytest_asyncio
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.reads.publisher import (
+    RENDERED_READER_SIGNATURES,
+    StagedLoaderPublisher,
+)
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
@@ -85,6 +90,32 @@ async def _installed(url: str) -> None:
     assert await _initialize(url) == Ok(None)
 
 
+_MISSING_READERS_SQL: Final[LiteralString] = """
+    SELECT array_agg(reader.signature ORDER BY reader.signature)
+    FROM unnest(CAST(%(readers)s AS text[])) AS reader(signature)
+    WHERE to_regprocedure(reader.signature) IS NULL
+"""
+
+
+async def _missing_readers(connection: Connection) -> object:
+    cursor = await connection.execute(
+        _MISSING_READERS_SQL, {'readers': list(RENDERED_READER_SIGNATURES)}
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    return row[0]
+
+
+async def _publication_is_current(url: str) -> bool:
+    """The publisher's own check: the manifest equals the catalog and every reader is stamped."""
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as connection:
+            return await StagedLoaderPublisher().is_current(connection)
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio(loop_scope='function')
 async def test_fresh_database_reaches_version_1000(database_url: str) -> None:
     await _installed(database_url)
@@ -135,6 +166,58 @@ async def test_concurrent_installs_apply_the_migration_once(database_url: str) -
         assert await _fetch_one(connection, 'SELECT count(*) FROM horsies_migrations') == (1,)
     finally:
         await connection.close()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_install_returns_with_the_history_readers_published(database_url: str) -> None:
+    await _installed(database_url)
+    connection = await _connect(database_url)
+    try:
+        assert await _missing_readers(connection) is None
+        # A task id that is nowhere: the detail reader answers with no row,
+        # where a database without it raises undefined_function (42883).
+        cursor = await connection.execute(
+            "SELECT count(*) FROM horsies_task_detail_staged("
+            "'0190a0b0-0000-7000-8000-000000000000'::uuid)"
+        )
+        assert await cursor.fetchone() == (0,)
+        assert await _fetch_one(
+            connection, 'SELECT leaf_name FROM horsies_task_lookup_manifest'
+        ) == ('horsies_task_history_forever_open',)
+    finally:
+        await connection.close()
+    assert await _publication_is_current(database_url)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_an_install_that_stopped_before_the_publication_is_completed(
+    database_url: str,
+) -> None:
+    await _installed(database_url)
+    connection = await _connect(database_url)
+    try:
+        # The state an install leaves when it stops between the migration
+        # and the publication.
+        await connection.execute('DROP FUNCTION horsies_task_detail_staged(uuid)')
+        await connection.execute('DROP FUNCTION horsies_task_result_staged(uuid)')
+        assert await _missing_readers(connection) == [
+            'horsies_task_detail_staged(uuid)',
+            'horsies_task_result_staged(uuid)',
+        ]
+        before = await _fetch_one(
+            connection, 'SELECT installed_on, execution_time FROM horsies_migrations'
+        )
+        await _installed(database_url)
+        assert await _missing_readers(connection) is None
+        assert (
+            await _fetch_one(
+                connection, 'SELECT installed_on, execution_time FROM horsies_migrations'
+            )
+            == before
+        )
+    finally:
+        await connection.close()
+    assert await _publication_is_current(database_url)
 
 
 @pytest.mark.asyncio(loop_scope='function')
