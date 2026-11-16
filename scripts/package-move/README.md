@@ -32,7 +32,9 @@ alone does not build.
 4. Path references (`package-move/move_rules.py references`):
    - exact edits, each anchor found exactly once: `.gitignore`, `.github/workflows/tests.yml`,
      `pyrightconfig.docs.json`, the tests that build paths from the repository root, `website/` pages that tell
-     where a source checkout keeps a file;
+     where a source checkout keeps a file. In `tests.yml`, the Python jobs and the showcase job also run for a
+     change to the crates that build `horsies._core` (`crates/horsies-python/`, `crates/horsies-core/`,
+     `crates/horsies-macros/`) and to the root Cargo and toolchain files;
    - a rule over every tracked text file: a path that starts at `horsies/` and continues into a package folder
      (`core/`, `monitoring/`, `web/`, `docs/`, `.agents/`) gets the prefix `python/`; `horsies/core/baseline/sql/`
      becomes `crates/horsies-core/baseline/`. A Cargo feature such as `horsies/web` does not match.
@@ -74,6 +76,9 @@ the checks. Run steps 2 to 5 by hand on a fresh checkout, make the SQL change ag
 
 ## After the move
 
+- `import horsies` needs `horsies._core`: the package root imports the broker, the broker imports the baseline
+  loader, and the loader imports `horsies._core`. Without the built module, every import of the package fails
+  with `ModuleNotFoundError: No module named 'horsies._core'`.
 - The first build (`maturin develop` or `uv sync`) compiles `horsies-core` and `horsies-python`. Every `uv sync`
   and `uv run` after the move builds the extension, so a contributor needs the Rust toolchain of
   `rust-toolchain.toml`.
