@@ -342,7 +342,7 @@ SELECT count(*) FROM horsies_cancel_orphaned_tasks(10);
 SELECT expect_value(
     'terminalization_miss',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-0000000000ff', 'FAIL_RUNNING', NULL, NULL)),
+        '00000000-0000-7000-8000-0000000000ff', 'FAIL_RUNNING', 'NONE', NULL, NULL)),
     'TASK_ABSENT'
 );
 SELECT expect_value(

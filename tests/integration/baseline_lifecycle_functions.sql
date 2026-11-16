@@ -1444,53 +1444,51 @@ SELECT lc_expect(
     'APPLIED'
 );
 
--- The miss classifier takes the caller's fence as a closed kind.
+-- The miss classifier (0008) takes the caller's kind and its fence as a closed kind.
 SELECT lc_task('00000000-0000-7000-8000-000000007002', 'CLAIMED');
 SELECT lc_expect(
     'miss (#697): OWNER held by the same worker at another generation is a conflict, not a lost claim',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[], 'OWNER', 'w1',
-        NULL)),
+        '00000000-0000-7000-8000-000000007002', 'EXPIRE_CLAIMED', 'OWNER', 'w1', NULL)),
     'SOURCE_STATE_CONFLICT'
 );
 SELECT lc_expect(
     'miss (#697): OWNER of another worker is a lost claim',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[], 'OWNER', 'w2',
-        NULL)),
+        '00000000-0000-7000-8000-000000007002', 'EXPIRE_CLAIMED', 'OWNER', 'w2', NULL)),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
     'miss (#697): OWNER_AND_GENERATION of another generation is a lost claim',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1',
+        '00000000-0000-7000-8000-000000007002', 'FAIL_RUNNING', 'OWNER_AND_GENERATION', 'w1',
         now() - interval '9 seconds')),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
     'miss (#697): OWNER_AND_GENERATION that holds is a conflict',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1',
+        '00000000-0000-7000-8000-000000007002', 'FAIL_RUNNING', 'OWNER_AND_GENERATION', 'w1',
         now() - interval '1 second')),
     'SOURCE_STATE_CONFLICT'
 );
 SELECT lc_expect(
     'miss (#697): NONE on a live row is a conflict',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['CANCEL_ADMIN']::text[], 'NONE', NULL, NULL)),
+        '00000000-0000-7000-8000-000000007002', 'CANCEL_ADMIN', 'NONE', NULL, NULL)),
     'SOURCE_STATE_CONFLICT'
 );
 SELECT lc_expect_sqlstate('miss (#697): an unknown fence kind', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'WORKER', 'w1', NULL)$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', 'WORKER', 'w1', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): a NULL fence kind', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], NULL, NULL, NULL)$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', NULL, NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): NONE with a worker', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'NONE', 'w1', NULL)$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', 'NONE', 'w1', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): OWNER with a generation', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'OWNER', 'w1', now())$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', 'OWNER', 'w1', now())$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): OWNER_AND_GENERATION without a generation', $q$
     SELECT * FROM horsies_terminalization_miss(
-        gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1', NULL)$q$, '22023');
+        gen_random_uuid(), 'FAIL_RUNNING', 'OWNER_AND_GENERATION', 'w1', NULL)$q$, '22023');
 
 -- The owner-only expiry before start: a miss on a claim the worker still holds is a conflict.
 SELECT lc_task('00000000-0000-7000-8000-000000007003', 'CLAIMED');
