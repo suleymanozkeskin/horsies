@@ -3,7 +3,7 @@
 //! Scans `src/**/*.rs` for SQL statements that set a terminal status
 //! (COMPLETED / FAILED / CANCELLED / EXPIRED) and pins them to a frozen
 //! empty allowlist. The database half scans the complete public-function
-//! catalog, pins the shared move plus all fifteen wire functions as the exact
+//! catalog, pins the shared move plus all seventeen wire functions as the exact
 //! terminal-writer set, and proves the live status CHECK admits only PENDING,
 //! CLAIMED, and RUNNING.
 //!
@@ -179,13 +179,23 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
     // and deletes live). Any other function with one of those properties, or
     // any function that updates live storage to a terminal status, is an
     // unreviewed terminal writer and changes the catalog-wide inventory.
-    const EXPECTED_WRITERS: [(&str, bool, bool); 16] = [
+    const EXPECTED_WRITERS: [(&str, bool, bool); 18] = [
         (
             "horsies_move_task_to_history(uuid,text,text,timestamp with time zone,text,text,text)",
             false,
             true,
         ),
         ("horsies_complete_locked_task(uuid,text,text)", true, false),
+        (
+            "horsies_finish_failed_attempt(uuid,text,timestamp with time zone,integer,double precision,text,text,text,text,text,text,text)",
+            true,
+            false,
+        ),
+        (
+            "horsies_finish_workflow_success(uuid,text,timestamp with time zone,text)",
+            true,
+            false,
+        ),
         (
             "horsies_complete_task_fused(uuid,text,timestamp with time zone,text,text,text)",
             true,
