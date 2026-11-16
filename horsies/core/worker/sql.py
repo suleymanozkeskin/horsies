@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from horsies.core.models.tasks import Execution
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 
@@ -86,7 +85,6 @@ next AS (
 )
 UPDATE horsies_tasks t
 SET status = 'CLAIMED',
-    claimed = TRUE,
     claimed_at = now(),
     claimed_by_worker_id = :worker_id,
     claim_expires_at = now() + :claim_lease_ms * INTERVAL '1 millisecond',
@@ -95,7 +93,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;
+RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;
 """)
 
 
@@ -107,7 +105,7 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 # never across a client round trip. Replaces the per-pass lock loop + counts +
 # per-queue CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
-    SELECT row_kind, id, task_name, args, kwargs, queue_name, is_workflow_task,
+    SELECT row_kind, id, task_name, input, queue_name, is_workflow_task,
            task_options, claimed_at, execution, short_by
     FROM horsies_claim(
         :p_worker_id,
@@ -244,34 +242,6 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
 UNCLAIM_CLAIMED_TASK_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = NOW()
-    WHERE id = :id
-      AND status = 'CLAIMED'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
-""")
-
-# A claimed row whose class does not fit the task that this worker
-# registered goes back to PENDING as ISOLATED, which any worker with
-# isolated children runs. Fenced to this worker's claim generation, which
-# the claim always returns, so a row that was claimed again is not touched.
-# The stored task options keep their class: the column is what the claim
-# reads.
-RETURN_CLAIMED_TASK_AS_ISOLATED_SQL = text(f"""
-    UPDATE horsies_tasks
-    SET execution = '{Execution.ISOLATED.value}',
-        status = 'PENDING',
-        claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
@@ -318,45 +288,6 @@ READ_IN_FLIGHT_ATTEMPT_SQL = text("""
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status IN ('CLAIMED', 'RUNNING')
       AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
-""")
-
-SCHEDULE_STALE_TASK_RETRY_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'PENDING',
-        retry_count = :retry_count,
-        next_retry_at = :next_retry_at,
-        enqueued_at = :next_retry_at,
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = NULL,
-        updated_at = now()
-    WHERE t.id = :id
-      AND t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
-      )
-      AND COALESCE(
-          (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id AND h.role = 'runner'
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ),
-          t.started_at
-      ) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-      AND (t.good_until IS NULL OR :next_retry_at < t.good_until)
-    RETURNING t.id
 """)
 
 NOTIFY_DELAYED_SQL = text("""
@@ -490,32 +421,7 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
     WHERE id IN (SELECT id FROM budgeted)
 """)
 
-UPSERT_TASK_ATTEMPT_SQL = text("""
-    INSERT INTO horsies_task_attempts (
-        task_id, attempt, outcome, will_retry,
-        started_at, finished_at,
-        error_code, error_message, failed_reason,
-        worker_id, worker_hostname, worker_pid, worker_process_name
-    )
-    VALUES (
-        :task_id, :attempt, :outcome, :will_retry,
-        :started_at, :finished_at,
-        :error_code, :error_message, :failed_reason,
-        :worker_id, :worker_hostname, :worker_pid, :worker_process_name
-    )
-    ON CONFLICT (task_id, attempt) DO UPDATE SET
-        outcome = EXCLUDED.outcome,
-        will_retry = EXCLUDED.will_retry,
-        started_at = EXCLUDED.started_at,
-        finished_at = EXCLUDED.finished_at,
-        error_code = EXCLUDED.error_code,
-        error_message = EXCLUDED.error_message,
-        failed_reason = EXCLUDED.failed_reason,
-        worker_id = EXCLUDED.worker_id,
-        worker_hostname = EXCLUDED.worker_hostname,
-        worker_pid = EXCLUDED.worker_pid,
-        worker_process_name = EXCLUDED.worker_process_name
-""")
+
 
 # Sweep cadence and batch size live on RecoveryConfig
 # (retention_sweep_interval_s, retention_delete_batch_size).

@@ -19,8 +19,8 @@ and sync-call errors. Passing an operation error to it must fail.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, assert_never
+from datetime import datetime, timezone
+from typing import assert_never
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,7 +47,9 @@ from horsies import (
 from horsies.core.brokers.postgres import (
     PostgresBroker,
     _async_context_err,  # pyright: ignore[reportPrivateUsage]
+    _command_fingerprint,  # pyright: ignore[reportPrivateUsage]
     _loop_runner_err,  # pyright: ignore[reportPrivateUsage]
+    _parse_enqueue_input,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.brokers.resources import BrokerResources
 from horsies.core.models.schedule import TaskSchedule
@@ -111,10 +113,10 @@ def owner_only_on_the_conflict(
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
     declared: Result[str, BrokerEnqueueError] = await broker.enqueue_async(
-        'report', task_id='task-1', enqueue_sha='sha',
+        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha'):
+    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -127,10 +129,10 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
     declared: Result[str, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
-        'report', task_id='task-1', enqueue_sha='sha',
+        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha'):
+    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -189,18 +191,17 @@ async def enqueue_helpers_return_their_subsets(
     session: AsyncSession,
     good_until: datetime,
 ) -> None:
-    cutover_values = PostgresBroker._cutover_enqueue_values  # pyright: ignore[reportPrivateUsage]
-    cutover: Result[dict[str, Any], BrokerInvalidInput] = cutover_values(
+    stored_input: Result[str, BrokerInvalidInput] = _parse_enqueue_input(
+        'report', None,
+    )
+    fingerprint: Result[bytes, BrokerInvalidInput] = _command_fingerprint(
         task_name='report',
         queue_name='default',
         priority=100,
-        args_json=None,
-        kwargs_json=None,
-        kwargs={},
+        stored_input='{}',
         good_until=good_until,
         enqueue_delay_seconds=None,
         task_options=None,
-        task_options_value=None,
         retention_class_key='default',
         retain_rerun_input=True,
     )
@@ -227,7 +228,7 @@ async def enqueue_helpers_return_their_subsets(
     loop_runner: Err[BrokerLoopRunnerFailed] = _loop_runner_err(
         'PostgresBroker.enqueue()', LoopRunnerError('stopped'),
     )
-    _ = (cutover, bound, verified, async_context, loop_runner)
+    _ = (stored_input, fingerprint, bound, verified, async_context, loop_runner)
 
 
 async def scheduled_enqueue_returns_only_enqueue_errors(

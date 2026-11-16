@@ -392,8 +392,8 @@ _INSERT_NODE_SQL = text(
         allow_failed_deps, join_type, min_success, task_options, max_retries,
         execution, good_until, retention_class_key, status, task_id,
         is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
-        sub_workflow_summary, result, error, created_at, started_at,
-        completed_at
+        sub_workflow_params, sub_workflow_summary, result, error, created_at,
+        started_at, completed_at
     ) VALUES (
         CAST(:id AS uuid), CAST(:workflow_id AS uuid), :task_index, :node_id,
         :task_name, :input, 'default', 100, :dependencies, NULL, NULL,
@@ -401,7 +401,8 @@ _INSERT_NODE_SQL = text(
         :execution, NULL, :retention_class_key, :status,
         CAST(:task_id AS uuid), :is_subworkflow,
         CAST(:sub_workflow_id AS uuid), NULL, NULL,
-        NULL, NULL, :error, :created_at, :started_at, :completed_at
+        :sub_workflow_params, NULL, NULL, :error, :created_at, :started_at,
+        :completed_at
     )
     """
 )
@@ -573,7 +574,8 @@ def _workflow_params(row: WorkflowRow) -> dict[str, object]:
 
 def _node_params(row: NodeRow) -> dict[str, object]:
     # A task node carries the task facts; a sub-workflow node carries none
-    # (horsies_workflow_tasks_task_facts_by_kind).
+    # (horsies_workflow_tasks_task_facts_by_kind), and only a sub-workflow
+    # node carries the params choice (horsies_workflow_tasks_sub_workflow_params_by_kind).
     match row.kind:
         case TaskNode(task_id=task_id):
             facts: dict[str, object] = {
@@ -583,6 +585,7 @@ def _node_params(row: NodeRow) -> dict[str, object]:
                 'max_retries': 0,
                 'execution': Execution.ISOLATED.value,
                 'retention_class_key': HISTORY_SEED_CLASS_KEY,
+                'sub_workflow_params': None,
             }
         case SubworkflowNode(sub_workflow_id=sub_workflow_id):
             facts = {
@@ -592,6 +595,7 @@ def _node_params(row: NodeRow) -> dict[str, object]:
                 'max_retries': None,
                 'execution': None,
                 'retention_class_key': None,
+                'sub_workflow_params': 'NOT_GIVEN',
             }
         case _ as unreachable:
             assert_never(unreachable)

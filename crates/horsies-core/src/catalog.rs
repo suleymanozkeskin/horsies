@@ -7,7 +7,8 @@
 //!
 //! Adding a code enum to the Python package: derive `CodeCatalog` on it, add
 //! it to [`CODE_CATALOGS`], and add a test below that pins its wire values
-//! to the enum's own text form.
+//! to the enum's own text form. A lifecycle status also marks its terminal
+//! variants, and a test pins them to the enum's own terminal rule.
 
 use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
 use crate::{
@@ -34,6 +35,23 @@ pub struct CatalogMember {
     pub doc: &'static str,
 }
 
+/// The terminal members of a catalog, from the `#[code_catalog(terminal)]`
+/// variants of its enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalStates {
+    /// The catalog is not a lifecycle: no member is terminal, and the Python
+    /// class has no `is_terminal`.
+    NotALifecycle,
+    /// The catalog is a lifecycle status. The Python class gets the
+    /// `is_terminal` property and a module constant with these members.
+    Lifecycle {
+        /// The Python name of the `frozenset` constant.
+        constant: &'static str,
+        /// The wire values of the terminal members, in declaration order.
+        members: &'static [&'static str],
+    },
+}
+
 /// One closed code catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodeCatalog {
@@ -45,6 +63,7 @@ pub struct CodeCatalog {
     pub doc: &'static str,
     /// The members in declaration order.
     pub members: &'static [CatalogMember],
+    pub terminal_states: TerminalStates,
 }
 
 /// A code enum whose catalog the derive recorded.
@@ -141,6 +160,280 @@ mod tests {
         assert_wire_values::<TaskAbsenceReason>(|reason| reason.as_str().to_owned());
     }
 
+    /// The core catalog holds exactly `python`, the members of the Python
+    /// catalog of the same name, in Python's order.
+    fn assert_python_members<E: CodeEnum>(python: &[&str]) {
+        let core: Vec<&str> = E::CATALOG
+            .members
+            .iter()
+            .map(|member| member.value)
+            .collect();
+        assert_eq!(core, python, "{}", E::CATALOG.python_class);
+    }
+
+    #[test]
+    fn broker_send_start_and_monitoring_catalogs_equal_python_s() {
+        // horsies/core/brokers/result_types.py
+        assert_python_members::<BrokerErrorCode>(&[
+            "SCHEMA_INIT_FAILED",
+            "ENQUEUE_FAILED",
+            "PAYLOAD_MISMATCH",
+            "IDEMPOTENCY_KEY_CONFLICT",
+            "TASK_INFO_QUERY_FAILED",
+            "MONITORING_QUERY_FAILED",
+            "DB_PING_FAILED",
+            "WORKER_PING_FAILED",
+            "CLEANUP_FAILED",
+            "CLOSE_FAILED",
+            "LISTENER_START_FAILED",
+            "LISTENER_SUBSCRIBE_FAILED",
+            "NO_BROKER",
+            "NO_TYPE_AVAILABLE",
+            "INVALID_JSON_PAYLOAD",
+            "INVALID_TASK_OPTIONS",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+            "LOOP_RUNNER_FAILED",
+            "INVALID_INPUT",
+            "LISTENER_DISABLED",
+            "WAIT_INSIDE_TASK",
+        ]);
+        // horsies/core/models/task_send_types.py
+        assert_python_members::<TaskSendErrorCode>(&[
+            "SEND_SUPPRESSED",
+            "ASYNC_CONTEXT",
+            "VALIDATION_FAILED",
+            "ENQUEUE_FAILED",
+            "PAYLOAD_MISMATCH",
+            "IDEMPOTENCY_KEY_CONFLICT",
+            "PAYLOAD_TOO_LARGE",
+            "EVENT_LOOP_LIMIT",
+            "LOOP_RUNNER_FAILED",
+        ]);
+        // horsies/core/workflows/start_types.py
+        assert_python_members::<WorkflowStartErrorCode>(&[
+            "BROKER_NOT_CONFIGURED",
+            "VALIDATION_FAILED",
+            "WORKFLOW_ID_CONFLICT",
+            "ENQUEUE_FAILED",
+            "LOOP_RUNNER_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+        ]);
+        // horsies/monitoring/errors.py
+        assert_python_members::<MonitoringQueryErrorCode>(&[
+            "DB_OPERATION_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "HISTORY_CONTRACT_VIOLATION",
+        ]);
+        // horsies/monitoring/task_actions.py
+        assert_python_members::<TaskActionErrorCode>(&[
+            "TASK_NOT_FOUND",
+            "TASK_NOT_CANCELLABLE",
+            "TASK_IS_WORKFLOW_TASK",
+            "DB_OPERATION_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "STORED_DATA_INVALID",
+        ]);
+    }
+
+    #[test]
+    fn built_in_task_code_catalogs_equal_python_s() {
+        // horsies/core/models/tasks.py; WORKFLOW_START_INCOMPLETE is the one
+        // approved addition, last in both catalogs.
+        assert_python_members::<OperationalErrorCode>(&[
+            "UNHANDLED_EXCEPTION",
+            "TASK_EXCEPTION",
+            "WORKER_CRASHED",
+            "BROKER_ERROR",
+            "WORKER_RESOLUTION_ERROR",
+            "WORKER_SERIALIZATION_ERROR",
+            "RESULT_DESERIALIZATION_ERROR",
+            "WORKFLOW_ENQUEUE_FAILED",
+            "SUBWORKFLOW_LOAD_FAILED",
+            "WORKFLOW_RECOVERY_LIMIT_REACHED",
+            "SUBWORKFLOW_DEPTH_LIMIT_REACHED",
+            "TASK_BLOCKED_LOOP",
+            "NEIGHBOUR_BLOCKED_LOOP",
+            "WORKFLOW_START_INCOMPLETE",
+        ]);
+        assert_python_members::<ContractCode>(&[
+            "RETURN_TYPE_MISMATCH",
+            "WORKFLOW_CTX_MISSING_ID",
+            "NO_TYPE_AVAILABLE",
+        ]);
+        assert_python_members::<RetrievalCode>(&[
+            "WAIT_TIMEOUT",
+            "TASK_NOT_FOUND",
+            "WORKFLOW_NOT_FOUND",
+            "RESULT_NOT_AVAILABLE",
+            "RESULT_NOT_READY",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+            "INVALID_INPUT",
+            "WAIT_INSIDE_TASK",
+        ]);
+        assert_python_members::<OutcomeCode>(&[
+            "TASK_CANCELLED",
+            "TASK_EXPIRED",
+            "TASK_TIMEOUT",
+            "WORKFLOW_PAUSED",
+            "WORKFLOW_EXPIRED",
+            "WORKFLOW_FAILED",
+            "WORKFLOW_CANCELLED",
+            "UPSTREAM_SKIPPED",
+            "SUBWORKFLOW_FAILED",
+            "WORKFLOW_SUCCESS_CASE_NOT_MET",
+            "WORKFLOW_OUTPUT_SKIPPED",
+        ]);
+    }
+
+    #[test]
+    fn the_all_lists_of_the_task_code_families_follow_the_catalog() {
+        let catalog = |catalog: CodeCatalog| -> Vec<String> {
+            catalog
+                .members
+                .iter()
+                .map(|member| member.value.to_owned())
+                .collect()
+        };
+        assert_eq!(
+            OperationalErrorCode::ALL
+                .map(|code| code.to_string())
+                .to_vec(),
+            catalog(<OperationalErrorCode as CodeEnum>::CATALOG)
+        );
+        assert_eq!(
+            ContractCode::ALL.map(|code| code.to_string()).to_vec(),
+            catalog(<ContractCode as CodeEnum>::CATALOG)
+        );
+        assert_eq!(
+            RetrievalCode::ALL.map(|code| code.to_string()).to_vec(),
+            catalog(<RetrievalCode as CodeEnum>::CATALOG)
+        );
+        assert_eq!(
+            OutcomeCode::ALL.map(|code| code.to_string()).to_vec(),
+            catalog(<OutcomeCode as CodeEnum>::CATALOG)
+        );
+    }
+
+    #[test]
+    fn status_and_absence_catalogs_equal_python_s() {
+        // horsies/core/types/status.py
+        assert_python_members::<TaskStatus>(&[
+            "PENDING",
+            "CLAIMED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+            "EXPIRED",
+        ]);
+        assert_python_members::<TaskAttemptOutcome>(&["COMPLETED", "FAILED", "WORKER_FAILURE"]);
+        // horsies/core/models/workflow/enums.py
+        assert_python_members::<WorkflowStatus>(&[
+            "PENDING",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "PAUSED",
+            "CANCELLED",
+            "EXPIRED",
+        ]);
+        assert_python_members::<WorkflowTaskStatus>(&[
+            "PENDING",
+            "READY",
+            "ENQUEUED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "SKIPPED",
+        ]);
+        // horsies/core/history/reads/detail.py
+        assert_python_members::<TaskAbsenceReason>(&[
+            "PREDATES_RETAINED_HISTORY",
+            "WITHIN_RETAINED_HISTORY",
+            "NOT_CLASSIFIED",
+        ]);
+    }
+
+    #[test]
+    fn the_handle_catalog_is_python_s_plus_internal_failed() {
+        // horsies/core/models/workflow/handle_types.py, then the one member
+        // that Python does not have: the workflow engine still folds some
+        // errors into INTERNAL_FAILED.
+        assert_python_members::<HandleErrorCode>(&[
+            "WORKFLOW_NOT_FOUND",
+            "DB_OPERATION_FAILED",
+            "STORED_DATA_INVALID",
+            "RESUME_RECOVERY_FAILED",
+            "LOOP_RUNNER_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+            "INTERNAL_FAILED",
+        ]);
+    }
+
+    /// The constant and the terminal members of a lifecycle catalog.
+    fn lifecycle(catalog: CodeCatalog) -> (&'static str, &'static [&'static str]) {
+        match catalog.terminal_states {
+            TerminalStates::Lifecycle { constant, members } => (constant, members),
+            TerminalStates::NotALifecycle => {
+                panic!("{} records no terminal members", catalog.python_class)
+            }
+        }
+    }
+
+    /// The terminal members that the derive recorded are the variants for
+    /// which `is_terminal` holds, in declaration order.
+    fn assert_terminal_members_follow<E: CodeEnum>(is_terminal: impl Fn(&E) -> bool) {
+        let rule: Vec<&str> = E::VARIANTS
+            .iter()
+            .filter(|variant| is_terminal(variant))
+            .map(|variant| variant.wire_value())
+            .collect();
+        let (_constant, members) = lifecycle(E::CATALOG);
+        assert_eq!(members, rule.as_slice(), "{}", E::CATALOG.python_class);
+    }
+
+    #[test]
+    fn status_terminal_members_follow_the_core_rule() {
+        assert_terminal_members_follow::<TaskStatus>(|status| status.is_terminal());
+        assert_terminal_members_follow::<WorkflowStatus>(|status| status.is_terminal());
+        assert_terminal_members_follow::<WorkflowTaskStatus>(|status| status.is_terminal());
+    }
+
+    #[test]
+    fn status_terminal_members_equal_python_s() {
+        // horsies/core/types/status.py
+        let (constant, members) = lifecycle(<TaskStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "TASK_TERMINAL_STATES");
+        assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);
+        // horsies/core/models/workflow/enums.py
+        let (constant, members) = lifecycle(<WorkflowStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "WORKFLOW_TERMINAL_STATES");
+        assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);
+        let (constant, members) = lifecycle(<WorkflowTaskStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "WORKFLOW_TASK_TERMINAL_STATES");
+        assert_eq!(members, ["COMPLETED", "FAILED", "SKIPPED"]);
+    }
+
+    #[test]
+    fn only_the_three_status_catalogs_are_lifecycles() {
+        let lifecycles: Vec<&str> = CODE_CATALOGS
+            .iter()
+            .filter(|catalog| match catalog.terminal_states {
+                TerminalStates::Lifecycle { .. } => true,
+                TerminalStates::NotALifecycle => false,
+            })
+            .map(|catalog| catalog.python_class)
+            .collect();
+        assert_eq!(
+            lifecycles,
+            ["TaskStatus", "WorkflowStatus", "WorkflowTaskStatus"]
+        );
+    }
+
     #[test]
     fn class_names_are_unique_and_values_are_unique_per_class() {
         let mut classes = HashSet::new();
@@ -181,6 +474,12 @@ mod tests {
             assert!(identifier(catalog.python_class), "{}", catalog.python_class);
             for member in catalog.members {
                 assert!(identifier(member.value), "{}", member.value);
+            }
+            match catalog.terminal_states {
+                TerminalStates::Lifecycle { constant, .. } => {
+                    assert!(identifier(constant), "{constant}");
+                }
+                TerminalStates::NotALifecycle => {}
             }
         }
     }
