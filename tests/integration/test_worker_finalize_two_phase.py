@@ -104,13 +104,13 @@ async def _insert_running_task(session: AsyncSession) -> str:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                  input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
                  is_subworkflow, status, task_id, created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node-0', 'two_phase_finalize_test',
+                ('NONE', :id, :wf_id, 0, 'node-0', 'two_phase_finalize_test',
                  '{}', 'default', 100,
                  '{}', FALSE, 'all',
                  FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW(),

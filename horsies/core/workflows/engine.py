@@ -122,6 +122,7 @@ from horsies.core.workflows.sql import (
     UPDATE_PARENT_NODE_RESULT_SQL,
     subworkflow_node_kind_params,
     task_node_kind_params,
+    with_downstream_subworkflow,
     task_node_facts,
     workflow_task_row_params,
 )
@@ -1519,7 +1520,10 @@ async def enqueue_subworkflow_task(
     )
 
     if child_node_params:
-        await session.execute(INSERT_WORKFLOW_TASKS_BULK_SQL, child_node_params)
+        await session.execute(
+            INSERT_WORKFLOW_TASKS_BULK_SQL,
+            with_downstream_subworkflow(child_node_params),
+        )
 
     # 7. Update parent's workflow_task with child_workflow_id and mark RUNNING
     await session.execute(
