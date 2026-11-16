@@ -102,20 +102,12 @@ def completion_batch_fragments() -> list[str]:
 def outcome_fragments() -> list[str]:
     return [
         baseline_type('horsies_terminalization_outcome'),
-        baseline_overload(
-            'horsies_terminalization_miss',
-            'p_task_id uuid',
-            'p_equivalent_kinds text[]',
-        ),
+        baseline_function('horsies_terminalization_miss'),
     ]
 
 
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
-MISS_CLASSIFIER_DDL = baseline_overload(
-    'horsies_terminalization_miss',
-    'p_task_id uuid',
-    'p_equivalent_kinds text[]',
-)
+MISS_CLASSIFIER_DDL = baseline_function('horsies_terminalization_miss')
 ATTEMPT_ENCODER_DDL = baseline_function(ATTEMPT_ENCODER_FUNCTION)
 
 
@@ -124,8 +116,9 @@ class TestOutcomeLayer:
         assert 'task_id uuid' in OUTCOME_TYPE_DDL
 
     def test_miss_classifier_consults_provenance_without_live(self) -> None:
+        # The one-argument provenance reader reads history only.
         assert (
-            'horsies_task_provenance_staged(p_task_id, FALSE)'
+            'horsies_task_provenance_staged(p_task_id) AS p'
             in MISS_CLASSIFIER_DDL
         )
 
@@ -136,8 +129,9 @@ class TestOutcomeLayer:
         lost = MISS_CLASSIFIER_DDL.index("'LOST_CLAIM'")
         assert absent < already < foreign < lost
 
-    def test_live_hit_from_provenance_after_live_miss_raises(self) -> None:
-        assert "ERRCODE = 'data_corrupted'" in MISS_CLASSIFIER_DDL
+    def test_provenance_cannot_answer_live_after_a_live_miss(self) -> None:
+        # No live flag is passed, so the reader cannot report the live table.
+        assert 'horsies_task_provenance_staged(p_task_id, ' not in MISS_CLASSIFIER_DDL
 
     def test_fragment_order(self) -> None:
         first, second = outcome_fragments()
