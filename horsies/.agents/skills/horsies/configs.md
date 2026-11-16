@@ -202,7 +202,8 @@ isolated children only, the sum is `count`, and every class goes to the
 lets each budget prefetch up to `prefetch_buffer`, within the worker total.
 In soft cap mode a claimed row of a capped queue starts only while the queue's
 RUNNING rows plus the rows that the worker started and that are not RUNNING yet
-are under `max_concurrency` (checked once per claim pass); the other rows wait,
+are under `max_concurrency`, and a child that runs rows of its class has a free
+slot or seat at that moment (checked once per claim pass); the other rows wait,
 CLAIMED, and return to the queue when the worker stops.
 A claimed row of a shared class whose registered task here has another class
 (e.g. `SHARED_ASYNC` row, function now `def`) is written `ISOLATED`, returned to

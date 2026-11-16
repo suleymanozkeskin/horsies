@@ -12,8 +12,13 @@ and each claim pass reads one count per capped queue that has held rows
   because their child has not set them RUNNING yet.
 
 The pass then starts held rows in claim order while that count stays under
-the cap. A held row stays CLAIMED, and the claimer heartbeat keeps its lease,
-until a later pass starts it or the worker stops and returns it to the queue.
+the cap and a child of the row's route has a free slot or seat at that moment
+(the free capacity of each budget, read after the count). An admitted row
+therefore goes to a child at once and does not wait in the slot pool. Another
+worker counts the row once its child sets it RUNNING, so the time in which
+another worker does not count it is one start. A held row stays CLAIMED, and
+the claimer heartbeat keeps its lease, until a later pass starts it or the
+worker stops and returns it to the queue.
 
 Rows of an uncapped queue start at once. In hard-cap mode every row starts at
 once: there the claim counts the CLAIMED rows against the cap too.
@@ -25,6 +30,8 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from horsies.core.models.tasks import Execution
 
 
 def start_check_caps(
@@ -47,13 +54,17 @@ def start_check_caps(
 
 @dataclass(frozen=True, slots=True)
 class HeldRow:
-    """A claimed row of a capped queue that waits for its queue's count.
+    """A claimed row of a capped queue that waits for its queue's count and
+    for a free child of its route.
 
-    ``row`` is the row as ``horsies_claim`` returned it.
+    ``budget`` is the budget class of the claim plan that the row's class
+    routes to: the children of that budget run the row. ``row`` is the row
+    as ``horsies_claim`` returned it.
     """
 
     task_id: str
     queue_name: str
+    budget: Execution
     row: Mapping[str, Any]
 
 
@@ -119,22 +130,33 @@ class QueueCapHold:
         """How many rows wait for the start check."""
         return len(self._held)
 
-    def admit(self, starts: Mapping[str, int]) -> list[HeldRow]:
+    def admit(
+        self,
+        starts: Mapping[str, int],
+        free: Mapping[Execution, int],
+    ) -> list[HeldRow]:
         """Take the held rows that may start, in claim order, and record them
         as started.
 
         ``starts`` is the count of each queue (``read_queue_starts``); a queue
-        that it does not name has 0. A row starts while its queue's count plus
-        the rows that this call started of it stays under the cap. The other
+        that it does not name has 0. ``free`` is the free capacity of each
+        budget now: its children or seats that take a task at once, less the
+        tasks that already wait for them; a budget that it does not name has
+        0. A row starts while its queue's count plus the rows that this call
+        started of it stays under the cap, and its budget's free capacity
+        less the rows that this call started of it stays above 0. The other
         rows stay held, in their order.
         """
         admitted: list[HeldRow] = []
         kept: deque[HeldRow] = deque()
         taken: dict[str, int] = {}
+        seated: dict[Execution, int] = {}
         for row in self._held:
             count = starts.get(row.queue_name, 0) + taken.get(row.queue_name, 0)
-            if count < self._caps[row.queue_name]:
+            room = free.get(row.budget, 0) - seated.get(row.budget, 0)
+            if count < self._caps[row.queue_name] and room > 0:
                 taken[row.queue_name] = taken.get(row.queue_name, 0) + 1
+                seated[row.budget] = seated.get(row.budget, 0) + 1
                 self._started.add(row.task_id)
                 admitted.append(row)
             else:

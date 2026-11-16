@@ -44,6 +44,9 @@ from horsies.core.utils.db import (
 )
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
+    ClaimPlan,
+    NotServed,
+    ServedBy,
     budgets_json,
     routes_json,
 )
@@ -262,6 +265,25 @@ class ClaimPass:
         return short_passes_before + 1 if self.short_of_plan > 0 else 0
 
 
+def route_budget(plan: ClaimPlan, execution: Execution, task_id: str) -> Execution:
+    """The budget class of ``plan`` whose children run claimed task
+    ``task_id`` of class ``execution``.
+
+    The claim reads only classes that ``plan`` serves, so a class that it
+    does not serve is a defect: ``AssertionError``. Pure.
+    """
+    match plan.route(execution):
+        case ServedBy(budget=budget):
+            return budget
+        case NotServed():
+            raise AssertionError(
+                f'task {task_id}: a {execution.value} row was claimed by a '
+                'worker that does not serve that class',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _end_start_when_done(
     hold: QueueCapHold,
     finalizer: asyncio.Future[Any],
@@ -291,6 +313,7 @@ class ClaimMixin:
         def _claim_slot_count(self) -> int: ...
         def _shared_async_seats_in_service(self) -> int: ...
         def _shared_thread_seats_in_service(self) -> int: ...
+        def _free_children(self, budget: Execution) -> int: ...
         async def _dispatch_one(
             self,
             task_id: str,
@@ -367,8 +390,18 @@ class ClaimMixin:
         for row in fitting_rows:
             queue_name = str(row['queue_name'])
             if self._queue_cap_hold.holds(queue_name):
+                task_id = str(row['id'])
                 self._queue_cap_hold.hold(
-                    HeldRow(task_id=str(row['id']), queue_name=queue_name, row=row),
+                    HeldRow(
+                        task_id=task_id,
+                        queue_name=queue_name,
+                        budget=route_budget(
+                            self.cfg.claim_plan(),
+                            parse_row_class(task_id, row['execution']),
+                            task_id,
+                        ),
+                        row=row,
+                    ),
                 )
             else:
                 _ = await self._dispatch_claim_row(row)
@@ -397,11 +430,14 @@ class ClaimMixin:
         )
 
     async def _start_held_rows(self) -> None:
-        """Start the held rows of the capped queues that have room.
+        """Start the held rows of the capped queues that have room, while a
+        child of the row's route is free.
 
         Sends one statement (``COUNT_QUEUE_STARTS_SQL``) when rows are held,
-        none otherwise. Each started row leaves the started set when its
-        finalizer ends.
+        none otherwise. The free capacity of each budget is read after the
+        count, and nothing awaits between that read and the submits, so each
+        started row goes to a child that is free at its submit. Each started
+        row leaves the started set when its finalizer ends.
 
         Raises:
             Exception: a DB error of the count, as in
@@ -423,9 +459,19 @@ class ClaimMixin:
                 ),
             ),
         )
-        for held in hold.admit(read_queue_starts(counted.columns, counted.rows)):
+        starts = read_queue_starts(counted.columns, counted.rows)
+        for held in hold.admit(starts, self._free_capacity()):
             finalizer = await self._dispatch_claim_row(held.row)
             _end_start_when_done(hold, finalizer, held.task_id)
+
+    def _free_capacity(self) -> dict[Execution, int]:
+        """The free capacity of each budget of the claim plan now: its
+        children or seats that take a task at once (``_free_children``).
+        Reads only."""
+        return {
+            budget: self._free_children(budget)
+            for budget in self.cfg.claim_plan().budgets()
+        }
 
     async def _return_held_rows(self) -> None:
         """Return each held row to its queue, at the stop of the worker.

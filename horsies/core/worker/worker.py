@@ -580,6 +580,28 @@ class Worker(
             case None:
                 raise AssertionError('a claim pass ran before the slot pool exists')
 
+    def _free_children(self, budget: Execution) -> int:
+        """The children or seats of ``budget`` that take a task at once
+        (``SlotPool.free_slots``, ``free_shared_async_seats``,
+        ``free_shared_thread_seats``), for the soft-cap start check.
+
+        A pass before the slot pool exists is a defect: ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                pass
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+        match budget:
+            case Execution.ISOLATED:
+                return pool.free_slots()
+            case Execution.SHARED_ASYNC:
+                return pool.free_shared_async_seats()
+            case Execution.SHARED_THREAD:
+                return pool.free_shared_thread_seats()
+            case _ as unreachable:
+                assert_never(unreachable)
+
     def _down_slots(self) -> tuple[DownSlot, ...]:
         """Each slot that is down, for the worker state snapshot.
 

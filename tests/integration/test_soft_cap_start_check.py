@@ -5,11 +5,13 @@ In soft-cap mode the claim counts only RUNNING rows against a queue's
 queue while the rows that they claimed before are still CLAIMED. Each pass
 starts a claimed row of a capped queue only while the queue's RUNNING rows,
 plus the rows that this worker started that are not RUNNING yet, stay under
-the cap. The other rows stay CLAIMED, held by the worker.
+the cap, and while a child of the row's route is free at that moment. The
+other rows stay CLAIMED, held by the worker.
 
-The worker here has one isolated slot and ``prefetch_buffer=2``, so a claim
-takes up to 3 rows. ``_dispatch_one`` is replaced by a recorder whose
-finalizer future the test ends.
+The worker here has one isolated slot unless a test says more, and
+``prefetch_buffer=2``, so a claim takes up to 3 rows. ``_dispatch_one`` is
+replaced by a recorder whose finalizer future the test ends; each slot takes
+one started row until its finalizer ends.
 """
 
 from __future__ import annotations
@@ -104,12 +106,20 @@ async def _statuses(session: AsyncSession) -> dict[str, tuple[str, str | None]]:
 
 
 class _RecordedDispatch:
-    """Stands in for ``Worker._dispatch_one``: records each started task and
-    returns a finalizer future that the test ends."""
+    """Stands in for ``Worker._dispatch_one`` and ``Worker._free_children``:
+    records each started task, returns a finalizer future that the test ends,
+    and counts a slot free while no started task whose finalizer runs holds
+    it."""
 
-    def __init__(self) -> None:
+    def __init__(self, slots: int) -> None:
+        self.slots = slots
         self.started: list[str] = []
         self.finalizers: dict[str, asyncio.Future[None]] = {}
+
+    def free_children(self, budget: Execution) -> int:
+        assert budget is Execution.ISOLATED, f'the worker has no {budget.value} children'
+        in_flight = sum(1 for finalizer in self.finalizers.values() if not finalizer.done())
+        return max(0, self.slots - in_flight)
 
     async def __call__(
         self,
@@ -139,12 +149,13 @@ class _RecordedDispatch:
 def _soft_cap_worker(
     broker: PostgresBroker,
     cap: int,
+    slots: int = 1,
 ) -> tuple[Worker, _RecordedDispatch]:
     cfg = WorkerConfig(
         dsn=broker.config.database_url.get_secret_value(),
         psycopg_dsn=listener_of(broker).database_url,
         queues=[CAPPED, FREE],
-        processes=1,
+        processes=slots,
         queue_priorities={CAPPED: 1, FREE: 1},
         queue_max_concurrency={CAPPED: cap},
         prefetch_buffer=2,
@@ -157,8 +168,9 @@ def _soft_cap_worker(
     )
     worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
     worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
-    dispatch = _RecordedDispatch()
+    dispatch = _RecordedDispatch(slots)
     worker._dispatch_one = dispatch  # type: ignore[method-assign,assignment]
+    worker._free_children = dispatch.free_children  # type: ignore[method-assign]
     return worker, dispatch
 
 
@@ -233,11 +245,69 @@ async def test_rows_of_an_uncapped_queue_start_while_a_capped_queue_waits(
 ) -> None:
     capped = [await _seed_pending(session, CAPPED, age_s=50 - n) for n in range(2)]
     free = await _seed_pending(session, FREE, age_s=10)
-    worker, dispatch = _soft_cap_worker(broker, cap=1)
+    worker, dispatch = _soft_cap_worker(broker, cap=1, slots=2)
 
     await _passes(worker, 2)
 
     assert set(dispatch.started) == {capped[0], free}
+
+
+async def test_a_row_under_the_cap_waits_for_a_free_child(
+    clean_workflow_tables: None,  # noqa: ARG001
+    session: AsyncSession,
+    broker: PostgresBroker,
+) -> None:
+    """Cap 1 and one slot: a row of an uncapped queue takes the slot, so the
+    row of the capped queue stays held while its queue has room; it starts on
+    the first pass after the slot frees."""
+    busy = await _seed_pending(session, FREE, age_s=100)
+    capped = await _seed_pending(session, CAPPED, age_s=50)
+    worker, dispatch = _soft_cap_worker(broker, cap=1)
+
+    await _passes(worker, 2)
+    assert dispatch.started == [busy]
+    assert (await _statuses(session))[capped] == ('CLAIMED', worker.worker_instance_id)
+
+    await _end_task(session, busy)
+    await dispatch.end(busy)
+    await _passes(worker, 1)
+    assert dispatch.started == [busy, capped]
+
+
+async def test_a_row_that_waits_for_a_child_lets_no_other_worker_pass_the_cap(
+    clean_workflow_tables: None,  # noqa: ARG001
+    session: AsyncSession,
+    broker: PostgresBroker,
+) -> None:
+    """Cap 1; workers A and B have one slot each. A's slot runs a long row of
+    an uncapped queue, so A holds its row of the capped queue: no child of
+    its route is free. B admits its row of the capped queue, and the row
+    runs. When A's slot frees, A counts B's RUNNING row and keeps its row
+    held: one row of the queue starts on the two workers, never two."""
+    long_row = await _seed_pending(session, FREE, age_s=100)
+    capped = [await _seed_pending(session, CAPPED, age_s=50 - n) for n in range(2)]
+    worker_a, dispatch_a = _soft_cap_worker(broker, cap=1)
+    worker_b, dispatch_b = _soft_cap_worker(broker, cap=1)
+
+    await _passes(worker_a, 1)
+    assert dispatch_a.started == [long_row]
+    assert (await _statuses(session))[capped[0]] == (
+        'CLAIMED',
+        worker_a.worker_instance_id,
+    )
+
+    await _passes(worker_b, 1)
+    assert dispatch_b.started == [capped[1]]
+    await _set_running(session, capped[1], worker_b.worker_instance_id)
+
+    await _end_task(session, long_row)
+    await dispatch_a.end(long_row)
+    await _passes(worker_a, 1)
+
+    assert dispatch_a.started == [long_row]
+    statuses = await _statuses(session)
+    assert statuses[capped[0]] == ('CLAIMED', worker_a.worker_instance_id)
+    assert statuses[capped[1]] == ('RUNNING', worker_b.worker_instance_id)
 
 
 async def test_stop_returns_the_held_rows_to_their_queue(
