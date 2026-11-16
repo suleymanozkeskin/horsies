@@ -120,17 +120,20 @@ _COMPLETE_LOCKED_TASK_SQL = text("""
     )
 """)
 
+# The last argument (wake) is TRUE: the function sends the capacity wake of
+# the locked row's queue.
 _COMPLETE_TASK_FUSED_SQL = text("""
     SELECT * FROM horsies_complete_task_fused(
         CAST(:task_id AS uuid), :worker_id,
-        CAST(:claimed_at AS TIMESTAMPTZ), :result,
-        :notify_channel, :notify_payload
+        CAST(:claimed_at AS TIMESTAMPTZ), :result, TRUE
     )
 """)
 
 # The batch arrives as one JSON parameter (``_fused_batch_parameters``): one
-# array per command, holding the six arguments of its row. Each ARRAY keeps the
-# input order, so the arguments of one command share one index.
+# array per command, holding the task id, the claim generation and the result
+# of its row. Each ARRAY keeps the input order, so the arguments of one
+# command share one index. The worker id is one parameter: a batch belongs to
+# one worker.
 _COMPLETE_TASKS_FUSED_SQL = text("""
     WITH batch AS MATERIALIZED (
         SELECT entry.value AS fields, entry.ordinality AS input_order
@@ -139,11 +142,10 @@ _COMPLETE_TASKS_FUSED_SQL = text("""
     )
     SELECT * FROM horsies_complete_tasks_fused(
         ARRAY(SELECT CAST(fields->>0 AS uuid) FROM batch ORDER BY input_order),
-        ARRAY(SELECT fields->>1 FROM batch ORDER BY input_order),
-        ARRAY(SELECT CAST(fields->>2 AS TIMESTAMPTZ) FROM batch ORDER BY input_order),
-        ARRAY(SELECT fields->>3 FROM batch ORDER BY input_order),
-        ARRAY(SELECT fields->>4 FROM batch ORDER BY input_order),
-        ARRAY(SELECT fields->>5 FROM batch ORDER BY input_order)
+        ARRAY(SELECT CAST(fields->>1 AS TIMESTAMPTZ) FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>2 FROM batch ORDER BY input_order),
+        :worker_id,
+        TRUE
     )
 """)
 
@@ -262,20 +264,12 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
                 'worker_id': fence.worker_id,
                 'result': result,
             }
-        case CompleteTaskFused(
-            task_id=task_id,
-            fence=fence,
-            result_json=result,
-            notify_channel=channel,
-            notify_payload=payload,
-        ):
+        case CompleteTaskFused(task_id=task_id, fence=fence, result_json=result):
             return _COMPLETE_TASK_FUSED_SQL, {
                 'task_id': task_id,
                 'worker_id': fence.worker_id,
                 'claimed_at': fence.claimed_at,
                 'result': result,
-                'notify_channel': channel,
-                'notify_payload': payload,
             }
         case FailLockedTask(
             task_id=task_id,
@@ -522,14 +516,16 @@ locks and the server time of one statement."""
 class FusedCompletionBatch:
     """Plain-success completions that one statement writes, in input order.
 
-    Each command keeps its own fence, result and NOTIFY: the statement
+    Each command keeps its own fence and result: the statement
     (``horsies_complete_tasks_fused``) runs ``horsies_complete_task_fused``
-    once per row, in sorted task-id order.
+    once per row, in sorted task-id order. The commands of one batch belong
+    to one worker: the statement takes one worker id.
 
     Raises:
-        ValueError: no command, more than ``FUSED_BATCH_MAX_ROWS``, or a task
-            id twice. The statement refuses a repeated id; a repeat means two
-            writes of one row in one statement.
+        ValueError: no command, more than ``FUSED_BATCH_MAX_ROWS``, a task
+            id twice, or commands of more than one worker. The statement
+            refuses a repeated id; a repeat means two writes of one row in one
+            statement.
     """
 
     commands: tuple[CompleteTaskFused, ...]
@@ -545,6 +541,17 @@ class FusedCompletionBatch:
             raise ValueError(
                 f'a fused completion batch names a task id twice: {task_ids}'
             )
+        worker_ids = {command.fence.worker_id for command in self.commands}
+        if len(worker_ids) != 1:
+            raise ValueError(
+                f'a fused completion batch belongs to one worker, got '
+                f'{sorted(worker_ids)}'
+            )
+
+    @property
+    def worker_id(self) -> str:
+        """The one worker of the batch."""
+        return self.commands[0].fence.worker_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,25 +596,22 @@ def _batch_write_error(failure: AutocommitFailure) -> BatchWriteError:
 
 
 def _fused_batch_parameters(batch: FusedCompletionBatch) -> dict[str, object]:
-    """The one parameter of the batch statement: a JSON array with one array
-    per command, in input order. Each holds the six arguments of
-    ``horsies_complete_task_fused`` for its row, as text or null. Pure.
+    """The parameters of the batch statement: the worker id, and a JSON
+    array with one array per command, in input order. Each holds the task
+    id, the claim generation and the result of its row, as text. Pure.
 
-    The driver sends one string, not six arrays that it dumps element by
-    element. Every value is a ``str`` or None, so ``json.dumps`` has no value
-    to refuse; ``ensure_ascii=False`` keeps each string as it is, apart from
-    the escapes of quotes, backslashes and control characters.
+    The driver sends one string, not three arrays that it dumps element by
+    element. Every value is a ``str``, so ``json.dumps`` has no value to
+    refuse; ``ensure_ascii=False`` keeps each string as it is, apart from the
+    escapes of quotes, backslashes and control characters.
     """
     return {
         'batch': json.dumps(
             [
                 [
                     command.task_id,
-                    command.fence.worker_id,
                     _generation_text(command.fence.claimed_at),
                     command.result_json,
-                    command.notify_channel,
-                    command.notify_payload,
                 ]
                 for command in batch.commands
             ],
@@ -615,6 +619,7 @@ def _fused_batch_parameters(batch: FusedCompletionBatch) -> dict[str, object]:
             allow_nan=False,
             separators=(',', ':'),
         ),
+        'worker_id': batch.worker_id,
     }
 
 
