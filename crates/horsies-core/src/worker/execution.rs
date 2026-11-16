@@ -2108,3 +2108,6 @@ mod set_running_gate_tests {
 #[cfg(test)]
 #[path = "finalizing_tests.rs"]
 mod finalizing_tests;
+
+#[cfg(test)]
+mod finalize_spec_tests;
