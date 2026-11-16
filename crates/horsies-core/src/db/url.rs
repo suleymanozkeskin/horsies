@@ -17,8 +17,13 @@
 //!   `passfile`, `sslpassword`, CRLs and the rest);
 //! - every unknown parameter;
 //! - a parameter given twice, also when the URL body already gives it;
-//! - every libpq environment variable other than `PGPASSWORD`
-//!   ([`ConnectionEnvironment`]).
+//! - a set libpq environment variable that libpq would apply
+//!   ([`VariableRule`]): a variable whose parameter the URL does not set, or a
+//!   variable that horsies does not support. A variable whose parameter the
+//!   URL sets is ignored, as libpq ignores it.
+//!
+//! A parameter counts as set when the query carries it (also with an empty
+//! value) or when its part of the URL body is not empty, as in libpq.
 //!
 //! The parser does no I/O. It reads no file and no environment variable; the
 //! caller passes the environment as a value.
@@ -26,9 +31,9 @@
 use std::fmt;
 use std::time::Duration;
 
-use super::environment::ConnectionEnvironment;
+use super::environment::{variable_rule, ConnectionEnvironment, EnvironmentPassword, VariableRule};
 use super::tls::{
-    client_identity, RootCertificates, SslMode, SslModeSource, TlsNegotiation, TlsPolicyError,
+    ClientFile, RootCertificates, SslMode, SslModeSource, TlsNegotiation, TlsPolicyError,
     TlsSettings,
 };
 
@@ -150,11 +155,15 @@ pub enum DatabaseName {
     SameAsUser,
 }
 
-/// The password of the URL. When it is not given, `PGPASSWORD` and then
-/// `~/.pgpass` are read when the connection plan is loaded.
+/// The password of the URL, with libpq's reading of each case.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UrlPassword {
     Given(DatabasePassword),
+    /// `password=` with an empty value in the query: libpq skips
+    /// `PGPASSWORD` and reads `~/.pgpass`.
+    GivenEmpty,
+    /// No password, or an empty one in the URL body: libpq reads
+    /// `PGPASSWORD`, then `~/.pgpass`.
     NotGiven,
 }
 
@@ -385,16 +394,30 @@ pub enum UrlError {
     #[error("{0}")]
     Tls(TlsPolicyError),
     #[error(
-        "the environment variable {name} is set; horsies reads only PGPASSWORD from the \
-         environment, so unset {name} and put the setting in the URL"
+        "the environment variable {name} is set and the URL does not set {parameter}, so libpq \
+         would use it; set {parameter} in the URL or unset {name}"
     )]
-    EnvironmentSetting { name: &'static str },
+    EnvironmentDefault {
+        name: &'static str,
+        parameter: &'static str,
+    },
+    #[error(
+        "the environment variable {name} is set and libpq would apply it; horsies does not \
+         support it, so unset {name}"
+    )]
+    EnvironmentNotSupported { name: &'static str },
+    #[error(
+        "the environment variable {name} is set and the password comes from the password file; \
+         horsies reads only ~/.pgpass, so unset {name} or give the password in the URL or in \
+         PGPASSWORD"
+    )]
+    EnvironmentPasswordFile { name: &'static str },
 }
 
 /// Parses a connection URL.
 ///
-/// Inputs: the URL text and the environment (only its list of set libpq
-/// variables is read here). Outcome: the typed settings, or the first
+/// Inputs: the URL text and the environment (its set libpq variables and
+/// whether `PGPASSWORD` is set). Outcome: the typed settings, or the first
 /// [`UrlError`]. No side effects: no file, no environment read, no network.
 pub fn parse_connection_url(
     text: &str,
@@ -405,9 +428,6 @@ pub fn parse_connection_url(
             length: text.len(),
             limit: MAX_URL_BYTES,
         });
-    }
-    if let Some(name) = environment.first_libpq_variable() {
-        return Err(UrlError::EnvironmentSetting { name });
     }
     let (scheme, rest) = split_scheme(text)?;
     let parts = split_parts(rest);
@@ -422,13 +442,125 @@ pub fn parse_connection_url(
         parts.path_with_slash,
         query.masked,
     ));
-    assemble(
+    let named = set_parameters(
+        &credentials,
+        &authority_hosts,
+        &path_database,
+        &query.parameters,
+    );
+    let settings = assemble(
         credentials,
         authority_hosts,
         path_database,
         query.parameters,
         masked_url,
-    )
+    )?;
+    check_environment(environment, &named, &settings.password)?;
+    Ok(settings)
+}
+
+/// The parameters the URL sets, in libpq's sense: a query parameter (also
+/// with an empty value), or a part of the URL body that is not empty.
+fn set_parameters(
+    credentials: &Credentials,
+    authority_hosts: &[RawHost],
+    path_database: &str,
+    parameters: &QueryParameters,
+) -> Vec<&'static str> {
+    let from_body = [
+        ("host", !authority_hosts.is_empty()),
+        (
+            "port",
+            authority_hosts
+                .iter()
+                .any(|host| matches!(host.port, PortSpec::Given(_))),
+        ),
+        ("user", matches!(credentials.user, UserName::Named(_))),
+        (
+            "password",
+            matches!(credentials.password, UrlPassword::Given(_)),
+        ),
+        ("dbname", !path_database.is_empty()),
+    ];
+    let from_query = [
+        ("host", parameters.host.is_some()),
+        ("port", parameters.port.is_some()),
+        ("user", parameters.user.is_some()),
+        ("password", parameters.password.is_some()),
+        ("dbname", parameters.dbname.is_some()),
+        ("application_name", parameters.application_name.is_some()),
+        ("options", parameters.options.is_some()),
+        ("connect_timeout", parameters.connect_timeout.is_some()),
+        ("sslmode", parameters.sslmode.is_some()),
+        ("sslrootcert", parameters.sslrootcert.is_some()),
+        ("sslcert", parameters.sslcert.is_some()),
+        ("sslkey", parameters.sslkey.is_some()),
+        ("sslnegotiation", parameters.sslnegotiation.is_some()),
+        ("channel_binding", parameters.channel_binding.is_some()),
+        (
+            "target_session_attrs",
+            parameters.target_session_attrs.is_some(),
+        ),
+        (
+            "load_balance_hosts",
+            parameters.load_balance_hosts.is_some(),
+        ),
+    ];
+    from_body
+        .into_iter()
+        .chain(from_query)
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Whether the password file is read: libpq reads it when the URL gives an
+/// empty `password=`, or when neither the URL nor `PGPASSWORD` gives one.
+enum PasswordFileUse {
+    Read,
+    NotRead,
+}
+
+fn password_file_use(
+    password: &UrlPassword,
+    environment: &ConnectionEnvironment,
+) -> PasswordFileUse {
+    match (password, environment.password()) {
+        (UrlPassword::Given(_), _) | (UrlPassword::NotGiven, EnvironmentPassword::Set(_)) => {
+            PasswordFileUse::NotRead
+        }
+        (UrlPassword::GivenEmpty, _) | (UrlPassword::NotGiven, EnvironmentPassword::NotSet) => {
+            PasswordFileUse::Read
+        }
+    }
+}
+
+/// Refuses every set libpq variable that libpq would apply to this URL.
+fn check_environment(
+    environment: &ConnectionEnvironment,
+    set: &[&'static str],
+    password: &UrlPassword,
+) -> Result<(), UrlError> {
+    for &name in environment.set_libpq_variables() {
+        match (
+            variable_rule(name),
+            password_file_use(password, environment),
+        ) {
+            (VariableRule::DefaultFor(parameter), _) if set.contains(&parameter) => {}
+            (VariableRule::DefaultFor(parameter), _) => {
+                return Err(UrlError::EnvironmentDefault { name, parameter })
+            }
+            (VariableRule::AlwaysApplies, _) => {
+                return Err(UrlError::EnvironmentNotSupported { name })
+            }
+            (VariableRule::PasswordFileLocation, PasswordFileUse::Read) => {
+                return Err(UrlError::EnvironmentPasswordFile { name })
+            }
+            (VariableRule::PasswordFileLocation, PasswordFileUse::NotRead)
+            | (VariableRule::NoConnectionEffect, _) => {}
+        }
+    }
+    Ok(())
 }
 
 struct UrlParts<'a> {
@@ -750,8 +882,11 @@ fn assemble(
     let password = match (credentials.password, parameters.password) {
         (UrlPassword::Given(_), Some(_)) => return Err(duplicate("password")),
         (UrlPassword::Given(password), None) => UrlPassword::Given(password),
-        (UrlPassword::NotGiven, Some(bytes)) => password_from_bytes(bytes),
-        (UrlPassword::NotGiven, None) => UrlPassword::NotGiven,
+        (UrlPassword::GivenEmpty | UrlPassword::NotGiven, Some(bytes)) => match bytes.is_empty() {
+            true => UrlPassword::GivenEmpty,
+            false => UrlPassword::Given(DatabasePassword(bytes)),
+        },
+        (password @ (UrlPassword::GivenEmpty | UrlPassword::NotGiven), None) => password,
     };
     let database = match (path_database.is_empty(), parameters.dbname) {
         (false, Some(_)) => return Err(duplicate("dbname")),
@@ -762,7 +897,8 @@ fn assemble(
     let tls = TlsSettings::resolve(
         sslmode_source(parameters.sslmode)?,
         root_certificates(parameters.sslrootcert),
-        client_identity(parameters.sslcert, parameters.sslkey).map_err(UrlError::Tls)?,
+        client_file(parameters.sslcert),
+        client_file(parameters.sslkey),
         tls_negotiation(parameters.sslnegotiation)?,
     )
     .map_err(UrlError::Tls)?;
@@ -876,11 +1012,20 @@ fn sslmode_source(value: Option<String>) -> Result<SslModeSource, UrlError> {
     }
 }
 
+/// Unset or empty means libpq's default file, as in libpq.
 fn root_certificates(value: Option<String>) -> RootCertificates {
     match value.as_deref() {
-        None | Some("") => RootCertificates::NotGiven,
+        None | Some("") => RootCertificates::Default,
         Some("system") => RootCertificates::System,
         Some(path) => RootCertificates::File(std::path::PathBuf::from(path)),
+    }
+}
+
+/// Unset or empty means libpq's default file, as in libpq.
+fn client_file(value: Option<String>) -> ClientFile {
+    match value.as_deref() {
+        None | Some("") => ClientFile::Default,
+        Some(path) => ClientFile::File(std::path::PathBuf::from(path)),
     }
 }
 
@@ -1003,7 +1148,14 @@ mod tests {
 
     use super::*;
     use crate::db::environment::{EnvironmentPassword, HomeDirectory};
-    use crate::db::tls::{ClientIdentity, RootSource, ServerVerification, TlsPolicy};
+    use crate::db::tls::{AttemptOrder, FileRoots, StrictRoots, TlsMode};
+
+    fn environment_with(
+        variables: Vec<&'static str>,
+        password: EnvironmentPassword,
+    ) -> ConnectionEnvironment {
+        ConnectionEnvironment::new(password, variables, HomeDirectory::Unknown)
+    }
 
     fn parse(text: &str) -> Result<ConnectionSettings, UrlError> {
         parse_connection_url(text, &ConnectionEnvironment::isolated())
@@ -1031,8 +1183,11 @@ mod tests {
         assert_eq!(settings.application_name(), Some("w1"));
         assert_eq!(settings.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
         assert_eq!(
-            settings.tls().policy(),
-            &TlsPolicy::TlsThenPlain(ServerVerification::NotVerified),
+            settings.tls().mode(),
+            &TlsMode::Weak {
+                order: AttemptOrder::TlsThenPlain,
+                roots: FileRoots::Default
+            },
         );
     }
 
@@ -1306,35 +1461,49 @@ mod tests {
 
     #[test]
     fn all_six_sslmode_values_parse() {
-        for (value, policy) in [
-            ("disable", TlsPolicy::Disabled),
+        let named = || FileRoots::File(PathBuf::from("/r.crt"));
+        for (value, mode) in [
+            ("disable", TlsMode::Disabled),
             (
                 "allow",
-                TlsPolicy::PlainThenTls(ServerVerification::NotVerified),
+                TlsMode::Weak {
+                    order: AttemptOrder::PlainThenTls,
+                    roots: FileRoots::Default,
+                },
             ),
             (
                 "prefer",
-                TlsPolicy::TlsThenPlain(ServerVerification::NotVerified),
+                TlsMode::Weak {
+                    order: AttemptOrder::TlsThenPlain,
+                    roots: FileRoots::Default,
+                },
             ),
             (
                 "require",
-                TlsPolicy::TlsOnly(ServerVerification::NotVerified),
+                TlsMode::Weak {
+                    order: AttemptOrder::TlsOnly,
+                    roots: FileRoots::Default,
+                },
             ),
             (
                 "verify-ca&sslrootcert=%2Fr.crt",
-                TlsPolicy::TlsOnly(ServerVerification::ChainOnly {
-                    root_file: PathBuf::from("/r.crt"),
-                }),
+                TlsMode::VerifyChain { roots: named() },
             ),
             (
                 "verify-full&sslrootcert=%2Fr.crt",
-                TlsPolicy::TlsOnly(ServerVerification::ChainAndHostName(RootSource::File(
-                    PathBuf::from("/r.crt"),
-                ))),
+                TlsMode::VerifyChainAndHostName {
+                    roots: StrictRoots::Files(named()),
+                },
+            ),
+            (
+                "verify-full",
+                TlsMode::VerifyChainAndHostName {
+                    roots: StrictRoots::Files(FileRoots::Default),
+                },
             ),
         ] {
             let settings = parse(&format!("postgresql://h/d?sslmode={value}")).expect("valid URL");
-            assert_eq!(settings.tls().policy(), &policy, "{value}");
+            assert_eq!(settings.tls().mode(), &mode, "{value}");
         }
     }
 
@@ -1352,31 +1521,41 @@ mod tests {
     #[test]
     fn tls_policy_errors_surface_from_the_parser() {
         assert_eq!(
-            parse("postgresql://h/d?sslmode=verify-full"),
-            Err(UrlError::Tls(TlsPolicyError::RootCertificateRequired {
-                sslmode: SslMode::VerifyFull
+            parse("postgresql://h/d?sslmode=require&sslrootcert=system"),
+            Err(UrlError::Tls(TlsPolicyError::WeakSslModeWithSystemRoots {
+                sslmode: SslMode::Require
             })),
         );
         assert_eq!(
-            parse("postgresql://h/d?sslcert=c.crt"),
-            Err(UrlError::Tls(TlsPolicyError::ClientIdentityIncomplete {
-                given: "sslcert",
-                missing: "sslkey"
-            })),
+            parse("postgresql://h/d?sslnegotiation=direct"),
+            Err(UrlError::Tls(
+                TlsPolicyError::DirectNegotiationNeedsRequiredTls {
+                    sslmode: SslMode::Prefer
+                }
+            )),
         );
     }
 
     #[test]
-    fn client_certificate_and_key_parse() {
+    fn client_certificate_and_key_parse_one_by_one() {
         let settings = parse("postgresql://h/d?sslmode=require&sslcert=%2Fc.crt&sslkey=%2Fc.key")
             .expect("valid URL");
         assert_eq!(
-            settings.tls().identity(),
-            &ClientIdentity::CertificateAndKey {
-                certificate: PathBuf::from("/c.crt"),
-                key: PathBuf::from("/c.key"),
-            },
+            settings.tls().certificate(),
+            &ClientFile::File(PathBuf::from("/c.crt"))
         );
+        assert_eq!(
+            settings.tls().key(),
+            &ClientFile::File(PathBuf::from("/c.key"))
+        );
+        let only_certificate = parse("postgresql://h/d?sslcert=%2Fc.crt").expect("valid URL");
+        assert_eq!(only_certificate.tls().key(), &ClientFile::Default);
+    }
+
+    #[test]
+    fn an_empty_query_password_skips_pgpassword() {
+        let settings = parse("postgresql://u@h/d?password=").expect("valid URL");
+        assert_eq!(settings.password(), &UrlPassword::GivenEmpty);
     }
 
     #[test]
@@ -1394,16 +1573,92 @@ mod tests {
     }
 
     #[test]
-    fn a_set_libpq_environment_variable_is_refused_by_name() {
-        let environment = ConnectionEnvironment::new(
-            EnvironmentPassword::NotSet,
-            vec!["PGSSLMODE"],
-            HomeDirectory::Unknown,
-        );
+    fn a_variable_is_refused_when_the_url_does_not_set_its_parameter() {
+        let environment = environment_with(vec!["PGSSLMODE"], EnvironmentPassword::NotSet);
         assert_eq!(
             parse_connection_url("postgresql://h/d", &environment),
-            Err(UrlError::EnvironmentSetting { name: "PGSSLMODE" }),
+            Err(UrlError::EnvironmentDefault {
+                name: "PGSSLMODE",
+                parameter: "sslmode"
+            }),
         );
+    }
+
+    #[test]
+    fn a_variable_is_ignored_when_the_url_sets_its_parameter() {
+        let environment = environment_with(
+            vec![
+                "PGHOST",
+                "PGPORT",
+                "PGUSER",
+                "PGDATABASE",
+                "PGSSLMODE",
+                "PGREQUIRESSL",
+            ],
+            EnvironmentPassword::NotSet,
+        );
+        assert!(
+            parse_connection_url("postgresql://u@h:5433/d?sslmode=require", &environment).is_ok()
+        );
+        let empty_query_values =
+            environment_with(vec!["PGUSER", "PGDATABASE"], EnvironmentPassword::NotSet);
+        assert!(parse_connection_url("postgresql://h?user=&dbname=", &empty_query_values).is_ok());
+    }
+
+    #[test]
+    fn an_empty_body_part_does_not_set_its_parameter() {
+        let environment = environment_with(vec!["PGUSER"], EnvironmentPassword::NotSet);
+        assert_eq!(
+            parse_connection_url("postgresql://@h/d", &environment),
+            Err(UrlError::EnvironmentDefault {
+                name: "PGUSER",
+                parameter: "user"
+            }),
+        );
+        let host_variable = environment_with(vec!["PGHOST"], EnvironmentPassword::NotSet);
+        assert!(matches!(
+            parse_connection_url("postgresql://:5432/d", &host_variable),
+            Err(UrlError::HostMissing)
+        ));
+    }
+
+    #[test]
+    fn an_unsupported_variable_is_refused_whenever_it_is_set() {
+        for name in ["PGSERVICE", "PGTZ", "PGGSSENCMODE", "PGSSLCRL"] {
+            let environment = environment_with(vec![name], EnvironmentPassword::NotSet);
+            assert_eq!(
+                parse_connection_url("postgresql://u:p@h/d?sslmode=require", &environment),
+                Err(UrlError::EnvironmentNotSupported { name }),
+            );
+        }
+    }
+
+    #[test]
+    fn a_variable_without_connection_effect_is_ignored() {
+        let environment = environment_with(
+            vec!["PGSERVICEFILE", "PGSYSCONFDIR", "PGLOCALEDIR"],
+            EnvironmentPassword::NotSet,
+        );
+        assert!(parse_connection_url("postgresql://h/d", &environment).is_ok());
+    }
+
+    #[test]
+    fn pgpassfile_is_refused_only_when_the_password_file_is_read() {
+        let unset = environment_with(vec!["PGPASSFILE"], EnvironmentPassword::NotSet);
+        assert_eq!(
+            parse_connection_url("postgresql://u@h/d", &unset),
+            Err(UrlError::EnvironmentPasswordFile { name: "PGPASSFILE" }),
+        );
+        assert_eq!(
+            parse_connection_url("postgresql://u@h/d?password=", &unset),
+            Err(UrlError::EnvironmentPasswordFile { name: "PGPASSFILE" }),
+        );
+        assert!(parse_connection_url("postgresql://u:p@h/d", &unset).is_ok());
+        let with_pgpassword = environment_with(
+            vec!["PGPASSFILE"],
+            EnvironmentPassword::Set(DatabasePassword::from_bytes(b"p".to_vec())),
+        );
+        assert!(parse_connection_url("postgresql://u@h/d", &with_pgpassword).is_ok());
     }
 
     #[test]

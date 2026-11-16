@@ -3,6 +3,7 @@
 pub mod attempt_writes;
 pub mod bound_handle;
 pub mod class_budgets;
+pub mod client_family;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
 pub mod error;

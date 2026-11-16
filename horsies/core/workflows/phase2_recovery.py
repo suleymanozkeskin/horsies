@@ -49,6 +49,7 @@ from horsies.core.history.phase2.quarantine import (
     PHASE2_QUARANTINE_FUNCTION,
     REPOINTED,
 )
+from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -57,7 +58,8 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.types.status import TaskStatus
 from horsies.core.workflows.engine import (
     NodeMayHaveDependents,
     apply_node_progression,
@@ -95,7 +97,7 @@ never deletes evidence itself."""
 
 
 DISCOVER_PENDING_SQL = text(f"""
-    SELECT task_id, terminal_status
+    SELECT task_id, terminalization_kind
     FROM {WORKFLOW_PHASE2_PENDING}
     WHERE created_at < NOW()
           - (CAST(:grace_ms AS double precision) / 1000.0)
@@ -113,6 +115,48 @@ why an unresolvable row cannot retry forever: once a row has retained
 through that many passes it is quarantined and discovery stops selecting
 it — the exclusion holds even if the quarantine transition itself
 refused, so a stuck row costs a bounded number of passes either way."""
+
+
+@dataclass(frozen=True, slots=True)
+class PendingKindWithoutPhase2:
+    """A pending row names a kind whose terminal move writes no pending row.
+
+    The pending table's CHECK admits only the five kinds that
+    `terminal_status_of_pending_kind` maps, so this names a row that the
+    schema refuses.
+    """
+
+    kind: str
+
+
+def terminal_status_of_pending_kind(
+    kind: str,
+) -> Result[TaskStatus, PendingKindWithoutPhase2]:
+    '''The task status that the terminal move wrote with this kind.
+
+    The move pairs each kind with one terminal status and refuses any other
+    pair, and only these five kinds write a pending row. No cancel kind
+    writes one, so a pending row never stands for a CANCELLED task.
+
+    Returns:
+        `Ok` with the status of the kind; `Err(PendingKindWithoutPhase2)`
+        for any other kind.
+    '''
+    match kind:
+        case TerminalizationKind.COMPLETE_LOCKED.value:
+            return Ok(TaskStatus.COMPLETED)
+        case (
+            TerminalizationKind.FAIL_RUNNING.value
+            | TerminalizationKind.FAIL_STALE.value
+        ):
+            return Ok(TaskStatus.FAILED)
+        case (
+            TerminalizationKind.EXPIRE_CLAIMED.value
+            | TerminalizationKind.EXPIRE_PENDING.value
+        ):
+            return Ok(TaskStatus.EXPIRED)
+        case _:
+            return Err(PendingKindWithoutPhase2(kind=kind))
 
 
 RECORD_RETAINING_ATTEMPT_SQL = text(f"""
@@ -295,6 +339,7 @@ NODE_RESULT_SQL = text("""
 async def _apply_progression(
     session: 'AsyncSession',
     disposition: Phase2Disposition,
+    terminal_status: str,
     broker: 'PostgresBroker | None',
 ) -> None:
     """Hand one applied node to the engine's shared progression body.
@@ -303,7 +348,8 @@ async def _apply_progression(
     the progression context; the engine owns everything after that, and
     the in-process completion path enters the same body with the same
     arguments. The consumption function does not return whether the node
-    has dependents, so the progression reads them.
+    has dependents, so the progression reads them. `terminal_status` is
+    the task status of the pending row's kind.
     """
     workflow_id = disposition.workflow_id
     if workflow_id is None or disposition.task_index is None:
@@ -316,9 +362,7 @@ async def _apply_progression(
                 NODE_RESULT_SQL, {'id': disposition.node_row_id},
             )
         ).scalar_one_or_none()
-        failure = _recovered_failure_result(
-            disposition.terminal_status or '', node_result,
-        )
+        failure = _recovered_failure_result(terminal_status, node_result)
 
     await apply_node_progression(
         session,
@@ -395,7 +439,22 @@ async def drive_phase2_recovery(
     for candidate in candidates:
         considered += 1
         task_id = str(candidate.task_id)
-        terminal_status = str(candidate.terminal_status)
+        match terminal_status_of_pending_kind(
+            str(candidate.terminalization_kind),
+        ):
+            case Ok(status):
+                terminal_status = status.value
+            case Err(without_phase2):
+                failed += 1
+                logger.error(
+                    'Phase-2 recovery refused task %s: kind %r writes no '
+                    'pending row',
+                    task_id,
+                    without_phase2.kind,
+                )
+                continue
+            case _ as unreachable:
+                assert_never(unreachable)
         try:
             node_status = node_status_for_terminal_task(terminal_status)
         except ValueError as exc:
@@ -416,7 +475,9 @@ async def drive_phase2_recovery(
                     terminal_node_status=node_status,
                 )
                 if disposition.disposition == 'APPLIED_TO_NODE':
-                    await _apply_progression(session, disposition, broker)
+                    await _apply_progression(
+                        session, disposition, terminal_status, broker,
+                    )
                 elif disposition.disposition not in DURABLE_DISPOSITIONS:
                     attempt_count = (
                         await session.execute(
@@ -633,7 +694,9 @@ async def _quarantine_exhausted_row(
     REPOINTED or already-drained verdict counts as quarantined, and a
     refusal is reported verbatim — the row is excluded from discovery by
     the attempt bound regardless, so a refusal costs visibility of the
-    relocation, never an unbounded retry.
+    relocation, never an unbounded retry. The cause is logged, not stored:
+    the attempt bound is the one cause of a quarantine copy, and the pending
+    row keeps the attempt count and the last failure class.
     """
     reason = (
         f'attempt bound {attempt_count} reached; '
@@ -643,9 +706,9 @@ async def _quarantine_exhausted_row(
         await session.execute(
             text(
                 f'SELECT * FROM {PHASE2_QUARANTINE_FUNCTION}('
-                'CAST(:task_id AS uuid), :reason)'
+                'CAST(:task_id AS uuid))'
             ),
-            {'task_id': task_id, 'reason': reason},
+            {'task_id': task_id},
         )
     ).one()
     verdict = str(row.verdict)
