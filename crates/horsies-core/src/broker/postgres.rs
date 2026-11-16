@@ -55,9 +55,13 @@ use crate::broker::task_lists::{
     bounded_list_from_rows, BoundedTaskList, ListShapeError, StaleMinutes, TASK_LIST_BOUND,
 };
 use crate::broker::wait_limit::WaitLimit;
-use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
+use crate::db::{
+    PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
+};
 
-use crate::broker::pools::{CloseOutcome, CoreHandle, OpenPools, PoolProfile, WriteInFlight};
+use crate::broker::pools::{
+    CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
+};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
     Transaction as CoreTransaction, TypedStatement, WORKER_RESERVED_CONNECTIONS,
@@ -295,7 +299,7 @@ FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 // dispatch reads them now that `horsies_claim`'s v12 return shape (shared
 // with Python) no longer includes them. The values are exact — read under
 // the row lock, atomically with the transition.
-const SET_RUNNING_SQL: &str = "\
+pub(crate) const SET_RUNNING_SQL: &str = "\
 WITH upd AS (
     UPDATE horsies_tasks
     SET status = 'RUNNING',
@@ -733,6 +737,9 @@ const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
 static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH_CHECK_SQL, &[]);
 
+/// `SELECT 1` on the session pool in the worker boot check.
+static SESSION_CHECK: TypedStatement = TypedStatement::new("session_check", HEALTH_CHECK_SQL, &[]);
+
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
 /// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
@@ -970,8 +977,9 @@ pub enum SchemaInitializationMode {
 ///   the web layer, migrations and the listeners, which borrow them through
 ///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`].
 ///
-/// Every LISTEN of the broker goes through its one listener connection on the
-/// session URL.
+/// Every LISTEN of the broker goes through the process listener of its
+/// session URL: one connection, shared with the other brokers of the process
+/// on the same URL.
 pub struct PostgresBroker {
     core: CoreHandle,
     statement_log: StatementLog,
@@ -1012,14 +1020,15 @@ impl PostgresBroker {
     }
 
     /// Construct a test broker on the database of a test's sqlx pool, with
-    /// its listener on `session_url`. The listener opens its own connection
-    /// at the first subscription; the URL is parsed then.
+    /// its listener on `session_url`: the process listener of that URL, which
+    /// opens its connection at the first subscription with the default socket
+    /// settings (`DEFAULT_SOCKET_SETTINGS`). The URL is parsed then.
     #[cfg(test)]
     pub fn from_pool_and_session_url(pool: PgPool, session_url: &str) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::MigrateAndValidate,
-            ProcessListener::on_session_url(session_url),
+            ProcessListener::on_session_url(session_url, DEFAULT_SOCKET_SETTINGS),
         )
     }
 
@@ -1185,7 +1194,10 @@ impl PostgresBroker {
                 IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
             )
             .num_seconds(),
-            listener: ProcessListener::on_session_url(config.effective_session_database_url()),
+            listener: ProcessListener::on_session_url(
+                config.effective_session_database_url(),
+                config.socket_settings(),
+            ),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
@@ -1333,6 +1345,25 @@ impl PostgresBroker {
         &self.reserve.maintenance
     }
 
+    /// The open core pools, for a lifecycle writer that runs on the main
+    /// core pool ([`crate::broker::attempt_writes`]) or a workflow step
+    /// (`workflow_engine::steps`), and the token of its write:
+    /// [`PostgresBroker::close`] waits for the write while the token lives. In a worker the main core pool is the worker profile pool. An
+    /// `Idle` handle opens its pools first.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
+    pub(crate) fn core_pools_for_write(
+        &self,
+    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
+        Ok(self.core.pools_for_write()?)
+    }
+
+    /// Whether this broker logs each core statement it runs, for the
+    /// lifecycle writers that run on the main core pool.
+    pub(crate) fn statement_log(&self) -> StatementLog {
+        self.statement_log
+    }
+
     /// Runs one statement on the main core pool and reads every row.
     ///
     /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
@@ -1391,24 +1422,6 @@ impl PostgresBroker {
         self.statement_log.log(statement);
     }
 
-    /// The open core pools for a write, and the token that keeps the write in
-    /// the wait of [`PostgresBroker::close`]. The workflow steps
-    /// (`workflow_engine::steps`) run on them.
-    ///
-    /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
-    /// its pools again.
-    pub(crate) fn core_pools_for_write(
-        &self,
-    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
-        Ok(self.core.pools_for_write()?)
-    }
-
-    /// Whether the broker logs each core statement it runs
-    /// (`PostgresConfig::echo`).
-    pub(crate) fn statement_log(&self) -> StatementLog {
-        self.statement_log
-    }
-
     /// Whether this broker's runtime pool is configured for PgBouncer
     /// transaction pooling.
     pub fn pgbouncer_transaction_mode(&self) -> bool {
@@ -1437,8 +1450,9 @@ impl PostgresBroker {
         Ok(outcome)
     }
 
-    /// The broker's listener: the one LISTEN connection of the broker, on the
-    /// session URL, shared by every subscriber.
+    /// The broker's listener: the process listener of the session URL, one
+    /// LISTEN connection shared by every subscriber of every broker of the
+    /// process on that URL.
     pub(crate) fn listener(&self) -> &ProcessListener {
         &self.listener
     }
@@ -2810,6 +2824,37 @@ impl PostgresBroker {
         }
 
         Ok(pongs)
+    }
+
+    /// The pool checks of a worker boot, before the session check
+    /// ([`PostgresBroker::check_session_delivery`]):
+    ///
+    /// 1. `SELECT 1` on the main core pool. Its first checkout runs the
+    ///    statement-pooling check: a URL that does not keep a transaction is
+    ///    `StatementPooledUrl`, not retryable.
+    /// 2. `SELECT 1` on the session core pool when the session URL differs
+    ///    (its first checkout runs the statement-pooling check too).
+    ///
+    /// A database that cannot be reached fails with its retryable error, so
+    /// the worker's start resilience retries it.
+    pub async fn check_worker_session(&self) -> Result<(), BrokerError> {
+        self.health_check().await?;
+        let open = self.core.pools()?;
+        match open.pools().session() {
+            SessionPool::SameAsMain => {}
+            SessionPool::Separate { pool, .. } => {
+                self.log_statement(&SESSION_CHECK);
+                let rows = pool
+                    .query(
+                        CheckoutClass::Batch,
+                        &SESSION_CHECK.bind().finish(),
+                        StatementBound::ConnectionTimeouts,
+                    )
+                    .await?;
+                let _row = one_row(rows, &SESSION_CHECK)?;
+            }
+        }
+        Ok(())
     }
 
     /// The session check of a worker boot: the session URL keeps session
@@ -6089,6 +6134,8 @@ mod session_settings_tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         }
     }
 
@@ -6518,6 +6565,8 @@ mod result_wait_tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         let broker = PostgresBroker::connect_observe_only(&config)
             .await
@@ -6529,6 +6578,29 @@ mod result_wait_tests {
             .ping_workers(None, Duration::from_millis(200), None)
             .await;
         assert!(pinged.is_ok(), "{:?}", pinged.err());
+    }
+
+    /// Two brokers on one session URL in one process share one listener
+    /// connection.
+    #[tokio::test]
+    #[serial]
+    async fn two_brokers_on_one_session_url_open_one_listener_connection() {
+        let application_name = format!("shared_listener_{}", Uuid::new_v4().simple());
+        let first = listener_broker(&application_name).await;
+        let second = listener_broker(&application_name).await;
+
+        let first_wait = first.result_wait_mode(Uuid::new_v4()).await;
+        let second_wait = second.result_wait_mode(Uuid::new_v4()).await;
+        assert!(matches!(first_wait, ResultWaitMode::Subscribed(_)));
+        assert!(matches!(second_wait, ResultWaitMode::Subscribed(_)));
+
+        let connections: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+                .bind(&application_name)
+                .fetch_one(first.pool())
+                .await
+                .expect("count the listener connections");
+        assert_eq!(connections, 1);
     }
 
     /// Dropping the broker stops its listener. The wait turns into polling,
