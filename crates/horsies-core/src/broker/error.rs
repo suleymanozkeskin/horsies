@@ -126,6 +126,13 @@ pub enum BrokerError {
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
 
+    /// A row of the claim, the start, the release or the stale claim
+    /// requeue breaks its function's row contract (`broker::claims`,
+    /// `broker::stale_recovery`). Not retryable: the same call meets it
+    /// again.
+    #[error("claim contract violation: {0}")]
+    ClaimContract(String),
+
     /// A statement on a core pool failed with one of the statement layer's
     /// three outcomes. Retryable when its cause may clear
     /// ([`Transience::Transient`]); a closed pool and a statement-pooled URL
@@ -188,6 +195,7 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_)
+            | Self::ClaimContract(_)
             | Self::PoolSettings(_)
             | Self::RowDecode(_) => false,
         }

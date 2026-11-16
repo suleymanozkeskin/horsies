@@ -597,6 +597,8 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         }
     }
 
@@ -784,6 +786,8 @@ mod tests {
                 pool_timeout: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: Some(0),
             prefetch_buffer: 0,
@@ -914,6 +918,8 @@ mod tests {
                 pool_timeout: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,

@@ -18,6 +18,7 @@ from horsies.core.types.result import is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.sql import COUNT_IN_FLIGHT_FOR_WORKER_SQL
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import current_resources
 
@@ -122,13 +123,13 @@ async def _link_runnable_workflow_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
                  task_id, created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :workflow_id, 0, 'orphan_guard_node',
+                ('NONE', :id, :workflow_id, 0, 'orphan_guard_node',
                  'workflow_join_barrier', '{}', 'default', 100, '{}',
                  FALSE, 'all', FALSE, 'RUNNING', :task_id, NOW(),
                  0, 'ISOLATED', 'standard_30d')
@@ -186,7 +187,7 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -236,7 +237,7 @@ async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -280,7 +281,7 @@ async def test_finalize_does_not_cancel_a_task_with_a_runnable_node_link(
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)

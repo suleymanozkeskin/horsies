@@ -7,10 +7,14 @@ use std::time::Duration;
 
 use super::Worker;
 use crate::broker::PostgresBroker;
+use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::TaskRegistry;
+use crate::worker::children::ChildLaunch;
+use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
+use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
 
 /// The bound of the wait for the first snapshot, which the worker writes at
 /// start.
@@ -27,25 +31,41 @@ const STOP_BOUND: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 #[serial_test::serial]
-#[ignore = "waits on #702 (the snapshot insert fails on the baseline) and #678 (the claim writes the removed claimed column)"]
+#[ignore = "waits on #678: the claim writes the removed claimed column"]
 async fn a_live_worker_answers_a_ping_and_lists_its_state() {
     let url = crate::broker::terminalization_matrix::migrated_database_url().await;
     let app_config = AppConfig::for_database_url(url);
     let broker = Arc::new(
-        PostgresBroker::connect_with(&app_config.broker)
+        PostgresBroker::connect_worker_with(&app_config.broker)
             .await
             .expect("connect the broker"),
     );
+    let profile = SelectedProfile {
+        name: "default".to_owned(),
+        profile: serde_json::from_value(serde_json::json!({
+            "isolated": {"kind": "isolated_children", "count": 1}
+        }))
+        .expect("a valid test profile"),
+    };
+    let launch = ChildLaunch {
+        command: idle_child_of_any_kind(),
+        program: ChildProgram::Rust,
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new(app_config.broker.database_url.clone()),
+    };
     let worker = Worker::new(
         Arc::clone(&broker),
-        Arc::new(TaskRegistry::new()),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         app_config,
         WorkerConfig {
             queues: vec!["default".to_owned()],
-            concurrency: 1,
             ..WorkerConfig::default()
         },
+        profile,
+        launch,
+        RegisteredClasses::default(),
     )
     .expect("worker");
     let worker_id = worker.worker_id().to_owned();

@@ -281,6 +281,15 @@ class TestValidateExceptionMapper:
         # ValueError key: non-string value (3)
         assert len(errors) == 3
 
+    def test_reserved_code_value_rejected(self) -> None:
+        """WORKFLOW_STOPPED is no task code, so no exception maps to it."""
+        mapper: ExceptionMapper = {ValueError: 'WORKFLOW_STOPPED'}
+        errors = validate_exception_mapper(mapper)
+        assert errors == [
+            "Mapper value for ValueError 'WORKFLOW_STOPPED' is a reserved error "
+            'code name and is not a task code; use another UPPER_SNAKE_CASE code',
+        ]
+
     def test_non_mapping_rejected(self) -> None:
         errors = validate_exception_mapper(['bad'])  # type: ignore[arg-type]
         assert len(errors) == 1

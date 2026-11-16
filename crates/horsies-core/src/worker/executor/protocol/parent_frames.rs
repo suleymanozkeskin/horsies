@@ -188,7 +188,9 @@ pub struct InitFrame {
 /// before it resolves the task. No task code runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoredOptionsRefusal {
-    /// The stored `task_options` text does not parse, or is not an object.
+    /// The stored `task_options` text does not parse, or is not an object,
+    /// or its `retry_policy` does not validate (the reason starts with
+    /// `stored retry_policy does not validate: `, as Python's).
     OptionsUnreadable(RefusalReason),
     /// The stored `timeout_ms` is not a whole number inside its bounds, or a
     /// shared class has none.

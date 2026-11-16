@@ -17,6 +17,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_postgres::error::DbError;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{
@@ -26,7 +27,7 @@ use crate::broker::attempt_writes::{
 use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
 };
@@ -38,6 +39,7 @@ use crate::core::lifecycle::{
     BatchSize, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
     UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
+use crate::db::{CheckoutClass, CorePool, StatementBound, StatementFailure, TypedStatement};
 
 /// The worker that holds the seeded claims.
 pub(super) const WORKER: &str = "lifecycle-test-worker";
@@ -600,14 +602,14 @@ pub(super) async fn try_seed_node(
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
             priority, dependencies, args_from, workflow_ctx_from, allow_failed_deps,
             join_type, min_success, task_options, max_retries, execution, good_until,
             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1::text, 'lifecycle.test', '{}', 'default',
@@ -765,6 +767,44 @@ pub(super) fn assert_refused<T: std::fmt::Debug>(
         }
         other => panic!("expected SQLSTATE {sqlstate}, got {other:?}"),
     }
+}
+
+/// The server error of a core statement that the database refused.
+pub(super) fn server_refusal<T: std::fmt::Debug>(result: Result<T, BrokerError>) -> DbError {
+    match result {
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })) => {
+            cause.server_error().clone()
+        }
+        other => panic!("expected a statement that the database refused, got {other:?}"),
+    }
+}
+
+/// Assert that a refusal has `sqlstate` and a message that contains
+/// `fragment`.
+pub(super) fn assert_server_refusal(error: &DbError, sqlstate: &str, fragment: &str) {
+    assert_eq!(error.code().code(), sqlstate, "{error}");
+    assert!(error.message().contains(fragment), "{error}");
+}
+
+/// The backend pid of the connection that runs a statement.
+static BACKEND_PID: TypedStatement =
+    TypedStatement::new("backend_pid", "SELECT pg_backend_pid() AS pid", &[]);
+
+/// Open (or reuse) the one connection of a core pool and return its backend
+/// pid. The connection is back in the pool when this returns.
+pub(super) async fn core_pool_backend_pid(pool: &CorePool) -> i32 {
+    let rows = pool
+        .query(
+            CheckoutClass::Reserved,
+            &BACKEND_PID.bind().finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("read the pooled backend pid");
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {}", rows.len());
+    };
+    row.try_get("pid").expect("the pid column")
 }
 
 /// The backend pid of a connection.
@@ -1193,6 +1233,34 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
         queue_max_concurrency: std::collections::HashMap::new(),
         hard_cap_mode: true,
         processes: 10,
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
+/// The request of one 0004 claim pass of `WORKER` over `queue`, with no
+/// cap: one `ISOLATED` budget of 10 that every class routes to.
+pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
         prefetch_buffer: 0,
         max_claim_per_worker: 0,
         max_claim_batch: 0,
