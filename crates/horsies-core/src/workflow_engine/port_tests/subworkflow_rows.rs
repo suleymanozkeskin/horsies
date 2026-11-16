@@ -428,7 +428,6 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
 /// row is kept.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #909"]
 async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no_child() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.later_node_prep_failure_child_workflow.v1";

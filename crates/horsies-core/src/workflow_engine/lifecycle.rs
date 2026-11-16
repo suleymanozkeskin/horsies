@@ -2,9 +2,8 @@ use std::collections::VecDeque;
 
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
+use crate::core::{OperationalErrorCode, WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -995,48 +994,53 @@ async fn reevaluate_and_enqueue(
                 crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
                     WorkflowError::Validation(format!("task identity mint failed: {error}"))
                 })?;
-            let max_retries = crate::workflow_engine::node_max_retries(
-                task.task_index,
-                &task.task_name,
-                task.task_options.as_deref(),
+            // The input with its `args_from` and workflow context members (a READY
+            // `workflow_ctx_from` node, reset at pause time, needs its context
+            // here too), the deadline, the retry limit and the facts. A node whose
+            // own data does not read fails alone, as Python's resume does through
+            // `enqueue_workflow_task` (`horsies/core/workflows/engine.py:634-705`).
+            let prepared = engine::preparation(
+                engine::prepare_ready_task_row(
+                    pool,
+                    workflow_id,
+                    engine::ReadyNodeData {
+                        task_index: task.task_index,
+                        task_name: &task.task_name,
+                        input: &task.input,
+                        args_from: &task.args_from,
+                        dependencies: &task.dependencies,
+                        workflow_ctx_from: task.workflow_ctx_from.as_deref(),
+                        task_options: task.task_options.as_deref(),
+                        queue_name: &task.queue_name,
+                    },
+                    retention,
+                )
+                .await,
             )?;
-
-            // Merge args_from if present.
-            let merged_input = merge_args_from_for_ready(
-                pool,
-                workflow_id,
-                &task.input,
-                &task.args_from,
-                &task.dependencies,
-            )
-            .await?;
-
-            // Inject workflow_ctx for ctx-capable nodes, matching the runtime
-            // promotion path. Without this, a READY `workflow_ctx_from` task
-            // (e.g. reset to READY at pause time) would be enqueued on resume
-            // with no upstream context and fail or produce a wrong result.
-            let merged_input = engine::inject_workflow_ctx_into_input(
-                pool,
-                workflow_id,
-                task.task_index,
-                &task.task_name,
-                task.workflow_ctx_from.as_deref(),
-                merged_input,
-            )
-            .await?;
-
-            let good_until = crate::workflow_engine::node_good_until(
-                task.task_index,
-                &task.task_name,
-                task.task_options.as_deref(),
-            )?;
-            let retention_class_key = retention.resolve_queue_class(&task.queue_name);
-            let facts = prepare_workflow_task_facts(
-                &merged_input,
-                task.task_options.as_deref(),
-                retention_class_key.as_deref(),
-            )
-            .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+            let prepared = match prepared {
+                engine::Preparation::Built(prepared) => prepared,
+                engine::Preparation::Refused(message) => {
+                    let step = engine::fail_workflow_node(
+                        pool,
+                        workflow_id,
+                        task.task_index,
+                        engine::node_not_prepared_error(
+                            workflow_id,
+                            task.task_index,
+                            OperationalErrorCode::WorkerSerializationError,
+                            message,
+                        ),
+                        registry,
+                        payload,
+                        retention,
+                    )
+                    .await?;
+                    match step {
+                        engine::PromotionStep::Continue => continue,
+                        engine::PromotionStep::WorkflowPaused => break,
+                    }
+                }
+            };
 
             // INSERT + LINK in a single transaction so a row whose LINK matches
             // 0 rows (workflow no longer RUNNING / task no longer READY) is
@@ -1049,12 +1053,12 @@ async fn reevaluate_and_enqueue(
                 .bind(&task.task_name)
                 .bind(&task.queue_name)
                 .bind(task.priority)
-                .bind(&merged_input)
+                .bind(&prepared.input)
                 .bind(&task.task_options)
-                .bind(facts.execution.as_str())
-                .bind(&facts.retention_class_key)
-                .bind(max_retries)
-                .bind(good_until)
+                .bind(prepared.facts.execution.as_str())
+                .bind(&prepared.facts.retention_class_key)
+                .bind(prepared.max_retries)
+                .bind(prepared.good_until)
                 .execute(&mut *tx)
                 .await?;
 
@@ -1124,7 +1128,7 @@ async fn enqueue_subworkflow_on_resume(
         match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
             Ok(child_depth) => child_depth,
             Err(error) => {
-                return engine::fail_subworkflow_node(
+                return engine::fail_workflow_node(
                     pool,
                     workflow_id,
                     task.task_index,
@@ -1133,7 +1137,8 @@ async fn enqueue_subworkflow_on_resume(
                     payload,
                     retention,
                 )
-                .await;
+                .await
+                .map(|_step| ());
             }
         };
     let Some(registered) = task
@@ -1141,7 +1146,7 @@ async fn enqueue_subworkflow_on_resume(
         .as_deref()
         .and_then(|key| registry.resolve_child_registration(key))
     else {
-        return engine::fail_subworkflow_node(
+        return engine::fail_workflow_node(
             pool,
             workflow_id,
             task.task_index,
@@ -1150,12 +1155,32 @@ async fn enqueue_subworkflow_on_resume(
             payload,
             retention,
         )
-        .await;
+        .await
+        .map(|_step| ());
+    };
+    // A child that cannot be built or started fails its node alone with
+    // WORKFLOW_ENQUEUE_FAILED (Python `horsies/core/workflows/engine.py:1180-1215`).
+    let fail_not_started = |message: String| {
+        engine::fail_workflow_node(
+            pool,
+            workflow_id,
+            task.task_index,
+            engine::node_not_prepared_error(
+                workflow_id,
+                task.task_index,
+                OperationalErrorCode::WorkflowEnqueueFailed,
+                format!(
+                    "Subworkflow build failed: {message} (workflow {spec_name}:{})",
+                    task.task_index
+                ),
+            ),
+            registry,
+            payload,
+            retention,
+        )
     };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
-    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
-
     let merged_input = merge_args_from_for_ready(
         pool,
         workflow_id,
@@ -1163,25 +1188,44 @@ async fn enqueue_subworkflow_on_resume(
         &task.args_from,
         &task.dependencies,
     )
-    .await?;
-    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
+    .await;
+    let built = engine::preparation(merged_input.and_then(|merged_input| {
+        let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
+        materialize_child_spec(registered, params, &merged_input, registry)
+    }))?;
+    let child_spec = match built {
+        engine::Preparation::Built(child_spec) => child_spec,
+        engine::Preparation::Refused(message) => {
+            return fail_not_started(message).await.map(|_step| ());
+        }
+    };
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
     // Start child workflow + link parent in a single transaction.
     let mut tx = pool.begin().await?;
 
-    let child_id = start_child_workflow_in_tx(
-        &mut tx,
-        &child_spec,
-        workflow_id,
-        task.task_index,
-        child_depth,
-        root_wf_id,
-        registry,
-        retention,
-    )
-    .await?;
+    let started = engine::preparation(
+        start_child_workflow_in_tx(
+            &mut tx,
+            &child_spec,
+            workflow_id,
+            task.task_index,
+            child_depth,
+            root_wf_id,
+            registry,
+            retention,
+        )
+        .await,
+    )?;
+    let child_id = match started {
+        engine::Preparation::Built(child_id) => child_id,
+        engine::Preparation::Refused(message) => {
+            // No child row stays: the child's writes roll back before the node fails.
+            tx.rollback().await?;
+            return fail_not_started(message).await.map(|_step| ());
+        }
+    };
 
     let link_result = sqlx::query(LINK_SUBWORKFLOW_SQL)
         .bind(&child_id)
