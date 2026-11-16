@@ -27,6 +27,22 @@ pub struct HistoryLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
+/// Expired leaves one candidate query of a pass reads at most.
+pub const MAX_PRUNE_CANDIDATES_PER_PASS: usize = 512;
+/// Leaves one pass detaches and drops at most, heartbeat leaves first.
+pub const MAX_PRUNE_LEAVES_PER_PASS: usize = 64;
+
+/// Whether a pass reached every expired leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneReach {
+    Complete,
+    /// A per-pass bound stopped the pass; the expired leaves left over are the
+    /// next pass's candidates.
+    Truncated,
+}
+
+/// One pruning pass. A leaf's error or refusal is reported and the pass goes
+/// on with the other leaves; a defect is not caught.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrunePass {
     pub finalized_leaves: Vec<String>,
@@ -34,6 +50,7 @@ pub struct PrunePass {
     pub history_swept: Vec<HistoryLeafSwept>,
     pub refusals: Vec<String>,
     pub errors: Vec<String>,
+    pub reach: PruneReach,
 }
 
 impl PrunePass {
@@ -90,18 +107,22 @@ const CLASS_RETENTION_SQL: &str = "CASE r.class_kind
              WHEN 'HEARTBEAT' THEN make_interval(hours => r.heartbeat_horizon_hours)
          END";
 
+/// The oldest expired leaves that `filter` selects, at most
+/// `MAX_PRUNE_CANDIDATES_PER_PASS`, and whether more remain.
 async fn expired_candidates(
     pool: &PgPool,
     filter: &str,
     bind_heartbeat: bool,
-) -> Result<Vec<LeafRef>, HistoryError> {
+) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
     let sql = format!(
         "SELECT c.leaf_name, c.class_key, c.lower_anchor, c.upper_anchor
          FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
            ON r.class_key = c.class_key
          WHERE {filter} AND c.dropped_at IS NULL
            AND c.upper_anchor + {CLASS_RETENTION_SQL} <= statement_timestamp()
-         ORDER BY c.lower_anchor"
+         ORDER BY c.lower_anchor
+         LIMIT {}",
+        MAX_PRUNE_CANDIDATES_PER_PASS + 1
     );
     let rows: Vec<(String, String, DateTime<Utc>, DateTime<Utc>)> = if bind_heartbeat {
         sqlx::query_as(&sql)
@@ -111,27 +132,35 @@ async fn expired_candidates(
     } else {
         sqlx::query_as(&sql).fetch_all(pool).await?
     };
-    rows.into_iter()
+    let reach = match rows.len() > MAX_PRUNE_CANDIDATES_PER_PASS {
+        true => PruneReach::Truncated,
+        false => PruneReach::Complete,
+    };
+    let leaves = rows
+        .into_iter()
+        .take(MAX_PRUNE_CANDIDATES_PER_PASS)
         .map(|(name, class, lower, upper)| {
             let bounds = LeafBounds::new(lower, upper)
                 .map_err(|error| HistoryError::contract(error.to_string()))?;
             LeafRef::new(name, class, bounds)
                 .map_err(|error| HistoryError::contract(error.to_string()))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((leaves, reach))
 }
 
 async fn finalize_interrupted_detaches<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let candidates = match expired_candidates(pool, EXPIRED_FINITE_FILTER, false).await {
+) -> (Vec<String>, Vec<String>, Vec<String>, PruneReach) {
+    let (candidates, reach) = match expired_candidates(pool, EXPIRED_FINITE_FILTER, false).await {
         Ok(candidates) => candidates,
         Err(error) => {
             return (
                 Vec::new(),
                 Vec::new(),
                 vec![format!("discover finalize: {error}")],
+                PruneReach::Complete,
             )
         }
     };
@@ -147,12 +176,20 @@ async fn finalize_interrupted_detaches<P: LoaderPublication>(
                             Vec::new(),
                             Vec::new(),
                             vec![format!("inspect {}: {error}", leaf.leaf_name())],
+                            reach,
                         );
                     }
                 }
             }
         }
-        Err(error) => return (Vec::new(), Vec::new(), vec![format!("connect: {error}")]),
+        Err(error) => {
+            return (
+                Vec::new(),
+                Vec::new(),
+                vec![format!("connect: {error}")],
+                reach,
+            )
+        }
     }
     let mut finalized = Vec::new();
     let mut refusals = Vec::new();
@@ -176,17 +213,32 @@ async fn finalize_interrupted_detaches<P: LoaderPublication>(
             Err(error) => errors.push(format!("finalize {}: {error}", leaf.leaf_name())),
         }
     }
-    (finalized, refusals, errors)
+    (finalized, refusals, errors, reach)
 }
 
+/// Detach and drop at most `max_leaves` expired period-class leaves, oldest
+/// first. `Truncated` when more expired leaves remain for the next pass.
 pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
-) -> (Vec<HistoryLeafSwept>, Vec<String>) {
-    let candidates = match expired_candidates(pool, EXPIRED_HISTORY_FILTER, true).await {
-        Ok(candidates) => candidates,
-        Err(error) => return (Vec::new(), vec![format!("discover history: {error}")]),
+    max_leaves: usize,
+) -> (Vec<HistoryLeafSwept>, Vec<String>, PruneReach) {
+    let (mut candidates, candidate_reach) =
+        match expired_candidates(pool, EXPIRED_HISTORY_FILTER, true).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    vec![format!("discover history: {error}")],
+                    PruneReach::Complete,
+                )
+            }
+        };
+    let reach = match (candidate_reach, candidates.len() > max_leaves) {
+        (PruneReach::Truncated, _) | (PruneReach::Complete, true) => PruneReach::Truncated,
+        (PruneReach::Complete, false) => PruneReach::Complete,
     };
+    candidates.truncate(max_leaves);
     let mut swept = Vec::new();
     let mut errors = Vec::new();
     for leaf in candidates {
@@ -238,7 +290,7 @@ pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
             Err(error) => errors.push(format!("{}: {error}", leaf.leaf_name())),
         }
     }
-    (swept, errors)
+    (swept, errors, reach)
 }
 
 /// Prune expired partitions through a direct or session-capable pool.
@@ -246,17 +298,24 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
 ) -> PrunePass {
-    let (finalized_leaves, mut refusals, mut errors) =
+    let (finalized_leaves, mut refusals, mut errors, finalize_reach) =
         finalize_interrupted_detaches(pool, publisher).await;
-    let heartbeat_swept = match sweep_expired_heartbeat_leaves(pool, publisher).await {
-        Ok(entries) => entries,
-        Err(error) => {
-            errors.push(format!("heartbeat sweep: {error}"));
-            Vec::new()
-        }
-    };
-    let (history_swept, history_errors) = sweep_expired_history_leaves(pool, publisher).await;
+    let (heartbeat_swept, heartbeat_reach) =
+        match sweep_expired_heartbeat_leaves(pool, publisher, MAX_PRUNE_LEAVES_PER_PASS).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                errors.push(format!("heartbeat sweep: {error}"));
+                (Vec::new(), PruneReach::Complete)
+            }
+        };
+    let history_budget = MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat_swept.len());
+    let (history_swept, history_errors, history_reach) =
+        sweep_expired_history_leaves(pool, publisher, history_budget).await;
     errors.extend(history_errors);
+    let reach = match (finalize_reach, heartbeat_reach, history_reach) {
+        (PruneReach::Complete, PruneReach::Complete, PruneReach::Complete) => PruneReach::Complete,
+        _ => PruneReach::Truncated,
+    };
     for entry in heartbeat_swept
         .iter()
         .map(|entry| (entry.leaf_name.as_str(), &entry.detach, entry.drop.as_ref()))
@@ -278,5 +337,6 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
         history_swept,
         refusals,
         errors,
+        reach,
     }
 }

@@ -593,6 +593,7 @@ mod p7_maintenance_tests {
             .contains(history_leaves[0].leaf_name()));
         assert_eq!(pruning["errors"].as_array().unwrap().len(), 0);
         assert_eq!(pruning["key_reservations"]["state"], "complete");
+        assert_eq!(pruning["reach"], "complete");
         let phase2 = snapshot.phase2_recovery.unwrap();
         assert_eq!(phase2["considered"], 0);
         assert_eq!(phase2["applied"], 0);
@@ -1267,6 +1268,10 @@ async fn run_reaper_pass(
             "dropped": prune.dropped_count(),
             "refusals": prune.refusals,
             "errors": prune.errors,
+            "reach": match prune.reach {
+                PruneReach::Complete => "complete",
+                PruneReach::Truncated => "truncated",
+            },
             "key_reservations": key_reservations,
         }));
         *next_partition_maintenance = tokio::time::Instant::now()

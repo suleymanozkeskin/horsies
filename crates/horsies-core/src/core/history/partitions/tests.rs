@@ -1841,40 +1841,6 @@ async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() 
 
 #[tokio::test]
 #[serial]
-async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let mut holder = database
-        .pool
-        .begin()
-        .await
-        .expect("begin coverage gate holder");
-    let held: bool = sqlx::query_scalar(
-        "SELECT pg_try_advisory_xact_lock(
-             hashtextextended('horsies:partition-coverage:v1', 1601)
-         )",
-    )
-    .fetch_one(holder.as_mut())
-    .await
-    .expect("hold coverage maintenance gate");
-    assert!(held);
-
-    let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("check cold startup under a busy coverage gate");
-    let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
-        panic!("missing current heartbeat coverage must refuse startup");
-    };
-    assert_eq!(failure.stage, "coverage_gate_busy");
-    assert!(!failure.heartbeat_covered_now);
-    holder
-        .rollback()
-        .await
-        .expect("release coverage gate holder");
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
 async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
@@ -1929,6 +1895,40 @@ async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
         .await
         .expect("read repaired index");
     assert!(repaired);
+    holder
+        .rollback()
+        .await
+        .expect("release coverage gate holder");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let mut holder = database
+        .pool
+        .begin()
+        .await
+        .expect("begin coverage gate holder");
+    let held: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(
+             hashtextextended('horsies:partition-coverage:v1', 1601)
+         )",
+    )
+    .fetch_one(holder.as_mut())
+    .await
+    .expect("hold coverage maintenance gate");
+    assert!(held);
+
+    let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("check cold startup under a busy coverage gate");
+    let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
+        panic!("missing current heartbeat coverage must refuse startup");
+    };
+    assert_eq!(failure.stage, "coverage_gate_busy");
+    assert!(!failure.heartbeat_covered_now);
     holder
         .rollback()
         .await
@@ -2273,9 +2273,10 @@ async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
     .expect("heartbeat probe index");
     assert!(index_ddl.contains("(task_id, role, sent_at DESC)"));
     transaction.commit().await.expect("commit heartbeat setup");
-    let swept = sweep_expired_heartbeat_leaves(&database.pool, &UnpublishedLoader)
+    let (swept, reach) = sweep_expired_heartbeat_leaves(&database.pool, &UnpublishedLoader, 64)
         .await
         .expect("sweep expired heartbeats");
+    assert_eq!(reach, PruneReach::Complete);
     assert_eq!(swept.len(), 1);
     assert_eq!(swept[0].leaf_name, expired.leaf_name());
     assert!(matches!(swept[0].drop, Some(LeafDrop::Dropped { .. })));
@@ -2496,6 +2497,40 @@ async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
     assert_eq!(pass.finalized_leaves, vec![leaf.leaf_name().to_owned()]);
     assert_eq!(pass.dropped_count(), 1);
     assert!(pass.errors.is_empty(), "prune errors: {:?}", pass.errors);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn history_sweep_stops_at_its_leaf_bound_and_reports_truncation() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let base =
+        utc_day_start(database_now(&mut clock).await.expect("database now") - Duration::days(8));
+    drop(clock);
+    for offset in 0..3 {
+        let leaf = leaf_ref(&parent, class_key, base + Duration::days(offset));
+        assert!(matches!(
+            create_leaf(&database.pool, &leaf).await,
+            LeafCreation::Created { .. }
+        ));
+    }
+    let (first, first_errors, first_reach) =
+        sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 2).await;
+    assert!(first_errors.is_empty(), "{first_errors:?}");
+    assert_eq!(first.len(), 2);
+    assert_eq!(first_reach, PruneReach::Truncated);
+    let (second, second_errors, second_reach) =
+        sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 2).await;
+    assert!(second_errors.is_empty(), "{second_errors:?}");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second_reach, PruneReach::Complete);
+    assert!(first
+        .iter()
+        .chain(second.iter())
+        .all(|entry| matches!(entry.drop, Some(LeafDrop::Dropped { .. }))));
     database.drop().await;
 }
 

@@ -9,6 +9,7 @@ use crate::core::history::commands::{
 };
 use crate::core::history::ddl::runtime_names::render_daily_leaf_ddl;
 use crate::core::history::errors::HistoryError;
+use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES,
 };
@@ -461,11 +462,14 @@ pub struct HeartbeatLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
-/// Sweep expired heartbeat leaves through a direct or session-capable pool.
+/// Sweep at most `max_leaves` expired heartbeat leaves, oldest first, through
+/// a direct or session-capable pool. `Truncated` when more expired leaves
+/// remain for the next pass.
 pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
-) -> Result<Vec<HeartbeatLeafSwept>, HistoryError> {
+    max_leaves: usize,
+) -> Result<(Vec<HeartbeatLeafSwept>, PruneReach), HistoryError> {
     let sql = format!(
         "SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
          FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
@@ -474,12 +478,20 @@ pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
            AND c.lower_bound_kind = '{AT_LOWER_BOUND_KIND}' AND c.dropped_at IS NULL
            AND c.upper_anchor + make_interval(hours => r.heartbeat_horizon_hours)
                <= statement_timestamp()
-         ORDER BY c.lower_anchor"
+         ORDER BY c.lower_anchor
+         LIMIT $2"
     );
-    let rows: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&sql)
+    let fetch_limit = i64::try_from(max_leaves.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut rows: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&sql)
         .bind(HEARTBEAT_CLASS_KEY)
+        .bind(fetch_limit)
         .fetch_all(pool)
         .await?;
+    let reach = match rows.len() > max_leaves {
+        true => PruneReach::Truncated,
+        false => PruneReach::Complete,
+    };
+    rows.truncate(max_leaves);
     let mut swept = Vec::with_capacity(rows.len());
     for (leaf_name, lower, upper) in rows {
         let leaf = LeafRef::new(
@@ -525,5 +537,5 @@ pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
             drop,
         });
     }
-    Ok(swept)
+    Ok((swept, reach))
 }
