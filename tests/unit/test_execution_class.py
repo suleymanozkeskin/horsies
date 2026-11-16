@@ -629,8 +629,7 @@ class TestWorkflowPaths:
     def _promotion_arguments(task_options: str | None) -> dict[str, Any]:
         return {
             'task_name': 'node.task',
-            'task_args': None,
-            'task_kwargs': None,
+            'node_input': '{}',
             'queue_name': 'default',
             'priority': 50,
             'args_from': None,

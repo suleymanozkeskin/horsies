@@ -147,7 +147,7 @@ class TestBatchedPromotionShape:
                 text("""
                     SELECT wt.task_index, wt.status, wt.started_at,
                            t.id AS task_id, t.status AS task_status,
-                           t.enqueue_sha, t.kwargs
+                           t.command_fingerprint, t.input
                     FROM horsies_workflow_tasks wt
                     JOIN horsies_tasks t ON t.id = wt.task_id
                     WHERE wt.workflow_id = :wf AND wt.task_index > 0
@@ -161,8 +161,8 @@ class TestBatchedPromotionShape:
             assert row.status == 'ENQUEUED'
             assert row.started_at is not None
             assert row.task_status == 'PENDING'  # claimable
-            assert row.enqueue_sha
-            assert '__h_workflow_meta__' in row.kwargs
+            assert row.command_fingerprint is None  # workflow tasks carry none
+            assert '__h_workflow_meta__' in row.input
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -676,7 +676,7 @@ class TestMultiLevelDag:
         kwargs_of_e = (
             await session.execute(
                 text("""
-                    SELECT t.kwargs FROM horsies_tasks t
+                    SELECT t.input FROM horsies_tasks t
                     JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
                     WHERE wt.workflow_id = :wf AND wt.task_index = 4
                 """),

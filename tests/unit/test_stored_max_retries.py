@@ -162,7 +162,7 @@ class TestWorkflowPaths:
             )
 
     def test_the_fast_path_root_stores_a_valid_limit(self) -> None:
-        max_retries, _, _ = root_retry_and_deadline(
+        max_retries, _ = root_retry_and_deadline(
             json.dumps({'retry_policy': _policy(max_retries=4)}), 'root'
         )
         assert max_retries == 4
@@ -171,8 +171,7 @@ class TestWorkflowPaths:
     async def test_node_promotion_refuses_a_negative_limit(self) -> None:
         arguments: dict[str, Any] = {
             'task_name': 'node.task',
-            'task_args': None,
-            'task_kwargs': None,
+            'node_input': '{}',
             'queue_name': 'default',
             'priority': 50,
             'args_from': None,

@@ -185,7 +185,7 @@ class TestTransactionValueError:
         defect = ValueError(DEFECT_MARKER)
 
         with patch(
-            'horsies.core.workflows.lifecycle.enqueue_fingerprint',
+            'horsies.core.workflows.lifecycle.workflow_task_row_params',
             side_effect=defect,
         ):
             with pytest.raises(ValueError) as exc_info:

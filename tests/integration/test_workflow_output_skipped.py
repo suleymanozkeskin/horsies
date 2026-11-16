@@ -418,7 +418,7 @@ class TestOutputNodeUnderSuccessPolicy:
         waiting = await self._node(session, handle.workflow_id, 1)
         assert waiting.status == 'ENQUEUED'
         task_row = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :id'),
+            text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
         )
         injected = json.loads(task_row.one().kwargs)['upstream']
@@ -456,7 +456,7 @@ class TestOutputNodeUnderSuccessPolicy:
 
         waiting = await self._node(session, handle.workflow_id, 1)
         task_row = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :id'),
+            text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
         )
         context = json.loads(task_row.one().kwargs)['__h_workflow_ctx__']
@@ -760,7 +760,7 @@ class TestOutputNodeUnderSuccessPolicy:
         waiting = await self._node(session, workflow_id, 1)
         assert waiting.status == 'ENQUEUED'
         task_row = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :id'),
+            text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
         )
         injected = json.loads(task_row.one().kwargs)['upstream']
