@@ -27,7 +27,10 @@ use crate::core::history::maintenance::coverage::{
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::registry::workflow::RegisteredWorkflowSpec;
+use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::on_workflow_task_complete;
@@ -46,6 +49,12 @@ pub(super) const POISON_TASK_OPTIONS: &str = "[]";
 /// object (Python's `BAD_POLICY`).
 pub(super) fn poison_success_policy() -> serde_json::Value {
     serde_json::json!({"cases": [1]})
+}
+
+/// The shared migrated database. A test on it must not leave a RUNNING
+/// workflow with stuck work, because other tests run global passes on it.
+pub(super) async fn shared_pool() -> PgPool {
+    crate::broker::terminalization_matrix::migrated_pool().await
 }
 
 /// Prefix of the databases that [`IsolatedDatabase`] creates.
@@ -448,6 +457,22 @@ impl NodeSeed {
         self.task_id = Some(task_id);
         self
     }
+
+    /// Injects the result of dependency `index` under input member `key`.
+    pub(super) fn args_from(mut self, key: &str, index: i32) -> Self {
+        self.args_from = Some(serde_json::json!({ key: index }));
+        self
+    }
+
+    pub(super) fn allow_failed_deps(mut self) -> Self {
+        self.allow_failed_deps = true;
+        self
+    }
+
+    pub(super) fn result(mut self, result: String) -> Self {
+        self.result = Some(result);
+        self
+    }
 }
 
 /// Inserts the node row and returns its row id.
@@ -622,6 +647,47 @@ pub(super) fn spec(name: &str, tasks: Vec<AnyNode>) -> WorkflowSpec {
     }
 }
 
+/// A sub-workflow node at `index` whose child is `child`, resolved by the
+/// child's definition key. It stores the child's name as its task name and
+/// gives no params, as a Python `SubWorkflowNode` without params.
+pub(super) fn sub_workflow_node(index: usize, child: &WorkflowSpec) -> AnyNode {
+    AnyNode {
+        task_name: child.name.clone(),
+        queue: None,
+        priority: None,
+        is_subworkflow: true,
+        sub_definition_key: child.definition_key.clone(),
+        ..task_node(index, &child.name)
+    }
+}
+
+/// A policy whose cases each require the listed node indexes.
+pub(super) fn required(cases: &[&[usize]]) -> SuccessPolicy {
+    SuccessPolicy {
+        cases: cases
+            .iter()
+            .map(|indexes| SuccessCase {
+                required_indices: indexes.to_vec(),
+            })
+            .collect(),
+        optional_indices: None,
+    }
+}
+
+/// A registry that resolves each of `children` by its definition key.
+pub(super) fn registry_of(children: &[WorkflowSpec]) -> WorkflowSpecRegistry {
+    let mut registry = WorkflowSpecRegistry::new();
+    for child in children {
+        registry
+            .register(RegisteredWorkflowSpec {
+                spec: child.clone(),
+                spec_builder: None,
+            })
+            .unwrap_or_else(|error| panic!("register child '{}': {error}", child.name));
+    }
+    registry
+}
+
 /// A broker on `pool` for the start and the handle.
 pub(super) fn broker(pool: &PgPool) -> Arc<PostgresBroker> {
     Arc::new(PostgresBroker::from_pool(pool.clone()))
@@ -737,6 +803,28 @@ pub(super) async fn finish_task(
     .expect("phase 2 of the workflow task");
 }
 
+/// Finishes the task of node `task_index` of `workflow_id` (see [`finish_task`])
+/// and returns the task id.
+pub(super) async fn finish_node(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_index: i32,
+    outcome: &TaskResult<serde_json::Value>,
+    registry: &WorkflowSpecRegistry,
+) -> Uuid {
+    let task_id = node(pool, workflow_id, task_index)
+        .await
+        .task_id
+        .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} has no task"));
+    finish_task(pool, task_id, outcome, registry).await;
+    task_id
+}
+
+/// A failure outcome with a user error code.
+pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Value> {
+    TaskResult::Err(TaskError::new(error_code, message))
+}
+
 /// A success outcome with `value`.
 pub(super) fn ok(value: serde_json::Value) -> TaskResult<serde_json::Value> {
     TaskResult::Ok(value)
@@ -797,6 +885,61 @@ pub(super) async fn workflow(pool: &PgPool, workflow_id: Uuid) -> WorkflowRow {
 
 pub(super) async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
     workflow(pool, workflow_id).await.status
+}
+
+/// The child workflow that node `task_index` of `workflow_id` started.
+pub(super) async fn child_of(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> Uuid {
+    node(pool, workflow_id, task_index)
+        .await
+        .sub_workflow_id
+        .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} started no child"))
+}
+
+/// The input of the live task row of node `task_index`, as JSON.
+pub(super) async fn node_task_input(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_index: i32,
+) -> serde_json::Value {
+    let task_id = node(pool, workflow_id, task_index)
+        .await
+        .task_id
+        .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} has no task"));
+    let input: String = sqlx::query_scalar("SELECT input FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("read the input of task {task_id}: {error}"));
+    serde_json::from_str(&input)
+        .unwrap_or_else(|error| panic!("task input does not decode: {error}: {input}"))
+}
+
+/// The result envelope that an `args_from` member carries: Python's wrap
+/// (`__h_taskresult_envelope__`) holds it in `inner`.
+pub(super) fn args_from_inner(
+    input: &serde_json::Value,
+    key: &str,
+) -> TaskResult<serde_json::Value> {
+    serde_json::from_value(input[key]["inner"].clone()).unwrap_or_else(|error| {
+        panic!("args_from member '{key}' has no inner envelope: {error}: {input}")
+    })
+}
+
+/// The entry of `node_id` in the workflow context of a task input.
+pub(super) fn ctx_result(
+    input: &serde_json::Value,
+    node_id: &str,
+) -> TaskResult<serde_json::Value> {
+    serde_json::from_value(input[WORKFLOW_CTX_KWARG]["results_by_id"][node_id].clone())
+        .unwrap_or_else(|error| panic!("context has no envelope for '{node_id}': {error}: {input}"))
+}
+
+/// The error of a result that must be an error.
+pub(super) fn error_of(result: &TaskResult<serde_json::Value>) -> &TaskError {
+    match result {
+        TaskResult::Err(error) => error,
+        TaskResult::Ok(value) => panic!("expected an error, got ok {value}"),
+    }
 }
 
 /// The error code of a task error, as text.
