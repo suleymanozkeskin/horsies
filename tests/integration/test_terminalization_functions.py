@@ -96,17 +96,21 @@ async def _schema(broker: PostgresBroker) -> None:
 
 _SEED_SQL = text("""
     INSERT INTO horsies_tasks (
-        id, task_name, queue_name, status, args, kwargs, enqueue_sha,
-        is_workflow_task, claimed, claimed_by_worker_id, claimed_at, started_at,
-        retention_class_key, command_fingerprint_version, command_fingerprint,
-        retain_rerun_input, prepared_rerun_input_disposition
-    )
-    VALUES (
-        CAST(:id AS uuid), 'terminalization.test', 'default', :status, '[]', '{}',
-        repeat('0', 64), :is_workflow_task, :claimed,
-        :worker_id, :claimed_at, NOW(),
-        :retention_class_key, 1, sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-        FALSE, 'DECLINED_BY_POLICY'
+        id, task_name, queue_name, status, input, is_workflow_task,
+        claimed_by_worker_id, claimed_at, started_at, retention_class_key,
+        command_fingerprint_version, command_fingerprint, retain_rerun_input, priority,
+        execution, enqueued_at, created_at, updated_at, retry_count, max_retries,
+        sent_at, claim_expires_at, worker_pid, worker_hostname, worker_process_name
+    ) VALUES (
+        CAST(:id AS uuid), 'terminalization.test', 'default', :status, '{}',
+        :is_workflow_task, :worker_id, :claimed_at, NOW(), :retention_class_key,
+        CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+        CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')) END,
+        FALSE, 100, 'ISOLATED', NOW(), NOW(), NOW(), 0, 0, NOW(),
+        CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+        CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+        CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+        CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
     )
 """)
 
@@ -128,7 +132,6 @@ async def _seed(
             'worker_id': worker_id,
             'claimed_at': claimed_at,
             'is_workflow_task': is_workflow_task,
-            'claimed': worker_id is not None,
             'retention_class_key': DEFAULT_RETENTION_CLASS_KEY,
         },
     )
@@ -145,9 +148,9 @@ async def _requeued_after_failed_attempt(
     """Leave the row and history where an automatic retry leaves them.
 
     The retry path records attempt 1 as FAILED with will_retry and advances
-    retry_count. The requeue statements clear error_code but not
-    failed_reason — that residue is what the terminal writers must not carry
-    into the terminal record.
+    retry_count. The attempt's failed reason is what the terminal writers
+    must not carry into the terminal record; the live row stores no failed
+    reason.
     """
     await session.execute(
         text("""
@@ -167,11 +170,10 @@ async def _requeued_after_failed_attempt(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET retry_count = 1,
-                failed_reason = :reason
+            SET retry_count = 1
             WHERE id = :id
         """),
-        {'id': task_id, 'reason': failed_reason},
+        {'id': task_id},
     )
     await session.commit()
 
@@ -271,20 +273,13 @@ def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused
     )
 
 
-class TestTerminalAtInvariant:
-    @pytest.mark.parametrize(
-        ('status', 'terminal_at'),
-        [
-            pytest.param('CANCELLED', None, id='terminal-requires-timestamp'),
-            pytest.param('PENDING', GENERATION, id='live-rejects-timestamp'),
-        ],
-    )
-    async def test_status_and_terminal_at_must_agree(
+class TestLiveStatusInvariant:
+    async def test_the_live_table_refuses_a_terminal_status(
         self,
         session: AsyncSession,
-        status: str,
-        terminal_at: datetime | None,
     ) -> None:
+        """A terminal task leaves the live table; the live row cannot hold a
+        terminal status (CHECK horsies_tasks_status_live)."""
         task_id = await _seed(
             session,
             status='PENDING',
@@ -292,36 +287,25 @@ class TestTerminalAtInvariant:
             claimed_at=None,
         )
 
-        with pytest.raises(
-            IntegrityError,
-            match='ck_horsies_tasks_terminal_at_terminal_only',
-        ):
+        with pytest.raises(IntegrityError, match='horsies_tasks_status_live'):
             await session.execute(
                 text("""
                     UPDATE horsies_tasks
-                    SET status = :status, terminal_at = :terminal_at
+                    SET status = 'CANCELLED'
                     WHERE id = :id
                 """),
-                {
-                    'id': task_id,
-                    'status': status,
-                    'terminal_at': terminal_at,
-                },
+                {'id': task_id},
             )
             await session.commit()
         await session.rollback()
 
         row = (
             await session.execute(
-                text(
-                    'SELECT status, terminal_at FROM horsies_tasks '
-                    'WHERE id = :id'
-                ),
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
                 {'id': task_id},
             )
         ).one()
         assert row.status == 'PENDING'
-        assert row.terminal_at is None
 
 
 class TestAppliedTransitions:
@@ -573,7 +557,7 @@ class TestRefusals:
         await session.execute(
             text("""
                 UPDATE horsies_tasks
-                SET claimed_by_worker_id = NULL, claimed = FALSE
+                SET claimed_by_worker_id = NULL
                 WHERE id = :id
             """),
             {'id': task_id},

@@ -582,9 +582,9 @@ async def test_stale_claimed_requeued_and_completed(
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW() - INTERVAL '10 seconds',
-                    claimed_by_worker_id = :dead_worker_id
+                    claimed_by_worker_id = :dead_worker_id,
+                    claim_expires_at = NOW() + INTERVAL '5 minutes'
                 WHERE id = :task_id
             """),
             {'task_id': task_id, 'dead_worker_id': dead_worker_id},
@@ -1182,7 +1182,6 @@ async def test_softcap_expired_claim_requeued(
                     text("""
                         UPDATE horsies_tasks
                         SET status = 'CLAIMED',
-                            claimed = TRUE,
                             claimed_at = NOW() - INTERVAL '10 seconds',
                             claimed_by_worker_id = :dead_worker_id,
                             claim_expires_at = NOW() - INTERVAL '5 seconds'

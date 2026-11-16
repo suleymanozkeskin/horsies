@@ -147,24 +147,28 @@ async def _task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-              (id, task_name, queue_name, priority, status, enqueued_at,
-               claimed, claimed_by_worker_id, claimed_at, claim_expires_at,
-               started_at, is_workflow_task, enqueue_sha, created_at,
-               updated_at, retry_count, max_retries, retention_class_key,
-               command_fingerprint_version, command_fingerprint,
-               retain_rerun_input, prepared_rerun_input_disposition,
-               execution)
-            VALUES
-              (:id, 'class_task', :queue, :priority, CAST(:status AS varchar),
-               now() + make_interval(secs => CAST(:due_in AS integer)),
-               :claimed, CAST(:owner AS varchar),
-               CASE WHEN CAST(:owner AS varchar) IS NULL THEN NULL ELSE now() END,
-               CASE WHEN CAST(:lease AS integer) IS NULL THEN NULL
+              (
+                  id, task_name, queue_name, priority, input, status, enqueued_at,
+                  claimed_by_worker_id, claimed_at, claim_expires_at, started_at,
+                  is_workflow_task, created_at, updated_at, retry_count, max_retries,
+                  retention_class_key, command_fingerprint_version,
+                  command_fingerprint, retain_rerun_input, execution, sent_at,
+                  worker_pid, worker_hostname, worker_process_name
+              ) VALUES (
+                  :id, 'class_task', :queue, :priority, '{}', CAST(:status AS varchar),
+                  now() + make_interval(secs => CAST(:due_in AS integer)),
+                  CAST(:owner AS varchar),
+                  CASE WHEN CAST(:owner AS varchar) IS NULL THEN NULL ELSE now() END,
+                  CASE WHEN CAST(:lease AS integer) IS NULL THEN NULL
                     ELSE now() + make_interval(secs => CAST(:lease AS integer)) END,
-               CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN now() ELSE NULL END,
-               false, :sha, now(), now(), 0, 0, 'standard_30d', 1,
-               sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-               false, 'DECLINED_BY_POLICY', :execution)
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN now() ELSE NULL END,
+                  false, now(), now(), 0, 0, 'standard_30d', 1,
+                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')), false,
+                  :execution, NOW(),
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+              )
         """),
         {
             'id': task_id,
@@ -172,10 +176,8 @@ async def _task(
             'priority': priority,
             'status': status,
             'due_in': due_in_s,
-            'claimed': owner is not None,
             'owner': owner,
             'lease': lease_s,
-            'sha': '0' * 64,
             'execution': execution.value,
         },
     )
@@ -650,7 +652,7 @@ async def _plan(session: AsyncSession, statement: Any, params: dict[str, Any]) -
 
 @pytest.mark.usefixtures('empty_fleet')
 class TestClassReadsUseTheClaimIndex:
-    """Both skip scans probe idx_horsies_tasks_claim_pending_class.
+    """Both skip scans probe horsies_tasks_claim_pending.
 
     20,000 PENDING rows over 4 queues, 3 classes and 100 priorities, so the
     planner picks on its own, without ``enable_seqscan = off``.
@@ -664,20 +666,19 @@ class TestClassReadsUseTheClaimIndex:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
-                  (id, task_name, queue_name, priority, status, enqueued_at,
-                   claimed, is_workflow_task, enqueue_sha, created_at,
-                   updated_at, retry_count, max_retries, retention_class_key,
-                   command_fingerprint_version, command_fingerprint,
-                   retain_rerun_input, prepared_rerun_input_disposition,
-                   execution)
-                SELECT gen_random_uuid(), 'class_task', 'q' || (g % 4),
-                       1 + (g % 100), 'PENDING', now() - g * interval '1 ms',
-                       false, false, repeat('0', 64), now(), now(), 0, 0,
-                       'standard_30d', 1,
-                       sha256(convert_to(CAST(g AS text), 'UTF8')), false,
-                       'DECLINED_BY_POLICY',
-                       (ARRAY['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'])[1 + g % 3]
-                FROM generate_series(1, 20000) AS g
+                  (
+                      id, task_name, queue_name, priority, input, status, enqueued_at,
+                      is_workflow_task, created_at, updated_at, retry_count,
+                      max_retries, retention_class_key, command_fingerprint_version,
+                      command_fingerprint, retain_rerun_input, execution, sent_at
+                  )
+                  SELECT gen_random_uuid(), 'class_task', 'q' || (g % 4), 1 + (g % 100),
+                      '{}', 'PENDING', now() - g * interval '1 ms', false, now(),
+                      now(), 0, 0, 'standard_30d', 1,
+                      sha256(convert_to(CAST(g AS text), 'UTF8')), false,
+                      (ARRAY['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'])[1 + g % 3],
+                      NOW()
+                  FROM generate_series(1, 20000) AS g
             """),
         )
         await session.commit()
@@ -688,5 +689,5 @@ class TestClassReadsUseTheClaimIndex:
         heads = await _plan(session, _PENDING_HEADS_SQL, {'head_limit': 10})
 
         for plan in (streams, heads):
-            assert 'idx_horsies_tasks_claim_pending_class' in plan
+            assert 'horsies_tasks_claim_pending' in plan
             assert '"Seq Scan"' not in plan

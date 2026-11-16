@@ -19,7 +19,7 @@ from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
     _initialize_worker_pool,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import listener_of
 
 pytestmark = [pytest.mark.integration]
@@ -35,32 +35,30 @@ async def _seed_claimed_workflow_task(
 ) -> str:
     """Insert a CLAIMED workflow task owned by WORKER_ID."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='node_handoff')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='node_handoff')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, claimed_at,
-                 claimed_by_worker_id, enqueue_sha, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'node_handoff', 'default', 100, '[]', '{}',
-                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
-                 TRUE, 0, 0, :claimed_at,
-                 :worker_id, :sha, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    claimed_at, claimed_by_worker_id, is_workflow_task,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution,
+                    claim_expires_at
+                ) VALUES (
+                    :id, 'node_handoff', 'default', 100, '{}', 'CLAIMED', :sent_at,
+                    NOW(), NOW(), NOW(), 0, 0, :claimed_at, :worker_id, TRUE,
+                    'standard_30d', NULL, NULL, FALSE, 'ISOLATED',
+                    NOW() + INTERVAL '5 minutes'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
             'claimed_at': claimed_at,
             'worker_id': WORKER_ID,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     return task_id

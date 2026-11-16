@@ -83,8 +83,7 @@ async def test_none_inherits_and_explicit_overrides(
                 for row in (
                     await connection.execute(
                         text(
-                            'SELECT id, retain_rerun_input, '
-                            'prepared_rerun_input_disposition '
+                            'SELECT id, retain_rerun_input '
                             'FROM horsies_tasks'
                         )
                     )
@@ -94,10 +93,5 @@ async def test_none_inherits_and_explicit_overrides(
         await engine.dispose()
 
     assert rows[inherited].retain_rerun_input is True
-    assert rows[inherited].prepared_rerun_input_disposition == 'INLINE'
     assert rows[declined].retain_rerun_input is False
-    assert (
-        rows[declined].prepared_rerun_input_disposition
-        == 'DECLINED_BY_POLICY'
-    )
     assert rows[explicit].retain_rerun_input is True

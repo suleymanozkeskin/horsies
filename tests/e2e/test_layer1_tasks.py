@@ -26,7 +26,7 @@ from horsies.core.types.result import is_ok, is_err
 from horsies.core.models.task_send_types import TaskSendResult, TaskSendSuppressed
 from sqlalchemy import text
 
-from tests.e2e.conftest import compute_test_enqueue_sha
+from tests.e2e.conftest import compute_test_command_fingerprint
 from tests.e2e.helpers.assertions import (
     assert_ok,
     assert_err,
@@ -963,29 +963,34 @@ def test_library_error_code_in_user_task() -> None:
 async def test_argument_deserialization_error(
     broker: PostgresBroker, app: Horsies,
 ) -> None:
-    """L1.7.7: Corrupted args JSON triggers WORKER_SERIALIZATION_ERROR."""
+    """L1.7.7: A corrupted stored input triggers WORKER_SERIALIZATION_ERROR."""
     task_id = str(uuid4())
-    # Store args as a JSON string instead of a JSON array
-    sent_at, sha = compute_test_enqueue_sha(
-        task_name='e2e_simple', args_json='"not_a_list"',
+    # Store the input as a JSON string instead of a JSON object
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name='e2e_simple', input_json='"not_a_list"',
     )
     async with current_resources(broker).session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
-                    (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
-                     claimed, retry_count, max_retries, enqueue_sha,
-                     retention_class_key, command_fingerprint_version,
-                     command_fingerprint, retain_rerun_input,
-                     prepared_rerun_input_disposition)
-                VALUES
-                    (:tid, 'e2e_simple', 'default', 'PENDING', :args, '{}', 100, :sent_at,
-                     FALSE, 0, 0, :enqueue_sha,
-                     'standard_30d', 1,
-                     sha256(convert_to(CAST(CAST(:tid AS uuid) AS text), 'UTF8')),
-                     FALSE, 'DECLINED_BY_POLICY')
+                    (
+                        id, task_name, queue_name, status, input, priority, sent_at,
+                        retry_count, max_retries, retention_class_key,
+                        command_fingerprint_version, command_fingerprint,
+                        retain_rerun_input, execution, enqueued_at, created_at,
+                        updated_at, is_workflow_task
+                    ) VALUES (
+                        :tid, 'e2e_simple', 'default', 'PENDING', :input, 100,
+                        :sent_at, 0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE
+                    )
             """),
-            {'tid': task_id, 'args': '"not_a_list"', 'sent_at': sent_at, 'enqueue_sha': sha},
+            {
+                'tid': task_id,
+                'input': '"not_a_list"',
+                'sent_at': sent_at,
+                'command_fingerprint': fingerprint,
+            },
         )
         await session.commit()
 
@@ -1003,35 +1008,37 @@ async def test_argument_deserialization_error(
 async def test_malformed_pydantic_args(
     broker: PostgresBroker, app: Horsies,
 ) -> None:
-    """L1.7.8: Invalid Pydantic model data in args triggers WORKER_SERIALIZATION_ERROR."""
+    """L1.7.8: Invalid Pydantic model data in the input triggers WORKER_SERIALIZATION_ERROR."""
     task_id = str(uuid4())
-    # Pydantic marker with data that fails model_validate (age is not coercible to int)
-    corrupted_args = json.dumps([{
-        '__pydantic_model__': True,
-        'module': 'tests.e2e.tasks.basic',
-        'qualname': 'UserInput',
-        'data': {'name': 'Alice', 'age': 'not_a_number'},
-    }])
-    sent_at, sha = compute_test_enqueue_sha(
-        task_name='e2e_pydantic', args_json=corrupted_args,
+    # Model data that fails model_validate (age is not coercible to int)
+    corrupted_input = json.dumps(
+        {'user': {'name': 'Alice', 'age': 'not_a_number'}},
+    )
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name='e2e_pydantic', input_json=corrupted_input,
     )
     async with current_resources(broker).session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
-                    (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
-                     claimed, retry_count, max_retries, enqueue_sha,
-                     retention_class_key, command_fingerprint_version,
-                     command_fingerprint, retain_rerun_input,
-                     prepared_rerun_input_disposition)
-                VALUES
-                    (:tid, 'e2e_pydantic', 'default', 'PENDING', :args, '{}', 100, :sent_at,
-                     FALSE, 0, 0, :enqueue_sha,
-                     'standard_30d', 1,
-                     sha256(convert_to(CAST(CAST(:tid AS uuid) AS text), 'UTF8')),
-                     FALSE, 'DECLINED_BY_POLICY')
+                    (
+                        id, task_name, queue_name, status, input, priority, sent_at,
+                        retry_count, max_retries, retention_class_key,
+                        command_fingerprint_version, command_fingerprint,
+                        retain_rerun_input, execution, enqueued_at, created_at,
+                        updated_at, is_workflow_task
+                    ) VALUES (
+                        :tid, 'e2e_pydantic', 'default', 'PENDING', :input, 100,
+                        :sent_at, 0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE
+                    )
             """),
-            {'tid': task_id, 'args': corrupted_args, 'sent_at': sent_at, 'enqueue_sha': sha},
+            {
+                'tid': task_id,
+                'input': corrupted_input,
+                'sent_at': sent_at,
+                'command_fingerprint': fingerprint,
+            },
         )
         await session.commit()
 
@@ -1306,24 +1313,26 @@ async def test_legacy_pydantic_result_envelope_rejected(
         },
         'err': None,
     })
-    sent_at, sha = compute_test_enqueue_sha(task_name='e2e_simple')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='e2e_simple')
     async with current_resources(broker).session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
-                    (id, task_name, queue_name, status, priority, sent_at,
-                     claimed, retry_count, max_retries, enqueue_sha,
-                     retention_class_key, command_fingerprint_version,
-                     command_fingerprint, retain_rerun_input,
-                     prepared_rerun_input_disposition)
-                VALUES
-                    (:tid, 'e2e_simple', 'default', 'RUNNING', 100, :sent_at,
-                     FALSE, 0, 0, :enqueue_sha,
-                     'standard_30d', 1,
-                     sha256(convert_to(CAST(CAST(:tid AS uuid) AS text), 'UTF8')),
-                     FALSE, 'DECLINED_BY_POLICY')
+                    (
+                        id, task_name, queue_name, status, priority, input, sent_at,
+                        retry_count, max_retries, retention_class_key,
+                        command_fingerprint_version, command_fingerprint,
+                        retain_rerun_input, execution, enqueued_at, created_at,
+                        updated_at, is_workflow_task, worker_pid, worker_hostname,
+                        worker_process_name
+                    ) VALUES (
+                        :tid, 'e2e_simple', 'default', 'RUNNING', 100, '{}', :sent_at,
+                        0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE, 4242, 'host-1',
+                        'child-1'
+                    )
             """),
-            {'tid': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+            {'tid': task_id, 'sent_at': sent_at, 'command_fingerprint': fingerprint},
         )
         await force_terminal(
             session,

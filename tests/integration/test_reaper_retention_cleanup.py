@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 from horsies.core.brokers.postgres import PostgresBroker
 
@@ -296,7 +296,7 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
 
     workflow_id = str(uuid.uuid4())
     task_id = str(uuid.uuid4())
-    sent_at, enqueue_sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='workflow_join_barrier',
         queue_name='normal',
         sent_at=datetime.now(timezone.utc) - timedelta(hours=48),
@@ -314,26 +314,23 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
     """), {'id': workflow_id})
     await session.execute(text("""
         INSERT INTO horsies_tasks
-            (id, task_name, queue_name, priority, args, kwargs,
-             status, sent_at, enqueued_at, created_at, updated_at,
-             claimed, claimed_at, claimed_by_worker_id, claim_expires_at,
-             retry_count, max_retries, enqueue_sha, is_workflow_task,
-             retention_class_key, command_fingerprint_version,
-             command_fingerprint, retain_rerun_input,
-             prepared_rerun_input_disposition)
-        VALUES
-            (:id, 'workflow_join_barrier', 'normal', 50, '[]', '{}',
-             'CLAIMED', :sent_at, NOW() - INTERVAL '48 hours',
-             NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
-             TRUE, NOW() - INTERVAL '48 hours', 'worker-retention-repro',
-             NOW() + INTERVAL '5 minutes', 0, 0, :enqueue_sha, TRUE,
-             'standard_30d', 1,
-             sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-             FALSE, 'DECLINED_BY_POLICY')
+            (
+                id, task_name, queue_name, priority, input, status, sent_at,
+                enqueued_at, created_at, updated_at, claimed_at, claimed_by_worker_id,
+                claim_expires_at, retry_count, max_retries, is_workflow_task,
+                retention_class_key, command_fingerprint_version, command_fingerprint,
+                retain_rerun_input, execution
+            ) VALUES (
+                :id, 'workflow_join_barrier', 'normal', 50, '{}', 'CLAIMED', :sent_at,
+                NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
+                NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
+                'worker-retention-repro', NOW() + INTERVAL '5 minutes', 0, 0, TRUE,
+                'standard_30d', NULL, NULL, FALSE, 'ISOLATED'
+            )
     """), {
         'id': task_id,
         'sent_at': sent_at,
-        'enqueue_sha': enqueue_sha,
+        'command_fingerprint': fingerprint,
     })
     await session.execute(text("""
         INSERT INTO horsies_workflow_tasks
