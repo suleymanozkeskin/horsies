@@ -54,9 +54,14 @@ async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, Bro
     let config = manifest
         .database
         .to_postgres_config(manifest.send.retain_rerun_input_default);
+    // `AssumeInitialized` runs no schema step, as `ObserveOnly`. Its other
+    // rule, no listener, is for the listener operations, which the bridge
+    // does not expose yet.
     let mode = match manifest.schema {
         SchemaMode::MigrateAndValidate => SchemaInitializationMode::MigrateAndValidate,
-        SchemaMode::ObserveOnly => SchemaInitializationMode::ObserveOnly,
+        SchemaMode::ObserveOnly | SchemaMode::AssumeInitialized => {
+            SchemaInitializationMode::ObserveOnly
+        }
     };
     let window = manifest.send.idempotency_reservation_window.as_duration();
     PostgresBroker::connect_with_policies(&config, mode, window)
@@ -125,8 +130,8 @@ impl CoreHandle {
     }
 
     /// Apply the embedded migrations and check the schema version, once per
-    /// handle: `SchemaInstalled`, `SchemaInstallNotRun` (an `OBSERVE_ONLY`
-    /// handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
+    /// handle: `SchemaInstalled`, `SchemaInstallNotRun` (an `OBSERVE_ONLY` or
+    /// `ASSUME_INITIALIZED` handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
     fn install_schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(

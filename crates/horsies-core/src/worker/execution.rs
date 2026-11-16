@@ -543,7 +543,7 @@ pub(crate) async fn execute_task(
                     task_timeout_error(timeout.unwrap_or_default())
                 }
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("async task panicked: {}", join_err),
                 )),
             }
@@ -569,11 +569,11 @@ pub(crate) async fn execute_task(
             match join {
                 Ok(Ok(r)) => r,
                 Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     "blocking task panicked".to_owned(),
                 )),
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("blocking task join error: {}", join_err),
                 )),
             }
@@ -795,9 +795,10 @@ async fn persist_workflow_success(
         fence,
         result_json,
     };
-    let outcome = finish_workflow_success(broker.pool(), &command)
-        .await
-        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+    let outcome =
+        finish_workflow_success(broker.core_main_pool(), broker.statement_log(), &command)
+            .await
+            .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { .. } => Ok(FinalizeOutcome::Terminal {
             is_success: true,
@@ -857,7 +858,7 @@ pub(crate) async fn persist_failed_attempt(
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let outcome = finish_failed_attempt(broker.pool(), command)
+    let outcome = finish_failed_attempt(broker.core_main_pool(), broker.statement_log(), command)
         .await
         .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
     match outcome {
