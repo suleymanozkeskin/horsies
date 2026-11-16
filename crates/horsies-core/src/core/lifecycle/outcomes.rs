@@ -20,6 +20,7 @@ use sqlx::{Column, Row};
 use uuid::Uuid;
 
 use crate::core::types::status::TaskStatus;
+use crate::db::{FromSql, Row as CoreRow};
 
 use super::operations::TerminalizationKind;
 
@@ -264,10 +265,32 @@ pub struct RawOutcomeRow {
     pub observed_guard: Option<serde_json::Value>,
 }
 
-/// Decode one returned row into its typed outcome. Fails closed on any
-/// deviation from the wire contract.
-pub fn decode_outcome_row(row: &PgRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
-    require_exact_columns(row)?;
+/// Decode one row of a core statement into its typed outcome. Fails closed
+/// on any deviation from the wire contract.
+pub fn decode_outcome_row(row: &CoreRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
+    let present: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
+    require_exact_columns(&present)?;
+    let raw = RawOutcomeRow {
+        task_id: core_column(row, "task_id")?,
+        ordinality: core_column(row, "ordinality")?,
+        outcome: core_column(row, "outcome")?,
+        terminal_at: core_column(row, "terminal_at")?,
+        terminalization_kind: core_column(row, "terminalization_kind")?,
+        observed_status: core_column(row, "observed_status")?,
+        observed_worker_id: core_column(row, "observed_worker_id")?,
+        observed_claimed_at: core_column(row, "observed_claimed_at")?,
+        guard_kind: core_column(row, "guard_kind")?,
+        observed_guard: core_column(row, "observed_guard")?,
+    };
+    decode_raw(raw)
+}
+
+/// Decode one row read in a sqlx transaction (`terminalize_in_tx`, whose
+/// callers still hold sqlx transactions) into its typed outcome. The same
+/// contract as [`decode_outcome_row`].
+pub fn decode_outcome_pg_row(row: &PgRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
+    let present: Vec<&str> = row.columns().iter().map(|c| c.name()).collect();
+    require_exact_columns(&present)?;
     let raw = RawOutcomeRow {
         task_id: get(row, "task_id")?,
         ordinality: get(row, "ordinality")?,
@@ -283,6 +306,14 @@ pub fn decode_outcome_row(row: &PgRow) -> Result<TerminalizationOutcome, Outcome
     decode_raw(raw)
 }
 
+fn core_column<'r, T: FromSql<'r>>(
+    row: &'r CoreRow,
+    column: &str,
+) -> Result<T, OutcomeDecodeError> {
+    row.try_get(column)
+        .map_err(|error| OutcomeDecodeError(format!("column {column}: {error}")))
+}
+
 fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
     row: &'r PgRow,
     column: &str,
@@ -291,8 +322,8 @@ fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
         .map_err(|e| OutcomeDecodeError(format!("column {column}: {e}")))
 }
 
-fn require_exact_columns(row: &PgRow) -> Result<(), OutcomeDecodeError> {
-    let present: Vec<&str> = row.columns().iter().map(|c| c.name()).collect();
+/// The row has exactly the ten columns of the wire contract.
+fn require_exact_columns(present: &[&str]) -> Result<(), OutcomeDecodeError> {
     let missing: Vec<&str> = ROW_COLUMNS
         .iter()
         .copied()

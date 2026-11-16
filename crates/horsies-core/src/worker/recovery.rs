@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::broker::core_rows::StatementLog;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -24,6 +25,7 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
+use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
@@ -143,7 +145,7 @@ struct StaleTaskId {
 #[cfg(test)]
 mod p7_maintenance_tests {
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
     use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -385,6 +387,101 @@ mod p7_maintenance_tests {
             next_partition_maintenance > tokio::time::Instant::now(),
             "the periodic maintenance tick advances after contained failures",
         );
+    }
+
+    /// Python's order (`reaper.py:144-638`) requeues stale CLAIMED rows before
+    /// it expires PENDING rows, so a stale claim whose `good_until` has passed
+    /// is requeued and expired in one pass. Expiry first would leave it
+    /// PENDING after the pass.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let coverage =
+            crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
+                &pool,
+                2,
+                2,
+                &[],
+                &crate::core::history::reads::publisher::StagedLoaderPublisher,
+            )
+            .await
+            .expect("partition coverage");
+        assert!(matches!(
+            coverage,
+            crate::core::history::maintenance::coverage::CoverageOutcome::Ensured(_)
+        ));
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'reaper_order', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW() - interval '1 day', NOW() - interval '1 day',
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'CLAIMED', NOW() - interval '1 day', NOW() - interval '1 day',
+                 'gone-worker', NOW() + interval '1 hour',
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NOW() - interval '1 minute', FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("seed a stale claim past its deadline");
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = true;
+        recovery.auto_fail_stale_running = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let retention = RetentionConfig::default();
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut orphan_state = OrphanSweepState::default();
+
+        run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
+            &pool,
+            &pool,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &recovery,
+            &PayloadPolicy::default(),
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+        )
+        .await;
+
+        let live: Option<String> =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("read the live row");
+        assert_eq!(live, None, "the expired task leaves the live table");
+        let history: String =
+            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the history row");
+        assert_eq!(history, "EXPIRED");
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("remove the history row");
     }
 
     #[tokio::test]
@@ -917,7 +1014,10 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively.
+/// as FAILED or requeuing them respectively. The caller has checked the
+/// client family of the handle that owns both pools
+/// (`Worker::start_database`); the reaper's partition maintenance writes
+/// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
@@ -937,6 +1037,10 @@ pub fn spawn_reaper(
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
+        // The fleet check runs after each pass, from one check interval after
+        // the start on (Python `reaper.py:622-628, 747-750`).
+        let mut coverage_log =
+            ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -971,6 +1075,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                 }
                 GatePass::Held(tx) => {
                     run_reaper_pass(
@@ -987,6 +1092,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                     release_gate(tx).await;
                 }
             }
@@ -1193,8 +1299,13 @@ async fn run_reaper_pass(
         }
     }
 
-    // Expire unclaimed PENDING tasks whose good_until has passed.
-    match expire_pending_tasks(runtime_pool).await {
+    // Expire unclaimed PENDING tasks whose good_until has passed, on the
+    // main core pool with the reserve.
+    let expired = match broker.core_pools_for_write() {
+        Ok((open, _write)) => expire_pending_tasks(open.main(), broker.statement_log()).await,
+        Err(error) => Err(error),
+    };
+    match expired {
         Ok(count) if count > 0 => {
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
@@ -1694,31 +1805,6 @@ mod orphan_audit_schedule_tests {
         assert!(state.schedule_if_due(now + interval, interval));
     }
 
-    /// The reaper pass runs Python's order (`reaper.py:144-638`): requeue
-    /// stale CLAIMED, orphan audit, stale RUNNING, expire PENDING, then
-    /// workflow recovery.
-    #[test]
-    fn reaper_pass_runs_the_steps_in_python_order() {
-        let source = include_str!("recovery.rs");
-        let pass = &source[source
-            .find(&["async fn ", "run_reaper_pass("].concat())
-            .expect("run_reaper_pass source")..];
-        let pass = &pass[..pass.find("\n}\n").expect("end of run_reaper_pass")];
-        let position = |call: &str| {
-            pass.find(call)
-                .unwrap_or_else(|| panic!("{call} not called in run_reaper_pass"))
-        };
-        let order = [
-            position("requeue_stale_claimed(runtime_pool"),
-            position("terminate_orphaned_workflow_tasks(runtime_pool"),
-            position("mark_stale_running_as_failed("),
-            position("expire_pending_tasks(runtime_pool)"),
-            position("recover_stuck_workflows_observed("),
-        ];
-        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-        assert!(!pass.contains(&["orphan_state", ".disabled"].concat()));
-    }
-
     #[test]
     fn transient_non_lock_failure_is_an_error_in_the_health_snapshot() {
         let error = crate::broker::BrokerError::Database(sqlx::Error::PoolTimedOut);
@@ -1847,15 +1933,28 @@ async fn terminate_orphaned_workflow_tasks(
     })
 }
 
-/// Expire unclaimed PENDING tasks whose `good_until` has passed.
+/// Expire unclaimed PENDING tasks whose `good_until` has passed (Python
+/// `expire_pending_tasks`, `core/brokers/postgres.py:3425-3503`).
 ///
 /// Runs `horsies_expire_pending_tasks` in bounded batches (earliest
 /// deadlines first, SKIP LOCKED) so a mass expiry is spread across several
 /// committed statements instead of one transaction that row-locks every
 /// match and flushes two trigger NOTIFYs per row in a single commit (which
-/// can overflow listener queues). No attempt rows are written (the task was
-/// never executed). Returns the number of expired tasks.
-pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::BrokerError> {
+/// can overflow listener queues). Each batch is one statement alone on
+/// `pool`, checked out as reserved work, and commits alone. At most
+/// [`EXPIRE_MAX_BATCHES_PER_PASS`] batches run; the rest waits for the next
+/// pass. No attempt rows are written (the task was never executed). Returns
+/// the number of expired tasks.
+///
+/// Errors: [`crate::broker::BrokerError::Statement`];
+/// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
+/// the wire contract or an outcome other than `APPLIED` (a discovery batch
+/// reports transitioned rows only). The batches before the failed one, and
+/// the failed batch when its statement returned, stay committed.
+pub async fn expire_pending_tasks(
+    pool: &crate::db::CorePool,
+    log: StatementLog,
+) -> Result<u64, crate::broker::BrokerError> {
     let task_error = TaskError::builtin(
         crate::core::OutcomeCode::TaskExpired,
         "task expired before being claimed (good_until passed)",
@@ -1869,17 +1968,49 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
         result_json,
         error_code: "TASK_EXPIRED".to_owned(),
     };
+    let full_batch = u64::from(EXPIRE_BATCH_SIZE.unsigned_abs());
 
     let mut total: u64 = 0;
     for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
-        let expired = crate::broker::terminalization::terminalize(pool, &command).await?;
-        let affected = expired.len() as u64;
+        let expired = crate::broker::terminalization::terminalize(pool, log, &command).await?;
+        let affected = transitioned_count(&expired)?;
         total += affected;
-        if affected < EXPIRE_BATCH_SIZE as u64 {
-            break;
+        if affected < full_batch {
+            return Ok(total);
         }
     }
+    tracing::warn!(
+        expired = total,
+        batches = EXPIRE_MAX_BATCHES_PER_PASS,
+        "pending expiry reached its per-pass bound; the next pass goes on",
+    );
     Ok(total)
+}
+
+/// The number of rows a pending expiry batch moved. The batch reports only
+/// the rows it moved (Python `expire_pending_tasks`), so any outcome other
+/// than `APPLIED` breaks the wire contract.
+fn transitioned_count(
+    outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
+) -> Result<u64, crate::broker::BrokerError> {
+    for outcome in outcomes {
+        match outcome {
+            crate::core::lifecycle::TerminalizationOutcome::Applied { .. } => {}
+            crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. } => {
+                return Err(crate::broker::BrokerError::TerminalizationContract(
+                    format!(
+                        "horsies_expire_pending_tasks: task {} reported {outcome:?}; \
+                     a discovery batch reports moved rows only",
+                        outcome.task_id(),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(outcomes.len() as u64)
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING, in batches of
@@ -2478,7 +2609,7 @@ mod tests {
 
         // Canonical workflow cancellation moves the backing task to history;
         // workflow and linkage then sweep together in one statement.
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
                 workflow_ids: vec![wf_id],
@@ -2937,3 +3068,9 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod class_coverage_loop_tests;
+
+#[cfg(test)]
+mod retention_ports;

@@ -19,7 +19,7 @@ use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -449,6 +449,7 @@ async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
     assert!(!database_exists);
 }
 
+/// The URL of the P5 database, accepted by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
     let pool = migrated_pool().await;
     drop(pool);
@@ -764,8 +765,6 @@ async fn complete_replay_within_class_is_already_applied() {
             task_id: uuid(&id),
             fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -861,7 +860,9 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     )
     .await;
 
-    let channel = format!("matrix_fused_{}", Uuid::new_v4().simple());
+    // The function builds the wake from the locked row: the queue of the
+    // matrix seed and the constant payload.
+    let channel = "task_queue_default";
     let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
         .await
         .expect("listener");
@@ -869,7 +870,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
         .listen("task_done")
         .await
         .expect("listen task_done");
-    listener.listen(&channel).await.expect("listen");
+    listener.listen(channel).await.expect("listen");
 
     let outcomes = terminalize(
         &pool,
@@ -877,8 +878,6 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
             task_id: uuid(&id),
             fence: owned("w1", claimed_at),
             result_json: "{\"Ok\":7}".to_owned(),
-            notify_channel: channel.clone(),
-            notify_payload: format!("capacity:{id}"),
         },
     )
     .await
@@ -940,13 +939,12 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
         .await
         .expect("second notify within timeout")
         .expect("second notification");
-    let capacity_payload = format!("capacity:{id}");
     let notifications = [
         (first.channel(), first.payload()),
         (second.channel(), second.payload()),
     ];
     assert!(notifications.contains(&("task_done", id.as_str())));
-    assert!(notifications.contains(&(channel.as_str(), capacity_payload.as_str())));
+    assert!(notifications.contains(&(channel, "capacity")));
 
     cleanup(&pool, &[&id]).await;
 }
@@ -989,8 +987,6 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
             task_id: uuid(&id),
             fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1035,8 +1031,6 @@ async fn fused_stale_generation_is_lost_claim() {
             task_id: uuid(&id),
             fence: owned("w1", stale),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1080,8 +1074,6 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
             task_id: uuid(&id),
             fence: owned("w1", claimed_at),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1117,7 +1109,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
                 worker_id: "w1".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: None,
         },
     )
@@ -1133,7 +1125,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
 
     let image = post_image(&pool, &id).await;
     assert_eq!(image.status, "FAILED");
-    assert_eq!(image.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(image.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(
         image.failed_reason, None,
         "the terminal writer owns the final-attempt summary; None clears \
@@ -1661,8 +1653,6 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
             task_id: uuid(&done),
             fence: owned("w1", seeded_generation(&pool, &done).await),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -2952,7 +2942,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
                 worker_id: "w1".to_owned(),
             },
             result_json: "{}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("failed".to_owned()),
         },
     )

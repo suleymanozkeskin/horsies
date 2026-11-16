@@ -1,16 +1,26 @@
 //! PostgreSQL LISTEN to SSE invalidation events.
+//!
+//! The stream subscribes the three status channels on the broker's listener,
+//! the one LISTEN connection of the broker; it opens no connection of its own.
+//! A listener gap or a full subscription queue sends one event with no ids
+//! for the topic ("refresh the whole topic"); a stopped listener sends the
+//! degraded frame.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, MutexGuard, Weak};
+use std::task::Poll;
 use std::time::Duration;
 
-use sqlx::postgres::PgListener;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::broker::process_listener::{default_payload_capacity, fixed_channel, ListenError};
 use crate::broker::PostgresBroker;
+use crate::db::{PayloadEvent, PayloadSubscription};
 
 pub const CHANNEL_TOPICS: [(&str, &str); 3] = [
     ("horsies_task_status", "tasks"),
@@ -106,16 +116,96 @@ impl EventCoalescer {
 /// that ends the stream.
 type StreamItem = Option<TopicEvent>;
 
+/// One event with no ids: the client reads the whole topic again.
+fn refresh_event(topic: &str) -> TopicEvent {
+    TopicEvent {
+        topic: topic.to_owned(),
+        ids: Vec::new(),
+    }
+}
+
 /// One event with no ids for every topic: the client reads each whole topic
 /// again.
 pub(crate) fn refresh_events() -> Vec<TopicEvent> {
     CHANNEL_TOPICS
         .iter()
-        .map(|(_, topic)| TopicEvent {
-            topic: (*topic).to_owned(),
-            ids: Vec::new(),
-        })
+        .map(|(_, topic)| refresh_event(topic))
         .collect()
+}
+
+/// What the stream does with one event of a topic subscription.
+#[derive(Debug, PartialEq, Eq)]
+enum TopicStep {
+    /// Record the entity id in the topic's window.
+    Record(String),
+    /// Notifications of the topic may be lost (a listener gap or a full
+    /// queue): send one event with no ids for the topic.
+    Refresh,
+    /// The listener stopped: send the degraded frame and end.
+    Degrade,
+}
+
+fn topic_step(event: PayloadEvent) -> TopicStep {
+    match event {
+        PayloadEvent::Payload(entity_id) => TopicStep::Record(entity_id),
+        PayloadEvent::Gap | PayloadEvent::Overflowed => TopicStep::Refresh,
+        PayloadEvent::Stopped => TopicStep::Degrade,
+    }
+}
+
+/// The payload subscription of one status channel, with its topic.
+struct TopicSubscription {
+    topic: &'static str,
+    subscription: PayloadSubscription,
+}
+
+/// One pending wait of [`TopicSubscriptions::next`].
+type TopicWait<'a> = Pin<Box<dyn Future<Output = (&'static str, PayloadEvent)> + Send + 'a>>;
+
+/// The subscriptions of the three status channels on the broker's listener.
+/// Each is a bounded payload queue, so a slow stream cannot hold the result
+/// waiters, and the waiters cannot hold the stream.
+struct TopicSubscriptions(Vec<TopicSubscription>);
+
+impl TopicSubscriptions {
+    /// Subscribes every channel of [`CHANNEL_TOPICS`]. On a refusal, the
+    /// channels already subscribed are dropped again.
+    async fn subscribe(broker: &PostgresBroker) -> Result<TopicSubscriptions, ListenError> {
+        let mut topics = Vec::with_capacity(CHANNEL_TOPICS.len());
+        for (channel, topic) in CHANNEL_TOPICS {
+            let subscription = broker
+                .listener()
+                .subscribe_payloads(fixed_channel(channel), default_payload_capacity())
+                .await?;
+            topics.push(TopicSubscription {
+                topic,
+                subscription,
+            });
+        }
+        Ok(TopicSubscriptions(topics))
+    }
+
+    /// The next event of any topic. Cancel-safe: a subscription's `recv`
+    /// keeps its event when it is dropped before it returns.
+    async fn next(&self) -> (&'static str, PayloadEvent) {
+        let mut waits: Vec<TopicWait<'_>> = self
+            .0
+            .iter()
+            .map(|topic| {
+                Box::pin(async move { (topic.topic, topic.subscription.recv().await) })
+                    as TopicWait<'_>
+            })
+            .collect();
+        std::future::poll_fn(|context| {
+            for wait in waits.iter_mut() {
+                if let Poll::Ready(event) = wait.as_mut().poll(context) {
+                    return Poll::Ready(event);
+                }
+            }
+            Poll::Pending
+        })
+        .await
+    }
 }
 
 #[derive(Debug, Default)]
@@ -258,35 +348,28 @@ impl EventBroadcaster {
             return;
         }
 
-        let mut listener = match PgListener::connect_with(self.broker.session_pool()).await {
-            Ok(listener) => listener,
+        let topics = match TopicSubscriptions::subscribe(&self.broker).await {
+            Ok(topics) => topics,
             Err(error) => {
-                tracing::warn!(error = %error, "monitoring event listener failed to start");
+                tracing::warn!(error = %error, "monitoring event subscriptions failed to start");
                 self.degrade().await;
                 return;
             }
         };
-        for (channel, _) in CHANNEL_TOPICS {
-            if let Err(error) = listener.listen(channel).await {
-                tracing::warn!(channel, error = %error, "monitoring event listener failed to subscribe");
-                self.degrade().await;
-                return;
-            }
-        }
 
         self.started.store(true, Ordering::Release);
         let broadcaster = Arc::downgrade(self);
         let debounce = self.debounce;
         let cancel = self.cancel.clone();
         let handle = tokio::spawn(async move {
-            Self::run(broadcaster, listener, debounce, cancel).await;
+            Self::run(broadcaster, topics, debounce, cancel).await;
         });
         *self.task.lock().await = Some(handle);
     }
 
     async fn run(
         broadcaster: Weak<Self>,
-        mut listener: PgListener,
+        topics: TopicSubscriptions,
         debounce: Duration,
         cancel: CancellationToken,
     ) {
@@ -317,45 +400,37 @@ impl EventBroadcaster {
                         }
                     }
                 }
-                // `try_recv` reports a lost connection as `Ok(None)` after the
-                // driver connected and listened again: notifications sent in
-                // between are lost, so every client reads every topic again.
-                notification = listener.try_recv() => {
-                    match notification {
-                        Ok(None) => {
-                            tracing::warn!(
-                                "monitoring event listener reconnected; \
-                                 sending a refresh of every topic",
+                (topic, event) = topics.next() => match topic_step(event) {
+                    TopicStep::Record(entity_id) => {
+                        if coalescer.record(topic, &entity_id) {
+                            deadlines.insert(
+                                topic.to_owned(),
+                                tokio::time::Instant::now() + debounce,
                             );
-                            let Some(broadcaster) = broadcaster.upgrade() else {
-                                break;
-                            };
-                            for event in refresh_events() {
-                                broadcaster.publish(Some(event)).await;
-                            }
-                        }
-                        Ok(Some(notification)) => {
-                            if let Some((_, topic)) = CHANNEL_TOPICS
-                                .iter()
-                                .find(|(channel, _)| *channel == notification.channel())
-                            {
-                                if coalescer.record(topic, notification.payload()) {
-                                    deadlines.insert(
-                                        (*topic).to_owned(),
-                                        tokio::time::Instant::now() + debounce,
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(error = %error, "monitoring event listener failed");
-                            if let Some(broadcaster) = broadcaster.upgrade() {
-                                broadcaster.degrade().await;
-                            }
-                            break;
                         }
                     }
-                }
+                    // Notifications of the topic were lost: the pending ids
+                    // are covered by one event with no ids for the topic.
+                    TopicStep::Refresh => {
+                        tracing::warn!(
+                            topic,
+                            "monitoring events may have been lost; sending a refresh of the topic",
+                        );
+                        let _covered_by_the_refresh = coalescer.drain_topic(topic);
+                        let _pending_flush = deadlines.remove(topic);
+                        let Some(broadcaster) = broadcaster.upgrade() else {
+                            break;
+                        };
+                        broadcaster.publish(Some(refresh_event(topic))).await;
+                    }
+                    TopicStep::Degrade => {
+                        tracing::warn!("the listener stopped; the monitoring event stream degrades");
+                        if let Some(broadcaster) = broadcaster.upgrade() {
+                            broadcaster.degrade().await;
+                        }
+                        break;
+                    }
+                },
             }
         }
         if let Some(broadcaster) = broadcaster.upgrade() {
@@ -431,6 +506,26 @@ mod queue_tests {
             items.push(item);
         }
         items
+    }
+
+    /// A payload is recorded; a gap or an overflow refreshes the topic; a
+    /// stopped listener degrades the stream.
+    #[test]
+    fn a_topic_event_maps_to_its_step() {
+        assert_eq!(
+            topic_step(PayloadEvent::Payload("t1".to_owned())),
+            TopicStep::Record("t1".to_owned())
+        );
+        assert_eq!(topic_step(PayloadEvent::Gap), TopicStep::Refresh);
+        assert_eq!(topic_step(PayloadEvent::Overflowed), TopicStep::Refresh);
+        assert_eq!(topic_step(PayloadEvent::Stopped), TopicStep::Degrade);
+        assert_eq!(
+            refresh_event("workers"),
+            TopicEvent {
+                topic: "workers".to_owned(),
+                ids: Vec::new(),
+            }
+        );
     }
 
     #[tokio::test]

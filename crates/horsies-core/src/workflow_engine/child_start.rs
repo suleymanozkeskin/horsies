@@ -316,6 +316,8 @@ fn merged_child_input(owed: &OwedChildStart) -> Result<NodeInput, WorkflowError>
             (
                 source.task_index,
                 DepResult {
+                    task_name: source.task_name.clone(),
+                    sub_definition_key: source.definition_key.clone(),
                     status: source.status.clone(),
                     result: source.result.clone(),
                 },

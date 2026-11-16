@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from horsies.core.history.heartbeats.partitioning import (
-    HEARTBEATS_PARTITIONED_DDL,
     CreateHourlyHeartbeatLeaf,
     EnsureHeartbeatCoverage,
     heartbeat_horizon,
@@ -22,11 +21,19 @@ from horsies.core.history.heartbeats.partitioning import (
     probe_index_name,
 )
 from horsies.core.history.names import HEARTBEAT_CLASS_KEY
-from horsies.core.history.terminalization.move import (
-    failure_family_fragments,
-)
+from tests.baseline_sql import baseline_function, baseline_table
 
 pytestmark = [pytest.mark.unit]
+
+HEARTBEATS_PARTITIONED_DDL = baseline_table('horsies_heartbeats')
+
+
+def failure_family_fragments() -> list[str]:
+    """The baseline failure functions: the locked and the stale failure."""
+    return [
+        baseline_function('horsies_fail_locked_task'),
+        baseline_function('horsies_fail_stale_task'),
+    ]
 
 HOUR = datetime(2026, 8, 7, 13, 0, tzinfo=timezone.utc)
 

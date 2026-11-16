@@ -14,6 +14,10 @@ pub enum MonitoringQueryErrorCode {
     /// The read failed with a database or driver error. `retryable` is the
     /// driver classification of the cause.
     DbOperationFailed,
+    /// The broker already holds resource sets for its limit of open event
+    /// loops, and this call ran on a new one. Nothing ran. Python client
+    /// only; removed before 0.8.0.
+    EventLoopLimit,
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
     /// Not retryable: a repeat gives the same result until the stored row

@@ -9,15 +9,14 @@
 //! `attempt_writes::tests::a_stale_claim_generation_writes_no_failure`.
 
 use serial_test::serial;
-use sqlx::Row;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
-    FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
+    RetryRequest,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
     AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationCommand,
     TerminalizationKind, TerminalizationOutcome, WorkflowSuccessOutcome,
@@ -109,7 +108,7 @@ async fn fail_guard_blocks_when_not_running() {
         .await
         .expect("requeue the row");
 
-    let outcome = finish_failed_attempt(
+    let outcome = write_failed_attempt(
         &pool,
         &failed_attempt(task_id, RetryRequest::NoRetry, AttemptFailureKind::Failed),
     )
@@ -144,7 +143,7 @@ async fn fail_worker_guard_blocks_when_not_running() {
     );
     command.failed_reason = Some("late worker failure".to_owned());
     command.attempt.failed_reason = Some("late worker failure".to_owned());
-    let outcome = finish_failed_attempt(&pool, &command)
+    let outcome = write_failed_attempt(&pool, &command)
         .await
         .expect("failure write");
 
@@ -164,7 +163,7 @@ async fn retry_guard_blocks_when_not_running() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     reaper_fails(&pool, task_id).await;
 
-    let outcome = finish_failed_attempt(
+    let outcome = write_failed_attempt(
         &pool,
         &failed_attempt(task_id, retry_after(0), AttemptFailureKind::Failed),
     )
@@ -186,7 +185,7 @@ async fn reaper_then_retry_race_sequence() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     reaper_fails(&pool, task_id).await;
 
-    let late_retry = finish_failed_attempt(
+    let late_retry = write_failed_attempt(
         &pool,
         &failed_attempt(task_id, retry_after(0), AttemptFailureKind::Failed),
     )
@@ -204,7 +203,6 @@ async fn reaper_then_retry_race_sequence() {
 /// runs before the failure write (differences ledger, row 18).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #711"]
 async fn the_claim_returns_the_retry_facts() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -217,34 +215,20 @@ async fn the_claim_returns_the_retry_facts() {
         },
     )
     .await;
-    let params = claim_pass(RETRY_FACTS_QUEUE);
-
-    let rows = sqlx::query(
-        "SELECT * FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    let pass = crate::broker::claims::claim_pass(
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        crate::broker::core_rows::StatementLog::Off,
+        &claim_request(RETRY_FACTS_QUEUE),
     )
-    .bind(&params.worker_id)
-    .bind(sqlx::types::Json(&params.queues))
-    .bind(sqlx::types::Json(&params.queue_priority))
-    .bind(sqlx::types::Json(&params.queue_max_concurrency))
-    .bind(params.hard_cap_mode)
-    .bind(10_i32)
-    .bind(0_i32)
-    .bind(0_i32)
-    .bind(0_i32)
-    .bind(None::<i32>)
-    .bind(60_000_i64)
-    .bind(sqlx::types::Json(&params.lock_keys))
-    .fetch_all(&pool)
     .await
     .expect("claim pass");
 
-    let row = rows
+    let row = pass
+        .claimed
         .iter()
-        .find(|row| row.try_get::<String, _>("id").ok() == Some(task_id.to_string()))
+        .find(|row| row.id == task_id)
         .expect("the claim returned the seeded task");
-    let retry_count: i32 = row.try_get("retry_count").expect("retry_count column");
-    let max_retries: i32 = row.try_get("max_retries").expect("max_retries column");
-    assert_eq!((retry_count, max_retries), (1, 3));
+    assert_eq!((row.retry_count, row.max_retries), (1, 3));
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -274,7 +258,7 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
         result_json: r#"{"ok": 1}"#.to_owned(),
     };
 
-    let refused = finish_workflow_success(&pool, &success(WORKER))
+    let refused = write_workflow_success(&pool, &success(WORKER))
         .await
         .expect("workflow success");
     assert!(
@@ -287,7 +271,7 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
     assert_eq!(status_of(&pool, task_id).await, "RUNNING");
     assert!(live_attempts(&pool, task_id).await.is_empty());
 
-    let owner = finish_workflow_success(&pool, &success(OTHER_WORKER))
+    let owner = write_workflow_success(&pool, &success(OTHER_WORKER))
         .await
         .expect("workflow success");
     assert!(
@@ -303,22 +287,18 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
 /// any lock or write (differences ledger, row 3).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #697"]
 async fn fused_finalize_null_fence_is_refused() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     let before = live_row(&pool, task_id).await;
 
-    let refused =
-        sqlx::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, $4, $5)")
-            .bind(task_id)
-            .bind(WORKER)
-            .bind(r#"{"ok": 2}"#)
-            .bind("task_queue_default")
-            .bind(format!("capacity:{task_id}"))
-            .fetch_all(&pool)
-            .await
-            .map(|rows| rows.len());
+    let refused = sqlx::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, TRUE)")
+        .bind(task_id)
+        .bind(WORKER)
+        .bind(r#"{"ok": 2}"#)
+        .fetch_all(&pool)
+        .await
+        .map(|rows| rows.len());
 
     assert_refused(refused, "22023", Constraint::Unnamed);
     assert_eq!(live_row(&pool, task_id).await, before);

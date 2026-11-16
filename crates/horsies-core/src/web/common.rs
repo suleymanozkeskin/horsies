@@ -385,6 +385,8 @@ pub(crate) fn query_failed(surface: &str, error: MonitoringQueryError) -> ApiErr
     let detail = format!("{surface} query failed: {}", error.message);
     match error.code {
         MonitoringQueryErrorCode::DbOperationFailed => ApiError::unavailable(detail),
+        // Python answers it with 503 too; the core never produces it.
+        MonitoringQueryErrorCode::EventLoopLimit => ApiError::unavailable(detail),
         MonitoringQueryErrorCode::HistoryContractViolation => {
             ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, detail)
         }
@@ -418,4 +420,39 @@ pub(crate) fn pagination_refused(
 pub(crate) fn parse_path_uuid(field: &'static str, raw: &str) -> Result<uuid::Uuid, ApiError> {
     uuid::Uuid::parse_str(raw)
         .map_err(|error| ApiError::Validation(vec![ApiError::path_uuid(field, raw, &error)]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitoring::MonitoringQueryErrorSource;
+
+    fn query_error(code: MonitoringQueryErrorCode) -> MonitoringQueryError {
+        MonitoringQueryError {
+            code,
+            message: "read failed".to_owned(),
+            retryable: false,
+            source: MonitoringQueryErrorSource::Database(sqlx::Error::PoolTimedOut),
+        }
+    }
+
+    #[test]
+    fn a_query_failure_maps_to_python_s_status() {
+        let status = |code| match query_failed("Task list", query_error(code)) {
+            ApiError::Detail(status, _) => status,
+            ApiError::Validation(_) => panic!("a query failure is never a validation body"),
+        };
+        assert_eq!(
+            status(MonitoringQueryErrorCode::DbOperationFailed),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(MonitoringQueryErrorCode::EventLoopLimit),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(MonitoringQueryErrorCode::HistoryContractViolation),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

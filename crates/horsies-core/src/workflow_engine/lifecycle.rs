@@ -594,6 +594,12 @@ mod resume_idempotency_tests {
         }
     }
 
+    /// Python `resume_workflow` (`core/workflows/lifecycle.py:1084-1263`): a
+    /// resume changes only a PAUSED workflow. On a RUNNING parent it returns
+    /// `false` and changes nothing, also when a child paused on its own (its
+    /// `on_error = pause`); that child is resumed by its own handle. The
+    /// stranded state that the earlier rule recovered cannot arise when the
+    /// status change and the cascade commit together (#872).
     #[tokio::test]
     #[serial]
     async fn resume_of_a_running_workflow_writes_nothing() {
@@ -606,7 +612,7 @@ mod resume_idempotency_tests {
 
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
-        // A RUNNING parent with a PAUSED child (the child was paused through its own handle).
+        // A RUNNING parent with a child that paused on its own.
         insert_workflow(&pool, &parent, "RUNNING", None).await;
         insert_running_task(&pool, &parent).await;
         insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
@@ -621,9 +627,13 @@ mod resume_idempotency_tests {
         )
         .await
         .expect("resume");
-        // Python's rule: a workflow that is not PAUSED is not resumed, and nothing is written.
-        assert!(!resumed, "a RUNNING workflow is not resumed");
-        assert_eq!(status_of(&pool, &child).await, "PAUSED");
+        assert!(!resumed, "a resume of a RUNNING workflow changes nothing");
+        assert_eq!(status_of(&pool, &parent).await, "RUNNING");
+        assert_eq!(
+            status_of(&pool, &child).await,
+            "PAUSED",
+            "a child that paused on its own stays PAUSED",
+        );
 
         cleanup(&pool, &[&parent, &child]).await;
     }
@@ -756,6 +766,14 @@ mod resume_idempotency_tests {
         .execute(&pool)
         .await
         .expect("insert ready resume node");
+        sqlx::query(
+            "UPDATE horsies_workflows SET sent_at = timestamptz '2026-01-01 00:00:00+00'
+             WHERE id = $1::uuid",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .expect("set the start call time");
 
         assert!(resume_workflow(
             &broker,
@@ -794,6 +812,18 @@ mod resume_idempotency_tests {
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
         assert!(!facts.3);
+        // The task row stores the start call time of its workflow as `sent_at`.
+        let sent_at_is_the_start_call_time: bool = sqlx::query_scalar(
+            "SELECT t.sent_at = timestamptz '2026-01-01 00:00:00+00'
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read resume task sent_at");
+        assert!(sent_at_is_the_start_call_time);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (
