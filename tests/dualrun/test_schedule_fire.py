@@ -38,7 +38,6 @@ from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.state import DueSchedule
 from horsies.core.types.result import Err, Ok, Result, is_ok
 from tests.dualrun.capture import Connection
-from tests.dualrun.clients import sqlalchemy_url
 from tests.dualrun.compare import ColumnDifference, render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
