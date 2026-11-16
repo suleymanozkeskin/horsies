@@ -158,6 +158,7 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
     );
     let cancel = CancellationToken::new();
     let reaper = spawn_reaper(
+        Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
         pool.clone(),
         pool.clone(),
         Arc::new(WorkflowSpecRegistry::new()),

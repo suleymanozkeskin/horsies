@@ -848,6 +848,7 @@ impl Worker {
         // The reaper's gate and pass run on the worker reserve, which the
         // runtime pool's users cannot exhaust.
         spawn_reaper(
+            Arc::clone(&self.broker),
             self.broker.reserve_pool().clone(),
             self.broker.reserve_maintenance_pool().clone(),
             Arc::clone(&self.workflow_registry),

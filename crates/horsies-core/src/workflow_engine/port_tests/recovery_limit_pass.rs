@@ -69,11 +69,11 @@ async fn passes(pool: &PgPool, registry: &WorkflowSpecRegistry, count: u32) -> V
 async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
     drive_phase2_recovery(
         pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         &WorkflowSpecRegistry::new(),
         0,
         GLOBAL_SCAN_ROW_CAP,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

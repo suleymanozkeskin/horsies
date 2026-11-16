@@ -121,6 +121,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut next_partition_maintenance = tokio::time::Instant::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         pool,
         pool,
         &WorkflowSpecRegistry::new(),
