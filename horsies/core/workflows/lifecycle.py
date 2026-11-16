@@ -63,8 +63,10 @@ from horsies.core.workflows.functions import (
 )
 from horsies.core.workflows.start_tree import start_parameters, start_tree
 from horsies.core.workflows.steps import (
+    RESUME_WORKFLOW_FUNCTION_SQL,
     START_WORKFLOW_FUNCTION_SQL,
     ParentAdvanceFailure,
+    ResumeDisposition,
     StartDisposition,
     advance_parents,
     decode_step_rows,
@@ -72,14 +74,8 @@ from horsies.core.workflows.steps import (
     run_in_transaction,
 )
 from horsies.core.workflows.sql import (
-    CHECK_WORKFLOW_EXISTS_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
-    RESUME_WORKFLOW_SQL,
-    GET_PENDING_WORKFLOW_TASKS_SQL,
-    GET_READY_WORKFLOW_TASKS_SQL,
-    GET_PAUSED_CHILD_WORKFLOWS_SQL,
-    RESUME_CHILD_WORKFLOW_SQL,
     SubWorkflowParams,
     TaskNodeFacts,
     task_node_facts,
@@ -794,12 +790,17 @@ async def resume_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
 ) -> HandleResult[bool]:
-    """Resume a paused workflow.
+    """Resume a paused workflow and its paused descendants.
 
-    Re-evaluates all PENDING tasks (marks READY if deps are terminal) and
-    enqueues all READY tasks. Only works if workflow is currently PAUSED.
-
-    Also cascades resume to all paused child workflows (iteratively, not recursively).
+    One transaction: ``BEGIN``, ``horsies_workflow_resume``, one
+    ``horsies_workflow_child_start`` per child start that it owes, ``COMMIT``.
+    The function moves the workflow and its PAUSED descendants to RUNNING,
+    promotes their PENDING nodes, enqueues their READY nodes (task rows
+    minted, child starts owed for sub-workflow nodes), and runs the
+    completion check of each resumed workflow, deepest first. After the
+    commit, the parent nodes of the child workflows that the step ended
+    advance (one transaction per level), then the recovery pass of the tree
+    runs, as before.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -812,22 +813,16 @@ async def resume_workflow(
         ``Err(HandleDbOperationFailed)`` on a database error before the
         resume commits; the transaction rolled back, or its commit outcome
         is unknown.
-        ``Err(HandleResumeRecoveryFailed)`` on a database error in the
-        recovery pass after the commit; the workflow is RUNNING.
+        ``Err(HandleResumeRecoveryFailed)`` when the resume committed and the
+        parent advance or the recovery pass after it failed; the workflow
+        is RUNNING.
         ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
         of open event loops and this is a new one; nothing ran.
-        Any other exception propagates.
+        ``OutcomeDecodeError`` for a row outside the function's contract,
+        ``SerializationError`` for a child tree value that does not
+        serialize, and ``ChildStartLimitExceeded``: defects; nothing
+        committed. Any other exception propagates.
     """
-    # Deferred imports to avoid circular dependency with engine.py
-    from horsies.core.workflows.engine import (
-        try_make_ready_and_enqueue,
-        get_dependency_results,
-        enqueue_workflow_task,
-        enqueue_subworkflow_task,
-        check_workflow_completion,
-        drain_parent_propagations_in_session,
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _event_loop_limit(workflow_id, 'resume', loop_limit)
@@ -836,93 +831,14 @@ async def resume_workflow(
 
     try:
         async with resources.session_factory() as session:
-            # 1. Transition PAUSED → RUNNING (only if currently PAUSED)
-            result = await session.execute(
-                RESUME_WORKFLOW_SQL,
+            committed = await run_in_transaction(
+                session,
+                broker,
+                RESUME_WORKFLOW_FUNCTION_SQL,
                 {'wf_id': workflow_id},
+                'horsies_workflow_resume',
+                ResumeDisposition,
             )
-            row = result.fetchone()
-            if row is None:
-                exists = await session.execute(
-                    CHECK_WORKFLOW_EXISTS_SQL,
-                    {'wf_id': workflow_id},
-                )
-                if exists.fetchone() is None:
-                    return Err(HandleWorkflowNotFound(
-                        message=f'Workflow {workflow_id} not found',
-                        workflow_id=workflow_id,
-                    ))
-                return Ok(False)
-
-            depth = row.depth or 0
-            root_wf_id = row.root_workflow_id or workflow_id
-
-            # 2. Find all PENDING tasks and try to make them READY
-            pending_result = await session.execute(
-                GET_PENDING_WORKFLOW_TASKS_SQL,
-                {'wf_id': workflow_id},
-            )
-            pending_indices = [r.task_index for r in pending_result.fetchall()]
-
-            for task_index in pending_indices:
-                await try_make_ready_and_enqueue(
-                    session, broker, workflow_id, task_index, depth, root_wf_id,
-                )
-
-            # 3. Find all READY tasks and enqueue them
-            # (These may be tasks that were READY at pause time, or tasks that
-            # couldn't be enqueued during step 2 due to failed deps check)
-            ready_result = await session.execute(
-                GET_READY_WORKFLOW_TASKS_SQL,
-                {'wf_id': workflow_id},
-            )
-            ready_tasks = ready_result.fetchall()
-
-            for task_index, dependencies, is_subworkflow in ready_tasks:
-                # Fetch dependency results for this task
-                dep_indices: list[int] = (
-                    cast(list[int], dependencies) if isinstance(dependencies, list) else []
-                )
-                dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
-                    session, workflow_id, dep_indices, app=broker.app,
-                )
-
-                if is_subworkflow:
-                    await enqueue_subworkflow_task(
-                        session,
-                        broker,
-                        workflow_id,
-                        task_index,
-                        all_dep_results=dep_results,
-                        all_dep_task_names=dep_task_names,
-                        parent_depth=depth,
-                        root_workflow_id=root_wf_id,
-                    )
-                else:
-                    await enqueue_workflow_task(
-                        session,
-                        workflow_id,
-                        task_index,
-                        all_dep_results=dep_results,
-                        all_dep_task_names=dep_task_names,
-                        broker=broker,
-                        all_dep_definition_keys=dep_definition_keys,
-                    )
-
-            # 4. Cascade resume to paused child workflows
-            await cascade_resume_to_children(session, broker, workflow_id)
-
-            # 5. Re-check completion after resume processing.
-            # Resume may transition pending tasks directly to SKIPPED/terminal without
-            # any subsequent task completion callback to trigger finalization.
-            await check_workflow_completion(session, workflow_id, broker)
-
-            # Drain parent propagations queued by the completion checks above
-            # (incl. the cascade's) — in-session on this cold path, matching
-            # the pre-denest in-transaction behavior.
-            await drain_parent_propagations_in_session(session, broker)
-
-            await session.commit()
     except SQLAlchemyError as exc:
         return Err(HandleDbOperationFailed(
             message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
@@ -930,6 +846,31 @@ async def resume_workflow(
             workflow_id=workflow_id,
             exception=exc,
         ))
+    match committed.outcome.disposition:
+        case ResumeDisposition.NOT_FOUND:
+            return Err(HandleWorkflowNotFound(
+                message=f'Workflow {workflow_id} not found',
+                workflow_id=workflow_id,
+            ))
+        case ResumeDisposition.NOT_PAUSED:
+            return Ok(False)
+        case ResumeDisposition.RESUMED:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+    match await advance_parents(broker, resources.session_factory, committed.parent_advances):
+        case None:
+            pass
+        case ParentAdvanceFailure(failed_child_workflow_id=child_id, cause=cause):
+            return Err(HandleResumeRecoveryFailed(
+                message=(
+                    f'Workflow {workflow_id} resumed; the parent advance of child '
+                    f'workflow {child_id} failed: {type(cause).__name__}: {cause}'
+                ),
+                workflow_id=workflow_id,
+                exception=cause,
+            ))
 
     try:
         # A task can finish while this transaction has resumed a child workflow
@@ -966,104 +907,6 @@ async def resume_workflow(
             exception=exc,
         ))
     return Ok(True)
-
-
-
-
-
-async def cascade_resume_to_children(
-    session: AsyncSession,
-    broker: 'PostgresBroker',
-    workflow_id: str,
-) -> None:
-    """
-    Iteratively resume all paused child workflows using BFS.
-    Avoids deep recursion for deeply nested workflows.
-    """
-    # Deferred imports to avoid circular dependency with engine.py
-    from horsies.core.workflows.engine import (
-        try_make_ready_and_enqueue,
-        get_dependency_results,
-        enqueue_workflow_task,
-        enqueue_subworkflow_task,
-        check_workflow_completion,
-    )
-
-    queue: deque[str] = deque([workflow_id])
-
-    while queue:
-        current_id = queue.popleft()
-
-        # Find paused child workflows
-        children = await session.execute(
-            GET_PAUSED_CHILD_WORKFLOWS_SQL,
-            {'wf_id': current_id},
-        )
-
-        for child_row in children.fetchall():
-            child_id = child_row.id
-            child_depth = child_row.depth or 0
-            child_root = child_row.root_workflow_id or child_id
-
-            # Resume child
-            await session.execute(
-                RESUME_CHILD_WORKFLOW_SQL,
-                {'wf_id': child_id},
-            )
-
-            # Re-evaluate and enqueue child's PENDING/READY tasks
-            child_pending = await session.execute(
-                GET_PENDING_WORKFLOW_TASKS_SQL,
-                {'wf_id': child_id},
-            )
-            for pending_row in child_pending.fetchall():
-                await try_make_ready_and_enqueue(
-                    session, broker, child_id, pending_row.task_index, child_depth, child_root,
-                )
-
-            child_ready = await session.execute(
-                GET_READY_WORKFLOW_TASKS_SQL,
-                {'wf_id': child_id},
-            )
-            for ready_row in child_ready.fetchall():
-                task_idx = ready_row.task_index
-                deps = ready_row.dependencies
-                is_sub = ready_row.is_subworkflow
-                dep_indices: list[int] = (
-                    cast(list[int], deps) if isinstance(deps, list) else []
-                )
-                dep_res, dep_names, dep_def_keys = await get_dependency_results(
-                    session, child_id, dep_indices, app=broker.app,
-                )
-
-                if is_sub:
-                    await enqueue_subworkflow_task(
-                        session,
-                        broker,
-                        child_id,
-                        task_idx,
-                        all_dep_results=dep_res,
-                        all_dep_task_names=dep_names,
-                        parent_depth=child_depth,
-                        root_workflow_id=child_root,
-                    )
-                else:
-                    await enqueue_workflow_task(
-                        session,
-                        child_id,
-                        task_idx,
-                        all_dep_results=dep_res,
-                        all_dep_task_names=dep_names,
-                        broker=broker,
-                        all_dep_definition_keys=dep_def_keys,
-                    )
-
-            # Check completion: resume may transition all pending tasks to
-            # SKIPPED/terminal without any subsequent callback to finalize.
-            await check_workflow_completion(session, child_id, broker)
-
-            # Add to queue to resume its children
-            queue.append(child_id)
 
 
 def resume_workflow_sync(
