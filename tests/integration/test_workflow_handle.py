@@ -9,9 +9,10 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.app import Horsies
@@ -2111,74 +2112,39 @@ class TestResumeCommitSplit:
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestUnknownStoredWorkflowStatus:
-    """horsies_workflows.status has no CHECK constraint; a value outside WorkflowStatus does not parse."""
+    """horsies_workflows.status takes only the WorkflowStatus values.
 
-    async def _workflow_with_status(
-        self, session: AsyncSession, broker: PostgresBroker, app: Horsies, name: str,
-    ) -> WorkflowHandle[Any]:
-        task_a = make_simple_task(app, f'{name}_a')
+    The CHECK horsies_workflows_status_known refuses any other value, so a
+    handle never reads one; no path writes the row outside the database.
+    """
+
+    async def test_the_database_refuses_an_unknown_status(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        task_a = make_simple_task(app, 'unknown_status_refused_a')
         spec = make_workflow_spec(
-            broker=broker, name=name, tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            broker=broker,
+            name='unknown_status_refused',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
         )
         handle = await start_ok(spec, broker)
-        await session.execute(
-            text("UPDATE horsies_workflows SET status = 'NOT_A_STATUS' WHERE id = :wf_id"),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-        return handle
 
-    async def test_status_returns_stored_data_invalid(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_read')
+        with pytest.raises(IntegrityError) as raised:
+            await session.execute(
+                text("UPDATE horsies_workflows SET status = 'BOGUS' WHERE id = :wf_id"),
+                {'wf_id': handle.workflow_id},
+            )
+        await session.rollback()
 
+        assert isinstance(raised.value.orig, psycopg.errors.CheckViolation)
+        assert raised.value.orig.diag.constraint_name == 'horsies_workflows_status_known'
         status_r = await handle.status_async()
-
-        assert is_err(status_r)
-        err = status_r.err_value
-        assert isinstance(err, HandleStoredDataInvalid)
-        assert isinstance(err.exception, ValueError)
-        assert 'NOT_A_STATUS' in err.message
-
-    async def test_cancel_returns_stored_data_invalid_and_changes_nothing(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_cancel')
-
-        cancel_r = await handle.cancel_async()
-
-        assert is_err(cancel_r)
-        assert isinstance(cancel_r.err_value, HandleStoredDataInvalid)
-        row = (await session.execute(
-            text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )).fetchone()
-        assert row is not None
-        assert row.status == 'NOT_A_STATUS'
-
-    async def test_get_folds_it_into_broker_error(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_get')
-
-        result = await handle.get_async(timeout_ms=0)
-
-        assert result.is_err()
-        assert result.unwrap_err().error_code is OperationalErrorCode.BROKER_ERROR
-        assert 'NOT_A_STATUS' in (result.unwrap_err().message or '')
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
 
 @pytest.mark.integration
