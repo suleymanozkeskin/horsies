@@ -4,7 +4,9 @@
 //! `FromRow` of the same type reads.
 
 use crate::broker::health::StoredWorkerState;
-use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskResultRow};
+use crate::broker::row::task::{
+    ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
+};
 use crate::db::{FromSql, Row, TypedStatement};
 
 /// Whether the broker logs each core statement it runs
@@ -145,6 +147,58 @@ pub(crate) fn task_result_row(
         status: column(row, statement, "status")?,
         result: column(row, statement, "result")?,
         failed_reason: column(row, statement, "failed_reason")?,
+    })
+}
+
+/// Reads a [`TaskInfoRow`].
+pub(crate) fn task_info_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<TaskInfoRow, RowDecodeError> {
+    Ok(TaskInfoRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+        queue_name: column(row, statement, "queue_name")?,
+        priority: column(row, statement, "priority")?,
+        retry_count: column(row, statement, "retry_count")?,
+        max_retries: column(row, statement, "max_retries")?,
+        next_retry_at: column(row, statement, "next_retry_at")?,
+        sent_at: column(row, statement, "sent_at")?,
+        enqueued_at: column(row, statement, "enqueued_at")?,
+        claimed_at: column(row, statement, "claimed_at")?,
+        started_at: column(row, statement, "started_at")?,
+        completed_at: column(row, statement, "completed_at")?,
+        failed_at: column(row, statement, "failed_at")?,
+        worker_hostname: column(row, statement, "worker_hostname")?,
+        worker_pid: column(row, statement, "worker_pid")?,
+        worker_process_name: column(row, statement, "worker_process_name")?,
+        error_code: column(row, statement, "error_code")?,
+        failed_reason: column(row, statement, "failed_reason")?,
+        result: column(row, statement, "result")?,
+        execution: column(row, statement, "execution")?,
+    })
+}
+
+/// Reads a [`TaskAttemptRow`].
+pub(crate) fn task_attempt_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<TaskAttemptRow, RowDecodeError> {
+    Ok(TaskAttemptRow {
+        task_id: column(row, statement, "task_id")?,
+        attempt: column(row, statement, "attempt")?,
+        outcome: column(row, statement, "outcome")?,
+        will_retry: column(row, statement, "will_retry")?,
+        started_at: column(row, statement, "started_at")?,
+        finished_at: column(row, statement, "finished_at")?,
+        error_code: column(row, statement, "error_code")?,
+        error_message: column(row, statement, "error_message")?,
+        failed_reason: column(row, statement, "failed_reason")?,
+        worker_id: column(row, statement, "worker_id")?,
+        worker_hostname: column(row, statement, "worker_hostname")?,
+        worker_pid: column(row, statement, "worker_pid")?,
+        worker_process_name: column(row, statement, "worker_process_name")?,
     })
 }
 
