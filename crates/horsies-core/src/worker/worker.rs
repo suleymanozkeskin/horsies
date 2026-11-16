@@ -3207,12 +3207,15 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -3443,12 +3446,15 @@ mod tests {
             session_database_url: Some(session_url),
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         })
         .await
         .expect("connect broker with a separate session pool");
@@ -3732,6 +3738,8 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         let broker = Arc::new(
             PostgresBroker::connect_with(&pg_config)
@@ -3841,6 +3849,8 @@ mod tests {
                 pool_timeout: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -3952,6 +3962,8 @@ mod tests {
                 pool_timeout: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 4, // soft-cap mode
