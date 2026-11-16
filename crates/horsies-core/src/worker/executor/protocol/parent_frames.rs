@@ -132,8 +132,9 @@ pub enum ChildProgram {
 }
 
 /// The connection pool of a child: `min_size` connections stay open,
-/// at most `max_size`. `check` pings a connection that waited in the pool
-/// before use. The pool refuses a `min_size` above `max_size` when it opens.
+/// at most `max_size`. `check` pings every pooled connection at checkout
+/// (psycopg's `check_connection`). The pool refuses a `min_size` above
+/// `max_size` when it opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildPool {
     pub min_size: PoolMinSize,
