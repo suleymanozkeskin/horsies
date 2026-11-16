@@ -642,7 +642,18 @@ pub(crate) async fn persist_terminal_state(
             .await
         }
         TaskResult::Err(ref task_error) => {
-            let error_code = task_error.error_code.as_ref().map(ToString::to_string);
+            // The stored error keeps its code when its `data` cannot be stored:
+            // the serializer stores `{"data_refused": <cause>}` in its place
+            // (Python `reportable_error`, `core/codec/typed.py:885-934`).
+            if let Some(refusal) = task_error.storage_refusal() {
+                tracing::error!(
+                    task_id = %task_id,
+                    error_code = %task_error.error_code,
+                    cause = %refusal,
+                    "data of a TaskError cannot be stored; it is stored as data_refused",
+                );
+            }
+            let error_code = Some(task_error.error_code.to_string());
             let retry = retry_request_for(running, stored_options, error_code.as_deref());
             let result_json =
                 serde_json::to_string(&TaskResult::<serde_json::Value>::Err(task_error.clone()))
@@ -1631,7 +1642,8 @@ mod result_wrap_tests {
         let wrapped_json = serde_json::to_string(&TaskResult::Ok(raw)).expect("wrap serializes");
 
         assert_eq!(
-            wrapped_json, r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
+            wrapped_json,
+            r#"{"__h_task_result__":true,"ok":{"amount": 1.2300, "id": 7},"err":null}"#,
             "result bytes must be embedded verbatim",
         );
 
