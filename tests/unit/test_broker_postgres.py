@@ -1221,6 +1221,29 @@ class TestEnqueueIdempotency:
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
+    async def test_enqueue_same_id_as_a_row_without_fingerprint_returns_err(self) -> None:
+        """INSERT conflicts, the existing row carries no fingerprint (a task
+        that the workflow engine wrote) -> Err(PAYLOAD_MISMATCH)."""
+        broker = _make_broker()
+        engine, _conn = _make_enqueue_engine(inserted=False)
+        _set_resources(broker, engine=engine)
+        session = _make_conflict_session(
+            stored_fingerprint=None, stored_fingerprint_version=None,
+        )
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='dup-id',
+            enqueue_sha='test-sha',
+            sent_at=_CONFLICT_SENT_AT,
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.PAYLOAD_MISMATCH
+        assert result.err_value.retryable is False
+
+    @pytest.mark.asyncio
     async def test_enqueue_same_id_row_deleted_returns_non_retryable_err(self) -> None:
         """INSERT conflicts, SELECT returns no row -> cannot verify payload identity."""
         broker = _make_broker()
