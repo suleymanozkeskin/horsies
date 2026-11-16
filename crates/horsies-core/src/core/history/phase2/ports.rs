@@ -1,0 +1,443 @@
+//! Ports of the Python phase-2 tests: consumption from history, the caller's
+//! plan setting, the quarantine copy and the locator keys.
+//!
+//! Python specification: `tests/integration/test_task_history_phase2_consumption.py`,
+//! `test_phase2_consume_plan.py`, `test_task_history_phase2_quarantine.py` and
+//! the core rows of `test_task_history_workflow_recovery_prototypes.py`. Each
+//! test runs in one transaction that it rolls back, on the shared migrated
+//! database.
+
+use serial_test::serial;
+use sqlx::{PgPool, Postgres, Transaction};
+use uuid::Uuid;
+
+use super::consumption::{consume_phase2, Phase2DispositionKind};
+use super::quarantine::{quarantine_one, QuarantineVerdict};
+use crate::broker::terminalization::terminalize_in_tx;
+use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+
+const PORT_WORKER: &str = "port-phase2-worker";
+const CLASS_KEY: &str = "standard_30d";
+
+async fn shared_pool() -> PgPool {
+    crate::broker::terminalization_matrix::migrated_pool().await
+}
+
+async fn seed_workflow(
+    transaction: &mut Transaction<'_, Postgres>,
+    workflow_id: Uuid,
+    status: &str,
+) {
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+             id, name, definition_key, status, on_error, output_task_index,
+             success_policy, result, error, parent_workflow_id, parent_task_index,
+             root_workflow_id, depth, sent_at, created_at, started_at, completed_at,
+             updated_at
+         ) VALUES (
+             $1, 'port_phase2', NULL, $2, 'fail', NULL,
+             NULL, NULL, NULL, NULL, NULL,
+             $1, 0, NOW(), NOW(), NOW(), NULL,
+             NOW()
+         )",
+    )
+    .bind(workflow_id)
+    .bind(status)
+    .execute(transaction.as_mut())
+    .await
+    .expect("insert workflow");
+}
+
+async fn seed_node(
+    transaction: &mut Transaction<'_, Postgres>,
+    node_id: Uuid,
+    workflow_id: Uuid,
+    task_id: Uuid,
+) {
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
+             min_success, task_options, max_retries, execution, good_until,
+             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
+             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
+             created_at, started_at, completed_at
+         ) VALUES (
+             $1, $2, 0, 'root', 'port.phase2', '{}', 'default', 100,
+             '{}', NULL, NULL, FALSE, 'all',
+             NULL, NULL, 0, 'ISOLATED', NULL,
+             $4, 'RUNNING', $3, FALSE, NULL,
+             NULL, NULL, NULL, NULL, NULL,
+             NOW(), NOW(), NULL
+         )",
+    )
+    .bind(node_id)
+    .bind(workflow_id)
+    .bind(task_id)
+    .bind(CLASS_KEY)
+    .execute(transaction.as_mut())
+    .await
+    .expect("insert workflow node");
+}
+
+async fn seed_running_workflow_task(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+             id, task_name, queue_name, priority, input, task_options, execution,
+             retention_class_key, sent_at, created_at,
+             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+             status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+             started_at, finalizing_at, finalizing_by_worker_id,
+             worker_pid, worker_hostname, worker_process_name,
+             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+         ) VALUES (
+             $1, 'port.phase2', 'default', 100, '{}', NULL, 'ISOLATED',
+             $2, NOW(), NOW(),
+             NULL, NULL, NULL,
+             'RUNNING', NOW(), NOW(), $3, NULL,
+             NOW(), NULL, NULL,
+             9, 'port-host', 'port-process',
+             0, 0, NULL, NULL, TRUE,
+             NOW(), FALSE, NULL, NULL
+         )",
+    )
+    .bind(task_id)
+    .bind(CLASS_KEY)
+    .bind(PORT_WORKER)
+    .execute(transaction.as_mut())
+    .await
+    .expect("insert running workflow task");
+}
+
+/// The ids of one workflow task that failed and moved to history, leaving a
+/// HISTORY pending row for its node.
+struct PendingEvidence {
+    task_id: Uuid,
+    workflow_id: Uuid,
+    node_id: Uuid,
+}
+
+async fn seed_pending(
+    transaction: &mut Transaction<'_, Postgres>,
+    workflow_status: &str,
+) -> PendingEvidence {
+    let evidence = PendingEvidence {
+        task_id: Uuid::new_v4(),
+        workflow_id: Uuid::new_v4(),
+        node_id: Uuid::new_v4(),
+    };
+    seed_workflow(transaction, evidence.workflow_id, workflow_status).await;
+    seed_running_workflow_task(transaction, evidence.task_id).await;
+    seed_node(
+        transaction,
+        evidence.node_id,
+        evidence.workflow_id,
+        evidence.task_id,
+    )
+    .await;
+    let outcomes = terminalize_in_tx(
+        transaction,
+        &TerminalizationCommand::FailLockedTask {
+            task_id: evidence.task_id,
+            fence: PriorLockedRead {
+                worker_id: PORT_WORKER.to_owned(),
+            },
+            result_json: "{\"Err\":{}}".to_owned(),
+            error_code: Some("TASK_ERROR".to_owned()),
+            failed_reason: Some("port phase-2 failure".to_owned()),
+        },
+    )
+    .await
+    .expect("fail the workflow task");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        pending_source(transaction, evidence.task_id)
+            .await
+            .as_deref(),
+        Some("HISTORY")
+    );
+    evidence
+}
+
+async fn pending_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    task_id: Uuid,
+) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT recovery_source FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(transaction.as_mut())
+    .await
+    .expect("read pending row")
+}
+
+async fn history_result_text(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) -> String {
+    sqlx::query_scalar(
+        "SELECT convert_from(result_payload, 'UTF8') FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(transaction.as_mut())
+    .await
+    .expect("read history result")
+}
+
+async fn node_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    node_id: Uuid,
+) -> (String, Option<String>) {
+    sqlx::query_as("SELECT status, result FROM horsies_workflow_tasks WHERE id = $1")
+        .bind(node_id)
+        .fetch_one(transaction.as_mut())
+        .await
+        .expect("read node")
+}
+
+/// `test_phase2_consume_plan.py::test_caller_plan_setting_survives_the_call`:
+/// the function's own plan setting does not leak into the caller's session.
+#[tokio::test]
+#[serial]
+async fn the_caller_plan_setting_survives_the_consume_call() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(transaction.as_mut())
+        .await
+        .expect("set the caller plan mode");
+    let disposition = consume_phase2(&mut transaction, Uuid::new_v4(), "FAILED")
+        .await
+        .expect("consume an unknown task");
+    assert_eq!(
+        disposition.disposition,
+        Phase2DispositionKind::PendingAbsent
+    );
+    let setting: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(transaction.as_mut())
+        .await
+        .expect("read the caller plan mode");
+    assert_eq!(setting, "force_custom_plan");
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestDurableDispositions.test_applied_to_node_records_the_history_result`:
+/// consumption writes the node from the history row and deletes the pending
+/// row.
+#[tokio::test]
+#[serial]
+async fn consumption_applies_the_history_result_to_the_node() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    let verdict = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume");
+    assert_eq!(verdict.disposition, Phase2DispositionKind::AppliedToNode);
+    assert_eq!(verdict.workflow_id, Some(evidence.workflow_id));
+    assert_eq!(verdict.node_status.as_deref(), Some("FAILED"));
+    assert_eq!(verdict.workflow_status.as_deref(), Some("RUNNING"));
+    let history_result = history_result_text(&mut transaction, evidence.task_id).await;
+    let (status, result) = node_state(&mut transaction, evidence.node_id).await;
+    assert_eq!(status, "FAILED");
+    assert_eq!(result, Some(history_result));
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id).await,
+        None
+    );
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestDurableDispositions.test_paused_workflow_still_records_the_node` and
+/// `test_phase2_applies_node_from_history_while_running_or_paused` (prototype,
+/// PAUSED half).
+#[tokio::test]
+#[serial]
+async fn a_paused_workflow_still_records_the_node() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "PAUSED").await;
+    let verdict = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume");
+    assert_eq!(verdict.disposition, Phase2DispositionKind::AppliedToNode);
+    assert_eq!(verdict.workflow_status.as_deref(), Some("PAUSED"));
+    let (status, _) = node_state(&mut transaction, evidence.node_id).await;
+    assert_eq!(status, "FAILED");
+    let replay = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume again");
+    assert_eq!(replay.disposition, Phase2DispositionKind::AlreadyApplied);
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestRepoint.test_copy_goes_with_its_node`: deleting the workflow removes
+/// the node, its pending row and its quarantine copy.
+#[tokio::test]
+#[serial]
+async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    // The repoint that `horsies_phase2_quarantine_one` performs, written out:
+    // copy the history row, then point the pending row at the copy.
+    sqlx::query(
+        "INSERT INTO horsies_workflow_phase2_quarantine (
+             task_id, workflow_id, workflow_node_row_id, terminalization_kind, terminal_at,
+             retention_class_key, history_schema_version, result_envelope_version,
+             result_payload, result_digest, quarantined_at
+         )
+         SELECT h.task_id, p.workflow_id, p.workflow_node_row_id, h.terminalization_kind,
+                h.terminal_at, p.history_class, h.history_schema_version,
+                h.result_envelope_version, h.result_payload, h.result_digest,
+                statement_timestamp()
+         FROM horsies_workflow_phase2_pending AS p
+         JOIN horsies_task_history AS h ON h.task_id = p.task_id
+         WHERE p.task_id = $1",
+    )
+    .bind(evidence.task_id)
+    .execute(transaction.as_mut())
+    .await
+    .expect("copy the evidence");
+    sqlx::query(
+        "UPDATE horsies_workflow_phase2_pending
+         SET recovery_source = 'QUARANTINE', quarantine_task_id = task_id,
+             history_class = NULL, history_anchor = NULL
+         WHERE task_id = $1",
+    )
+    .bind(evidence.task_id)
+    .execute(transaction.as_mut())
+    .await
+    .expect("repoint the pending row");
+
+    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        .bind(evidence.workflow_id)
+        .execute(transaction.as_mut())
+        .await
+        .expect("delete the workflow");
+
+    let (pending, copies): (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1),
+             (SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1)",
+    )
+    .bind(evidence.task_id)
+    .fetch_one(transaction.as_mut())
+    .await
+    .expect("count evidence");
+    assert_eq!((pending, copies), (0, 0));
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `test_pending_locator_structurally_pins_node_to_workflow` (prototype): a
+/// pending row whose node belongs to another workflow is refused by the
+/// locator key.
+#[tokio::test]
+#[serial]
+async fn the_pending_locator_pins_its_node_to_its_workflow() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    let other_workflow = Uuid::new_v4();
+    seed_workflow(&mut transaction, other_workflow, "RUNNING").await;
+    let refused = sqlx::query(
+        "UPDATE horsies_workflow_phase2_pending SET workflow_id = $2 WHERE task_id = $1",
+    )
+    .bind(evidence.task_id)
+    .bind(other_workflow)
+    .execute(transaction.as_mut())
+    .await
+    .expect_err("a node of another workflow is refused");
+    assert_eq!(
+        refused
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("horsies_workflow_phase2_pending_node_fkey")
+    );
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestRepoint.test_locator_is_copied_verified_repointed`: the copy holds the
+/// kind, the class and the payload of the history row, and the pending row
+/// points at it.
+#[tokio::test]
+#[serial]
+async fn a_locator_is_copied_verified_and_repointed() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    let outcome = quarantine_one(&mut transaction, evidence.task_id)
+        .await
+        .expect("quarantine");
+    assert_eq!(outcome.verdict, QuarantineVerdict::Repointed);
+    let copy_matches: bool = sqlx::query_scalar(
+        "SELECT q.terminalization_kind = h.terminalization_kind
+                AND q.retention_class_key = h.retention_class_key
+                AND q.result_payload = h.result_payload
+                AND q.result_digest = h.result_digest
+         FROM horsies_workflow_phase2_quarantine AS q
+         JOIN horsies_task_history AS h ON h.task_id = q.task_id
+         WHERE q.task_id = $1",
+    )
+    .bind(evidence.task_id)
+    .fetch_one(transaction.as_mut())
+    .await
+    .expect("compare the copy");
+    assert!(copy_matches);
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id)
+            .await
+            .as_deref(),
+        Some("QUARANTINE")
+    );
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestRefusal.test_broken_locator_refuses_and_retains_history_source`: a
+/// locator that points at no history row is refused, and the pending row
+/// keeps its history source.
+#[tokio::test]
+#[serial]
+async fn a_broken_locator_refuses_and_keeps_its_history_source() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    sqlx::query(
+        "UPDATE horsies_workflow_phase2_pending
+         SET history_anchor = history_anchor + interval '1 second'
+         WHERE task_id = $1",
+    )
+    .bind(evidence.task_id)
+    .execute(transaction.as_mut())
+    .await
+    .expect("break the locator");
+    let outcome = quarantine_one(&mut transaction, evidence.task_id)
+        .await
+        .expect("quarantine");
+    assert_eq!(outcome.verdict, QuarantineVerdict::SourceAbsent);
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id)
+            .await
+            .as_deref(),
+        Some("HISTORY")
+    );
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestRefusal.test_unknown_task_is_pending_gone`.
+#[tokio::test]
+#[serial]
+async fn an_unknown_task_is_pending_gone() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let outcome = quarantine_one(&mut transaction, Uuid::new_v4())
+        .await
+        .expect("quarantine");
+    assert_eq!(outcome.verdict, QuarantineVerdict::PendingGone);
+    transaction.rollback().await.expect("rollback");
+}

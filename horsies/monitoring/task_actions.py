@@ -1,10 +1,10 @@
 """The cancel action for individual tasks.
 
-The action is one transaction: lock the target row, apply a
-compare-and-set, and — when the CAS matches nothing — diagnose the
-reason from the row already locked. Holding the lock is what makes the
-diagnosis trustworthy; a concurrent claim either waits behind it or is
-rejected by the CAS.
+The action is one statement in autocommit, ``horsies_cancel_task``: it
+takes the task advisory lock and the row lock, moves a cancellable row to
+history as CANCELLED, or classifies the refusal from the row it locked or,
+for a task absent from the live table, from history. A concurrent claim
+either waits behind the lock or finds the row gone.
 
 Two boundaries are deliberate:
 
@@ -33,33 +33,23 @@ from typing import TYPE_CHECKING, ClassVar, assert_never
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from sqlalchemy.ext.asyncio import AsyncConnection
-
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.errors import HistoryContractError
-from horsies.core.history.reads.detail import (
-    HistoryTaskState,
-    LiveTaskLocation,
-    TaskStateAbsent,
-    read_task_state,
-    staged_detail_published,
-)
-from horsies.core.lifecycle.commands import CancelLockedTask
-from horsies.core.lifecycle.fences import CallerHoldsRowLock
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
     ObservedTaskState,
+    ObservedWorkflowTask,
     OutcomeDecodeError,
     SourceStateConflict,
     TaskAbsent,
+    TerminalizationOutcome,
+    decode_outcome_row,
 )
-from horsies.core.lifecycle.persistence import LOCK_TASK_SQL, apply_async
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 
 
 if TYPE_CHECKING:
@@ -70,12 +60,8 @@ if TYPE_CHECKING:
 class TaskActionNotFound:
     """No task has this id. Nothing changed.
 
-    The id is not a UUID, the database has no staged history read (a
-    database before the history coverage), or neither the live table nor
-    history holds the task (retention can remove it). Also returned when
-    the history read finds the task live after the lock read missed it:
-    the cancel decides at the lock read, where the row was not live; a
-    repeated cancel finds the row.
+    The id is not a UUID, or neither the live table nor history holds the
+    task (retention can remove it).
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_FOUND
@@ -117,14 +103,14 @@ class TaskActionWorkflowTask:
 
 @dataclass(slots=True, frozen=True)
 class TaskActionDbOperationFailed:
-    """The cancel transaction failed with a database or driver error.
+    """The cancel statement failed with a database or driver error.
 
     ``retryable`` is the driver classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. ``exception``
-    is the ``SQLAlchemyError``. Before the commit, the transaction rolled
-    back and nothing changed. At the commit, the commit outcome is unknown:
-    a repeated cancel tells which, because a committed cancel answers
-    ``TaskActionNotCancellable`` with ``CANCELLED``.
+    is the ``SQLAlchemyError``. The statement wrote nothing, or it
+    committed and its reply was lost: a repeated cancel tells which,
+    because a committed cancel answers ``TaskActionNotCancellable`` with
+    ``CANCELLED``.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DB_OPERATION_FAILED
@@ -152,12 +138,11 @@ class TaskActionEventLoopLimit:
 
 @dataclass(slots=True, frozen=True)
 class TaskActionStoredDataInvalid:
-    """Stored task data does not parse. Nothing changed: the transaction did not commit.
+    """Stored task data does not parse. Nothing changed: the cancel refused the task.
 
-    ``exception`` is the ``HistoryContractError`` of the history read (a
-    history status that is not a ``TaskStatus`` member, or an unknown
-    location), or the ``OutcomeDecodeError`` of the cancel outcome row. A repeat gives the same result until the
-    stored row changes.
+    ``exception`` is the ``OutcomeDecodeError`` of the cancel outcome row,
+    for example a history status that is not a ``TaskStatus`` member. A
+    repeat gives the same result until the stored row changes.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.STORED_DATA_INVALID
@@ -186,15 +171,11 @@ class TaskCancelled:
     was_status: TaskStatus
 
 
-# Locks the row for the rest of the transaction, after the task advisory
-# lock (``LOCK_TASK_SQL``), which every move function takes before its row
-# lock. The diagnosis reads ``is_workflow_task`` here; the status it reports
-# comes from the cancel outcome, which decodes it.
-_LOCK_TASK_SQL = text("""
-    SELECT is_workflow_task
-    FROM horsies_tasks
-    WHERE id = CAST(:id AS uuid)
-    FOR UPDATE
+# One statement in autocommit. The function takes the task advisory lock,
+# then the row lock, and either moves the row or classifies the refusal; the
+# statement commits when it returns.
+CANCEL_TASK_SQL = text("""
+    SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), :include_running)
 """)
 
 def _not_found(task_id: str) -> Err[TaskActionNotFound]:
@@ -256,7 +237,7 @@ def _db_err(
 def _stored_data_err(
     action: str,
     task_id: str,
-    exc: HistoryContractError | OutcomeDecodeError,
+    exc: OutcomeDecodeError,
 ) -> Err[TaskActionStoredDataInvalid]:
     """Wrap stored data that does not parse. The transaction did not commit."""
     return Err(
@@ -268,38 +249,46 @@ def _stored_data_err(
     )
 
 
-async def _diagnose_live_miss(
-    connection: AsyncConnection, task_id: str
-) -> Err[TaskActionNotFound | TaskActionWorkflowTask | TaskActionNotCancellable]:
-    """Classify a task absent from the live table.
+def _cancel_answer(
+    task_id: str,
+    outcome: TerminalizationOutcome,
+) -> Result[
+    TaskCancelled,
+    TaskActionNotFound | TaskActionWorkflowTask | TaskActionNotCancellable,
+]:
+    """The answer of the cancel to its caller, from the decoded outcome. Pure.
 
-    Terminalization moves finished rows to history, so a terminal task
-    is a live miss by design: the history read names it, and the answer
-    is the same refusal a terminal live row produced before the split —
-    a state conflict, or the workflow-bound refusal — never "not
-    found" for a task the dashboard is still showing.
-
-    A history read that reports the task live is "not found" too. The
-    cancel decides at the lock read, and the row was not live there: the
-    history read is a later statement, which saw a row that was inserted
-    after the lock read. A repeated cancel finds the row.
+    A finished task is refused as it was when it was live: a workflow task
+    with the workflow-bound refusal, a plain task as not cancellable from
+    its terminal status (an earlier cancel included, ``AlreadyApplied``).
 
     Raises:
-        HistoryContractError: the history row's status is not a task status,
-            or the staged function reports an unknown location.
+        RuntimeError: an outcome that contradicts the function: a lost
+            claim (the cancel has no claim fence), or an applied, replayed
+            or refused cancel with no observed status.
     """
-    if not await staged_detail_published(connection):
-        return _not_found(task_id)
-    state = await read_task_state(connection, task_id=task_id)
-    match state:
-        case HistoryTaskState(is_workflow_task=True, status=status):
+    match outcome:
+        case Applied(observed=ObservedTaskState(status=TaskStatus() as was_status)):
+            return Ok(TaskCancelled(task_id=task_id, was_status=was_status))
+        case SourceStateConflict(evidence=ObservedWorkflowTask(observed_status=status)):
             return _workflow_bound(task_id, status)
-        case HistoryTaskState(status=status):
+        case (
+            SourceStateConflict(observed=ObservedTaskState(status=TaskStatus() as status))
+            | AlreadyApplied(observed=ObservedTaskState(status=TaskStatus() as status))
+        ):
             return _not_cancellable(task_id, status)
-        case TaskStateAbsent():
+        case TaskAbsent():
             return _not_found(task_id)
-        case LiveTaskLocation():
-            return _not_found(task_id)
+        case Applied() | AlreadyApplied() | SourceStateConflict():
+            raise RuntimeError(
+                f'administrative cancellation of task {task_id} '
+                'reported no observed status'
+            )
+        case LostClaim():
+            raise RuntimeError(
+                f'administrative cancellation of task {task_id} reported a '
+                'lost claim; the cancel has no claim fence'
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -318,19 +307,14 @@ async def cancel_task(
     because the row flips while the process keeps executing — its side
     effects still happen and no attempt record is written for that run.
 
-    Waiting result handles unblock on commit: the terminal-status trigger
-    fires ``task_done`` and a CANCELLED row is reported as TASK_CANCELLED,
-    so no result payload is written here.
+    Waiting result handles unblock on commit: the move fires ``task_done``
+    and a CANCELLED row is reported as TASK_CANCELLED, so no result payload
+    is written here. One ``horsies_cancel_task`` statement in autocommit.
 
     Raises:
-        RuntimeError: the cancel outcome contradicts the caller-held row
-            lock, or the cancel function reports no row or no observed
-            status for the locked row. These are defects, not outcomes.
+        RuntimeError: the cancel outcome contradicts the function (a lost
+            claim, or no observed status). These are defects, not outcomes.
     """
-    permitted_statuses = (TaskStatus.PENDING, TaskStatus.CLAIMED)
-    if include_running:
-        permitted_statuses += (TaskStatus.RUNNING,)
-
     # Identity columns are uuid; text that does not parse as one cannot
     # name any task. Python also accepts forms that the Postgres uuid cast
     # refuses (for example a ``urn:uuid:`` prefix), so every statement gets
@@ -355,58 +339,21 @@ async def cancel_task(
 
     try:
         async with resources.session_factory() as session:
-            await session.execute(LOCK_TASK_SQL, {'task_id': task_id})
-            locked = (await session.execute(_LOCK_TASK_SQL, {'id': task_id})).first()
-            if locked is None:
-                return await _diagnose_live_miss(
-                    await session.connection(), task_id
+            connection = await autocommit_connection(session)
+            rows = (
+                await connection.execute(
+                    CANCEL_TASK_SQL,
+                    {'task_id': task_id, 'include_running': include_running},
                 )
-            (is_workflow_task,) = locked
-
-            outcome = await apply_async(
-                await session.connection(),
-                CancelLockedTask(
-                    task_id=task_id,
-                    fence=CallerHoldsRowLock(),
-                    permitted_source_statuses=permitted_statuses,
-                ),
+            ).mappings().all()
+            assert len(rows) == 1, (
+                f'horsies_cancel_task returned {len(rows)} rows for task {task_id}'
             )
-            # The cancel function reports the locked row's status on each
-            # of these outcomes, and the decoder has parsed it.
-            match outcome:
-                case Applied(
-                    observed=ObservedTaskState(status=TaskStatus() as was_status),
-                ):
-                    await session.commit()
-                    return Ok(TaskCancelled(task_id=task_id, was_status=was_status))
-                case (
-                    AlreadyApplied(
-                        observed=ObservedTaskState(
-                            status=TaskStatus() as observed_status,
-                        ),
-                    )
-                    | SourceStateConflict(
-                        observed=ObservedTaskState(
-                            status=TaskStatus() as observed_status,
-                        ),
-                    )
-                ):
-                    if is_workflow_task:
-                        return _workflow_bound(task_id, observed_status)
-                    return _not_cancellable(task_id, observed_status)
-                case Applied() | AlreadyApplied() | SourceStateConflict():
-                    raise RuntimeError(
-                        f'administrative cancellation of task {task_id} '
-                        'reported no observed status for the locked row'
-                    )
-                case LostClaim() | TaskAbsent():
-                    raise RuntimeError(
-                        'administrative cancellation contradicted the '
-                        'caller-held row lock'
-                    )
-                case _ as unreachable:
-                    assert_never(unreachable)
+            outcome = decode_outcome_row(
+                {str(key): value for key, value in rows[0].items()}
+            )
     except SQLAlchemyError as exc:
         return _db_err('Task cancel', task_id, exc)
-    except (HistoryContractError, OutcomeDecodeError) as exc:
+    except OutcomeDecodeError as exc:
         return _stored_data_err('Task cancel', task_id, exc)
+    return _cancel_answer(task_id, outcome)

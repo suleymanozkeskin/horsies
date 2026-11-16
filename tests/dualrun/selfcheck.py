@@ -117,7 +117,8 @@ def _fresh_ids(connection: Connection, count: int) -> list[str]:
     return [str(record[0]) for record in records]
 
 
-def _read_start(connection: Connection) -> Result[datetime, SelfCheckStepFailed]:
+def read_run_start(connection: Connection) -> Result[datetime, SelfCheckStepFailed]:
+    """The database clock at the start of a run, before any write of the run."""
     match read_database_clock(connection):
         case Err(failed):
             return _failed('read the run start', failed)
@@ -125,9 +126,10 @@ def _read_start(connection: Connection) -> Result[datetime, SelfCheckStepFailed]
             return Ok(now)
 
 
-def _capture(
+def capture_run(
     connection: Connection, start: datetime
 ) -> Result[SelfCheckRun, SelfCheckStepFailed]:
+    """The snapshot of the database, with the run window from ``start`` to the clock now."""
     match read_database_clock(connection):
         case Err(failed):
             return _failed('read the run end', failed)
@@ -150,7 +152,7 @@ def run_function_calls(
 ) -> Result[SelfCheckRun, SelfCheckStepFailed]:
     """Install, run the function-call script with new ids, commit, capture."""
     with psycopg.connect(database.url, autocommit=True) as connection:
-        match _read_start(connection):
+        match read_run_start(connection):
             case Err(failed):
                 return Err(failed)
             case Ok(start):
@@ -173,7 +175,7 @@ def run_function_calls(
                 )
         except psycopg.Error as exc:
             return _failed('run the function-call script', exc)
-        return _capture(connection, start)
+        return capture_run(connection, start)
 
 
 # ---- Seeded history ----
@@ -202,7 +204,7 @@ _COMPLETE_SQL: Final[LiteralString] = """
 _FAILED_ATTEMPT_SQL: Final[LiteralString] = """
     SELECT outcome FROM horsies_finish_failed_attempt(
         %(task_id)s, %(worker_id)s, (SELECT claimed_at FROM horsies_tasks WHERE id = %(task_id)s),
-        0, 1.0, 'same_class', '{"err":1}', 'E1', 'reason', 'FAILED', 'timed out', 'reason'
+        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'timed out', 'reason', 'REFUSE', TRUE
     )
 """
 
@@ -292,7 +294,7 @@ def run_seeded_history(
 ) -> Result[SelfCheckRun, SelfCheckStepFailed]:
     """Install, run the production coverage pass, move a task into a daily leaf, detach a leaf, capture."""
     with psycopg.connect(database.url, autocommit=True) as connection:
-        match _read_start(connection):
+        match read_run_start(connection):
             case Err(failed):
                 return Err(failed)
             case Ok(start):
@@ -312,4 +314,4 @@ def run_seeded_history(
                 _seeded_writes(connection)
         except psycopg.Error as exc:
             return _failed('write the seeded history', exc)
-        return _capture(connection, start)
+        return capture_run(connection, start)

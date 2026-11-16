@@ -20,9 +20,11 @@ use super::support::{
     IsolatedDatabase, LiveStatus, NodeSeed, Notifications, WorkflowSeed, WORKER,
 };
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
+use crate::broker::core_rows::StatementLog;
 use crate::broker::lifecycle_tests::support::{
     database_options, unpinged_single_connection_pool, wait_until_idle, WireProxy,
 };
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -264,7 +266,8 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
     let pool = shared_pool().await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_replay").await).await;
     let committed = finish_workflow_success(
-        &pool,
+        &core_pool_for_test_pool(&pool),
+        StatementLog::Off,
         &FinishWorkflowSuccess {
             task_id: node_a.task_id(),
             fence: OwnedClaim {
@@ -318,7 +321,8 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     // Prepare the success statement on the proxied connection, so the write
     // is one request with one reply.
     let warm_up = finish_workflow_success(
-        &proxied,
+        &core_pool_for_test_pool(&proxied),
+        StatementLog::Off,
         &FinishWorkflowSuccess {
             task_id: Uuid::new_v4(),
             fence: OwnedClaim {
