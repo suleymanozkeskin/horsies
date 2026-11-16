@@ -795,7 +795,10 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively.
+/// as FAILED or requeuing them respectively. The caller has checked the
+/// client family of the handle that owns both pools
+/// (`Worker::start_database`); the reaper's partition maintenance writes
+/// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
@@ -2756,3 +2759,6 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod retention_ports;

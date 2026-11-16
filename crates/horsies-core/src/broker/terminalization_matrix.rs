@@ -449,6 +449,7 @@ async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
     assert!(!database_exists);
 }
 
+/// The URL of the P5 database, accepted by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
     let pool = migrated_pool().await;
     drop(pool);
@@ -1108,7 +1109,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
                 worker_id: "w1".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: None,
         },
     )
@@ -1124,7 +1125,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
 
     let image = post_image(&pool, &id).await;
     assert_eq!(image.status, "FAILED");
-    assert_eq!(image.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(image.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(
         image.failed_reason, None,
         "the terminal writer owns the final-attempt summary; None clears \
@@ -2941,7 +2942,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
                 worker_id: "w1".to_owned(),
             },
             result_json: "{}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("failed".to_owned()),
         },
     )

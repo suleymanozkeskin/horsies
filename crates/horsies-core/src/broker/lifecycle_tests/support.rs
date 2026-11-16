@@ -978,7 +978,7 @@ pub(super) async fn write_workflow_success(
 /// A pool of one connection that does not ping a connection at checkout, so
 /// a dead pooled connection shows at its first statement (Python's worker
 /// pre-ping off).
-pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
+pub(crate) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
     PgPoolOptions::new()
         .max_connections(1)
         .test_before_acquire(false)
@@ -988,13 +988,13 @@ pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -
 }
 
 /// The connect options of the shared test database.
-pub(super) fn database_options(pool: &PgPool) -> PgConnectOptions {
+pub(crate) fn database_options(pool: &PgPool) -> PgConnectOptions {
     (*pool.connect_options()).clone()
 }
 
 /// Wait until the one connection of `pool` is back in the pool; the release
 /// check of the pool runs in the background after a query.
-pub(super) async fn wait_until_idle(pool: &PgPool) {
+pub(crate) async fn wait_until_idle(pool: &PgPool) {
     for _ in 0..IDLE_POLLS {
         if pool.num_idle() == 1 {
             return;
@@ -1051,7 +1051,7 @@ const REPLY_DROP_SETTLE: std::time::Duration = std::time::Duration::from_millis(
 /// round trips, and it can drop the reply of the next request: the server
 /// receives and runs the request; the client gets no reply and then a closed
 /// connection.
-pub(super) struct WireProxy {
+pub(crate) struct WireProxy {
     port: u16,
     armed: Arc<AtomicBool>,
     dropped: Arc<AtomicBool>,
@@ -1061,7 +1061,7 @@ pub(super) struct WireProxy {
 
 impl WireProxy {
     /// Listen on a free local port and relay to the server of `upstream`.
-    pub(super) async fn start(upstream: &PgConnectOptions) -> Self {
+    pub(crate) async fn start(upstream: &PgConnectOptions) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind the proxy");
@@ -1089,17 +1089,17 @@ impl WireProxy {
     }
 
     /// Connect options that reach the database through this proxy.
-    pub(super) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
+    pub(crate) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
         upstream.clone().host("127.0.0.1").port(self.port)
     }
 
     /// Drop the reply to the next request that a client sends.
-    pub(super) fn drop_next_reply(&self) {
+    pub(crate) fn drop_next_reply(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
 
     /// Whether a reply was dropped.
-    pub(super) fn reply_was_dropped(&self) -> bool {
+    pub(crate) fn reply_was_dropped(&self) -> bool {
         self.dropped.load(Ordering::SeqCst)
     }
 
