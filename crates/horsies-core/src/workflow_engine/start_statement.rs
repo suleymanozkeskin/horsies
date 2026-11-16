@@ -3,9 +3,14 @@
 //!
 //! The core builds the tree in memory: the top-level workflow, a pre-built
 //! child workflow for every sub-workflow root (recursively, to the depth
-//! limit), and every node row with its typed facts. The function inserts the
-//! rows, mints the task rows of the READY task nodes, and links each
-//! sub-workflow root to its pre-built child, in one statement in autocommit.
+//! limit), every node row with its typed facts, and a failed-node record for
+//! each sub-workflow root whose child cannot start. The function inserts the
+//! rows, fails the recorded nodes and runs their progression, mints the task
+//! rows of the READY task nodes, and links each sub-workflow root to its
+//! pre-built child.
+//!
+//! The same arrays describe the child tree of an owed child start
+//! (`horsies_workflow_child_start`, `child_start.rs`).
 
 use std::borrow::Cow;
 
@@ -14,28 +19,33 @@ use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::{AnyNode, OnError, WorkflowSpec, WorkflowSpecRegistry};
-use crate::db::{CheckoutClass, ParameterType, TypedStatement};
+use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::{
+    AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec,
+    WorkflowSpecRegistry,
+};
+use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
+use crate::workflow_engine::engine::subworkflow_load_failed_error;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
-    build_child_spec, child_workflow_depth, node_task_facts, require_subworkflow_node_keys,
+    child_workflow_depth, materialize_child_spec, node_task_facts, require_subworkflow_node_keys,
     stored_queue_and_priority,
 };
-use crate::workflow_engine::steps::{run_alone, step_rows, StepContractError, StepDisposition};
+use crate::workflow_engine::steps::{
+    run_alone, run_in_transaction, step_row_select, step_rows, ChildBuild, OwedParentAdvances,
+    StepContractError, StepDisposition,
+};
 
 /// `horsies_workflow_start`: the workflow rows of the tree (top-level first),
-/// the start call time, the node rows, and the failed-node records (always
-/// empty here: a root child that cannot be built refuses the start).
+/// the start call time, the node rows, and the failed-node records.
 pub(crate) static START: TypedStatement = TypedStatement::new(
     "horsies_workflow_start",
-    "SELECT row_kind, disposition, workflow_id, advance_child_workflow_id, detail, task_index
-     FROM horsies_workflow_start(
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-         $27, $28, $29, $30, $31, $32,
-         $33, $34, $35
-     )",
+    step_row_select!(
+        "horsies_workflow_start($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, \
+         $33, $34, $35)"
+    ),
     &[
         // Workflow rows.
         ParameterType::UuidArray,
@@ -109,8 +119,20 @@ pub(crate) enum StartOutcome {
     Exists { stored_name: Option<String> },
 }
 
-/// The parallel arrays of `horsies_workflow_start`, one element per workflow
-/// row or node row of the tree. Only [`start_arguments`] builds it.
+/// What a committed start did, and the parent advances it owes after its
+/// commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartedTree {
+    pub(crate) outcome: StartOutcome,
+    /// The workflows that the owed child starts of a transaction-form start
+    /// ended and that have a parent. Empty for the one-statement form.
+    pub(crate) parent_advances: OwedParentAdvances,
+}
+
+/// The parallel arrays of `horsies_workflow_start` (and of the `TREE` kind of
+/// `horsies_workflow_child_start`), one element per workflow row, node row or
+/// failed-node record of the tree. Only [`start_arguments`] and
+/// [`child_tree_arguments`] build it.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct StartArguments {
     workflow_ids: Vec<Uuid>,
@@ -144,6 +166,9 @@ pub(crate) struct StartArguments {
     node_sub_workflow_names: Vec<Option<String>>,
     node_sub_definition_keys: Vec<Option<String>>,
     node_sub_workflow_params: Vec<Option<String>>,
+    failed_workflow_ids: Vec<Uuid>,
+    failed_task_indexes: Vec<i32>,
+    failed_results: Vec<String>,
 }
 
 /// One workflow of the tree, before its rows are pushed.
@@ -156,37 +181,88 @@ struct TreeWorkflow<'a> {
     depth: i32,
 }
 
+/// What the host build made of the child of a sub-workflow node.
+pub(crate) enum ChildBuildOutcome {
+    /// The child spec, at its depth.
+    Built { spec: WorkflowSpec, depth: i32 },
+    /// The child cannot start: the node fails with this error, and its
+    /// workflow's `on_error` applies (Python's node-level failure,
+    /// `_fail_enqueued_task` and `_fail_subworkflow_load`,
+    /// `core/workflows/engine.py:474-619`).
+    NodeFails(TaskError),
+}
+
+/// Characters of a build failure text that the node error keeps (Python:
+/// `str(exc)[:200]`, `core/workflows/engine.py:1206`).
+const BUILD_FAILURE_TEXT_CHARS: usize = 200;
+
 /// Builds the arguments of a start: the top-level workflow `workflow_id` of
-/// `spec`, and a pre-built child for every sub-workflow node without
-/// dependencies, recursively. Parents come before their children; the
+/// `spec`, a pre-built child for every sub-workflow node without
+/// dependencies (recursively), and a failed-node record for each such node
+/// whose child cannot start. Parents come before their children; the
 /// top-level row is first. Does no I/O; it runs the registered child builders
 /// (`spec_builder`), which must have no side effects.
 ///
-/// Errors: [`WorkflowError::Validation`] when a child cannot be built (no
-/// registration under its definition key, a builder that fails, a child past
-/// the depth limit, a sub-workflow node of the child without a definition
-/// key), a node without a resolved queue or priority, a node index above
-/// `i32::MAX`, or task options that the enqueue rules refuse;
-/// [`WorkflowError::Serialization`] for a value that does not encode. Python
-/// fails only the sub-workflow node when its child cannot be built; the core
-/// refuses the start as before, until the failed-node records run in the
-/// transaction form with `horsies_workflow_child_start` (#751).
+/// Errors: [`WorkflowError::Validation`] for a sub-workflow node of a built
+/// child without a definition key, a node without a resolved queue or
+/// priority, a node index above `i32::MAX`, or task options that the enqueue
+/// rules refuse; [`WorkflowError::Serialization`] for a value that does not
+/// encode.
 pub(crate) fn start_arguments(
     spec: &WorkflowSpec,
     workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
 ) -> Result<StartArguments, WorkflowError> {
+    tree_arguments(
+        TreeWorkflow {
+            spec: Cow::Borrowed(spec),
+            workflow_id,
+            parent: None,
+            depth: 0,
+        },
+        registry,
+        retention,
+    )
+}
+
+/// Builds the `TREE` arguments of an owed child start: the child
+/// `child_workflow_id` of `spec` under the node `parent_task_index` of
+/// `parent_workflow_id`, at `depth`, with its pre-built children and
+/// failed-node records as [`start_arguments`]. Errors as
+/// [`start_arguments`].
+pub(crate) fn child_tree_arguments(
+    spec: &WorkflowSpec,
+    child_workflow_id: Uuid,
+    parent_workflow_id: Uuid,
+    parent_task_index: i32,
+    depth: i32,
+    registry: &WorkflowSpecRegistry,
+    retention: &RetentionConfig,
+) -> Result<StartArguments, WorkflowError> {
+    tree_arguments(
+        TreeWorkflow {
+            spec: Cow::Borrowed(spec),
+            workflow_id: child_workflow_id,
+            parent: Some((parent_workflow_id, parent_task_index)),
+            depth,
+        },
+        registry,
+        retention,
+    )
+}
+
+/// The rows of the tree under `top`. Each workflow is pushed once, and a
+/// child only below the depth limit, so the work list ends.
+fn tree_arguments(
+    top: TreeWorkflow<'_>,
+    registry: &WorkflowSpecRegistry,
+    retention: &RetentionConfig,
+) -> Result<StartArguments, WorkflowError> {
     let mut arguments = StartArguments::default();
-    // Each workflow is pushed once, and a child only below the depth limit,
-    // so the work list ends.
-    let mut pending = vec![TreeWorkflow {
-        spec: Cow::Borrowed(spec),
-        workflow_id,
-        parent: None,
-        depth: 0,
-    }];
+    let mut pending = vec![top];
     while let Some(workflow) = pending.pop() {
+        require_subworkflow_node_keys(&workflow.spec)?;
         arguments.push_workflow(&workflow)?;
         for node in &workflow.spec.tasks {
             arguments.push_node(workflow.workflow_id, node, retention)?;
@@ -197,38 +273,144 @@ pub(crate) fn start_arguments(
             .iter()
             .filter(|node| node.is_subworkflow && node.dependencies.is_empty())
         {
-            pending.push(root_child(&workflow, node, registry)?);
+            let task_index = node_index(node.index)?;
+            let spec_name = node
+                .task_name
+                .strip_prefix("__sub_workflow:")
+                .unwrap_or(&node.task_name);
+            let built = build_child(
+                ChildOfNode {
+                    parent_workflow_id: workflow.workflow_id,
+                    task_index,
+                    parent_depth: workflow.depth,
+                    spec_name,
+                    definition_key: node.sub_definition_key.as_deref(),
+                },
+                || Ok(NodeInput::Input(node.input_json.clone())),
+                node.sub_workflow_params,
+                registry,
+            )?;
+            match built {
+                ChildBuildOutcome::Built { spec, depth } => pending.push(TreeWorkflow {
+                    spec: Cow::Owned(spec),
+                    workflow_id: Uuid::new_v4(),
+                    parent: Some((workflow.workflow_id, task_index)),
+                    depth,
+                }),
+                ChildBuildOutcome::NodeFails(error) => {
+                    tracing::error!(
+                        workflow_id = %workflow.workflow_id,
+                        task_index,
+                        error = ?error.message,
+                        "sub-workflow root not started; its node fails",
+                    );
+                    arguments.push_failed_record(workflow.workflow_id, task_index, error)?;
+                }
+            }
         }
     }
     Ok(arguments)
 }
 
-/// The pre-built child of the sub-workflow root `node` of `parent`.
-fn root_child<'a>(
-    parent: &TreeWorkflow<'_>,
-    node: &AnyNode,
+/// The sub-workflow node whose child the host build makes.
+pub(crate) struct ChildOfNode<'a> {
+    pub(crate) parent_workflow_id: Uuid,
+    pub(crate) task_index: i32,
+    pub(crate) parent_depth: i32,
+    /// The child workflow's name, for the load failure message.
+    pub(crate) spec_name: &'a str,
+    pub(crate) definition_key: Option<&'a str>,
+}
+
+/// The host build of the child of a sub-workflow node, in Python's order
+/// (`enqueue_subworkflow_task`, `core/workflows/engine.py:1019-1212`): the
+/// depth limit, the load of the registered child by its definition key, the
+/// node input (`input_of`, which the child start merges with the `args_from`
+/// members), then the registered builder.
+///
+/// A child past the depth limit, one with no registration under its key, an
+/// `args_from` key that names a member of the static input (from
+/// `input_of`), and a builder that fails are [`ChildBuildOutcome::NodeFails`].
+/// Errors: what `input_of` returns. Does no I/O.
+pub(crate) fn build_child<F>(
+    node: ChildOfNode<'_>,
+    input_of: F,
+    params: SubWorkflowParams,
     registry: &WorkflowSpecRegistry,
-) -> Result<TreeWorkflow<'a>, WorkflowError> {
-    let task_index = node_index(node.index)?;
-    let depth = child_workflow_depth(parent.depth, parent.workflow_id, task_index)
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let spec_name = node
-        .task_name
-        .strip_prefix("__sub_workflow:")
-        .unwrap_or(&node.task_name);
-    let child_spec = build_child_spec(
-        spec_name,
-        node.sub_definition_key.as_deref(),
-        node,
-        registry,
-    )?;
-    require_subworkflow_node_keys(&child_spec)?;
-    Ok(TreeWorkflow {
-        spec: Cow::Owned(child_spec),
-        workflow_id: Uuid::new_v4(),
-        parent: Some((parent.workflow_id, task_index)),
-        depth,
-    })
+) -> Result<ChildBuildOutcome, WorkflowError>
+where
+    F: FnOnce() -> Result<NodeInput, WorkflowError>,
+{
+    let depth =
+        match child_workflow_depth(node.parent_depth, node.parent_workflow_id, node.task_index) {
+            Ok(depth) => depth,
+            Err(error) => return Ok(ChildBuildOutcome::NodeFails(error)),
+        };
+    let Some(registered) = node
+        .definition_key
+        .and_then(|key| registry.resolve_child_registration(key))
+    else {
+        return Ok(ChildBuildOutcome::NodeFails(subworkflow_load_failed_error(
+            node.spec_name,
+            node.definition_key,
+        )));
+    };
+    let input = match input_of()? {
+        NodeInput::Input(input) => input,
+        NodeInput::NodeFails(error) => return Ok(ChildBuildOutcome::NodeFails(error)),
+    };
+    match materialize_child_spec(registered, params, &input, registry) {
+        Ok(spec) => Ok(ChildBuildOutcome::Built { spec, depth }),
+        Err(error) => Ok(ChildBuildOutcome::NodeFails(build_failed_error(
+            node.parent_workflow_id,
+            node.task_index,
+            &error,
+        ))),
+    }
+}
+
+/// The input that the registered builder of a child takes.
+pub(crate) enum NodeInput {
+    /// The encoded input, `args_from` members merged.
+    Input(String),
+    /// The input cannot be built; the node fails with this error.
+    NodeFails(TaskError),
+}
+
+/// The error of a sub-workflow node whose registered builder failed:
+/// `WORKFLOW_ENQUEUE_FAILED`, with the workflow and the node in `data`
+/// (Python `core/workflows/engine.py:1161-1212`). The workflow is named by
+/// its id: the core has no workflow name at the child start.
+pub(crate) fn build_failed_error(
+    workflow_id: Uuid,
+    task_index: i32,
+    error: &WorkflowError,
+) -> TaskError {
+    let cause = match error {
+        WorkflowError::Validation(message) => message.clone(),
+        other => other.to_string(),
+    };
+    let cause: String = cause.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
+    TaskError {
+        data: Some(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "task_index": task_index,
+        })),
+        ..TaskError::builtin(
+            OperationalErrorCode::WorkflowEnqueueFailed,
+            format!("Subworkflow build failed: {cause} (workflow {workflow_id}:{task_index})"),
+        )
+    }
+}
+
+/// The stored result of a node that fails with `error`: the error in its
+/// result envelope.
+///
+/// Errors: [`WorkflowError::Serialization`] when the error does not encode.
+pub(crate) fn node_failure_result(error: TaskError) -> Result<String, WorkflowError> {
+    Ok(serde_json::to_string(
+        &TaskResult::<serde_json::Value>::Err(error),
+    )?)
 }
 
 /// A node index as the `integer` column stores it.
@@ -239,6 +421,17 @@ fn node_index(index: usize) -> Result<i32, WorkflowError> {
 }
 
 impl StartArguments {
+    /// Whether the tree holds a failed-node record. Only then can the start
+    /// owe child starts.
+    pub(crate) fn has_failed_records(&self) -> bool {
+        !self.failed_workflow_ids.is_empty()
+    }
+
+    /// The id of the top row of the tree.
+    pub(crate) fn top_workflow_id(&self) -> Option<Uuid> {
+        self.workflow_ids.first().copied()
+    }
+
     fn push_workflow(&mut self, workflow: &TreeWorkflow<'_>) -> Result<(), WorkflowError> {
         let spec = &workflow.spec;
         let output_task_index = spec.output_index.map(node_index).transpose()?;
@@ -264,6 +457,19 @@ impl StartArguments {
         self.parent_task_indexes
             .push(workflow.parent.map(|(_, task_index)| task_index));
         self.depths.push(workflow.depth);
+        Ok(())
+    }
+
+    fn push_failed_record(
+        &mut self,
+        workflow_id: Uuid,
+        task_index: i32,
+        error: TaskError,
+    ) -> Result<(), WorkflowError> {
+        let result = node_failure_result(error)?;
+        self.failed_workflow_ids.push(workflow_id);
+        self.failed_task_indexes.push(task_index);
+        self.failed_results.push(result);
         Ok(())
     }
 
@@ -354,78 +560,153 @@ impl StartArguments {
     }
 }
 
-/// Starts the tree in one statement in autocommit, as producer work
-/// ([`CheckoutClass::Batch`]), with `sent_at` as the start call time of every
-/// workflow and task row of the tree.
+impl StartArguments {
+    /// Binds the workflow rows: 9 parameters.
+    pub(crate) fn bind_workflows<'a>(&'a self, binder: ParameterBinder<'a>) -> ParameterBinder<'a> {
+        binder
+            .value(&self.workflow_ids)
+            .value(&self.names)
+            .value(&self.definition_keys)
+            .value(&self.on_errors)
+            .value(&self.output_task_indexes)
+            .value(&self.success_policies)
+            .value(&self.parent_workflow_ids)
+            .value(&self.parent_task_indexes)
+            .value(&self.depths)
+    }
+
+    /// Binds the node rows: 22 parameters.
+    pub(crate) fn bind_nodes<'a>(&'a self, binder: ParameterBinder<'a>) -> ParameterBinder<'a> {
+        binder
+            .value(&self.node_workflow_ids)
+            .value(&self.node_task_indexes)
+            .value(&self.node_ids)
+            .value(&self.node_task_names)
+            .value(&self.node_inputs)
+            .value(&self.node_queue_names)
+            .value(&self.node_priorities)
+            .value(&self.node_dependencies)
+            .value(&self.node_args_from)
+            .value(&self.node_workflow_ctx_from)
+            .value(&self.node_allow_failed_deps)
+            .value(&self.node_join_types)
+            .value(&self.node_min_successes)
+            .value(&self.node_task_options)
+            .value(&self.node_max_retries)
+            .value(&self.node_executions)
+            .value(&self.node_good_untils)
+            .value(&self.node_retention_class_keys)
+            .value(&self.node_is_subworkflow)
+            .value(&self.node_sub_workflow_names)
+            .value(&self.node_sub_definition_keys)
+            .value(&self.node_sub_workflow_params)
+    }
+
+    /// Binds the failed-node records: 3 parameters.
+    pub(crate) fn bind_failed_records<'a>(
+        &'a self,
+        binder: ParameterBinder<'a>,
+    ) -> ParameterBinder<'a> {
+        binder
+            .value(&self.failed_workflow_ids)
+            .value(&self.failed_task_indexes)
+            .value(&self.failed_results)
+    }
+}
+
+#[cfg(test)]
+impl StartArguments {
+    /// The parent pair and the depth of the top row, for the tests of other
+    /// modules.
+    pub(crate) fn top_row_for_test(&self) -> (Option<Uuid>, Option<i32>, i32) {
+        (
+            self.parent_workflow_ids[0],
+            self.parent_task_indexes[0],
+            self.depths[0],
+        )
+    }
+}
+
+/// The bound start statement, with `sent_at` as the start call time.
+fn start_statement<'a>(
+    arguments: &'a StartArguments,
+    sent_at: &'a DateTime<Utc>,
+) -> BoundStatement<'a> {
+    let binder = arguments.bind_workflows(START.bind()).value(sent_at);
+    arguments
+        .bind_failed_records(arguments.bind_nodes(binder))
+        .finish()
+}
+
+/// Starts the tree as producer work ([`CheckoutClass::Batch`]), with
+/// `sent_at` as the start call time of every workflow and task row of the
+/// tree.
 ///
-/// Errors: [`WorkflowError::Broker`] when the statement failed (nothing
+/// | Arguments | Statements |
+/// |---|---|
+/// | no failed-node record | `horsies_workflow_start`, one statement in autocommit |
+/// | failed-node records | `BEGIN`; `horsies_workflow_start`; `horsies_workflow_child_start` per owed child start; `COMMIT` |
+///
+/// Without failed-node records the function owes no child start: every
+/// sub-workflow root has its pre-built child. A failed record runs the
+/// failure policy and promotion of its node, which can promote a
+/// sub-workflow node, so that form runs in a transaction.
+///
+/// Errors: [`WorkflowError::Broker`] when a statement failed (nothing
 /// committed, or `OutcomeUnknown`: a resend with the same id meets `EXISTS`);
-/// [`WorkflowError::StepContract`] for a row outside the contract. Owed child
-/// starts are outside it: every sub-workflow root has its pre-built child and
-/// no failed-node record is passed, so the function owes none.
+/// [`WorkflowError::StepContract`] for a row outside the contract (owed child
+/// starts of the one-statement form included); the refusal of the host build
+/// of an owed child (nothing committed).
 pub(crate) async fn start_tree(
     broker: &PostgresBroker,
     arguments: &StartArguments,
     sent_at: DateTime<Utc>,
-) -> Result<StartOutcome, WorkflowError> {
-    let no_failed_workflow_ids: Vec<Uuid> = Vec::new();
-    let no_failed_task_indexes: Vec<i32> = Vec::new();
-    let no_failed_results: Vec<String> = Vec::new();
-    let statement = START
-        .bind()
-        .value(&arguments.workflow_ids)
-        .value(&arguments.names)
-        .value(&arguments.definition_keys)
-        .value(&arguments.on_errors)
-        .value(&arguments.output_task_indexes)
-        .value(&arguments.success_policies)
-        .value(&arguments.parent_workflow_ids)
-        .value(&arguments.parent_task_indexes)
-        .value(&arguments.depths)
-        .value(&sent_at)
-        .value(&arguments.node_workflow_ids)
-        .value(&arguments.node_task_indexes)
-        .value(&arguments.node_ids)
-        .value(&arguments.node_task_names)
-        .value(&arguments.node_inputs)
-        .value(&arguments.node_queue_names)
-        .value(&arguments.node_priorities)
-        .value(&arguments.node_dependencies)
-        .value(&arguments.node_args_from)
-        .value(&arguments.node_workflow_ctx_from)
-        .value(&arguments.node_allow_failed_deps)
-        .value(&arguments.node_join_types)
-        .value(&arguments.node_min_successes)
-        .value(&arguments.node_task_options)
-        .value(&arguments.node_max_retries)
-        .value(&arguments.node_executions)
-        .value(&arguments.node_good_untils)
-        .value(&arguments.node_retention_class_keys)
-        .value(&arguments.node_is_subworkflow)
-        .value(&arguments.node_sub_workflow_names)
-        .value(&arguments.node_sub_definition_keys)
-        .value(&arguments.node_sub_workflow_params)
-        .value(&no_failed_workflow_ids)
-        .value(&no_failed_task_indexes)
-        .value(&no_failed_results)
-        .finish();
-    let rows = run_alone(broker, CheckoutClass::Batch, &statement).await?;
-    let step = step_rows::<StartDisposition>(&rows, &START)?;
-    match step.owed_child_starts.len() {
-        0 => {}
-        count => {
-            return Err(StepContractError::ChildStartsInAutocommit {
-                function: START.name(),
-                count,
+    build: ChildBuild<'_>,
+) -> Result<StartedTree, WorkflowError> {
+    let statement = start_statement(arguments, &sent_at);
+    let (disposition, detail, parent_advances) = match arguments.has_failed_records() {
+        false => {
+            let rows = run_alone(broker, CheckoutClass::Batch, &statement).await?;
+            let step = step_rows::<StartDisposition>(&rows, &START)?;
+            match step.owed_child_starts.len() {
+                0 => {}
+                count => {
+                    return Err(StepContractError::ChildStartsInAutocommit {
+                        function: START.name(),
+                        count,
+                    }
+                    .into())
+                }
             }
-            .into())
+            (
+                step.outcome.disposition,
+                step.outcome.detail,
+                OwedParentAdvances::default(),
+            )
         }
-    }
-    Ok(match step.outcome.disposition {
-        StartDisposition::Started => StartOutcome::Started,
-        StartDisposition::Exists => StartOutcome::Exists {
-            stored_name: step.outcome.detail,
+        true => {
+            let committed = run_in_transaction::<StartDisposition>(
+                broker,
+                CheckoutClass::Batch,
+                &statement,
+                build,
+            )
+            .await?;
+            (
+                committed.disposition,
+                committed.detail,
+                committed.parent_advances,
+            )
+        }
+    };
+    Ok(StartedTree {
+        outcome: match disposition {
+            StartDisposition::Started => StartOutcome::Started,
+            StartDisposition::Exists => StartOutcome::Exists {
+                stored_name: detail,
+            },
         },
+        parent_advances,
     })
 }
 

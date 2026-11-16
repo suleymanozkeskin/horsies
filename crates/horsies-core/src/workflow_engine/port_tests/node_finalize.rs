@@ -172,23 +172,21 @@ async fn finalize(
     .await?;
     let owed = match &outcome {
         FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two: form,
-        } => Some((*is_success, *capacity_notified, *form)),
+            ..
+        } => Some((*capacity_notified, *form)),
         FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused => None,
     };
-    if let Some((is_success, capacity_notified, form)) = owed {
+    if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
             &broker,
             &WorkflowSpecRegistry::new(),
             claimed.id,
-            is_success,
             &claimed.queue_name,
             claimed.is_workflow_task,
             capacity_notified,
             form,
-            &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
         .await?;
@@ -603,16 +601,14 @@ async fn phase_two(
         &broker,
         &WorkflowSpecRegistry::new(),
         task_id,
-        true,
         queue_name,
         is_workflow_task,
         false,
         PhaseTwoForm::NotKnown,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
-    .map(|_parent_advance| ())
+    .map(|_parent_advances| ())
 }
 
 fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeError {

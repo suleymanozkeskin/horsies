@@ -227,7 +227,6 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
             capacity_notified: false,
             phase_two: PhaseTwoForm::NotKnown,
         },
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await;

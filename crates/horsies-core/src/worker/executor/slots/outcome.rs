@@ -791,7 +791,6 @@ impl OutcomeWriter {
                 capacity_notified,
                 phase_two,
             },
-            &self.payload_policy,
             &self.retention,
         )
         .await;
