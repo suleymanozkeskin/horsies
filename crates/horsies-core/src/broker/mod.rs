@@ -10,10 +10,16 @@ pub mod listener;
 pub mod migrations;
 #[cfg(test)]
 mod monitoring_schema_tests;
+#[cfg(test)]
+mod pgbouncer_contract_tests;
 pub mod postgres;
 pub mod result_types;
 pub mod row;
+#[cfg(test)]
+mod send_path_tests;
 pub mod shared_listener;
+#[cfg(test)]
+mod start_deadline_tests;
 pub mod task_lists;
 pub mod terminalization;
 #[cfg(test)]
