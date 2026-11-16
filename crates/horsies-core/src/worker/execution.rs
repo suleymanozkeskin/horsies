@@ -37,7 +37,9 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
+use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::workflow_engine::phase2_recovery::terminal_status_of_pending_kind;
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -914,20 +916,20 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 }
 
 /// A replay of a committed write (`AlreadyApplied`). A workflow task owes
-/// phase 2 while its durable phase-2 record exists; a plain task owes
-/// nothing.
+/// phase 2 while its durable phase-2 record exists, with the outcome of the
+/// status that the record's kind stands for; a plain task owes nothing.
 async fn replay_of_committed_write(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
-        true => match load_pending_terminal_success(pool, task_id).await? {
-            Some(is_success) => Ok(FinalizeOutcome::Terminal {
-                is_success,
+        true => match load_pending_phase_two(pool, task_id).await? {
+            PendingPhaseTwo::Owed(status) => Ok(FinalizeOutcome::Terminal {
+                is_success: status == TaskStatus::Completed,
                 capacity_notified: false,
             }),
-            None => Ok(FinalizeOutcome::Finalized),
+            PendingPhaseTwo::Consumed => Ok(FinalizeOutcome::Finalized),
         },
         false => Ok(FinalizeOutcome::Finalized),
     }
@@ -1024,39 +1026,59 @@ pub(crate) async fn finalize_workflow_phase(
     Ok(())
 }
 
-/// Read the durable phase-2 terminal status after a Phase-1 replay.
+/// The kind of a task's phase-2 record. The record has no status column: the
+/// status follows from the kind (`terminal_status_of_pending_kind`).
+const LOAD_PENDING_KIND_SQL: &str =
+    "SELECT terminalization_kind FROM horsies_workflow_phase2_pending WHERE task_id = $1";
+
+/// What the phase-2 record of a committed workflow write owes, as a replay
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPhaseTwo {
+    /// The record exists: phase 2 is owed for a task that ended with this
+    /// status (COMPLETED, FAILED or EXPIRED).
+    Owed(TaskStatus),
+    /// No record: phase 2 consumed it, so the replay owes nothing.
+    Consumed,
+}
+
+/// Read the phase-2 record of a workflow task after a phase-1 replay.
 ///
-/// `None` means the outbox evidence has already been durably consumed. The
-/// moved terminal row is deliberately not queried: v35 live rows are live-only.
-async fn load_pending_terminal_success(
+/// One statement; writes nothing. The moved history row is not read: the
+/// record is the evidence that phase 2 is still owed.
+///
+/// Errors:
+/// - the read fails: retryable;
+/// - the record names a kind that writes no phase-2 record: not retryable.
+async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
-) -> Result<Option<bool>, FinalizeError> {
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT terminal_status FROM horsies_workflow_phase2_pending WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| FinalizeError {
-        stage: FinalizeStage::Phase2Workflow,
-        task_id,
-        message: format!("failed to load phase-2 terminal status: {}", e),
-        retryable: true,
-    })?;
-    status
-        .map(|status| match status.as_str() {
-            "COMPLETED" => Ok(true),
-            "FAILED" | "CANCELLED" | "EXPIRED" => Ok(false),
-            other => Err(FinalizeError {
+) -> Result<PendingPhaseTwo, FinalizeError> {
+    let kind: Option<String> = sqlx::query_scalar(LOAD_PENDING_KIND_SQL)
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase2Workflow,
+            task_id,
+            message: format!("failed to load the phase-2 record: {error}"),
+            retryable: true,
+        })?;
+    match kind {
+        None => Ok(PendingPhaseTwo::Consumed),
+        Some(kind) => terminal_status_of_pending_kind(&kind)
+            .map(PendingPhaseTwo::Owed)
+            .map_err(|refusal| FinalizeError {
                 stage: FinalizeStage::Phase2Workflow,
                 task_id,
-                message: format!("phase-2 outbox has non-terminal status {other:?}"),
+                message: refusal.to_string(),
                 retryable: false,
             }),
-        })
-        .transpose()
+    }
 }
+
+#[cfg(test)]
+mod replay_read_tests;
 
 pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
     // Wake workers of this queue to re-check capacity/backlog. The capacity
