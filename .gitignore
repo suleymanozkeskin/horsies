@@ -1,3 +1,6 @@
+# Rust build output of the root Cargo workspace
+/target/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -47,7 +50,8 @@ ignored-content/
 
 /docs/
 
-examples/
+# Root scratch folder only; rust/examples/ is a tracked crate.
+/examples/
 
 .coverage
 .env.planetscale
