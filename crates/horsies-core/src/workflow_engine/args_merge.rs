@@ -43,9 +43,10 @@ struct ArgsFromEntry<'a> {
 /// The stored text is read with the core's strict reader: 300 levels of room,
 /// so a user value of 200 levels inside its envelopes reads (Python
 /// `core/codec/json_value.py:54-75`). The merge re-encodes the object, so an
-/// integer that the parse would round is refused instead of changed. `{}` and
-/// `null` (no static input) are an empty object. Any other non-object input
-/// cannot take named members and is refused.
+/// integer that the parse would round is refused instead of changed. Only an
+/// object takes named members: any other input, `null` included, is refused.
+/// The client gives a node with members an object input such as `{}`; the
+/// core does not read `null` as `{}`.
 pub(crate) fn input_object(
     input: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, WorkflowError> {
@@ -67,7 +68,6 @@ pub(crate) fn input_object(
         },
     )?;
     match parsed {
-        serde_json::Value::Null => Ok(serde_json::Map::new()),
         serde_json::Value::Object(object) => Ok(object),
         _ => Err(WorkflowError::Validation(
             "a node input that takes args_from or workflow context members must be a JSON object"
@@ -385,7 +385,7 @@ mod tests {
         let stored = serde_json::to_string(&TaskResult::Ok(serde_json::Value::from(42))).unwrap();
         deps.insert(0, dep("COMPLETED", Some(stored)));
 
-        let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
+        let result = merge_args_from_sync("{}", &Some(json!({"answer": 0})), &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(
             parsed,
@@ -412,7 +412,7 @@ mod tests {
                 result: Some(stored),
             },
         );
-        let result = merge_args_from_sync("null", &Some(json!({"child": 1})), &deps).unwrap();
+        let result = merge_args_from_sync("{}", &Some(json!({"child": 1})), &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["child"]["source_task_name"], "__sub_workflow:child");
         assert_eq!(parsed["child"]["source_definition_key"], "app.child");
@@ -423,7 +423,7 @@ mod tests {
         let mut deps = HashMap::new();
         deps.insert(0, dep("FAILED", None));
 
-        let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
+        let result = merge_args_from_sync("{}", &Some(json!({"answer": 0})), &deps).unwrap();
         let TaskResult::Err(error) = inner_of(&result, "answer") else {
             panic!("a dependency with no result must give an error entry");
         };
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn a_dependency_with_no_row_gets_no_kwarg() {
         let result =
-            merge_args_from_sync("null", &Some(json!({"answer": 0})), &HashMap::new()).unwrap();
+            merge_args_from_sync("{}", &Some(json!({"answer": 0})), &HashMap::new()).unwrap();
         assert_eq!(result, "{}");
     }
 
@@ -444,7 +444,7 @@ mod tests {
         for status in ["PENDING", "READY", "ENQUEUED", "RUNNING"] {
             let mut deps = HashMap::new();
             deps.insert(0, dep(status, None));
-            let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
+            let result = merge_args_from_sync("{}", &Some(json!({"answer": 0})), &deps).unwrap();
             let TaskResult::Err(error) = inner_of(&result, "answer") else {
                 panic!("a {status} dependency must give an error entry");
             };
@@ -552,9 +552,12 @@ mod tests {
 
     #[test]
     fn merge_into_a_non_object_input_is_refused() {
+        // `null` is not read as `{}`: only an object takes named members.
         let args_from = Some(json!({"dep_val": 0}));
-        let err = merge_args_from_sync("[1]", &args_from, &HashMap::new()).unwrap_err();
-        assert!(matches!(err, WorkflowError::Validation(_)));
+        for input in ["[1]", "null"] {
+            let err = merge_args_from_sync(input, &args_from, &HashMap::new()).unwrap_err();
+            assert!(matches!(err, WorkflowError::Validation(_)), "{input}");
+        }
     }
 
     #[test]
@@ -566,7 +569,7 @@ mod tests {
             let mut deps = HashMap::new();
             deps.insert(0, dep("COMPLETED", Some(stored.to_owned())));
 
-            let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
+            let result = merge_args_from_sync("{}", &Some(json!({"answer": 0})), &deps).unwrap();
             let TaskResult::Err(error) = inner_of(&result, "answer") else {
                 panic!("a stored result that does not read must give an error entry");
             };

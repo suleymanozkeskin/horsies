@@ -177,6 +177,46 @@ impl<I, F> Clone for InputField<I, F> {
 
 impl<I, F> Copy for InputField<I, F> {}
 
+/// Whether a sub-workflow node gives its child workflow params. The client
+/// sets it when it defines the node; the core branches on it and never reads
+/// the choice from the input text.
+///
+/// The node's input text (`AnyNode::input_json`) is required in both cases:
+/// the node row stores it, and a child with a `spec_builder` receives it. For
+/// `NotGiven` it is the client's encoding of an empty params input (`null`
+/// for a Rust `()`, `{}` from Python).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubWorkflowParams {
+    /// The node gives no params. A child registered without a `spec_builder`
+    /// takes such a node.
+    NotGiven,
+    /// The node gives params: a static input, `args_from` members, or both.
+    /// A child registered without a `spec_builder` refuses such a node.
+    Given,
+}
+
+impl SubWorkflowParams {
+    /// The value that a sub-workflow node row stores in
+    /// `horsies_workflow_tasks.sub_workflow_params`: `NOT_GIVEN` or `GIVEN`.
+    /// A task node row stores `NULL`.
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            Self::NotGiven => "NOT_GIVEN",
+            Self::Given => "GIVEN",
+        }
+    }
+
+    /// The choice of a stored value; `None` for any other text.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "NOT_GIVEN" => Some(Self::NotGiven),
+            "GIVEN" => Some(Self::Given),
+            _ => None,
+        }
+    }
+}
+
 /// Type-erased node stored in `WorkflowSpec.tasks`.
 ///
 /// Contains all fields needed for validation, DB insertion, and engine
@@ -186,13 +226,15 @@ pub struct AnyNode {
     /// Registered task function name.
     pub task_name: String,
 
-    /// The encoded input of the node's task as one JSON value.
+    /// The encoded input of the node's task as one JSON value, as the client
+    /// encoded it. Every node has one; the core never supplies a default.
     ///
-    /// `None`: the node sets no static input. The node row then stores `{}`
-    /// (Python's empty keyword input), and `args_from` and workflow context
-    /// members merge into it at enqueue.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_json: Option<String>,
+    /// A node that sets no fields carries the client's encoding of an empty
+    /// input: `{}` from Python (no keyword arguments), `null` from a Rust
+    /// `()` input. The node row stores the text as written, and the task
+    /// decodes it as stored. `args_from` and workflow context members merge
+    /// into it at enqueue, so a node with members has an object input.
+    pub input_json: String,
 
     /// Indices of upstream dependencies in the spec's task list.
     pub dependencies: Vec<usize>,
@@ -249,20 +291,10 @@ pub struct AnyNode {
     /// Set when the sub-workflow's spec has a `definition_key`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_definition_key: Option<String>,
-}
 
-/// The text that a node row stores as its `input` when the node sets no
-/// static input: `{}`, Python's empty keyword input. `args_from` and workflow
-/// context members merge into it at enqueue; a task whose input type takes no
-/// object reads it as `null` (`decode_task_input`).
-pub const NO_NODE_INPUT: &str = "{}";
-
-impl AnyNode {
-    /// The node row's `input`: the static input as written, or
-    /// [`NO_NODE_INPUT`] when the node sets none.
-    pub fn stored_input(&self) -> &str {
-        self.input_json.as_deref().unwrap_or(NO_NODE_INPUT)
-    }
+    /// Whether a sub-workflow node gives its child params, as the client set
+    /// it. A task node has no child, so it gives none: `NotGiven`.
+    pub sub_workflow_params: SubWorkflowParams,
 }
 
 /// Typed builder for a workflow task node.
@@ -274,7 +306,7 @@ impl AnyNode {
 /// `WorkflowSpecBuilder::task()`.
 pub struct TaskNode<T, I = ()> {
     task_name: String,
-    input_json: Option<String>,
+    input_json: String,
     dependencies: Vec<usize>,
     args_from: HashMap<String, usize>,
     workflow_ctx_from_refs: Vec<usize>,
@@ -302,15 +334,18 @@ impl<T, I> std::fmt::Debug for TaskNode<T, I> {
 }
 
 impl<T, I> TaskNode<T, I> {
-    /// Low-level constructor from a bare task name.
+    /// Low-level constructor from a task name and the node's encoded input
+    /// (one JSON value, stored as written).
     ///
-    /// Intended for internal spec-builder tests and `TaskFunction::node()`.
-    /// External callers should use `#[task]`-generated `node()`.
+    /// The input is required: the caller passes its encoding of the task's
+    /// input. A node that sets fields later with `.set(...)`, or takes
+    /// `args_from` or workflow context members, starts from an object such
+    /// as `{}`. Intended for internal spec-builder tests.
     #[cfg(test)]
-    pub(crate) fn raw(task_name: impl Into<String>) -> Self {
+    pub(crate) fn raw(task_name: impl Into<String>, input_json: impl Into<String>) -> Self {
         Self {
             task_name: task_name.into(),
-            input_json: None,
+            input_json: input_json.into(),
             dependencies: Vec::new(),
             args_from: HashMap::new(),
             workflow_ctx_from_refs: Vec::new(),
@@ -327,12 +362,12 @@ impl<T, I> TaskNode<T, I> {
         }
     }
 
-    /// Set the encoded input as one JSON value, stored as written.
+    /// Replace the encoded input with one JSON value, stored as written.
     ///
     /// A node that also takes `args_from` or `workflow_ctx_from` members needs
     /// an object input: the members merge into it at enqueue.
     pub fn input_json(mut self, input_json: impl Into<String>) -> Self {
-        self.input_json = Some(input_json.into());
+        self.input_json = input_json.into();
         self
     }
 
@@ -536,16 +571,14 @@ impl<T, I> TaskNode<T, I> {
             task_options_json: self.task_options_json,
             is_subworkflow: false,
             sub_definition_key: None,
+            sub_workflow_params: SubWorkflowParams::NotGiven,
         }
     }
 }
 
-/// Encode a node's whole input as one JSON value.
-///
-/// `null` (a unit or `None` input) is `None`: the node sets no static input.
-pub(crate) fn serialize_explicit_input<V: Serialize>(
-    value: &V,
-) -> Result<Option<String>, HorsiesError> {
+/// Encode a node's whole input as one JSON value, as the value encodes: a
+/// unit or `None` input is `null`, an empty map is `{}`.
+pub(crate) fn serialize_explicit_input<V: Serialize>(value: &V) -> Result<String, HorsiesError> {
     // Strict serialization rejects non-finite floats (NaN/±Infinity) at the node
     // input boundary instead of coercing them to JSON `null` (N5, Python
     // allow_nan=False parity).
@@ -558,44 +591,37 @@ pub(crate) fn serialize_explicit_input<V: Serialize>(
         other => check_node_input(std::slice::from_ref(other), &serde_json::Map::new())?,
     }
 
-    Ok(match value {
-        serde_json::Value::Null => None,
-        other => Some(other.to_string()),
-    })
+    Ok(value.to_string())
 }
 
-/// Set one field of a node's object input. No input starts an empty object;
-/// an input that is not a JSON object is refused.
+/// Set one field of a node's object input. An input that is not a JSON
+/// object, `null` included, is refused: the node starts from an object such
+/// as `{}` to take fields.
 pub(crate) fn merge_kwarg_value(
-    existing_input_json: Option<String>,
+    existing_input_json: &str,
     field_name: &str,
     value: serde_json::Value,
-) -> Result<Option<String>, HorsiesError> {
-    let mut map = match existing_input_json {
-        None => serde_json::Map::new(),
-        Some(input_json) => {
-            let parsed = crate::core::codec::from_json_str::<serde_json::Value>(&input_json)
-                .map_err(|e| {
-                    HorsiesError::new(format!("input_json is not valid JSON: {}", e))
-                        .with_help("ensure the node's input is valid JSON")
-                })?;
-            match parsed {
-                serde_json::Value::Object(map) => map,
-                _ => {
-                    return Err(HorsiesError::new(
-                        "cannot use field-level .set(...) on a node whose input is not a JSON object",
-                    )
-                    .with_help(
-                        "use .set_input(...) for whole-input payloads, or keep explicit values in an object input",
-                    ));
-                }
-            }
+) -> Result<String, HorsiesError> {
+    let parsed = crate::core::codec::from_json_str::<serde_json::Value>(existing_input_json)
+        .map_err(|e| {
+            HorsiesError::new(format!("input_json is not valid JSON: {}", e))
+                .with_help("ensure the node's input is valid JSON")
+        })?;
+    let mut map = match parsed {
+        serde_json::Value::Object(map) => map,
+        _ => {
+            return Err(HorsiesError::new(
+                "cannot use field-level .set(...) on a node whose input is not a JSON object",
+            )
+            .with_help(
+                "start the node from an object input such as {}, or use .set_input(...) for whole-input payloads",
+            ));
         }
     };
 
     map.insert(field_name.to_owned(), value);
     check_node_input(&[], &map)?;
-    Ok(Some(serde_json::Value::Object(map).to_string()))
+    Ok(serde_json::Value::Object(map).to_string())
 }
 
 /// The rules of a user value on a node input: no engine key at any depth or as a kwarg name, and at most 200
@@ -631,7 +657,7 @@ where
         ))
     })?;
 
-    node.input_json = merge_kwarg_value(node.input_json, field.name(), value)?;
+    node.input_json = merge_kwarg_value(&node.input_json, field.name(), value)?;
     Ok(node)
 }
 
@@ -671,10 +697,6 @@ pub struct TaskDefaults {
     pub queue_name: String,
     /// The task's resolved priority at registration time.
     pub priority: u32,
-    /// Whether this task expects non-unit input.
-    pub expects_input: bool,
-    /// Type name of the task's input type, for diagnostics.
-    pub input_type_name: Option<&'static str>,
 }
 
 /// Resolve queue and priority from task defaults into workflow nodes.
@@ -723,22 +745,22 @@ mod tests {
         // C7: an array-valued node input is one input value, not N positional
         // values. The node stores it as written and the task decodes it whole.
         let input = serialize_explicit_input(&vec![1, 2, 3]).unwrap();
-        assert_eq!(input.as_deref(), Some("[1,2,3]"));
+        assert_eq!(input, "[1,2,3]");
 
-        let task_input =
-            crate::worker::execution::build_task_input(input.as_deref().unwrap(), false).unwrap();
+        let task_input = crate::worker::execution::build_task_input(&input, false).unwrap();
         let decoded: Vec<i32> = crate::core::task::macros::decode_task_input(&task_input).unwrap();
         assert_eq!(decoded, vec![1, 2, 3]);
     }
 
     #[test]
-    fn serialize_explicit_input_maps_null_to_no_input() {
-        assert_eq!(serialize_explicit_input(&()).unwrap(), None);
+    fn serialize_explicit_input_keeps_null_and_empty_object_apart() {
+        // A unit input encodes as `null` and an empty map as `{}`; neither is
+        // replaced by the other.
+        assert_eq!(serialize_explicit_input(&()).unwrap(), "null");
+        assert_eq!(serialize_explicit_input(&None::<i32>).unwrap(), "null");
         assert_eq!(
-            serialize_explicit_input(&serde_json::json!({}))
-                .unwrap()
-                .as_deref(),
-            Some("{}")
+            serialize_explicit_input(&serde_json::json!({})).unwrap(),
+            "{}"
         );
     }
 
@@ -752,9 +774,32 @@ mod tests {
         assert!(
             serialize_explicit_input(&serde_json::json!([{"__builtin_task_code__": "X"}])).is_err()
         );
-        assert!(merge_kwarg_value(None, "__h_workflow_ctx__", serde_json::json!({})).is_err());
-        assert!(merge_kwarg_value(None, "x", serde_json::json!({"__horsies_y": 1})).is_err());
-        assert!(merge_kwarg_value(None, "x", serde_json::json!({"y": 1})).is_ok());
+        assert!(merge_kwarg_value("{}", "__h_workflow_ctx__", serde_json::json!({})).is_err());
+        assert!(merge_kwarg_value("{}", "x", serde_json::json!({"__horsies_y": 1})).is_err());
+        assert!(merge_kwarg_value("{}", "x", serde_json::json!({"y": 1})).is_ok());
+    }
+
+    #[test]
+    fn a_node_stores_its_input_as_given() {
+        // The core never supplies a default input: `null` stays `null` and
+        // `{}` stays `{}` on the spec node.
+        let unit: TaskNode<()> = TaskNode::raw("t", "null");
+        assert_eq!(unit.into_any_node(0).input_json, "null");
+        let empty_object: TaskNode<()> = TaskNode::raw("t", "{}");
+        assert_eq!(empty_object.into_any_node(0).input_json, "{}");
+    }
+
+    #[test]
+    fn field_set_needs_an_object_input() {
+        // `.set(...)` merges into an object; a `null` input is refused, not
+        // replaced by `{}`.
+        let refused = merge_kwarg_value("null", "count", serde_json::json!(1)).unwrap_err();
+        assert!(
+            refused.to_string().contains("not a JSON object"),
+            "{refused}"
+        );
+        let merged = merge_kwarg_value("{}", "count", serde_json::json!(1)).unwrap();
+        assert_eq!(merged, r#"{"count":1}"#);
     }
 
     #[test]
@@ -774,6 +819,27 @@ mod tests {
         // Finite floats (including f64::MAX) are unchanged.
         assert!(serialize_explicit_input(&Payload { ratio: 2.5 }).is_ok());
         assert!(serialize_explicit_input(&Payload { ratio: f64::MAX }).is_ok());
+    }
+
+    #[test]
+    fn sub_workflow_params_round_trip_through_the_stored_value() {
+        for params in [SubWorkflowParams::NotGiven, SubWorkflowParams::Given] {
+            assert_eq!(
+                SubWorkflowParams::from_stored(params.as_stored()),
+                Some(params)
+            );
+        }
+        assert_eq!(
+            SubWorkflowParams::as_stored(SubWorkflowParams::NotGiven),
+            "NOT_GIVEN"
+        );
+        assert_eq!(
+            SubWorkflowParams::as_stored(SubWorkflowParams::Given),
+            "GIVEN"
+        );
+        for refused in ["", "not_given", "NotGiven", "GIVEN "] {
+            assert_eq!(SubWorkflowParams::from_stored(refused), None, "{refused:?}");
+        }
     }
 
     #[test]
@@ -826,9 +892,9 @@ mod tests {
 
     #[test]
     fn task_node_builder_defaults() {
-        let node: TaskNode<String> = TaskNode::raw("my_task");
+        let node: TaskNode<String> = TaskNode::raw("my_task", "null");
         assert_eq!(node.task_name(), "my_task");
-        assert!(node.input_json.is_none());
+        assert_eq!(node.input_json, "null");
         assert!(node.dependencies.is_empty());
         assert!(node.args_from.is_empty());
         assert!(node.workflow_ctx_from_refs.is_empty());
@@ -846,7 +912,7 @@ mod tests {
 
     #[test]
     fn task_node_chainable_setters() {
-        let node: TaskNode<i32> = TaskNode::raw("add")
+        let node: TaskNode<i32> = TaskNode::raw("add", "null")
             .input_json(r#"{"mode": "fast"}"#)
             .node_id("add_step")
             .queue("high")
@@ -854,7 +920,7 @@ mod tests {
             .allow_failed_deps(true)
             .join_quorum(2);
 
-        assert_eq!(node.input_json.as_deref(), Some(r#"{"mode": "fast"}"#));
+        assert_eq!(node.input_json, r#"{"mode": "fast"}"#);
         assert_eq!(node.node_id.as_deref(), Some("add_step"));
         assert_eq!(node.queue.as_deref(), Some("high"));
         assert_eq!(node.priority, Some(10));
@@ -865,7 +931,7 @@ mod tests {
 
     #[test]
     fn task_node_key_after_node_id() {
-        let node: TaskNode<Vec<u8>> = TaskNode::raw("compress").node_id("compress:0");
+        let node: TaskNode<Vec<u8>> = TaskNode::raw("compress", "null").node_id("compress:0");
         let key = node.key().expect("key should be Some after node_id set");
         assert_eq!(key.node_id(), "compress:0");
     }
@@ -873,7 +939,7 @@ mod tests {
     #[test]
     fn task_node_waits_for_deduplicates() {
         let dep = NodeRef { index: 0 };
-        let node: TaskNode<()> = TaskNode::raw("t").waits_for(dep).waits_for(dep);
+        let node: TaskNode<()> = TaskNode::raw("t", "null").waits_for(dep).waits_for(dep);
         assert_eq!(node.dependencies, vec![0]);
     }
 
@@ -882,14 +948,14 @@ mod tests {
         let d0 = NodeRef { index: 0 };
         let d1 = NodeRef { index: 1 };
         let d2 = NodeRef { index: 2 };
-        let node: TaskNode<()> = TaskNode::raw("t").waits_for_all(&[d0, d1, d2]);
+        let node: TaskNode<()> = TaskNode::raw("t", "null").waits_for_all(&[d0, d1, d2]);
         assert_eq!(node.dependencies, vec![0, 1, 2]);
     }
 
     #[test]
     fn task_node_args_from_adds_dependency() {
         let dep = NodeRef { index: 5 };
-        let node: TaskNode<()> = TaskNode::raw("t").raw_arg_from("raw_data", dep);
+        let node: TaskNode<()> = TaskNode::raw("t", "{}").raw_arg_from("raw_data", dep);
         assert_eq!(node.dependencies, vec![5]);
         assert_eq!(node.args_from.get("raw_data"), Some(&5));
     }
@@ -897,7 +963,7 @@ mod tests {
     #[test]
     fn task_node_into_any_node() {
         let dep = NodeRef { index: 0 };
-        let node: TaskNode<String> = TaskNode::raw("process")
+        let node: TaskNode<String> = TaskNode::raw("process", "null")
             .input_json(r#""hello""#)
             .waits_for(dep)
             .raw_arg_from("input", dep)
@@ -909,7 +975,7 @@ mod tests {
 
         let any = node.into_any_node(1);
         assert_eq!(any.task_name, "process");
-        assert_eq!(any.input_json.as_deref(), Some(r#""hello""#));
+        assert_eq!(any.input_json, r#""hello""#);
         assert_eq!(any.dependencies, vec![0]);
         assert_eq!(any.args_from.get("input"), Some(&0));
         assert_eq!(any.node_id.as_deref(), Some("process:1"));
@@ -925,7 +991,7 @@ mod tests {
     fn any_node_serde_round_trip() {
         let any = AnyNode {
             task_name: "fetch".to_owned(),
-            input_json: Some(r#"{"url": "https://example.com"}"#.to_owned()),
+            input_json: r#"{"url": "https://example.com"}"#.to_owned(),
             dependencies: vec![],
             args_from: HashMap::new(),
             workflow_ctx_from: None,
@@ -941,11 +1007,14 @@ mod tests {
             task_options_json: None,
             is_subworkflow: false,
             sub_definition_key: None,
+            sub_workflow_params: SubWorkflowParams::NotGiven,
         };
 
         let json = serde_json::to_string(&any).unwrap();
         let back: AnyNode = serde_json::from_str(&json).unwrap();
         assert_eq!(back.task_name, "fetch");
+        assert_eq!(back.input_json, r#"{"url": "https://example.com"}"#);
+        assert_eq!(back.sub_workflow_params, SubWorkflowParams::NotGiven);
         assert_eq!(back.node_id.as_deref(), Some("fetch:0"));
         assert_eq!(back.join, JoinType::All);
         assert!(!back.is_subworkflow);
@@ -953,7 +1022,7 @@ mod tests {
 
     #[test]
     fn join_all_and_any_setters() {
-        let node: TaskNode<()> = TaskNode::raw("t").join_any().join_all();
+        let node: TaskNode<()> = TaskNode::raw("t", "null").join_any().join_all();
         assert_eq!(node.join, JoinType::All);
         assert!(node.min_success.is_none());
     }
@@ -965,7 +1034,7 @@ mod tests {
     fn make_any_node(task_name: &str, is_subworkflow: bool) -> AnyNode {
         AnyNode {
             task_name: task_name.to_owned(),
-            input_json: None,
+            input_json: "null".to_owned(),
             dependencies: vec![],
             args_from: HashMap::new(),
             workflow_ctx_from: None,
@@ -981,6 +1050,7 @@ mod tests {
             task_options_json: None,
             is_subworkflow,
             sub_definition_key: None,
+            sub_workflow_params: SubWorkflowParams::NotGiven,
         }
     }
 
@@ -1044,14 +1114,10 @@ mod tests {
             "task_a" => Some(TaskDefaults {
                 queue_name: "standard".to_owned(),
                 priority: 50,
-                expects_input: false,
-                input_type_name: None,
             }),
             "task_b" => Some(TaskDefaults {
                 queue_name: "urgent".to_owned(),
                 priority: 10,
-                expects_input: false,
-                input_type_name: None,
             }),
             _ => None,
         }

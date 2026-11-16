@@ -1,0 +1,803 @@
+//! Ports of the parent finalize rows of Python
+//! `tests/integration/test_worker_retry_scheduling.py`,
+//! `tests/integration/test_worker_persist_terminal_state.py`,
+//! `tests/integration/test_worker_load_persisted_task_result.py` and
+//! `tests/e2e/test_layer1_tasks.py` (sent_at across retries).
+//!
+//! Each test enters at [`persist_terminal_state`], the worker's phase 1 for a
+//! result of an attempt, and reads the rows it left. The dispatch facts
+//! (`ClaimedTaskRow`, `SetRunningRow`) are read from the seeded row, as the
+//! claim and the start write return them.
+
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use serial_test::serial;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use super::{persist_terminal_state, FinalizeError, FinalizeOutcome};
+use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::core::config::payload::PayloadPolicy;
+use crate::core::task::error::{BuiltInTaskCode, TaskError};
+use crate::core::task::result::TaskResult;
+use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::retry::read_stored_options;
+
+const WORKER: &str = "finalize-spec-worker";
+const TASK_NAME: &str = "finalize_spec_task";
+
+/// How long after the retry write the test shows that no wake came yet. The
+/// retry delay of these tests is 1 s.
+const EARLY_WAKE_WINDOW: Duration = Duration::from_millis(300);
+
+/// The bound of the wait for the delayed retry wake.
+const WAKE_BOUND: Duration = Duration::from_secs(10);
+
+/// The stale threshold of the reaper call: the seeded rows started 30
+/// minutes ago and have no runner beat.
+const STALE_THRESHOLD_SECONDS: f64 = 60.0;
+const FINALIZING_THRESHOLD_SECONDS: f64 = 300.0;
+const STALE_SCAN_LIMIT: i64 = 1_000;
+
+/// Whether the seeded task belongs to a workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Plain,
+    Workflow,
+}
+
+/// One RUNNING task on the baseline schema, held by [`WORKER`].
+struct TaskSeed<'a> {
+    queue: &'a str,
+    retry_count: i32,
+    max_retries: i32,
+    task_options: Option<&'a str>,
+    good_until: Option<DateTime<Utc>>,
+    origin: Origin,
+}
+
+impl<'a> TaskSeed<'a> {
+    fn plain(queue: &'a str) -> TaskSeed<'a> {
+        TaskSeed {
+            queue,
+            retry_count: 0,
+            max_retries: 0,
+            task_options: None,
+            good_until: None,
+            origin: Origin::Plain,
+        }
+    }
+}
+
+/// The ids of a seeded task and, for a workflow task, its workflow.
+struct Seeded {
+    task_id: Uuid,
+    workflow_id: Option<Uuid>,
+}
+
+/// Stored options with a retry policy (Python's stored layout).
+fn retry_options(
+    max_retries: u32,
+    backoff: &str,
+    intervals: &[u32],
+    auto_retry_for: &[&str],
+) -> String {
+    serde_json::json!({
+        "retry_policy": {
+            "max_retries": max_retries,
+            "intervals": intervals,
+            "backoff_strategy": backoff,
+            "jitter": false,
+            "max_delay_seconds": null,
+            "auto_retry_for": auto_retry_for,
+        }
+    })
+    .to_string()
+}
+
+/// A RUNNING task row, started 30 minutes ago with no heartbeat. A workflow
+/// task also gets a RUNNING workflow and a RUNNING node linked to it.
+async fn seed_task(pool: &PgPool, seed: &TaskSeed<'_>) -> Seeded {
+    let task_id = Uuid::new_v4();
+    let (fingerprint_version, fingerprint): (Option<i16>, Option<Vec<u8>>) = match seed.origin {
+        Origin::Plain => (Some(1), Some(vec![5_u8; 32])),
+        Origin::Workflow => (None, None),
+    };
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+         ) VALUES (
+            $1, $2, $3, 100, '{}', $4, 'ISOLATED',
+            'forever', date_trunc('milliseconds', NOW()) - interval '31 minutes',
+            NOW() - interval '31 minutes',
+            $5, $6, NULL,
+            'RUNNING', NOW() - interval '31 minutes',
+            date_trunc('milliseconds', NOW()) - interval '30 minutes', $7, NULL,
+            NOW() - interval '30 minutes', NULL, NULL,
+            4242, 'finalize-host', 'finalize-process',
+            $8, $9, NULL, $10, $11,
+            NOW(), FALSE, NULL, NULL
+         )",
+    )
+    .bind(task_id)
+    .bind(TASK_NAME)
+    .bind(seed.queue)
+    .bind(seed.task_options)
+    .bind(fingerprint_version)
+    .bind(fingerprint)
+    .bind(WORKER)
+    .bind(seed.retry_count)
+    .bind(seed.max_retries)
+    .bind(seed.good_until)
+    .bind(seed.origin == Origin::Workflow)
+    .execute(pool)
+    .await
+    .expect("seed RUNNING task");
+    let workflow_id = match seed.origin {
+        Origin::Plain => None,
+        Origin::Workflow => Some(seed_workflow_for(pool, task_id, seed.queue).await),
+    };
+    Seeded {
+        task_id,
+        workflow_id,
+    }
+}
+
+/// A RUNNING workflow with one RUNNING task node linked to `task_id`.
+async fn seed_workflow_for(pool: &PgPool, task_id: Uuid, queue: &str) -> Uuid {
+    let workflow_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+             id, name, definition_key, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at
+         ) VALUES ($1, 'finalize_spec_workflow', NULL, 'RUNNING', 'fail', 0, $1,
+                   NOW(), NOW(), NOW(), NOW())",
+    )
+    .bind(workflow_id)
+    .execute(pool)
+    .await
+    .expect("seed workflow");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             dependencies, allow_failed_deps, join_type, max_retries, execution,
+             retention_class_key, status, task_id, is_subworkflow, created_at, started_at
+         ) VALUES ($1, $2, 0, 'only', $3, '{}', $4, 100,
+                   '{}', FALSE, 'all', 0, 'ISOLATED',
+                   'forever', 'RUNNING', $5, FALSE, NOW(), NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(TASK_NAME)
+    .bind(queue)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("seed workflow node");
+    workflow_id
+}
+
+/// The claimed row as the claim returns it.
+async fn claimed_row(pool: &PgPool, task_id: Uuid) -> ClaimedTaskRow {
+    sqlx::query_as(
+        "SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at
+         FROM horsies_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("claimed row")
+}
+
+/// The attempt facts as the start write returns them.
+async fn running_row(pool: &PgPool, task_id: Uuid) -> SetRunningRow {
+    sqlx::query_as(
+        "SELECT id, started_at, retry_count, max_retries, good_until
+         FROM horsies_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("running row")
+}
+
+/// Run phase 1 with the dispatch facts read now.
+async fn finalize(
+    pool: &PgPool,
+    task_id: Uuid,
+    result: TaskResult<Vec<u8>>,
+) -> Result<FinalizeOutcome, FinalizeError> {
+    let claimed = claimed_row(pool, task_id).await;
+    let running = running_row(pool, task_id).await;
+    finalize_with(pool, task_id, result, &claimed, &running).await
+}
+
+/// Run phase 1 with dispatch facts that the caller read earlier.
+async fn finalize_with(
+    pool: &PgPool,
+    task_id: Uuid,
+    result: TaskResult<Vec<u8>>,
+    claimed: &ClaimedTaskRow,
+    running: &SetRunningRow,
+) -> Result<FinalizeOutcome, FinalizeError> {
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let stored_options = read_stored_options(claimed.task_options.as_deref());
+    persist_terminal_state(
+        &broker,
+        task_id,
+        result,
+        claimed,
+        &stored_options,
+        running,
+        WORKER,
+        &PayloadPolicy::default(),
+    )
+    .await
+}
+
+fn error_result(code: &str) -> TaskResult<Vec<u8>> {
+    TaskResult::Err(
+        TaskError::new(code, format!("{code} happened")).expect("the test codes are user codes"),
+    )
+}
+
+fn ok_result(text: &str) -> TaskResult<Vec<u8>> {
+    TaskResult::Ok(serde_json::to_vec(text).expect("encode a JSON string"))
+}
+
+/// A name for each outcome, for assertion messages.
+fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
+    match outcome {
+        Ok(FinalizeOutcome::Terminal {
+            is_success,
+            capacity_notified,
+        }) => format!(
+            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+        ),
+        Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
+        Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
+        Ok(FinalizeOutcome::Refused) => "Refused".to_owned(),
+        Err(error) => format!("Err({error})"),
+    }
+}
+
+async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read live row")
+}
+
+async fn history_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read history row")
+}
+
+/// The live attempt rows: attempt, will_retry, error code.
+async fn live_attempts(pool: &PgPool, task_id: Uuid) -> Vec<(i32, bool, Option<String>)> {
+    sqlx::query_as(
+        "SELECT attempt, will_retry, error_code FROM horsies_task_attempts
+         WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .expect("read attempts")
+}
+
+async fn cleanup(pool: &PgPool, seeded: &Seeded) {
+    for statement in [
+        "DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+        "DELETE FROM horsies_task_attempts WHERE task_id = $1",
+        "DELETE FROM horsies_heartbeats WHERE task_id = $1",
+        "DELETE FROM horsies_tasks WHERE id = $1",
+        "DELETE FROM horsies_task_history WHERE task_id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(seeded.task_id)
+            .execute(pool)
+            .await
+            .expect("cleanup");
+    }
+    if let Some(workflow_id) = seeded.workflow_id {
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workflow");
+    }
+}
+
+/// A queue name of this test run: `task_queue_<name>` stays within the
+/// 63-byte channel limit.
+fn test_queue() -> String {
+    format!(
+        "finalize_spec_{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+    )
+}
+
+/// Python `test_worker_retry_scheduling.py::test_a_listed_code_schedules_the_retry`:
+/// PENDING, the retry count up, the owner cleared, `enqueued_at` equal to
+/// `next_retry_at`, one attempt that will retry, and a wake of the queue
+/// after the retry delay, not before.
+#[tokio::test]
+#[serial]
+async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let options = retry_options(3, "fixed", &[1, 1, 1], &["ERR"]);
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            retry_count: 1,
+            max_retries: 3,
+            task_options: Some(&options),
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .expect("listener");
+    listener
+        .listen(&format!("task_queue_{queue}"))
+        .await
+        .expect("listen on the queue channel");
+
+    let outcome = finalize(&pool, seeded.task_id, error_result("ERR")).await;
+
+    assert!(
+        matches!(outcome, Ok(FinalizeOutcome::Retried)),
+        "{}",
+        describe(&outcome)
+    );
+    let row = live_row(&pool, seeded.task_id).await.expect("live row");
+    assert_eq!(row["status"], "PENDING");
+    assert_eq!(row["retry_count"], 2);
+    assert!(row["claimed_by_worker_id"].is_null());
+    assert!(!row["next_retry_at"].is_null());
+    assert_eq!(row["enqueued_at"], row["next_retry_at"]);
+    assert_eq!(
+        live_attempts(&pool, seeded.task_id).await,
+        vec![(2, true, Some("ERR".to_owned()))]
+    );
+    let early = tokio::time::timeout(EARLY_WAKE_WINDOW, listener.try_recv()).await;
+    assert!(early.is_err(), "the queue was woken before the retry delay");
+    let wake = tokio::time::timeout(WAKE_BOUND, listener.try_recv())
+        .await
+        .expect("the delayed wake arrives within the bound")
+        .expect("the listener reads")
+        .expect("the listener stays connected");
+    assert_eq!(wake.payload(), seeded.task_id.to_string());
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_retry_scheduling.py::test_good_until_is_judged_under_the_lock`:
+/// the dispatch read `good_until` an hour ahead at the start; it moves into
+/// the past before the write. The write judges the value it locks, so the
+/// task fails instead of retrying.
+#[tokio::test]
+#[serial]
+async fn good_until_is_judged_under_the_lock() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let options = retry_options(1, "fixed", &[1], &["ERR"]);
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            max_retries: 1,
+            task_options: Some(&options),
+            good_until: Some(Utc::now() + chrono::Duration::hours(1)),
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let claimed = claimed_row(&pool, seeded.task_id).await;
+    let running = running_row(&pool, seeded.task_id).await;
+    sqlx::query("UPDATE horsies_tasks SET good_until = NOW() - interval '5 minutes' WHERE id = $1")
+        .bind(seeded.task_id)
+        .execute(&pool)
+        .await
+        .expect("move good_until into the past");
+
+    let outcome = finalize_with(
+        &pool,
+        seeded.task_id,
+        error_result("ERR"),
+        &claimed,
+        &running,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, Ok(FinalizeOutcome::Finalized)),
+        "{}",
+        describe(&outcome)
+    );
+    assert_eq!(live_row(&pool, seeded.task_id).await, None);
+    let history = history_row(&pool, seeded.task_id)
+        .await
+        .expect("history row");
+    assert_eq!(history["status"], "FAILED");
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_persist_terminal_state.py::test_worker_failure_reaper_already_reclaimed`,
+/// on the failure path: the reaper failed the row first; the worker's
+/// failure write is refused, owes nothing and changes nothing.
+#[tokio::test]
+#[serial]
+async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
+    let claimed = claimed_row(&pool, seeded.task_id).await;
+    let running = running_row(&pool, seeded.task_id).await;
+    let _processed = mark_stale_running_as_failed(
+        &pool,
+        STALE_THRESHOLD_SECONDS,
+        FINALIZING_THRESHOLD_SECONDS,
+        STALE_SCAN_LIMIT,
+    )
+    .await
+    .expect("stale recovery");
+    let before = history_row(&pool, seeded.task_id)
+        .await
+        .expect("the reaper moved the row to history");
+    assert_eq!(before["status"], "FAILED");
+
+    let outcome = finalize_with(
+        &pool,
+        seeded.task_id,
+        error_result("ERR"),
+        &claimed,
+        &running,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, Ok(FinalizeOutcome::Refused)),
+        "{}",
+        describe(&outcome)
+    );
+    assert_eq!(history_row(&pool, seeded.task_id).await, Some(before));
+    assert_eq!(live_row(&pool, seeded.task_id).await, None);
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_persist_terminal_state.py::test_failure_phase1_replay_after_a_lost_reply`
+/// (plain case): a second phase 1 of a committed failure writes nothing,
+/// and a plain task owes no phase 2 either time.
+#[tokio::test]
+#[serial]
+async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
+    let claimed = claimed_row(&pool, seeded.task_id).await;
+    let running = running_row(&pool, seeded.task_id).await;
+
+    let first = finalize_with(
+        &pool,
+        seeded.task_id,
+        error_result("TRANSIENT"),
+        &claimed,
+        &running,
+    )
+    .await;
+    let committed = history_row(&pool, seeded.task_id)
+        .await
+        .expect("history row");
+    let replay = finalize_with(
+        &pool,
+        seeded.task_id,
+        error_result("TRANSIENT"),
+        &claimed,
+        &running,
+    )
+    .await;
+
+    assert!(
+        matches!(first, Ok(FinalizeOutcome::Finalized)),
+        "{}",
+        describe(&first)
+    );
+    assert!(
+        matches!(replay, Ok(FinalizeOutcome::Finalized)),
+        "{}",
+        describe(&replay)
+    );
+    assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
+    assert_eq!(live_attempts(&pool, seeded.task_id).await, Vec::new());
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_persist_terminal_state.py::test_failure_phase1_replay_after_a_lost_reply`
+/// (workflow case): the replay writes nothing, and the workflow task still
+/// owes its phase 2 for the committed failure.
+#[tokio::test]
+#[serial]
+#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
+async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let claimed = claimed_row(&pool, seeded.task_id).await;
+    let running = running_row(&pool, seeded.task_id).await;
+
+    let first = finalize_with(
+        &pool,
+        seeded.task_id,
+        error_result("TRANSIENT"),
+        &claimed,
+        &running,
+    )
+    .await;
+    let committed = history_row(&pool, seeded.task_id)
+        .await
+        .expect("history row");
+    let replay = finalize_with(
+        &pool,
+        seeded.task_id,
+        error_result("TRANSIENT"),
+        &claimed,
+        &running,
+    )
+    .await;
+
+    for outcome in [&first, &replay] {
+        assert!(
+            matches!(
+                outcome,
+                Ok(FinalizeOutcome::Terminal {
+                    is_success: false,
+                    ..
+                })
+            ),
+            "{}",
+            describe(outcome)
+        );
+    }
+    assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_persist_terminal_state.py::test_workflow_phase1_replay_loads_the_persisted_result`:
+/// a committed workflow success replays phase 2, not phase 1; the replay
+/// adds no attempt and leaves the committed record as it was.
+#[tokio::test]
+#[serial]
+#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
+async fn a_workflow_success_replay_owes_phase_two() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let claimed = claimed_row(&pool, seeded.task_id).await;
+    let running = running_row(&pool, seeded.task_id).await;
+
+    let first = finalize_with(
+        &pool,
+        seeded.task_id,
+        ok_result("persisted"),
+        &claimed,
+        &running,
+    )
+    .await;
+    let committed = history_row(&pool, seeded.task_id)
+        .await
+        .expect("history row");
+    let replay = finalize_with(
+        &pool,
+        seeded.task_id,
+        ok_result("persisted"),
+        &claimed,
+        &running,
+    )
+    .await;
+
+    for outcome in [&first, &replay] {
+        assert!(
+            matches!(
+                outcome,
+                Ok(FinalizeOutcome::Terminal {
+                    is_success: true,
+                    ..
+                })
+            ),
+            "{}",
+            describe(outcome)
+        );
+    }
+    assert_eq!(committed["status"], "COMPLETED");
+    assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_persist_terminal_state.py::test_locked_completion_miss_does_not_touch_a_newer_generation`,
+/// entered at the finalize: a workflow success with a stale claim
+/// generation is refused, owes nothing, and leaves the row of the newer
+/// claim RUNNING with no attempt.
+#[tokio::test]
+#[serial]
+async fn a_stale_generation_success_leaves_the_newer_claim_unchanged() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let mut claimed = claimed_row(&pool, seeded.task_id).await;
+    claimed.claimed_at -= chrono::Duration::minutes(1);
+    let running = running_row(&pool, seeded.task_id).await;
+    let before = live_row(&pool, seeded.task_id).await;
+
+    let outcome = finalize_with(
+        &pool,
+        seeded.task_id,
+        ok_result("stale"),
+        &claimed,
+        &running,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, Ok(FinalizeOutcome::Refused)),
+        "{}",
+        describe(&outcome)
+    );
+    assert_eq!(live_row(&pool, seeded.task_id).await, before);
+    assert_eq!(live_attempts(&pool, seeded.task_id).await, Vec::new());
+    assert_eq!(history_row(&pool, seeded.task_id).await, None);
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_load_persisted_task_result.py::test_a_plain_task_owes_no_phase_two`
+/// (horsies #500): the terminal write of a plain task, success or failure,
+/// sends its capacity wake in the same statement and owes no phase 2.
+#[tokio::test]
+#[serial]
+async fn a_plain_task_owes_no_phase_two() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let succeeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
+    let failed = seed_task(&pool, &TaskSeed::plain(&queue)).await;
+
+    let success = finalize(&pool, succeeded.task_id, ok_result("done")).await;
+    let failure = finalize(&pool, failed.task_id, error_result("FATAL")).await;
+
+    for outcome in [&success, &failure] {
+        assert!(
+            matches!(outcome, Ok(FinalizeOutcome::Finalized)),
+            "{}",
+            describe(outcome)
+        );
+    }
+    let completed = history_row(&pool, succeeded.task_id)
+        .await
+        .expect("history row of the success");
+    assert_eq!(completed["status"], "COMPLETED");
+    let failed_row = history_row(&pool, failed.task_id)
+        .await
+        .expect("history row of the failure");
+    assert_eq!(failed_row["status"], "FAILED");
+    let pending_phase_two: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = ANY($1)",
+    )
+    .bind(vec![succeeded.task_id, failed.task_id])
+    .fetch_one(&pool)
+    .await
+    .expect("read phase-2 records");
+    assert_eq!(pending_phase_two, 0);
+    cleanup(&pool, &succeeded).await;
+    cleanup(&pool, &failed).await;
+}
+
+/// Python `test_worker_persist_terminal_state.py::test_err_workflow_stopped_code_skips`,
+/// changed by decision: `WORKFLOW_STOPPED` is a reserved code and the branch
+/// that left the row RUNNING is removed (decisions, "Task returns: one rule
+/// in the core"). No task result can carry the code: it is not a built-in
+/// code and `TaskError::new` refuses it, so no result that reaches
+/// `persist_terminal_state` holds it.
+#[test]
+fn a_task_result_cannot_carry_the_workflow_stopped_code() {
+    assert_eq!(BuiltInTaskCode::parse("WORKFLOW_STOPPED"), None);
+    assert!(TaskError::new("WORKFLOW_STOPPED", "workflow was stopped").is_err());
+}
+
+/// Python `test_layer1_tasks.py::test_exponential_backoff_intervals`: two
+/// retries keep the `sent_at` of the send, and the second retry waits longer
+/// than the first.
+#[tokio::test]
+#[serial]
+async fn retries_keep_the_sent_at_and_the_second_delay_is_longer() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let options = retry_options(3, "exponential", &[1], &["ERR"]);
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            max_retries: 3,
+            task_options: Some(&options),
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let sent_at = live_row(&pool, seeded.task_id).await.expect("live row")["sent_at"].clone();
+
+    let mut delays = Vec::new();
+    for retry in 1..=2_i32 {
+        let outcome = finalize(&pool, seeded.task_id, error_result("ERR")).await;
+        assert!(
+            matches!(outcome, Ok(FinalizeOutcome::Retried)),
+            "retry {retry}: {}",
+            describe(&outcome)
+        );
+        let (retry_count, row_sent_at, delay_ms): (i32, serde_json::Value, f64) = sqlx::query_as(
+            "SELECT t.retry_count, to_jsonb(t.sent_at),
+                    (EXTRACT(EPOCH FROM (t.next_retry_at - a.finished_at)) * 1000)::float8
+             FROM horsies_tasks t
+             JOIN horsies_task_attempts a ON a.task_id = t.id AND a.attempt = t.retry_count
+             WHERE t.id = $1",
+        )
+        .bind(seeded.task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the retried row");
+        assert_eq!(retry_count, retry);
+        assert_eq!(row_sent_at, sent_at, "retry {retry} changed sent_at");
+        delays.push(delay_ms);
+        // The next attempt: claimed again and started by this worker.
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET status = 'RUNNING', claimed_at = date_trunc('milliseconds', NOW()),
+                 claimed_by_worker_id = $2, claim_expires_at = NULL, started_at = NOW(),
+                 worker_pid = 4242, worker_hostname = 'finalize-host',
+                 worker_process_name = 'finalize-process', next_retry_at = NULL
+             WHERE id = $1",
+        )
+        .bind(seeded.task_id)
+        .bind(WORKER)
+        .execute(&pool)
+        .await
+        .expect("start the next attempt");
+    }
+
+    assert!(
+        delays[1] > delays[0],
+        "the second delay ({} ms) is not longer than the first ({} ms)",
+        delays[1],
+        delays[0]
+    );
+    cleanup(&pool, &seeded).await;
+}

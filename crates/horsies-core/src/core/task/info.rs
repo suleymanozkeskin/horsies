@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::task::execution::ExecutionClass;
 use crate::core::task::result::TaskResult;
 use crate::core::types::status::TaskAttemptOutcome;
 use crate::core::types::TaskStatus;
@@ -47,6 +48,10 @@ pub struct TaskInfo {
     /// `None` when not requested, empty `Vec` when no attempts recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempts: Option<Vec<TaskAttemptInfo>>,
+
+    /// How a worker runs the task: the stored class of a live task, or
+    /// [`ExecutionClass::NotKeptInHistory`] for a task read from history.
+    pub execution: ExecutionClass,
 }
 
 /// Metadata for a single task execution attempt.
@@ -79,6 +84,7 @@ pub struct TaskAttemptInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::task::execution::Execution;
 
     /// Helper to build a minimal TaskInfo for testing.
     fn make_task_info(result: Option<TaskResult<serde_json::Value>>) -> TaskInfo {
@@ -104,6 +110,7 @@ mod tests {
             failed_reason: None,
             result,
             attempts: None,
+            execution: ExecutionClass::Live(Execution::Isolated),
         }
     }
 
@@ -141,7 +148,8 @@ mod tests {
             "priority": 5,
             "retry_count": 1,
             "max_retries": 3,
-            "enqueued_at": "2025-01-01T00:00:00Z"
+            "enqueued_at": "2025-01-01T00:00:00Z",
+            "execution": "SHARED_ASYNC"
         });
         let info: TaskInfo = serde_json::from_value(json).unwrap();
         assert_eq!(
@@ -149,6 +157,7 @@ mod tests {
             Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
         );
         assert!(info.result.is_none());
+        assert_eq!(info.execution, ExecutionClass::Live(Execution::SharedAsync));
     }
 
     #[test]
@@ -162,7 +171,8 @@ mod tests {
             "retry_count": 0,
             "max_retries": 1,
             "enqueued_at": "2025-01-01T00:00:00Z",
-            "result": {"__h_task_result__": true, "ok": "hello world", "err": null}
+            "result": {"__h_task_result__": true, "ok": "hello world", "err": null},
+            "execution": "NOT_KEPT_IN_HISTORY"
         });
         let info: TaskInfo = serde_json::from_value(json).unwrap();
         assert!(info.result.is_some());
@@ -180,6 +190,37 @@ mod tests {
         assert!(back.result.unwrap().is_ok());
         assert_eq!(back.task_id, info.task_id);
         assert_eq!(back.task_name, info.task_name);
+    }
+
+    #[test]
+    fn round_trip_preserves_execution_class() {
+        for execution in [
+            ExecutionClass::Live(Execution::SharedThread),
+            ExecutionClass::NotKeptInHistory,
+        ] {
+            let mut info = make_task_info(None);
+            info.execution = execution;
+            let json = serde_json::to_value(&info).unwrap();
+            assert_eq!(json["execution"], execution.as_str());
+            let back: TaskInfo = serde_json::from_value(json).unwrap();
+            assert_eq!(back.execution, execution);
+        }
+    }
+
+    #[test]
+    fn deserialize_without_execution_is_refused() {
+        // The class is never guessed: a task info without it does not decode.
+        let json = serde_json::json!({
+            "task_id": "00000000-0000-0000-0000-000000000004",
+            "task_name": "no_class",
+            "status": "PENDING",
+            "queue_name": "default",
+            "priority": 5,
+            "retry_count": 0,
+            "max_retries": 0,
+            "enqueued_at": "2025-01-01T00:00:00Z"
+        });
+        assert!(serde_json::from_value::<TaskInfo>(json).is_err());
     }
 
     #[test]
