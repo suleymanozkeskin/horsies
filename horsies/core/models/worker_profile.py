@@ -283,8 +283,8 @@ class IsolatedPool(BaseModel):
       Off by default. Each check is a database round trip, and a write of
       the child is one statement in autocommit, so a check doubles its round
       trips. With it off, a dead pooled connection fails the write that takes
-      it: the RUNNING update ends as ``OWNERSHIP_UNCONFIRMED`` and the claim
-      lease returns the task; a lost finalizing marker is logged, and the
+      it: the RUNNING update ends as ``OWNERSHIP_UNCONFIRMED`` and the worker
+      releases the claim at once; a lost finalizing marker is logged, and the
       runner heartbeats of the worker cover the row.
 
     AppConfig validation refuses a ``min_size`` above ``max_size``.

@@ -32,7 +32,7 @@ from horsies import Ok, Err
 async def my_endpoint():
     match await my_task.send_async(name="alice", count=3):
         case Ok(handle):
-            return {"task_id": handle.task_id}
+            return {"task_id": str(handle.task_id)}
         case Err(send_err):
             return {"error": send_err.message}
 ```
@@ -247,7 +247,7 @@ my_task.send(connection_url=str(db_connection.url))
 
 ## Retrying Failed Sends
 
-When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The stored `TaskSendPayload` carries the task id, the serialized arguments and the `sent_at` of the first send; if that send was written, the retry finds the same command on the same task id and returns it instead of writing a second row.
+When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The stored `TaskSendPayload` carries the task id, the serialized arguments and the `sent_at` of the first send; if that send was written, the retry finds the same command on the same task id and returns it instead of writing a second row. This holds after the task finished too: a retry reads the task history and does not run the task a second time.
 
 ```python
 from horsies import Err, Ok, TaskSendEnqueueFailed, TaskSendIdempotencyKeyConflict
@@ -409,7 +409,7 @@ The codes, and which of them the retry methods accept, are in the [Errors Refere
 
 | Property/Method | Type | Description |
 | --------------- | ---- | ----------- |
-| `.task_id` | `str` | Unique task identifier |
+| `.task_id` | `uuid.UUID` | Unique task identifier |
 | `.get(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (blocking) |
 | `.get_async(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (async) |
 | `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |

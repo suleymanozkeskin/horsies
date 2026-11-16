@@ -295,7 +295,7 @@ async def insert_live_task(
     """
     from horsies.core.history.identity.uuid7 import mint_task_id
 
-    task_id = task_id if task_id is not None else mint_task_id()
+    task_id = task_id if task_id is not None else str(mint_task_id())
     now = datetime.now(timezone.utc)
     await connection.execute(
         text(

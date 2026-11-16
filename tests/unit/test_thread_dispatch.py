@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Coroutine
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock
@@ -27,6 +28,7 @@ from horsies.core.models.worker_profile import (
     SharedThreadChildren,
 )
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
@@ -81,6 +83,10 @@ _THREAD_KIND = SharedThreadChild(seats=4, pool=_POOL, task_send_pool=2)
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 THREADS = SharedThreadChildren(count=2, seats=3)
 THREAD_OPTIONS = json.dumps(
     {'timeout_ms': 2000, 'execution': Execution.SHARED_THREAD.value},
@@ -119,7 +125,7 @@ def _request(work: ThreadSeatWork | None = None) -> ThreadRunRequest:
         kwargs_json=None,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=CLAIM,
         work=work or ThreadSeatTask(timeout_ms=MIN_TASK_TIMEOUT_MS),
     )
 
@@ -227,9 +233,8 @@ class TestDispatch:
             'cpu',
             False,
             timeout=TaskTimeout(ms=2000),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=THREAD_OPTIONS),
             execution=Execution.SHARED_THREAD,
-            task_options=THREAD_OPTIONS,
         )
 
         worker._slots.submit.assert_not_called()
@@ -241,7 +246,7 @@ class TestDispatch:
             kwargs_json='{}',
             worker_id=worker.worker_instance_id,
             is_workflow_task=False,
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=THREAD_OPTIONS),
             work=ThreadSeatTask(timeout_ms=2000),
         )
         worker._finalize_shared_after.assert_called_once_with(
@@ -251,7 +256,7 @@ class TestDispatch:
             False,
             ThreadSeatTask(timeout_ms=2000),
             task_name='hash',
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=THREAD_OPTIONS),
         )
         assert worker._spawn_background.call_args.kwargs['finalizer'] is True
 
@@ -266,9 +271,8 @@ class TestDispatch:
             None,
             '{}',
             timeout=NoTimeout(),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=None),
             execution=Execution.SHARED_THREAD,
-            task_options=None,
         )
 
         worker._slots.submit.assert_not_called()
@@ -286,9 +290,8 @@ class TestDispatch:
             None,
             '{}',
             timeout=TaskTimeout(ms=2000),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=THREAD_OPTIONS),
             execution=Execution.SHARED_THREAD,
-            task_options=THREAD_OPTIONS,
         )
 
         worker._slots.submit_shared.assert_not_called()
@@ -322,7 +325,7 @@ class TestFinalizeThread:
             False,
             work,
             task_name='hash',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
     @pytest.mark.parametrize(
@@ -366,7 +369,7 @@ class TestFinalizeThread:
         worker._record_task_timeout.assert_awaited_once_with(  # type: ignore[attr-defined]
             'task-1',
             1500,
-            CLAIMED_AT,
+            CLAIM,
             retry=retry,
         )
         worker._finalize_child_loss.assert_not_awaited()  # type: ignore[attr-defined]
@@ -392,7 +395,7 @@ class TestFinalizeThread:
                 assert timeout_retry_write(error.data) == (
                     1500,
                     RetryPlacement.ISOLATED,
-                    CLAIMED_AT,
+                    CLAIM,
                 )
             case Ok():
                 raise AssertionError(result)
@@ -411,7 +414,7 @@ class TestFinalizeThread:
             ANY,
             'task-1',
             lost,
-            CLAIMED_AT,
+            CLAIM,
         )
 
     async def test_a_refusal_that_ends_at_a_deadline_is_a_defect(self) -> None:

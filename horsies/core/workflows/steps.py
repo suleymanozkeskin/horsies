@@ -574,20 +574,19 @@ def source_results(
     """The result of each terminal dependency of ``owed``, by index. Does no I/O."""
     from horsies.core.workflows.engine import terminal_dependency_result
 
-    results: dict[int, TaskResult[Any, TaskError]] = {}
-    for source in owed.sources:
-        result = terminal_dependency_result(
+    return {
+        source.task_index: terminal_dependency_result(
             broker.app,
             workflow_id=owed.workflow_id,
             task_index=source.task_index,
+            node_id=source.node_id,
             status=source.status.value,
             stored_result=source.result,
             task_name=source.task_name,
             sub_definition_key=source.definition_key,
         )
-        if result is not None:
-            results[source.task_index] = result
-    return results
+        for source in owed.sources
+    }
 
 
 def child_start_kind(broker: PostgresBroker, owed: OwedChildStart) -> ChildStartKind:

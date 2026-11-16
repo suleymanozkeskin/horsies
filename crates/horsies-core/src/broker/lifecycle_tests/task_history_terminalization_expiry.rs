@@ -6,7 +6,7 @@
 use serial_test::serial;
 
 use super::support::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
     BatchSize, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };

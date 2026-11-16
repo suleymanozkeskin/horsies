@@ -263,12 +263,15 @@ app.check_live().await?;
 
 **Returns** `Ok(())` when all validations pass, or `Err(HorsiesError)` with diagnostic messages.
 
-**CLI equivalent:**
+**Command line:** the `horsies` binary does not run this check. `horsies check` writes a refusal to stderr and exits with code 1, because the check needs the task registry of the application binary. See the [CLI Reference](../../cli). To run the check from the command line, call `app.check_with(live)` in the application binary. `check_with(true)` runs `check_live()`; `check_with(false)` runs `check()`.
 
-```bash
-horsies check ./config/horsies.toml       # Static validation
-horsies check ./config/horsies.toml --live # Static + broker connectivity
+```rust
+// In the application binary, after every task is registered
+let live = std::env::args().any(|argument| argument == "--live");
+app.check_with(live).await?;
 ```
+
+One entry point for the worker, scheduler, and check modes is tracked in [#656](https://github.com/suleymanozkeskin/horsies/issues/656).
 
 ## Logging Configuration
 
