@@ -48,9 +48,10 @@ def enqueue_fingerprint(
 ) -> str:
     """Deterministic SHA-256 fingerprint for enqueue payload identity.
 
-    Computed once from Python values before INSERT. Stored in the row.
-    On conflict, the stored hash is compared directly — no recomputation
-    from DB values, no datetime round-trip risk.
+    Computed once from Python values and carried in ``TaskSendPayload``.
+    The broker neither stores nor compares it: the exact-id resend check
+    compares the stored command fingerprint and ``sent_at``, which cover
+    every field hashed here.
 
     The text keeps the default ``ensure_ascii=True``, so this call does not
     use ``dumps_canonical_json``: unescaped text gives a different hash for
