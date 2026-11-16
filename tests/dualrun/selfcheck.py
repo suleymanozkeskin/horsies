@@ -204,7 +204,7 @@ _COMPLETE_SQL: Final[LiteralString] = """
 _FAILED_ATTEMPT_SQL: Final[LiteralString] = """
     SELECT outcome FROM horsies_finish_failed_attempt(
         %(task_id)s, %(worker_id)s, (SELECT claimed_at FROM horsies_tasks WHERE id = %(task_id)s),
-        0, 1.0, 'same_class', '{"err":1}', 'E1', 'reason', 'FAILED', 'timed out', 'reason'
+        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'timed out', 'reason', 'REFUSE', TRUE
     )
 """
 

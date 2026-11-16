@@ -69,6 +69,15 @@ from horsies.core.models.workflow import (
 from horsies.core.models.workflow.enums import stored_node_status
 from horsies.core.errors import WorkflowValidationError, ErrorCode, ConfigurationError
 from horsies.core.workflows.retention import queue_retention_class
+from horsies.core.workflows.stored_success_policy import (
+    NoSuccessPolicy,
+    StoredSuccessPolicy,
+    StoredSuccessPolicyError,
+    SuccessPolicyRead,
+    evaluate_success_cases,
+    read_stored_success_policy,
+    required_indices_of,
+)
 from horsies.core.workflows.sql import (
     COUNT_CTX_TERMINAL_DEPS_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
@@ -154,6 +163,36 @@ def _is_outputless_workflow_envelope(value: Any) -> bool:
     return (
         envelope.get('__h_task_result__') is True
         and envelope.get('__h_outputless_terminals__') is True
+    )
+
+
+def _missing_result_entry(
+    *,
+    task_index: int,
+    node_id: str | None,
+    task_name: str,
+    status: str,
+) -> 'TaskResult[Any, TaskError]':
+    """The entry of a COMPLETED or FAILED dependency with no stored result.
+
+    No library writer leaves such a node, so it is stored data that does not
+    parse: ``RESULT_DESERIALIZATION_ERROR`` naming the source node (its id,
+    or ``-`` when it has none, its index and its task) and its status. The
+    baseline function ``horsies_workflow_source_value`` builds the same
+    entry.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    node_label = node_id if node_id is not None else '-'
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=(
+                f'Dependency node {node_label} (index {task_index}, task '
+                f'{task_name}) is {status} with no stored result'
+            ),
+            data={'dependency_index': task_index},
+        ),
     )
 
 
@@ -928,12 +967,12 @@ async def _build_enqueued_task_params(
             broker.app.config.payload,
             task_name=task_name,
             kind='kwargs',
-            encoded_len=len(kwargs_json),
+            payload_text=kwargs_json,
         )
 
     # Create actual task in tasks table
     return Ok(workflow_task_row_params(
-        task_id=mint_task_id(),
+        task_id=str(mint_task_id()),
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
@@ -1405,7 +1444,7 @@ async def enqueue_subworkflow_task(
             )
             child_task_id: str | None = None
             if is_fast_root and child_task.index is not None:
-                child_task_id = mint_task_id()
+                child_task_id = str(mint_task_id())
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
                 # structurally absent on fast roots).
@@ -2720,6 +2759,8 @@ async def get_dependency_results(
             each recovery pass as one unit.
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
+    - COMPLETED/FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
+      naming the node (``_missing_result_entry``)
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
     Strict-serde phase 6: decode each row's stored result via
@@ -2757,17 +2798,16 @@ async def get_dependency_results(
         task_index = row.task_index
         task_names_by_index[task_index] = row.task_name
         definition_keys_by_index[task_index] = row.sub_definition_key
-        dependency_result = terminal_dependency_result(
+        results[task_index] = terminal_dependency_result(
             app,
             workflow_id=workflow_id,
             task_index=task_index,
+            node_id=row.node_id,
             status=row.status,
             stored_result=row.result,
             task_name=row.task_name,
             sub_definition_key=row.sub_definition_key,
         )
-        if dependency_result is not None:
-            results[task_index] = dependency_result
 
     return (results, task_names_by_index, definition_keys_by_index)
 
@@ -2777,18 +2817,19 @@ def terminal_dependency_result(
     *,
     workflow_id: str,
     task_index: int,
+    node_id: str | None,
     status: str,
     stored_result: str | None,
     task_name: str,
     sub_definition_key: str | None,
-) -> 'TaskResult[Any, TaskError] | None':
+) -> 'TaskResult[Any, TaskError]':
     """The result that a terminal dependency gives a node that it promotes.
 
     - SKIPPED: an ``UPSTREAM_SKIPPED`` error naming the dependency index.
     - COMPLETED or FAILED with a stored result: the result decoded with the
       source's ok type (``_decode_stored_task_result``).
-    - COMPLETED or FAILED with no stored result: ``None``; the node gets no
-      value for it.
+    - COMPLETED or FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
+      naming the node (``_missing_result_entry``).
 
     Does no I/O.
     """
@@ -2803,7 +2844,12 @@ def terminal_dependency_result(
             )
         )
     if not stored_result:
-        return None
+        return _missing_result_entry(
+            task_index=task_index,
+            node_id=node_id,
+            task_name=task_name,
+            status=status,
+        )
     return _decode_stored_task_result(
         stored_result,
         app=app,
@@ -2835,6 +2881,8 @@ async def get_dependency_results_with_names(
             whose callers own the typed recovery seams.
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
+    - COMPLETED/FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
+      naming the node (``_missing_result_entry``)
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
     Strict-serde phase 6: each stored result is decoded via
@@ -2889,7 +2937,12 @@ async def get_dependency_results_with_names(
                 sub_definition_key=sub_definition_key,
             )
         else:
-            continue  # No result to include
+            task_result = _missing_result_entry(
+                task_index=task_index,
+                node_id=node_id,
+                task_name=task_name,
+                status=status,
+            )
 
         dep_results.by_index[task_index] = task_result
         if node_id is not None:
@@ -3430,6 +3483,24 @@ async def on_subworkflow_complete(
 
 
 
+def _success_policy_or_raise(
+    workflow_id: str,
+    success_policy_data: object,
+) -> SuccessPolicyRead:
+    """The stored success policy of the workflow, for a completion step.
+
+    Raises:
+        StoredSuccessPolicyError: the stored value does not parse. The step
+            fails; the workflow recovery limit counts the raise and fails
+            the workflow closed.
+    """
+    match read_stored_success_policy(workflow_id, success_policy_data):
+        case Ok(ok_value=policy):
+            return policy
+        case Err(err_value=unreadable):
+            raise StoredSuccessPolicyError(unreadable)
+
+
 async def evaluate_workflow_success(
     session: AsyncSession,
     workflow_id: str,
@@ -3445,20 +3516,16 @@ async def evaluate_workflow_success(
 
     If success_policy is None: default behavior (any failed → False)
     If success_policy is set: True if any SuccessCase is satisfied
-    """
-    if success_policy_data is None:
-        # Default behavior: succeed only if no failures and no stored error
-        return not has_error and failed == 0
 
-    # Guard: JSONB may come back as string depending on driver
-    policy: dict[str, Any] | None
-    if isinstance(success_policy_data, str):
-        policy = _deser_json(success_policy_data, 'success_policy')
-    else:
-        policy = success_policy_data
-    if not isinstance(policy, dict):
-        logger.warning('Corrupt success_policy for workflow, treating as no policy')
-        return not has_error and failed == 0
+    Raises:
+        StoredSuccessPolicyError: the stored success policy does not parse.
+    """
+    match _success_policy_or_raise(workflow_id, success_policy_data):
+        case NoSuccessPolicy():
+            # Default behavior: succeed only if no failures and no stored error
+            return not has_error and failed == 0
+        case StoredSuccessPolicy() as policy:
+            pass
 
     # Build status map by task_index
     result = await session.execute(
@@ -3468,26 +3535,10 @@ async def evaluate_workflow_success(
 
     status_by_index: dict[int, str] = {row.task_index: row.status for row in result.fetchall()}
 
-    # Note: optional_indices from success_policy are ignored here because
-    # optional tasks can fail without affecting whether a success case is satisfied.
-    # We only check if required tasks in each case are COMPLETED.
-
-    # Evaluate each success case
-    cases = policy.get('cases', [])
-    for case in cases:
-        required_indices = case.get('required_indices', [])
-        if not required_indices:
-            continue
-
-        # Case is satisfied if ALL required tasks are COMPLETED
-        all_completed = all(
-            status_by_index.get(idx) == 'COMPLETED' for idx in required_indices
-        )
-        if all_completed:
-            return True
-
-    # No case satisfied
-    return False
+    # optional_indices are not read here: an optional task can fail without
+    # changing whether a case is satisfied. A case is satisfied when all its
+    # required tasks are COMPLETED.
+    return evaluate_success_cases(policy, status_by_index)
 
 
 
@@ -3511,10 +3562,17 @@ async def get_workflow_failure_error(
         SerializationError: the error that this function selected does not
             serialize. It decoded that error from a stored row, or built it,
             so this is a defect; the caller's transaction rolls back.
+        StoredSuccessPolicyError: the stored success policy does not parse.
     """
     from horsies.core.models.tasks import TaskError
 
-    if success_policy_data is None:
+    match _success_policy_or_raise(workflow_id, success_policy_data):
+        case NoSuccessPolicy():
+            policy: StoredSuccessPolicy | None = None
+        case StoredSuccessPolicy() as stored_policy:
+            policy = stored_policy
+
+    if policy is None:
         # Default: get first failed task's error
         result = await session.execute(
             GET_FIRST_FAILED_TASK_RESULT_SQL,
@@ -3536,21 +3594,9 @@ async def get_workflow_failure_error(
                 )
         return None
 
-    # Guard: JSONB may come back as string depending on driver
-    policy: dict[str, Any] | None
-    if isinstance(success_policy_data, str):
-        policy = _deser_json(success_policy_data, 'success_policy')
-    else:
-        policy = success_policy_data
-    if not isinstance(policy, dict):
-        logger.warning('Corrupt success_policy for workflow, treating as no policy')
-        return None
-
     # With success_policy: find first failed required task or use sentinel error
     # Collect all required indices across all cases
-    all_required: set[int] = set()
-    for case in policy.get('cases', []):
-        all_required.update(case.get('required_indices', []))
+    all_required = required_indices_of(policy)
 
     if all_required:
         # Get first failed required task

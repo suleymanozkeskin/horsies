@@ -1,9 +1,17 @@
-//! What the two one-statement attempt writers report, decoded in one place.
+//! What the one-statement attempt writers report, decoded in one place.
 //!
-//! `horsies_finish_failed_attempt` returns the ten shared outcome columns and
-//! seven more; `horsies_finish_workflow_success` returns the ten and two
-//! more. A miss carries the shared classifier's row unchanged with the extra
-//! columns NULL, so it decodes through the shared decoder.
+//! `horsies_finish_failed_attempt` and `horsies_finish_stale_attempt` return
+//! the ten shared outcome columns and the same nine more;
+//! `horsies_finish_workflow_success` returns the ten and four more. The last
+//! two of each are the node facts that phase 1 reads after the move of a
+//! workflow task: `node_has_dependents` and `downstream_subworkflow`. A miss
+//! carries the shared classifier's row unchanged with the extra columns NULL,
+//! so it decodes through the shared decoder.
+//!
+//! The node facts are set on the applied row of a workflow task and NULL on
+//! every other row. The decoders carry them as [`PhaseTwoStep`], the form of
+//! the phase-2 step. Python has no counterpart: its phase 2 reads the nodes
+//! itself.
 //!
 //! Python reference: `horsies/core/lifecycle/outcomes.py`
 //! (`decode_failed_attempt_row`, `decode_workflow_success_row`).
@@ -13,11 +21,10 @@
 //! [`OutcomeDecodeError`].
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgRow;
-use sqlx::{Column, Row};
 use uuid::Uuid;
 
 use crate::core::types::status::TaskStatus;
+use crate::db::{FromSql, Row};
 
 use super::operations::TerminalizationKind;
 use super::outcomes::{
@@ -38,7 +45,7 @@ const SHARED_COLUMNS: [&str; 10] = [
     "observed_guard",
 ];
 
-const FAILED_ATTEMPT_COLUMNS: [&str; 7] = [
+const FAILED_ATTEMPT_COLUMNS: [&str; 9] = [
     "retry_disposition",
     "retry_count",
     "next_retry_at",
@@ -46,9 +53,16 @@ const FAILED_ATTEMPT_COLUMNS: [&str; 7] = [
     "is_workflow_task",
     "queue_name",
     "task_name",
+    "node_has_dependents",
+    "downstream_subworkflow",
 ];
 
-const WORKFLOW_SUCCESS_COLUMNS: [&str; 2] = ["queue_name", "task_name"];
+const WORKFLOW_SUCCESS_COLUMNS: [&str; 4] = [
+    "queue_name",
+    "task_name",
+    "node_has_dependents",
+    "downstream_subworkflow",
+];
 
 // ---------------------------------------------------------------------------
 // Outcomes
@@ -87,6 +101,25 @@ pub enum AttemptWriteRefusal {
 pub struct PhaseTwoOwed {
     pub task_name: String,
     pub queue_name: String,
+    /// What the step of phase 2 can do, from the node facts of phase 1.
+    pub step: PhaseTwoStep,
+}
+
+/// What the phase-2 step of a workflow task can do, from the node facts that
+/// phase 1 reads after its move (`node_has_dependents`,
+/// `downstream_subworkflow`). Dependencies and the fact are fixed at workflow
+/// start, so the answer holds for phase 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseTwoStep {
+    /// No node lists this node as a dependency: the step finishes the node
+    /// and promotes nothing. One statement in autocommit.
+    NoDependents,
+    /// The node has dependents and no sub-workflow node is below it: the
+    /// step owes no child start. One statement in autocommit.
+    DependentsWithoutSubworkflow,
+    /// A sub-workflow node is below the node: the step can owe a child start,
+    /// which commits with the step. A transaction.
+    SubworkflowReachable,
 }
 
 /// Why a terminal failure was written instead of a retry.
@@ -135,6 +168,69 @@ pub enum FailedAttemptOutcome {
     Refused(AttemptWriteRefusal),
 }
 
+/// A claimed row that no child started, returned to the queue by the
+/// failed-attempt statement under the claimed-row rule `RELEASE`: PENDING
+/// again with every claim and run field cleared and no attempt row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasedClaim {
+    pub task_id: Uuid,
+    /// The queue of the released row.
+    pub queue_name: String,
+    /// The row as the statement saw it under the lock: CLAIMED by this
+    /// worker at this claim generation.
+    pub observed: ObservedTaskState,
+}
+
+/// What `horsies_finish_failed_attempt` reported under the claimed-row rule
+/// `RELEASE`, which the worker uses when a child ended without a report
+/// (timeout, loop kill, crash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnreportedAttemptOutcome {
+    /// The row was still CLAIMED: no child started it, and it is back in
+    /// the queue.
+    Released(ReleasedClaim),
+    /// The row was not CLAIMED by this claim generation: the statement wrote
+    /// or refused the failed attempt as under the rule `REFUSE`.
+    Failed(FailedAttemptOutcome),
+}
+
+/// What is owed after the terminal failure of a stale RUNNING task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterStaleFailure {
+    /// A plain task: the statement sends no capacity wake (as Python), and
+    /// nothing is owed.
+    NothingOwed,
+    /// A workflow task: phase 2 is owed. The move recorded it, and phase-2
+    /// recovery runs it.
+    PhaseTwoOwed(PhaseTwoOwed),
+}
+
+/// What `horsies_finish_stale_attempt` reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleAttemptOutcome {
+    /// The terminal failure (`FAIL_STALE`) and its attempt row committed.
+    FailureApplied {
+        task_id: Uuid,
+        terminal_at: DateTime<Utc>,
+        observed: ObservedTaskState,
+        retry: RetryRefusal,
+        after: AfterStaleFailure,
+    },
+    /// The crash retry and its attempt row (`will_retry`) committed.
+    /// `retry_count` is the count the row now holds.
+    RetryScheduled {
+        task_id: Uuid,
+        retry_count: i32,
+        next_retry_at: DateTime<Utc>,
+        queue_name: String,
+        observed: ObservedTaskState,
+    },
+    /// Nothing was written: the row is not RUNNING, it is not stale under
+    /// the lock (guard `STALENESS`), or its retry count is not the one the
+    /// retry was computed from (guard `RETRY_COUNT`).
+    Refused(AttemptWriteRefusal),
+}
+
 /// What `horsies_finish_workflow_success` reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowSuccessOutcome {
@@ -150,6 +246,17 @@ pub enum WorkflowSuccessOutcome {
 }
 
 impl FailedAttemptOutcome {
+    /// The outcome text, for the log.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FailureApplied { .. } => "APPLIED",
+            Self::RetryScheduled { .. } => "RETRY_SCHEDULED",
+            Self::Refused(refusal) => refusal.as_str(),
+        }
+    }
+}
+
+impl StaleAttemptOutcome {
     /// The outcome text, for the log.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -186,7 +293,7 @@ impl AttemptWriteRefusal {
 // Decoding
 // ---------------------------------------------------------------------------
 
-/// The seven columns that only the failed-attempt row carries.
+/// The nine columns that only the failed-attempt row carries.
 struct FailedAttemptColumns {
     retry_disposition: Option<String>,
     retry_count: Option<i32>,
@@ -195,6 +302,63 @@ struct FailedAttemptColumns {
     is_workflow_task: Option<bool>,
     queue_name: Option<String>,
     task_name: Option<String>,
+    facts: NodeFactColumns,
+}
+
+/// The two node facts of phase 1, as read from the row.
+struct NodeFactColumns {
+    node_has_dependents: Option<bool>,
+    downstream_subworkflow: Option<String>,
+}
+
+impl NodeFactColumns {
+    /// The read of the two columns of `row`.
+    fn read(row: &Row) -> Result<Self, OutcomeDecodeError> {
+        Ok(Self {
+            node_has_dependents: get(row, "node_has_dependents")?,
+            downstream_subworkflow: get(row, "downstream_subworkflow")?,
+        })
+    }
+
+    /// The names of the set columns, for a row whose outcome sets neither.
+    fn populated(&self) -> Vec<&'static str> {
+        let mut populated = Vec::new();
+        if self.node_has_dependents.is_some() {
+            populated.push("node_has_dependents");
+        }
+        if self.downstream_subworkflow.is_some() {
+            populated.push("downstream_subworkflow");
+        }
+        populated
+    }
+
+    /// The phase-2 step of an applied workflow task.
+    ///
+    /// - `node_has_dependents` FALSE: `NoDependents`. `downstream_subworkflow`
+    ///   is `NONE`, or NULL when no node links the task (phase 2 then finds no
+    ///   node to finish). `REACHABLE` is refused: a sub-workflow node below the
+    ///   node would be a dependent of it.
+    /// - TRUE: `NONE` gives `DependentsWithoutSubworkflow`, `REACHABLE` gives
+    ///   `SubworkflowReachable`. NULL is refused: a node with dependents is
+    ///   linked, and the start stores the fact on every node.
+    /// - NULL `node_has_dependents`, or any other text, is refused.
+    fn phase_two_step(&self) -> Result<PhaseTwoStep, OutcomeDecodeError> {
+        let has_dependents = require(self.node_has_dependents, "node_has_dependents")?;
+        match (has_dependents, self.downstream_subworkflow.as_deref()) {
+            (false, None | Some("NONE")) => Ok(PhaseTwoStep::NoDependents),
+            (true, Some("NONE")) => Ok(PhaseTwoStep::DependentsWithoutSubworkflow),
+            (true, Some("REACHABLE")) => Ok(PhaseTwoStep::SubworkflowReachable),
+            (false, Some("REACHABLE")) => Err(OutcomeDecodeError(
+                "node_has_dependents is FALSE and downstream_subworkflow is REACHABLE".to_owned(),
+            )),
+            (true, None) => Err(OutcomeDecodeError(
+                "node_has_dependents is TRUE and downstream_subworkflow is NULL".to_owned(),
+            )),
+            (_, Some(unknown)) => Err(OutcomeDecodeError(format!(
+                "unknown downstream_subworkflow {unknown:?}"
+            ))),
+        }
+    }
 }
 
 impl FailedAttemptColumns {
@@ -221,12 +385,24 @@ impl FailedAttemptColumns {
         if self.task_name.is_some() {
             populated.push("task_name");
         }
+        populated.extend(self.facts.populated());
         populated
     }
 }
 
-/// Decode the one row of `horsies_finish_failed_attempt`.
-pub fn decode_failed_attempt_row(row: &PgRow) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
+/// The four columns that only the workflow-success row carries.
+struct WorkflowSuccessColumns {
+    queue_name: Option<String>,
+    task_name: Option<String>,
+    facts: NodeFactColumns,
+}
+
+/// Decode the one row of `horsies_finish_failed_attempt`. A `RELEASED` row
+/// decodes to [`UnreportedAttemptOutcome::Released`]; whether the claimed-row
+/// rule of the call allows it is the writer's check.
+pub fn decode_failed_attempt_row(
+    row: &Row,
+) -> Result<UnreportedAttemptOutcome, OutcomeDecodeError> {
     require_exact_columns(row, &FAILED_ATTEMPT_COLUMNS, "failed-attempt")?;
     let raw = shared_columns(row)?;
     let extra = FailedAttemptColumns {
@@ -237,6 +413,7 @@ pub fn decode_failed_attempt_row(row: &PgRow) -> Result<FailedAttemptOutcome, Ou
         is_workflow_task: get(row, "is_workflow_task")?,
         queue_name: get(row, "queue_name")?,
         task_name: get(row, "task_name")?,
+        facts: NodeFactColumns::read(row)?,
     };
     decode_failed_attempt(raw, extra)
 }
@@ -244,21 +421,62 @@ pub fn decode_failed_attempt_row(row: &PgRow) -> Result<FailedAttemptOutcome, Ou
 fn decode_failed_attempt(
     raw: RawOutcomeRow,
     extra: FailedAttemptColumns,
-) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
+) -> Result<UnreportedAttemptOutcome, OutcomeDecodeError> {
     match raw.outcome.as_str() {
-        "APPLIED" => decode_failure_applied(raw, extra),
-        "RETRY_SCHEDULED" => decode_retry_scheduled(raw, extra),
+        "APPLIED" => decode_failure_applied(raw, extra).map(UnreportedAttemptOutcome::Failed),
+        "RETRY_SCHEDULED" => {
+            decode_retry_scheduled(raw, extra).map(UnreportedAttemptOutcome::Failed)
+        }
+        "RELEASED" => decode_released(raw, extra).map(UnreportedAttemptOutcome::Released),
         other => {
             require_null(&extra.populated(), other)?;
-            refusal_of(decode_raw(raw)?).map(FailedAttemptOutcome::Refused)
+            refusal_of(decode_raw(raw)?)
+                .map(FailedAttemptOutcome::Refused)
+                .map(UnreportedAttemptOutcome::Failed)
         }
     }
+}
+
+/// The kind of task whose terminal failure applied.
+enum FailedTask {
+    Plain,
+    Workflow(PhaseTwoOwed),
+}
+
+/// An `APPLIED` row of a failure writer, before the writer names what the
+/// failure owes.
+struct AppliedFailure {
+    task_id: Uuid,
+    terminal_at: DateTime<Utc>,
+    observed: ObservedTaskState,
+    retry: RetryRefusal,
+    task: FailedTask,
 }
 
 fn decode_failure_applied(
     raw: RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
+    let applied = decode_applied_failure(raw, extra, TerminalizationKind::FailRunning)?;
+    Ok(FailedAttemptOutcome::FailureApplied {
+        task_id: applied.task_id,
+        terminal_at: applied.terminal_at,
+        observed: applied.observed,
+        retry: applied.retry,
+        after: match applied.task {
+            FailedTask::Plain => AfterFailure::CapacityWoken,
+            FailedTask::Workflow(owed) => AfterFailure::PhaseTwoOwed(owed),
+        },
+    })
+}
+
+/// An `APPLIED` row of the kind `expected`: the retry disposition, and the
+/// facts of a workflow task (its dependents fact, task and queue).
+fn decode_applied_failure(
+    raw: RawOutcomeRow,
+    extra: FailedAttemptColumns,
+    expected: TerminalizationKind,
+) -> Result<AppliedFailure, OutcomeDecodeError> {
     if extra.retry_count.is_some() {
         return Err(OutcomeDecodeError(
             "APPLIED failed-attempt row carries retry_count, which only a retry sets".to_owned(),
@@ -279,10 +497,11 @@ fn decode_failure_applied(
             unreachable!("the shared decoder keeps the APPLIED discriminant")
         }
     };
-    if kind != TerminalizationKind::FailRunning {
+    if kind != expected {
         return Err(OutcomeDecodeError(format!(
-            "failed-attempt APPLIED carries kind {}, not FAIL_RUNNING",
-            kind.as_str()
+            "failed-attempt APPLIED carries kind {}, not {}",
+            kind.as_str(),
+            expected.as_str()
         )));
     }
     let retry = match extra.retry_disposition.as_deref() {
@@ -309,19 +528,26 @@ fn decode_failure_applied(
             ))
         }
     };
-    let after = match require(extra.is_workflow_task, "is_workflow_task")? {
-        true => AfterFailure::PhaseTwoOwed(PhaseTwoOwed {
+    let task = match require(extra.is_workflow_task, "is_workflow_task")? {
+        true => FailedTask::Workflow(PhaseTwoOwed {
+            step: extra.facts.phase_two_step()?,
             task_name: require(extra.task_name, "task_name")?,
             queue_name: require(extra.queue_name, "queue_name")?,
         }),
-        false => AfterFailure::CapacityWoken,
+        false => {
+            require_null(
+                &extra.facts.populated(),
+                "APPLIED plain-task failed-attempt",
+            )?;
+            FailedTask::Plain
+        }
     };
-    Ok(FailedAttemptOutcome::FailureApplied {
+    Ok(AppliedFailure {
         task_id,
         terminal_at,
         observed,
         retry,
-        after,
+        task,
     })
 }
 
@@ -329,6 +555,31 @@ fn decode_retry_scheduled(
     raw: RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
+    let scheduled = decode_scheduled_retry(raw, extra)?;
+    Ok(FailedAttemptOutcome::RetryScheduled {
+        task_id: scheduled.task_id,
+        retry_count: scheduled.retry_count,
+        next_retry_at: scheduled.next_retry_at,
+        queue_name: scheduled.queue_name,
+        observed: scheduled.observed,
+    })
+}
+
+/// A `RETRY_SCHEDULED` row of a failure writer.
+struct ScheduledRetry {
+    task_id: Uuid,
+    retry_count: i32,
+    next_retry_at: DateTime<Utc>,
+    queue_name: String,
+    observed: ObservedTaskState,
+}
+
+/// A `RETRY_SCHEDULED` row: the new retry count, the retry time and the
+/// queue; every terminal and refusal column NULL.
+fn decode_scheduled_retry(
+    raw: RawOutcomeRow,
+    extra: FailedAttemptColumns,
+) -> Result<ScheduledRetry, OutcomeDecodeError> {
     let mut populated: Vec<&'static str> = Vec::new();
     if raw.terminal_at.is_some() {
         populated.push("terminal_at");
@@ -354,8 +605,9 @@ fn decode_retry_scheduled(
     if extra.task_name.is_some() {
         populated.push("task_name");
     }
+    populated.extend(extra.facts.populated());
     require_null(&populated, "RETRY_SCHEDULED")?;
-    Ok(FailedAttemptOutcome::RetryScheduled {
+    Ok(ScheduledRetry {
         task_id: raw.task_id,
         retry_count: require(extra.retry_count, "retry_count")?,
         next_retry_at: require(extra.next_retry_at, "next_retry_at")?,
@@ -364,22 +616,145 @@ fn decode_retry_scheduled(
     })
 }
 
+/// A `RELEASED` row: the row and its queue, every other column NULL, and
+/// the row seen CLAIMED.
+fn decode_released(
+    raw: RawOutcomeRow,
+    extra: FailedAttemptColumns,
+) -> Result<ReleasedClaim, OutcomeDecodeError> {
+    let mut populated: Vec<&'static str> = Vec::new();
+    if raw.terminal_at.is_some() {
+        populated.push("terminal_at");
+    }
+    if raw.terminalization_kind.is_some() {
+        populated.push("terminalization_kind");
+    }
+    if raw.guard_kind.is_some() {
+        populated.push("guard_kind");
+    }
+    if raw.observed_guard.is_some() {
+        populated.push("observed_guard");
+    }
+    let FailedAttemptColumns {
+        retry_disposition,
+        retry_count,
+        next_retry_at,
+        good_until,
+        is_workflow_task,
+        queue_name,
+        task_name,
+        facts,
+    } = extra;
+    let named = [
+        ("retry_disposition", retry_disposition.is_some()),
+        ("retry_count", retry_count.is_some()),
+        ("next_retry_at", next_retry_at.is_some()),
+        ("good_until", good_until.is_some()),
+        ("is_workflow_task", is_workflow_task.is_some()),
+        ("task_name", task_name.is_some()),
+    ];
+    populated.extend(
+        named
+            .iter()
+            .filter(|(_, is_set)| *is_set)
+            .map(|(column, _)| *column),
+    );
+    populated.extend(facts.populated());
+    require_null(&populated, "RELEASED")?;
+    let observed = observed_of(&raw)?;
+    if observed.status != Some(TaskStatus::Claimed) {
+        return Err(OutcomeDecodeError(format!(
+            "RELEASED row observed status {:?}, not CLAIMED",
+            observed.status
+        )));
+    }
+    Ok(ReleasedClaim {
+        task_id: raw.task_id,
+        queue_name: require(queue_name, "queue_name")?,
+        observed,
+    })
+}
+
+/// Decode the one row of `horsies_finish_stale_attempt`: the columns of
+/// `horsies_finish_failed_attempt`. `APPLIED` carries the kind
+/// `FAIL_STALE`; the function never returns `RELEASED`.
+pub fn decode_stale_attempt_row(row: &Row) -> Result<StaleAttemptOutcome, OutcomeDecodeError> {
+    require_exact_columns(row, &FAILED_ATTEMPT_COLUMNS, "stale-attempt")?;
+    let raw = shared_columns(row)?;
+    let extra = FailedAttemptColumns {
+        retry_disposition: get(row, "retry_disposition")?,
+        retry_count: get(row, "retry_count")?,
+        next_retry_at: get(row, "next_retry_at")?,
+        good_until: get(row, "good_until")?,
+        is_workflow_task: get(row, "is_workflow_task")?,
+        queue_name: get(row, "queue_name")?,
+        task_name: get(row, "task_name")?,
+        facts: NodeFactColumns::read(row)?,
+    };
+    decode_stale_attempt(raw, extra)
+}
+
+fn decode_stale_attempt(
+    raw: RawOutcomeRow,
+    extra: FailedAttemptColumns,
+) -> Result<StaleAttemptOutcome, OutcomeDecodeError> {
+    match raw.outcome.as_str() {
+        "APPLIED" => {
+            let applied = decode_applied_failure(raw, extra, TerminalizationKind::FailStale)?;
+            Ok(StaleAttemptOutcome::FailureApplied {
+                task_id: applied.task_id,
+                terminal_at: applied.terminal_at,
+                observed: applied.observed,
+                retry: applied.retry,
+                after: match applied.task {
+                    FailedTask::Plain => AfterStaleFailure::NothingOwed,
+                    FailedTask::Workflow(owed) => AfterStaleFailure::PhaseTwoOwed(owed),
+                },
+            })
+        }
+        "RETRY_SCHEDULED" => {
+            let scheduled = decode_scheduled_retry(raw, extra)?;
+            Ok(StaleAttemptOutcome::RetryScheduled {
+                task_id: scheduled.task_id,
+                retry_count: scheduled.retry_count,
+                next_retry_at: scheduled.next_retry_at,
+                queue_name: scheduled.queue_name,
+                observed: scheduled.observed,
+            })
+        }
+        "RELEASED" => Err(OutcomeDecodeError(
+            "horsies_finish_stale_attempt returned RELEASED, which it never writes".to_owned(),
+        )),
+        other => {
+            require_null(&extra.populated(), other)?;
+            refusal_of(decode_raw(raw)?).map(StaleAttemptOutcome::Refused)
+        }
+    }
+}
+
 /// Decode the one row of `horsies_finish_workflow_success`.
 pub fn decode_workflow_success_row(
-    row: &PgRow,
+    row: &Row,
 ) -> Result<WorkflowSuccessOutcome, OutcomeDecodeError> {
     require_exact_columns(row, &WORKFLOW_SUCCESS_COLUMNS, "workflow-success")?;
     let raw = shared_columns(row)?;
-    let queue_name: Option<String> = get(row, "queue_name")?;
-    let task_name: Option<String> = get(row, "task_name")?;
-    decode_workflow_success(raw, queue_name, task_name)
+    let extra = WorkflowSuccessColumns {
+        queue_name: get(row, "queue_name")?,
+        task_name: get(row, "task_name")?,
+        facts: NodeFactColumns::read(row)?,
+    };
+    decode_workflow_success(raw, extra)
 }
 
 fn decode_workflow_success(
     raw: RawOutcomeRow,
-    queue_name: Option<String>,
-    task_name: Option<String>,
+    extra: WorkflowSuccessColumns,
 ) -> Result<WorkflowSuccessOutcome, OutcomeDecodeError> {
+    let WorkflowSuccessColumns {
+        queue_name,
+        task_name,
+        facts,
+    } = extra;
     match decode_raw(raw)? {
         TerminalizationOutcome::Applied {
             task_id,
@@ -401,6 +776,7 @@ fn decode_workflow_success(
                 phase_two: PhaseTwoOwed {
                     task_name: require(task_name, "task_name")?,
                     queue_name: require(queue_name, "queue_name")?,
+                    step: facts.phase_two_step()?,
                 },
             })
         }
@@ -415,6 +791,7 @@ fn decode_workflow_success(
             if task_name.is_some() {
                 populated.push("task_name");
             }
+            populated.extend(facts.populated());
             require_null(&populated, "refused workflow-success")?;
             refusal_of(refused).map(WorkflowSuccessOutcome::Refused)
         }
@@ -475,7 +852,7 @@ fn observed_of(raw: &RawOutcomeRow) -> Result<ObservedTaskState, OutcomeDecodeEr
     })
 }
 
-fn shared_columns(row: &PgRow) -> Result<RawOutcomeRow, OutcomeDecodeError> {
+fn shared_columns(row: &Row) -> Result<RawOutcomeRow, OutcomeDecodeError> {
     Ok(RawOutcomeRow {
         task_id: get(row, "task_id")?,
         ordinality: get(row, "ordinality")?,
@@ -490,16 +867,13 @@ fn shared_columns(row: &PgRow) -> Result<RawOutcomeRow, OutcomeDecodeError> {
     })
 }
 
-fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
-    row: &'r PgRow,
-    column: &str,
-) -> Result<T, OutcomeDecodeError> {
+fn get<'r, T: FromSql<'r>>(row: &'r Row, column: &str) -> Result<T, OutcomeDecodeError> {
     row.try_get(column)
         .map_err(|error| OutcomeDecodeError(format!("column {column}: {error}")))
 }
 
 fn require_exact_columns(
-    row: &PgRow,
+    row: &Row,
     extra: &[&str],
     writer: &str,
 ) -> Result<(), OutcomeDecodeError> {

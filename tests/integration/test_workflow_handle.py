@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,6 +44,20 @@ from tests.broker_resources_support import current_resources, listener_of, repla
 # =============================================================================
 # Shared helpers
 # =============================================================================
+
+
+async def _workflow_completed_at(
+    session: AsyncSession,
+    workflow_id: str,
+) -> datetime | None:
+    """The stored completed_at of one workflow row, read in a new snapshot."""
+    await session.commit()
+    return (
+        await session.execute(
+            text('SELECT completed_at FROM horsies_workflows WHERE id = :id'),
+            {'id': workflow_id},
+        )
+    ).scalar_one()
 
 
 async def _complete_task(
@@ -1235,12 +1249,7 @@ class TestWorkflowHandleCancel:
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
-        cancelled_at = (
-            await session.execute(
-                text('SELECT completed_at FROM horsies_workflows WHERE id = :wf_id'),
-                {'wf_id': handle.workflow_id},
-            )
-        ).scalar_one()
+        cancelled_at = await _workflow_completed_at(session, handle.workflow_id)
         assert cancelled_at is not None
 
         # The still-running task finishes after the cancel.
@@ -1261,7 +1270,9 @@ class TestWorkflowHandleCancel:
         assert row[0] == 'CANCELLED', (
             f'Late completion must not resurrect a cancelled workflow, got {row[0]}'
         )
-        assert row[1] == cancelled_at, 'the late completion keeps the cancel time'
+        assert row[1] == cancelled_at, (
+            'a late completion must not move the completed_at of the cancel'
+        )
         assert row[2] is None, 'workflow result must not be written after cancel'
 
     async def test_cancel_does_not_deadlock_against_completion_lock_order(
@@ -1328,6 +1339,54 @@ class TestWorkflowHandleCancel:
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
+
+    async def test_cancel_sets_completed_at_on_descendants(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The cascade sets completed_at on each child workflow it cancels."""
+        task_a = make_simple_task(app, 'descendant_cancel_completed_at_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker,
+            name='descendant_cancel_completed_at',
+            tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
+                VALUES
+                    (:child_id, 'descendant_completed_at_child', 'RUNNING',
+                     'fail', 1, :parent_id, 0, :parent_id, NOW(), NOW(),
+                     NOW(), NOW())
+            """),
+            {
+                'child_id': child_workflow_id,
+                'parent_id': handle.workflow_id,
+            },
+        )
+        await session.commit()
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        child_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :id'),
+                {'id': child_workflow_id},
+            )
+        ).scalar_one()
+        assert child_status == 'CANCELLED'
+        assert await _workflow_completed_at(session, child_workflow_id) is not None
 
     async def test_descendant_cancel_uses_completion_lock_order(
         self,
