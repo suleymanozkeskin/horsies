@@ -61,8 +61,8 @@ pub use crate::core::{AppConfig, HorsiesError};
 pub use crate::broker::{
     expected_schema_version, run_horsies_migrations, BrokerError, BrokerErrorCode,
     BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow,
-    NotifyListener, PostgresBroker, RawResultRecord, SchemaInitializationMode,
-    SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
+    ListenError, ListenerPlanError, NotifyListener, PostgresBroker, RawResultRecord,
+    SchemaInitializationMode, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
     TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
     WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };

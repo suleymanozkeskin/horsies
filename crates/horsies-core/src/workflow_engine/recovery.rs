@@ -1,7 +1,6 @@
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
 use std::time::Instant;
@@ -9,7 +8,6 @@ use uuid::Uuid;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::recovery_limit::{
     count_over_failure_limit, run_recovery_candidate, CandidateOutcome, CountFailures,
     FailureRecord, RecoveryCase, RecoveryFailurePolicy,
@@ -1543,7 +1541,11 @@ async fn enqueue_ready_task(
     let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
     })?;
-    let max_retries = parse_max_retries(row.task_options.as_deref());
+    let max_retries = crate::workflow_engine::node_max_retries(
+        row.task_index,
+        &row.task_name,
+        row.task_options.as_deref(),
+    )?;
 
     let merged_input = match merge_args_from_for_ready(
         pool,
@@ -1583,7 +1585,11 @@ async fn enqueue_ready_task(
     )
     .await?;
 
-    let good_until = parse_good_until_from_options(row.task_options.as_deref());
+    let good_until = crate::workflow_engine::node_good_until(
+        row.task_index,
+        &row.task_name,
+        row.task_options.as_deref(),
+    )?;
     let retention_class_key = retention.resolve_queue_class(&row.queue_name);
     let facts = prepare_workflow_task_facts(
         &merged_input,
@@ -3189,6 +3195,103 @@ mod cap_tests {
             .execute(&pool)
             .await
             .ok();
+    }
+
+    /// Recovery case 1 reads a READY node's stored options with the reader of a task row: a retry policy that
+    /// does not fit is refused before any statement, so no task row is inserted, and the refusal reaches the
+    /// candidate's failure bound (`run_recovery_candidate`). The test seeds no node: a reader that guesses a
+    /// limit (3 here) runs the insert, the LINK matches 0 rows, and the call answers `Ok(false)`.
+    #[tokio::test]
+    #[serial]
+    async fn a_ready_node_whose_retry_policy_does_not_fit_is_not_enqueued() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "recovery_refused_retry_policy_node";
+        let row = ReadyTaskRow {
+            workflow_id: Uuid::new_v4(),
+            task_index: 3,
+            task_name: task_name.to_owned(),
+            input: "{}".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 17,
+            task_options: Some(r#"{"retry_policy": {"backoff_strategy": "fixed"}}"#.to_owned()),
+            args_from: None,
+            workflow_ctx_from: None,
+            dependencies: Vec::new(),
+        };
+
+        let outcome = enqueue_ready_task(
+            &pool,
+            &row,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await;
+
+        match outcome {
+            Err(WorkflowError::Validation(message)) => assert!(
+                message.contains(&format!(
+                    "task_options of workflow node 3 ({task_name}) refused"
+                )),
+                "{message}"
+            ),
+            other => panic!("the recovery enqueue must refuse the node, got {other:?}"),
+        }
+        let task_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task_rows, 0);
+    }
+
+    /// Recovery case 1 reads a READY node's stored deadline before it writes: a `good_until` that is not
+    /// an RFC 3339 text is refused, not read as no deadline. The test seeds no node: a reader that drops the
+    /// deadline runs the insert, the LINK matches 0 rows, and the call answers `Ok(false)`.
+    #[tokio::test]
+    #[serial]
+    async fn a_ready_node_whose_deadline_does_not_read_is_not_enqueued() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "recovery_refused_deadline_node";
+        let row = ReadyTaskRow {
+            workflow_id: Uuid::new_v4(),
+            task_index: 5,
+            task_name: task_name.to_owned(),
+            input: "{}".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 17,
+            task_options: Some(r#"{"good_until": 12345}"#.to_owned()),
+            args_from: None,
+            workflow_ctx_from: None,
+            dependencies: Vec::new(),
+        };
+
+        let outcome = enqueue_ready_task(
+            &pool,
+            &row,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await;
+
+        match outcome {
+            Err(WorkflowError::Validation(message)) => assert!(
+                message.contains(&format!(
+                    "task_options of workflow node 5 ({task_name}) refused"
+                )),
+                "{message}"
+            ),
+            other => panic!("the recovery enqueue must refuse the node, got {other:?}"),
+        }
+        let task_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task_rows, 0);
     }
 
     #[tokio::test]
