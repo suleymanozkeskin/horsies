@@ -3,24 +3,15 @@ use std::collections::VecDeque;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::enqueue::prepare_workflow_task_facts;
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
+use crate::core::WorkflowSpecRegistry;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::CheckoutClass;
-use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
-use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
-    stored_sub_workflow_params,
-};
 use crate::workflow_engine::steps::{
-    self, advance_parents, CancelOutcome, EngineContext, ParentAdvance, PauseOutcome,
-    ResumeDisposition, TransactionStep,
+    self, advance_parents, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
 };
 
 #[cfg(test)]
@@ -101,62 +92,6 @@ WHERE id = $1 AND status = 'PAUSED'
   AND updated_at < NOW() - ($3::double precision * INTERVAL '1 second')
 RETURNING id";
 
-const RESUME_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'RUNNING', updated_at = NOW()
-WHERE id = $1 AND status = 'PAUSED'
-RETURNING id";
-
-/// Current status of a workflow (for the idempotent resume path).
-const GET_WORKFLOW_STATUS_SQL: &str = "\
-SELECT status FROM horsies_workflows WHERE id = $1";
-
-const FIND_PENDING_TASKS_SQL: &str = "\
-SELECT task_index, dependencies, task_name, input,
-       queue_name, priority, args_from, workflow_ctx_from,
-       allow_failed_deps, join_type, min_success,
-       node_id, task_options
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1::uuid AND status = 'PENDING'";
-
-const FIND_READY_TASKS_SQL: &str = "\
-SELECT task_index, task_name, input,
-       queue_name, priority, task_options, node_id,
-       args_from, workflow_ctx_from, dependencies, is_subworkflow,
-       sub_workflow_name, sub_definition_key, sub_workflow_params
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1::uuid AND status = 'READY'";
-
-/// Find terminal deps for a PENDING task (used for resume re-evaluation).
-const FIND_TERMINAL_DEPS_SQL: &str = "\
-SELECT task_index
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1 AND task_index = ANY($2)
-  AND status IN ('COMPLETED', 'FAILED', 'SKIPPED')";
-
-// An engine-minted task row carries no command fingerprint, no idempotency
-// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
-const ENQUEUE_TASK_SQL: &str = "\
-INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, input, task_options, execution,
-    retention_class_key, sent_at, created_at,
-    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-    status, enqueued_at, retry_count, max_retries, good_until,
-    is_workflow_task, updated_at,
-    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-)
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
-        'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
-
-const LINK_ENQUEUED_TASK_SQL: &str = "\
-UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
-FROM horsies_workflows w
-WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
-  AND wt.status = 'READY'
-  AND w.id = wt.workflow_id
-  AND w.status = 'RUNNING'";
-
 /// Find RUNNING child workflows of a given parent.
 const FIND_RUNNING_CHILDREN_SQL: &str = "\
 SELECT id FROM horsies_workflows
@@ -178,31 +113,6 @@ SET status = 'READY', task_id = NULL, started_at = NULL
 WHERE wt.task_id = ANY($1)
   AND wt.status IN ('ENQUEUED', 'RUNNING')";
 
-/// Find PAUSED child workflows of a given parent.
-const FIND_PAUSED_CHILDREN_SQL: &str = "\
-SELECT id, depth, root_workflow_id FROM horsies_workflows
-WHERE parent_workflow_id = $1 AND status = 'PAUSED'";
-
-/// Resume a single child workflow (PAUSED -> RUNNING).
-const RESUME_CHILD_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'RUNNING', updated_at = NOW()
-WHERE id = $1 AND status = 'PAUSED'";
-
-/// Get parent depth and root workflow ID (used for sub-workflow launch on resume).
-const GET_WORKFLOW_DEPTH_SQL: &str = "\
-SELECT depth, root_workflow_id
-FROM horsies_workflows
-WHERE id = $1";
-
-/// Link a sub-workflow task to its child workflow. A linked parent node is RUNNING while its child runs
-/// (Python `LINK_SUB_WORKFLOW_SQL`, `core/workflows/sql.py:271-275`).
-const LINK_SUBWORKFLOW_SQL: &str = "\
-UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1, status = 'RUNNING', started_at = NOW()
-WHERE workflow_id = $2 AND task_index = $3
-  AND status = 'READY'";
-
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -211,65 +121,6 @@ WHERE workflow_id = $2 AND task_index = $3
 #[allow(dead_code)]
 struct IdRow {
     id: Uuid,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TerminalDepRow {
-    task_index: i32,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct PendingTaskRow {
-    task_index: i32,
-    dependencies: Vec<i32>,
-    task_name: String,
-    input: String,
-    queue_name: String,
-    priority: i32,
-    args_from: Option<serde_json::Value>,
-    workflow_ctx_from: Option<Vec<String>>,
-    allow_failed_deps: bool,
-    join_type: String,
-    min_success: Option<i32>,
-    node_id: Option<String>,
-    task_options: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct ReadyTaskRow {
-    task_index: i32,
-    task_name: String,
-    input: String,
-    queue_name: String,
-    priority: i32,
-    task_options: Option<String>,
-    node_id: Option<String>,
-    args_from: Option<serde_json::Value>,
-    workflow_ctx_from: Option<Vec<String>>,
-    dependencies: Vec<i32>,
-    is_subworkflow: bool,
-    sub_workflow_name: Option<String>,
-    sub_definition_key: Option<String>,
-    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
-    /// `GIVEN`); `NULL` on a task node.
-    sub_workflow_params: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct ChildWorkflowRow {
-    id: Uuid,
-    depth: Option<i32>,
-    root_workflow_id: Option<Uuid>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct DepthRow {
-    depth: Option<i32>,
-    root_workflow_id: Option<Uuid>,
 }
 
 // ---------------------------------------------------------------------------
@@ -586,25 +437,25 @@ pub(crate) async fn pause_tree_and_relocate(
     Ok(paused)
 }
 
-/// Resumes a workflow tree: `horsies_workflow_resume`, in a transaction (`BEGIN`, the step, `COMMIT`) on the
-/// main core pool as producer work (Python `resume_workflow`, `core/workflows/lifecycle.py:1084-1263`).
+/// Resumes a workflow tree: `horsies_workflow_resume`, in a transaction (`BEGIN`, the step, one
+/// `horsies_workflow_child_start` per owed child start, `COMMIT`) on the main core pool as producer work (Python
+/// `resume_workflow`, `core/workflows/lifecycle.py:1084-1263`).
 ///
 /// The function moves the workflow PAUSED -> RUNNING with its PAUSED descendants, promotes their PENDING nodes,
 /// enqueues their READY nodes (task rows minted), runs the completion checks deepest first, and advances the
-/// parent node of a resumed child that ended, when that parent is resumed too.
+/// parent node of a resumed child that ended, when that parent is resumed too. A READY sub-workflow node owes a
+/// child start, which runs in the same transaction.
 ///
 /// Outcomes:
-/// - `Ok(true)`: the tree was resumed. When the step ended the resumed workflow and it has a parent, its parent
-///   node advances after the commit ([`advance_parents`]). Then the tree recovery pass runs as before.
+/// - `Ok(true)`: the tree was resumed. The parent advances that the step and its child starts owe run after the
+///   commit ([`advance_parents`]). Then the tree recovery pass runs as before.
 /// - `Ok(false)`: the workflow exists and is not PAUSED, RUNNING included; nothing was written (Python's rule).
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
 /// - `DB_OPERATION_FAILED`, `INTERNAL_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its
-///   `COMMIT` reply was lost.
+///   `COMMIT` reply was lost. A refused host build of an owed child (`INTERNAL_FAILED` or `STORED_DATA_INVALID`)
+///   commits nothing.
 /// - `RESUME_RECOVERY_FAILED`, not retryable: the resume committed, and the parent advance or the tree recovery
 ///   pass after it failed.
-///
-/// A step that owes child starts is rolled back and the resume runs on the engine code
-/// (`resume_workflow_inner`) until `horsies_workflow_child_start` replaces that path (#902).
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn resume_workflow(
@@ -615,52 +466,31 @@ pub async fn resume_workflow(
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    let engine = EngineContext {
+    let build = ChildBuild {
         registry,
-        payload,
         retention,
     };
-    let step = steps::resume(broker, workflow_id)
+    let committed = steps::resume(broker, workflow_id, build)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))?;
-    let changed = match step {
-        TransactionStep::Committed(outcome) => match outcome.disposition {
-            ResumeDisposition::NotFound => {
-                return Err(to_handle_error(
-                    WorkflowError::WorkflowNotFound { workflow_id },
-                    workflow_id,
-                ))
-            }
-            ResumeDisposition::NotPaused => return Ok(false),
-            ResumeDisposition::Resumed => {
-                match outcome.parent_advance {
-                    ParentAdvance::Owed { child_workflow_id } => {
-                        advance_parents(broker, CheckoutClass::Batch, child_workflow_id, engine)
-                            .await
-                            .map_err(|failure| {
-                                resume_recovery_failed(workflow_id, &failure.error)
-                            })?;
-                    }
-                    ParentAdvance::NotOwed => {}
-                }
-                true
-            }
-        },
-        TransactionStep::RolledBackForChildStarts(owed) => {
-            tracing::info!(
-                workflow_id = %workflow_id,
-                owed_child_starts = owed.len(),
-                "resume owes child starts; the engine code resumes the workflow",
-            );
-            match resume_workflow_inner(broker.pool(), workflow_id, registry, payload, retention)
-                .await
-                .map_err(|e| to_handle_error(e, workflow_id))?
-            {
-                ResumeSteps::NotResumed => return Ok(false),
-                ResumeSteps::Ran { changed } => changed,
-            }
+    match committed.disposition {
+        ResumeDisposition::NotFound => {
+            return Err(to_handle_error(
+                WorkflowError::WorkflowNotFound { workflow_id },
+                workflow_id,
+            ))
         }
-    };
+        ResumeDisposition::NotPaused => return Ok(false),
+        ResumeDisposition::Resumed => {}
+    }
+    advance_parents(
+        broker,
+        CheckoutClass::Batch,
+        committed.parent_advances,
+        build,
+    )
+    .await
+    .map_err(|failure| resume_recovery_failed(workflow_id, &failure.error))?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
     // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree. finalizing_grace_ms = 0:
     // resume recovers immediately (Python `core/workflows/lifecycle.py:1234-1262`).
@@ -674,7 +504,7 @@ pub async fn resume_workflow(
     )
     .await
     .map_err(|error| resume_recovery_failed(workflow_id, &error))?;
-    Ok(changed)
+    Ok(true)
 }
 
 /// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
@@ -690,507 +520,9 @@ fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOpe
     }
 }
 
-/// What the resume steps did before the tree recovery pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResumeSteps {
-    /// Nothing to resume: the workflow is terminal, or a PAUSED or PENDING read raced the guarded flip.
-    NotResumed,
-    /// The resume steps ran; the tree recovery pass follows. `changed` is true when the status flipped
-    /// PAUSED -> RUNNING, a child resumed, or a READY node was enqueued.
-    Ran { changed: bool },
-}
-
-async fn resume_workflow_inner(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<ResumeSteps, WorkflowError> {
-    let resumed: Option<IdRow> = sqlx::query_as(RESUME_WORKFLOW_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
-    let status_flipped = resumed.is_some();
-
-    if !status_flipped {
-        // Not PAUSED. Distinguish not-found / terminal / already-RUNNING so a
-        // crash between the parent flip and the child cascade can still be
-        // recovered on retry (C8) instead of returning early.
-        let status: Option<String> = sqlx::query_scalar(GET_WORKFLOW_STATUS_SQL)
-            .bind(workflow_id)
-            .fetch_optional(pool)
-            .await?;
-        match status {
-            None => {
-                return Err(WorkflowError::WorkflowNotFound { workflow_id });
-            }
-            Some(status) => {
-                match WorkflowStatus::try_from(status.as_str())
-                    .map_err(WorkflowError::InvalidStatus)?
-                {
-                    WorkflowStatus::Running => {
-                        tracing::info!(
-                            workflow_id = %workflow_id,
-                            "resume called on an already-RUNNING workflow; running idempotent recovery",
-                        );
-                    }
-                    WorkflowStatus::Completed
-                    | WorkflowStatus::Failed
-                    | WorkflowStatus::Cancelled
-                    | WorkflowStatus::Expired => return Ok(ResumeSteps::NotResumed),
-                    // The guarded UPDATE did not perform the PAUSED -> RUNNING
-                    // transition. Do not mutate from a later PAUSED/PENDING read.
-                    WorkflowStatus::Paused | WorkflowStatus::Pending => {
-                        return Ok(ResumeSteps::NotResumed)
-                    }
-                }
-            }
-        }
-    } else {
-        tracing::info!(workflow_id = %workflow_id, "workflow resumed, re-evaluating pending tasks");
-    }
-
-    // Re-evaluate and enqueue tasks for this workflow.
-    let nodes_enqueued =
-        reevaluate_and_enqueue(pool, workflow_id, registry, payload, retention).await?;
-
-    // Cascade resume to paused child workflows (iterative BFS).
-    let children_resumed =
-        cascade_resume_to_children(pool, workflow_id, registry, payload, retention).await?;
-
-    // Check if all tasks are already terminal (e.g., all pending tasks were
-    // skipped during re-evaluation because upstream deps failed). Without
-    // this, the workflow would remain stuck in RUNNING forever.
-    engine::check_workflow_completion(pool, workflow_id, registry, payload, retention).await?;
-
-    // A genuine PAUSED->RUNNING flip is always a resume. An already-RUNNING
-    // (idempotent) call counts as a resume only if it actually recovered
-    // something — children resumed or ready nodes re-enqueued — so a no-op
-    // retry returns Ok(false) (C8).
-    Ok(ResumeSteps::Ran {
-        changed: status_flipped || children_resumed > 0 || nodes_enqueued > 0,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Cascade resume to children (Gap 14-4)
-// ---------------------------------------------------------------------------
-
-/// Iteratively resume all paused child workflows using BFS.
-///
-/// For each resumed child, re-evaluates PENDING tasks and enqueues READY
-/// tasks (including sub-workflow READY tasks). Mirrors Python's
-/// `_cascade_resume_to_children()`.
-async fn cascade_resume_to_children(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<usize, WorkflowError> {
-    let mut queue: VecDeque<Uuid> = VecDeque::new();
-    queue.push_back(workflow_id);
-    let mut resumed_count = 0usize;
-
-    while let Some(current_id) = queue.pop_front() {
-        // Find paused child workflows.
-        let children: Vec<ChildWorkflowRow> = sqlx::query_as(FIND_PAUSED_CHILDREN_SQL)
-            .bind(&current_id)
-            .fetch_all(pool)
-            .await?;
-
-        for child in children {
-            // Resume child workflow.
-            sqlx::query(RESUME_CHILD_WORKFLOW_SQL)
-                .bind(&child.id)
-                .execute(pool)
-                .await?;
-            resumed_count += 1;
-
-            tracing::debug!(
-                parent_workflow_id = %current_id,
-                child_workflow_id = %child.id,
-                "cascade: child workflow resumed",
-            );
-
-            // Re-evaluate and enqueue tasks for the resumed child.
-            reevaluate_and_enqueue(pool, child.id, registry, payload, retention).await?;
-
-            // Check if child is already complete after re-evaluation.
-            engine::check_workflow_completion(pool, child.id, registry, payload, retention).await?;
-
-            // Add to queue to resume its children.
-            queue.push_back(child.id);
-        }
-    }
-
-    Ok(resumed_count)
-}
-
-// ---------------------------------------------------------------------------
-// Re-evaluate and enqueue logic (shared by resume + cascade)
-// ---------------------------------------------------------------------------
-
-/// Re-evaluate PENDING tasks and enqueue READY tasks for a single workflow.
-///
-/// Uses the engine's `process_dependents` for PENDING tasks to get full
-/// join-type evaluation (all/any/quorum), matching Python's resume behavior
-/// which calls `_try_make_ready_and_enqueue` for each PENDING task.
-///
-/// For already-READY tasks (which were READY at pause time but not yet
-/// enqueued), enqueues directly including sub-workflow READY tasks.
-/// Returns the number of READY nodes successfully enqueued (regular tasks and
-/// launched sub-workflows). In a consistent RUNNING workflow this is 0; a
-/// non-zero count signals recoverable state the resume actually re-enqueued.
-async fn reevaluate_and_enqueue(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<usize, WorkflowError> {
-    let mut enqueued = 0usize;
-    // 1. Re-evaluate PENDING tasks using full join evaluation.
-    //
-    // For each PENDING task, find a terminal dependency and trigger
-    // process_dependents, which calls try_make_ready_and_enqueue with
-    // full join type evaluation (all/any/quorum), condition checks, etc.
-    let pending_tasks: Vec<PendingTaskRow> = sqlx::query_as(FIND_PENDING_TASKS_SQL)
-        .bind(workflow_id)
-        .fetch_all(pool)
-        .await?;
-
-    // Collect unique terminal dependency indices to avoid redundant calls.
-    let mut triggered_dep_indices = std::collections::HashSet::new();
-
-    for task in &pending_tasks {
-        if task.dependencies.is_empty() {
-            continue; // Shouldn't happen (roots are enqueued at start).
-        }
-
-        // Find terminal deps for this task.
-        let terminal_deps: Vec<TerminalDepRow> = sqlx::query_as(FIND_TERMINAL_DEPS_SQL)
-            .bind(workflow_id)
-            .bind(&task.dependencies)
-            .fetch_all(pool)
-            .await?;
-
-        for dep in &terminal_deps {
-            if triggered_dep_indices.insert(dep.task_index) {
-                // Trigger full join evaluation via process_dependents.
-                if let Err(e) = engine::process_dependents(
-                    pool,
-                    workflow_id,
-                    dep.task_index,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await
-                {
-                    tracing::error!(
-                        workflow_id = %workflow_id,
-                        dep_index = dep.task_index,
-                        error = %e,
-                        "failed to re-evaluate dependents on resume",
-                    );
-                }
-            }
-        }
-    }
-
-    // 2. Enqueue all READY tasks (both regular and sub-workflow).
-    // These may be tasks that were READY at pause time, or tasks that
-    // became READY via step 1 but weren't enqueued (e.g., sub-workflows).
-    let ready_tasks: Vec<ReadyTaskRow> = sqlx::query_as(FIND_READY_TASKS_SQL)
-        .bind(workflow_id)
-        .fetch_all(pool)
-        .await?;
-
-    for task in &ready_tasks {
-        if task.is_subworkflow {
-            // Sub-workflow READY task: launch child workflow.
-            match enqueue_subworkflow_on_resume(
-                pool,
-                workflow_id,
-                task,
-                registry,
-                payload,
-                retention,
-            )
-            .await
-            {
-                Ok(()) => enqueued += 1,
-                Err(e) => {
-                    tracing::error!(
-                        workflow_id = %workflow_id,
-                        task_index = task.task_index,
-                        error = %e,
-                        "failed to launch sub-workflow on resume",
-                    );
-                }
-            }
-        } else {
-            // Regular READY task: enqueue into horsies_tasks.
-            let task_id =
-                crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                    WorkflowError::Validation(format!("task identity mint failed: {error}"))
-                })?;
-            let max_retries = parse_max_retries(task.task_options.as_deref());
-
-            // Merge args_from if present. A key that the static input also sets fails the node
-            // (Python `core/workflows/engine.py:834-839`); the resume counts it as a handled node.
-            let merged_input = match merge_args_from_for_ready(
-                pool,
-                workflow_id,
-                &task.input,
-                &task.args_from,
-                &task.dependencies,
-            )
-            .await?
-            {
-                ArgsFromMerge::Merged(merged_input) => merged_input,
-                ArgsFromMerge::StaticMemberConflict(conflict) => {
-                    engine::fail_node_at_enqueue(
-                        pool,
-                        workflow_id,
-                        task.task_index,
-                        conflict.node_error(workflow_id, task.task_index, MergedNodeKind::Task),
-                        registry,
-                        payload,
-                        retention,
-                    )
-                    .await?;
-                    enqueued += 1;
-                    continue;
-                }
-            };
-
-            // Inject workflow_ctx for ctx-capable nodes, matching the runtime
-            // promotion path. Without this, a READY `workflow_ctx_from` task
-            // (e.g. reset to READY at pause time) would be enqueued on resume
-            // with no upstream context and fail or produce a wrong result.
-            let merged_input = engine::inject_workflow_ctx_into_input(
-                pool,
-                workflow_id,
-                task.task_index,
-                &task.task_name,
-                task.workflow_ctx_from.as_deref(),
-                merged_input,
-            )
-            .await?;
-
-            let good_until = parse_good_until_from_options(task.task_options.as_deref());
-            let retention_class_key = retention.resolve_queue_class(&task.queue_name);
-            let facts = prepare_workflow_task_facts(
-                &merged_input,
-                task.task_options.as_deref(),
-                retention_class_key.as_deref(),
-            )
-            .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-
-            // INSERT + LINK in a single transaction so a row whose LINK matches
-            // 0 rows (workflow no longer RUNNING / task no longer READY) is
-            // rolled back rather than left as an orphaned, claimable PENDING
-            // row. Mirrors `enqueue_workflow_task` in engine.rs.
-            let mut tx = pool.begin().await?;
-
-            sqlx::query(ENQUEUE_TASK_SQL)
-                .bind(task_id)
-                .bind(&task.task_name)
-                .bind(&task.queue_name)
-                .bind(task.priority)
-                .bind(&merged_input)
-                .bind(&task.task_options)
-                .bind(facts.execution.as_str())
-                .bind(&facts.retention_class_key)
-                .bind(max_retries)
-                .bind(good_until)
-                .execute(&mut *tx)
-                .await?;
-
-            let link_result = sqlx::query(LINK_ENQUEUED_TASK_SQL)
-                .bind(&task_id)
-                .bind(workflow_id)
-                .bind(task.task_index)
-                .execute(&mut *tx)
-                .await?;
-
-            if link_result.rows_affected() == 0 {
-                tx.rollback().await?;
-                tracing::debug!(
-                    workflow_id = %workflow_id,
-                    task_index = task.task_index,
-                    "resume ready-task link matched 0 rows (workflow not RUNNING or task not READY), rolled back",
-                );
-                continue;
-            }
-
-            tx.commit().await?;
-            enqueued += 1;
-
-            tracing::debug!(
-                workflow_id = %workflow_id,
-                task_index = task.task_index,
-                task_id = %task_id,
-                "ready task enqueued after resume",
-            );
-        }
-    }
-
-    Ok(enqueued)
-}
-
-// ---------------------------------------------------------------------------
-// Sub-workflow launch on resume (Gap 14-6)
-// ---------------------------------------------------------------------------
-
-/// Launch a child workflow for a sub-workflow READY task during resume.
-///
-/// Resolves the spec from the registry, supports dynamic parameterization
-/// via `spec_builder`, starts the child workflow, and links the parent task.
-///
-/// A child past the depth limit, or a child definition that is not registered under the node's key, fails
-/// the node (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `SUBWORKFLOW_LOAD_FAILED`) and applies the workflow's
-/// `on_error`, as Python's resume does through `enqueue_subworkflow_task`.
-async fn enqueue_subworkflow_on_resume(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    task: &ReadyTaskRow,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
-    let spec_name = task
-        .task_name
-        .strip_prefix("__sub_workflow:")
-        .or(task.sub_workflow_name.as_deref())
-        .unwrap_or(&task.task_name);
-
-    let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
-        .bind(workflow_id)
-        .fetch_one(pool)
-        .await?;
-    let child_depth =
-        match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
-            Ok(child_depth) => child_depth,
-            Err(error) => {
-                return engine::fail_node_at_enqueue(
-                    pool,
-                    workflow_id,
-                    task.task_index,
-                    error,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await;
-            }
-        };
-    let Some(registered) = task
-        .sub_definition_key
-        .as_deref()
-        .and_then(|key| registry.resolve_child_registration(key))
-    else {
-        return engine::fail_node_at_enqueue(
-            pool,
-            workflow_id,
-            task.task_index,
-            engine::subworkflow_load_failed_error(spec_name, task.sub_definition_key.as_deref()),
-            registry,
-            payload,
-            retention,
-        )
-        .await;
-    };
-
-    // Build the child spec (supports dynamic parameterization via spec_builder).
-    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
-
-    let merged_input = match merge_args_from_for_ready(
-        pool,
-        workflow_id,
-        &task.input,
-        &task.args_from,
-        &task.dependencies,
-    )
-    .await?
-    {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return engine::fail_node_at_enqueue(
-                pool,
-                workflow_id,
-                task.task_index,
-                conflict.node_error(workflow_id, task.task_index, MergedNodeKind::SubWorkflow),
-                registry,
-                payload,
-                retention,
-            )
-            .await;
-        }
-    };
-    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
-
-    let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
-
-    // Start child workflow + link parent in a single transaction.
-    let mut tx = pool.begin().await?;
-
-    let child_id = start_child_workflow_in_tx(
-        &mut tx,
-        &child_spec,
-        workflow_id,
-        task.task_index,
-        child_depth,
-        root_wf_id,
-        registry,
-        retention,
-    )
-    .await?;
-
-    let link_result = sqlx::query(LINK_SUBWORKFLOW_SQL)
-        .bind(&child_id)
-        .bind(workflow_id)
-        .bind(task.task_index)
-        .execute(&mut *tx)
-        .await?;
-
-    if link_result.rows_affected() == 0 {
-        tx.rollback().await?;
-        tracing::debug!(
-            workflow_id = %workflow_id,
-            task_index = task.task_index,
-            "sub-workflow link failed on resume, rolled back",
-        );
-        return Ok(());
-    }
-
-    tx.commit().await?;
-
-    tracing::debug!(
-        workflow_id = %workflow_id,
-        task_index = task.task_index,
-        child_workflow_id = %child_id,
-        spec_name,
-        "sub-workflow launched on resume",
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-use crate::workflow_engine::args_merge::merge_args_from_async as merge_args_from_for_ready;
-use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
-
 #[cfg(test)]
 mod resume_idempotency_tests {
-    //! Resume outcomes and the engine-code resume steps (`resume_workflow_inner`,
-    //! `reevaluate_and_enqueue`), which still run a resume that owes a child start.
+    //! Resume outcomes through `horsies_workflow_resume`.
     use super::*;
     use crate::broker::PostgresBroker;
     use serial_test::serial;
@@ -1331,11 +663,13 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_fails_a_ready_node_whose_args_from_names_a_static_member() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker =
+            PostgresBroker::from_pool(crate::broker::enqueue_history_tests::migrated_pool().await);
+        let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4().to_string();
-        insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
+        insert_workflow(&pool, &workflow_id, "PAUSED", None).await;
         for (index, status, dependencies, input, args_from) in [
-            (0, "COMPLETED", "{}", "null", None),
+            (0, "COMPLETED", "{}", "{}", None),
             (1, "READY", "{0}", r#"{"x": 5}"#, Some(r#"{"x": 0}"#)),
         ] {
             sqlx::query(
@@ -1361,16 +695,15 @@ mod resume_idempotency_tests {
             .expect("insert node");
         }
 
-        let handled = reevaluate_and_enqueue(
-            &pool,
+        assert!(resume_workflow(
+            &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
             &WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
         .await
-        .expect("resume enqueue path");
-        assert_eq!(handled, 1);
+        .expect("resume"));
 
         let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
             "SELECT status, task_id, result FROM horsies_workflow_tasks
@@ -1396,20 +729,24 @@ mod resume_idempotency_tests {
         cleanup(&pool, &[&workflow_id]).await;
     }
 
+    /// The resume mints the task row of a READY node with the typed facts of the node row: its
+    /// retention class, no command fingerprint, no retained input, and the node's enqueue time.
     #[tokio::test]
     #[serial]
     async fn p6_workflow_enqueue_lifecycle_resume_persists_never_eligible_facts() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker =
+            PostgresBroker::from_pool(crate::broker::enqueue_history_tests::migrated_pool().await);
+        let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4().to_string();
-        insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
+        insert_workflow(&pool, &workflow_id, "PAUSED", None).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                'NONE', $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '1', 'bulk', 17, '{}',
-                FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+                'NONE', $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '{\"value\": 1}', 'bulk', 17, '{}',
+                FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_7d'
             )",
         )
         .bind(Uuid::new_v4())
@@ -1417,21 +754,16 @@ mod resume_idempotency_tests {
         .execute(&pool)
         .await
         .expect("insert ready resume node");
-        let mut retention = RetentionConfig::default();
-        retention
-            .queue_retention
-            .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
 
-        let enqueued = reevaluate_and_enqueue(
-            &pool,
+        assert!(resume_workflow(
+            &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
             &WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
-            &retention,
+            &RetentionConfig::default(),
         )
         .await
-        .expect("resume enqueue path");
-        assert_eq!(enqueued, 1);
+        .expect("resume"));
         // The node holds its enqueue time: the node write and the task insert share a transaction.
         let node_holds_enqueue_time: bool = sqlx::query_scalar(
             "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
@@ -1455,6 +787,7 @@ mod resume_idempotency_tests {
         .fetch_one(&pool)
         .await
         .expect("read resume enqueue facts");
+        // The class is the node row's, stored at start.
         assert_eq!(facts.0, "standard_7d");
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
@@ -1551,35 +884,6 @@ mod p7_lifecycle_tests {
         .execute(pool)
         .await
         .expect("seed running workflow node");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn resume_rejects_unknown_persisted_workflow_status_without_mutation() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let workflow_id = Uuid::new_v4();
-        seed_workflow(&pool, workflow_id, "CORRUPT", None).await;
-
-        let error = resume_workflow_inner(
-            &pool,
-            workflow_id,
-            &WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect_err("unknown persisted status must fail closed");
-        assert!(matches!(
-            error,
-            WorkflowError::InvalidStatus(ref status) if status == "CORRUPT"
-        ));
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-                .bind(workflow_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(status, "CORRUPT");
     }
 
     #[tokio::test]

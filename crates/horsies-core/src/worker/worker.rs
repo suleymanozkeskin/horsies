@@ -1075,7 +1075,6 @@ impl Worker {
                     .auto_terminate_orphaned_workflow_tasks;
                 let hostname = self.hostname.clone();
                 let payload_policy = self.app_config.payload.clone();
-                let phase2_policy = self.app_config.payload.clone();
                 let phase2_retention = self.app_config.retention.clone();
                 self.tracker.spawn(async move {
                     let reason = format!("task '{}' not registered", task_name);
@@ -1094,14 +1093,8 @@ impl Worker {
                     )
                     .await
                     {
-                        execution::run_phase2(
-                            &broker,
-                            &workflow_registry,
-                            work,
-                            &phase2_policy,
-                            &phase2_retention,
-                        )
-                        .await;
+                        execution::run_phase2(&broker, &workflow_registry, work, &phase2_retention)
+                            .await;
                     } else {
                         tracing::warn!(
                             task_id = %task_id,
@@ -1121,7 +1114,6 @@ impl Worker {
         let hostname = self.hostname.clone();
         let recovery = self.app_config.recovery.clone();
         let payload_policy = self.app_config.payload.clone();
-        let phase2_policy = self.app_config.payload.clone();
         let phase2_retention = self.app_config.retention.clone();
 
         // Mark this task in-dispatch until the spawned execution finishes, so the
@@ -1157,14 +1149,7 @@ impl Worker {
             drop(permit);
 
             if let Some(work) = phase2_work {
-                execution::run_phase2(
-                    &broker,
-                    &workflow_registry,
-                    work,
-                    &phase2_policy,
-                    &phase2_retention,
-                )
-                .await;
+                execution::run_phase2(&broker, &workflow_registry, work, &phase2_retention).await;
             }
 
             in_dispatch
@@ -1940,12 +1925,10 @@ mod tests {
 
         if let Some(work) = phase2_work {
             let registry = WorkflowSpecRegistry::new();
-            let policy = crate::core::config::payload::PayloadPolicy::default();
             run_phase2(
                 &broker,
                 &registry,
                 work,
-                &policy,
                 &crate::core::RetentionConfig::default(),
             )
             .await;
@@ -2327,7 +2310,6 @@ mod tests {
             &broker,
             &WorkflowSpecRegistry::new(),
             phase2_work,
-            &crate::core::config::payload::PayloadPolicy::default(),
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -2381,7 +2363,6 @@ mod tests {
             &broker,
             &WorkflowSpecRegistry::new(),
             phase2_work,
-            &crate::core::config::payload::PayloadPolicy::default(),
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -2437,12 +2418,10 @@ mod tests {
         assert_eq!(workflow_result, None);
 
         let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
         run_phase2(
             &broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -2493,12 +2472,10 @@ mod tests {
         );
 
         let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
         run_phase2(
             &failed_phase2_broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;

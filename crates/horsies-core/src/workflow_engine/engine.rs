@@ -1887,9 +1887,8 @@ async fn build_enqueued_task_params(
 /// is non-empty, returning the (possibly updated) input JSON.
 ///
 /// Shared by the runtime promotion path (`build_enqueued_task_params`) and the
-/// resume/recovery re-enqueue paths (`lifecycle::reevaluate_and_enqueue`,
-/// `recovery::enqueue_ready_task`) so all three inject identical context under
-/// `WORKFLOW_CTX_KWARG`. A node with no `workflow_ctx_from` returns its input
+/// recovery re-enqueue path (`recovery::enqueue_ready_task`) so both inject
+/// identical context under `WORKFLOW_CTX_KWARG`. A node with no `workflow_ctx_from` returns its input
 /// unchanged; the DB read only happens when context is actually required.
 pub(crate) async fn inject_workflow_ctx_into_input(
     pool: &PgPool,

@@ -2,6 +2,7 @@
 
 pub mod args_merge;
 pub mod bound_handle;
+pub(crate) mod child_start;
 pub mod engine;
 pub mod error;
 pub mod info;

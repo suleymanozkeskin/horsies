@@ -389,17 +389,52 @@ async fn cancel_answers_terminal_and_missing_workflows() {
 // Step rows
 // ---------------------------------------------------------------------------
 
-/// A step whose `OUTCOME` row comes last, after a `CHILD_START` row and its
-/// `SOURCE` row, as `horsies_workflow_node_finish` returns them.
+/// A step whose `OUTCOME` row comes last, after a `SOURCE` row and the
+/// `CHILD_START` row of its node, as `horsies_workflow_node_finish` returns
+/// them. `$3` is the params choice of the `CHILD_START` row; `$4` is the node
+/// that the `SOURCE` row names.
 static STEP_ROWS_WITH_CHILD_START: TypedStatement = TypedStatement::new(
     "test_step_rows_with_child_start",
-    "SELECT * FROM (VALUES
-         ('CHILD_START'::text, NULL::text, $1::uuid, NULL::uuid, NULL::text, 3::integer),
-         ('SOURCE', NULL, $1, NULL, NULL, 3),
-         ('OUTCOME', 'APPLIED', $1, $2::uuid, NULL, NULL)
-     ) AS r(row_kind, disposition, workflow_id, advance_child_workflow_id, detail, task_index)",
-    &[ParameterType::Uuid, ParameterType::Uuid],
+    r#"SELECT * FROM (VALUES
+         ('SOURCE'::text, NULL::text, $1::uuid, NULL::uuid, NULL::text, $4::integer,
+          NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer,
+          2::integer, 'COMPLETED'::text, '{"__h_task_result__":true,"ok":7,"err":null}'::text),
+         ('CHILD_START', NULL, $1, NULL, NULL, 3,
+          '{"base": 1}', '{"value": 2}', 'child', 'tests.child.v1', $3::text, 4,
+          NULL, NULL, NULL),
+         ('OUTCOME', 'APPLIED', $1, $2::uuid, NULL, NULL,
+          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+     ) AS r(row_kind, disposition, workflow_id, advance_child_workflow_id, detail, task_index,
+            node_input, args_from, sub_workflow_name, sub_definition_key, sub_workflow_params,
+            parent_depth, source_task_index, source_status, source_result)"#,
+    &[
+        ParameterType::Uuid,
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Int4,
+    ],
 );
+
+async fn step_rows_with_child_start(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+    ended_child: Uuid,
+    params: &str,
+    source_node: i32,
+) -> Vec<Row> {
+    let params = params.to_owned();
+    rows_of(
+        broker,
+        &STEP_ROWS_WITH_CHILD_START
+            .bind()
+            .value(&workflow_id)
+            .value(&ended_child)
+            .value(&params)
+            .value(&source_node)
+            .finish(),
+    )
+    .await
+}
 
 /// Two `OUTCOME` rows.
 static STEP_ROWS_TWO_OUTCOMES: TypedStatement = TypedStatement::new(
@@ -440,15 +475,7 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
     let broker = test_broker().await;
     let workflow_id = Uuid::new_v4();
     let ended_child = Uuid::new_v4();
-    let rows = rows_of(
-        &broker,
-        &STEP_ROWS_WITH_CHILD_START
-            .bind()
-            .value(&workflow_id)
-            .value(&ended_child)
-            .finish(),
-    )
-    .await;
+    let rows = step_rows_with_child_start(&broker, workflow_id, ended_child, "GIVEN", 3).await;
 
     let step =
         step_rows::<NodeFinishDisposition>(&rows, &STEP_ROWS_WITH_CHILD_START).expect("step rows");
@@ -465,8 +492,50 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
             owed_child_starts: vec![OwedChildStart {
                 workflow_id,
                 task_index: 3,
+                node_input: r#"{"base": 1}"#.to_owned(),
+                args_from: Some(r#"{"value": 2}"#.to_owned()),
+                sub_workflow_name: Some("child".to_owned()),
+                sub_definition_key: Some("tests.child.v1".to_owned()),
+                sub_workflow_params: SubWorkflowParams::Given,
+                parent_depth: 4,
+                sources: vec![ChildStartSource {
+                    task_index: 2,
+                    status: "COMPLETED".to_owned(),
+                    result: Some(r#"{"__h_task_result__":true,"ok":7,"err":null}"#.to_owned()),
+                }],
             }],
         }
+    );
+}
+
+/// A `SOURCE` row whose node has no `CHILD_START` row, and a params choice
+/// outside `GIVEN` and `NOT_GIVEN`, break the contract.
+#[tokio::test]
+#[serial]
+async fn child_start_rows_outside_the_contract_are_refused() {
+    let broker = test_broker().await;
+    let workflow_id = Uuid::new_v4();
+
+    let orphan_source =
+        step_rows_with_child_start(&broker, workflow_id, workflow_id, "GIVEN", 9).await;
+    let refused = step_rows::<NodeFinishDisposition>(&orphan_source, &STEP_ROWS_WITH_CHILD_START);
+    assert!(
+        matches!(
+            refused,
+            Err(StepContractError::Row(RowDecodeError::Shape { .. }))
+        ),
+        "{refused:?}"
+    );
+
+    let unknown_params =
+        step_rows_with_child_start(&broker, workflow_id, workflow_id, "SOME", 3).await;
+    let refused = step_rows::<NodeFinishDisposition>(&unknown_params, &STEP_ROWS_WITH_CHILD_START);
+    assert!(
+        matches!(
+            refused,
+            Err(StepContractError::Row(RowDecodeError::Shape { .. }))
+        ),
+        "{refused:?}"
     );
 }
 
@@ -578,11 +647,43 @@ fn the_dependents_choice_names_the_function_values() {
 }
 
 #[test]
-fn a_chain_of_parent_advances_is_bounded_by_the_tree_depth() {
+fn a_drive_of_parent_advances_covers_a_chain_from_the_deepest_child() {
     // Depth 0 to 32: a chain from the deepest child advances 32 parents.
+    assert!(MAX_PARENT_ADVANCES > crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH as usize);
+}
+
+#[test]
+fn owed_parent_advances_keep_their_order_and_name_each_child_once() {
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut owed = OwedParentAdvances::of(ParentAdvance::NotOwed);
+    assert!(owed.is_empty());
+    owed.add(ParentAdvance::Owed {
+        child_workflow_id: first,
+    });
+    owed.extend(OwedParentAdvances::of(ParentAdvance::Owed {
+        child_workflow_id: second,
+    }));
+    owed.add(ParentAdvance::Owed {
+        child_workflow_id: first,
+    });
+    assert_eq!(owed.child_workflow_ids(), &[first, second]);
+}
+
+#[test]
+fn a_failed_parent_advance_owes_its_level_first_then_the_rest_in_order() {
+    let failed = Uuid::new_v4();
+    let next = Uuid::new_v4();
+    let last = Uuid::new_v4();
+    // The stack of advance_parents runs its last element next.
+    let failure = ParentAdvanceFailure {
+        failed_child_workflow_id: failed,
+        owed_after: owed_from_stack(vec![last, next]),
+        error: WorkflowError::Validation("level failed".to_owned()),
+    };
     assert_eq!(
-        MAX_PARENT_ADVANCES,
-        (crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH + 1) as usize
+        failure.still_owed().child_workflow_ids(),
+        &[failed, next, last]
     );
 }
 

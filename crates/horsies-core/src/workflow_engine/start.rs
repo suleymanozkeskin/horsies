@@ -18,10 +18,12 @@ use crate::core::{
     WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
 };
 
+use crate::db::CheckoutClass;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start_statement::{start_arguments, start_tree, StartOutcome};
+use crate::workflow_engine::steps::{advance_parents, ChildBuild};
 
 // ---------------------------------------------------------------------------
 // SQL constants
@@ -365,12 +367,12 @@ pub async fn start_workflow_with_retry<T>(
     Err(last_err.expect("loop ran at least once"))
 }
 
-/// Writes the workflow tree in one statement (`horsies_workflow_start`).
+/// Writes the workflow tree through `horsies_workflow_start`.
 ///
-/// The tree is built in memory first ([`start_arguments`]): the node rows of the workflow, and a pre-built
-/// child for every sub-workflow root, recursively. A child that cannot be built refuses the start and
-/// nothing is written (as before; Python fails only that node, which needs the transaction form with
-/// `horsies_workflow_child_start`, #751).
+/// The tree is built in memory first ([`start_arguments`]): the node rows of the workflow, a pre-built child
+/// for every sub-workflow root (recursively), and a failed-node record for each sub-workflow root whose child
+/// cannot start (past the depth limit, no registration under its key, a failing builder). A failed root fails
+/// only its node and its workflow's `on_error` applies, as Python does (`core/workflows/engine.py:1019-1212`).
 ///
 /// Then the broker handle checks its client family (`ensure_client_family_for_write`). A database of the
 /// other family, or with no family row, gives `WorkflowError::Broker` with
@@ -378,8 +380,14 @@ pub async fn start_workflow_with_retry<T>(
 ///
 /// The function inserts the top-level row with `ON CONFLICT (id) DO NOTHING`, so a concurrent start with the
 /// same id waits for the first one and then sees its row: `EXISTS` with the stored name, and nothing is
-/// written. Otherwise it inserts the child rows and every node row, links each sub-workflow root to its
-/// pre-built child, and mints the task rows of the READY task nodes, in one statement in autocommit.
+/// written. Otherwise it inserts the child rows and every node row, fails the recorded nodes and runs their
+/// progression, links each sub-workflow root to its pre-built child, and mints the task rows of the READY task
+/// nodes. Without failed-node records that is one statement in autocommit; with them, a transaction that also
+/// runs the child starts the progression owes ([`start_tree`]).
+///
+/// After the commit, the parent advances that those child starts owe run, one transaction per level. A
+/// failed advance is logged and left to workflow recovery (case 1.6): the start committed, so the start
+/// returns its outcome.
 async fn start_workflow_inner(
     broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
@@ -394,7 +402,12 @@ async fn start_workflow_inner(
     // before the first write. A mismatch is not retryable and writes nothing.
     broker.ensure_client_family_for_write().await?;
 
-    let outcome = match start_tree(broker, &arguments, sent_at).await? {
+    let build = ChildBuild {
+        registry,
+        retention,
+    };
+    let started = start_tree(broker, &arguments, sent_at, build).await?;
+    let outcome = match started.outcome {
         StartOutcome::Started => WorkflowRowInsert::Inserted,
         StartOutcome::Exists { stored_name } => existing_workflow(stored_name, &spec.name),
     };
@@ -407,6 +420,16 @@ async fn start_workflow_inner(
             outcome = ?outcome,
             "workflow id already exists; nothing was written",
         ),
+    }
+    if let Err(failure) =
+        advance_parents(broker, CheckoutClass::Batch, started.parent_advances, build).await
+    {
+        tracing::error!(
+            workflow_id = %wf_id,
+            child_workflow_id = %failure.failed_child_workflow_id,
+            error = %failure.error,
+            "parent advance after the workflow start failed; workflow recovery advances it",
+        );
     }
     Ok(outcome)
 }
