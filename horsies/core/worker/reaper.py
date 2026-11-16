@@ -37,7 +37,6 @@ from horsies.core.worker.runtime import (
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
-    DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
@@ -441,13 +440,6 @@ class ReaperMixin:
                         deadline,
                         batch_size,
                         drained_when='empty_batch',
-                    )
-                    await self._delete_expired_in_batches(
-                        resources.session_factory,
-                        DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
-                        {},
-                        deadline,
-                        batch_size,
                     )
 
                 if deleted_worker_states > 0 or deleted_workflows > 0:

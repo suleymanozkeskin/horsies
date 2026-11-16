@@ -168,6 +168,40 @@ class TestRepoint:
                 ).scalar_one()
                 assert count == 0, table
 
+    @pytest.mark.asyncio
+    async def test_copy_goes_with_its_node(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """The copy refers to its node, so the retention delete of the
+        workflow removes the copy with the pending row that points at it."""
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            task_id, workflow_id, _ = await seed_pending(connection)
+            repointed = await quarantine_one(connection, task_id)
+            assert repointed.verdict == 'REPOINTED'
+
+            await connection.execute(
+                text(
+                    'DELETE FROM horsies_workflows '
+                    'WHERE id = CAST(:workflow_id AS uuid)'
+                ),
+                {'workflow_id': workflow_id},
+            )
+            for table in (
+                'horsies_workflow_phase2_pending',
+                'horsies_workflow_phase2_quarantine',
+            ):
+                count = (
+                    await connection.execute(
+                        text(
+                            f'SELECT count(*) FROM {table} '
+                            'WHERE task_id = CAST(:task_id AS uuid)'
+                        ),
+                        {'task_id': task_id},
+                    )
+                ).scalar_one()
+                assert count == 0, table
+
 
 class TestRefusal:
     @pytest.mark.asyncio
