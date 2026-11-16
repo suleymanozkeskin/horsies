@@ -19,7 +19,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, LiteralString
 
 import psycopg
 from psycopg import sql
@@ -1237,6 +1237,99 @@ class TestTheToolNeverRunsDdl:
         assert body['code'] == 'SCHEMA_INCOMPATIBLE'
         assert 'no horsies schema' in body['detail']
         assert await relation_names(fresh_database) == (None, None)
+        await built.state.events.close()
+        await cli_app.get_broker().close_async()
+
+
+async def run_statements(database_url: str, *statements: LiteralString) -> None:
+    """Run fixed statements in one autocommit connection."""
+    connection = await psycopg.AsyncConnection.connect(
+        to_psycopg_url(database_url), autocommit=True
+    )
+    try:
+        for statement in statements:
+            await connection.execute(statement)
+    finally:
+        await connection.close()
+
+
+# The bookkeeping and one table of a horsies 0.x Python database (0.7.0, v61).
+_ZERO_X_PYTHON_SCHEMA: tuple[LiteralString, ...] = (
+    'CREATE TABLE horsies_schema_version '
+    '(version integer PRIMARY KEY, applied_at timestamptz NOT NULL)',
+    'INSERT INTO horsies_schema_version VALUES (61, now())',
+    'CREATE TABLE horsies_tasks (id uuid PRIMARY KEY)',
+)
+
+# The bookkeeping of a horsies-rust 0.x database: sqlx rows up to version 65.
+_ZERO_X_RUST_SCHEMA: tuple[LiteralString, ...] = (
+    'CREATE TABLE horsies_migrations (version bigint PRIMARY KEY, '
+    'description text NOT NULL, installed_on timestamptz NOT NULL, '
+    'success boolean NOT NULL, checksum bytea NOT NULL, '
+    'execution_time bigint NOT NULL)',
+    "INSERT INTO horsies_migrations VALUES (65, 'rust 0.x', now(), TRUE, "
+    "'\\x00'::bytea, 1)",
+)
+
+
+class TestZeroXSchema:
+    """A horsies 0.x database has its own state: the remedy is a new database."""
+
+    async def _meta(self, database_url: str) -> dict[str, Any]:
+        cli_app = cli.resolve_web_app(web_args(database_url=database_url))
+        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=built), base_url='http://test'
+            ) as client:
+                body: dict[str, Any] = (await client.get('/api/meta')).json()
+        finally:
+            await built.state.events.close()
+            await cli_app.get_broker().close_async()
+        return body
+
+    async def test_meta_reports_a_python_0x_schema(self, fresh_database: str) -> None:
+        await run_statements(fresh_database, *_ZERO_X_PYTHON_SCHEMA)
+
+        body = await self._meta(fresh_database)
+
+        assert body['schema_state'] == 'ZERO_X'
+        assert body['schema_version'] is None
+        assert body['schema_compatible'] is False
+        assert body['actions_enabled'] is False
+        assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
+
+    async def test_meta_reports_a_rust_0x_schema(self, fresh_database: str) -> None:
+        await run_statements(fresh_database, *_ZERO_X_RUST_SCHEMA)
+
+        body = await self._meta(fresh_database)
+
+        assert body['schema_state'] == 'ZERO_X'
+        assert body['schema_version'] == 65
+        assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'
+
+    async def test_actions_are_refused_and_nothing_is_changed(
+        self, fresh_database: str
+    ) -> None:
+        await run_statements(fresh_database, *_ZERO_X_PYTHON_SCHEMA)
+        cli_app = cli.resolve_web_app(web_args(database_url=fresh_database))
+        built = create_monitoring_app(cli_app, auth_policy=AllowAll())
+
+        async with AsyncClient(
+            transport=ASGITransport(app=built), base_url='http://test'
+        ) as client:
+            response = await client.post(
+                f'/api/tasks/{uuid.uuid4()}/cancel', headers=ACT
+            )
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body['code'] == 'SCHEMA_INCOMPATIBLE'
+        assert 'horsies 0.x schema' in body['detail']
+        assert 'Start a horsies app or worker' not in body['detail']
+        tasks_relation, version_relation = await relation_names(fresh_database)
+        assert tasks_relation is not None
+        assert version_relation is not None
         await built.state.events.close()
         await cli_app.get_broker().close_async()
 
