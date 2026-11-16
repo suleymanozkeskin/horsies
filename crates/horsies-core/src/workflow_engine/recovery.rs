@@ -2,7 +2,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_enqueue_facts, EnqueueInputEligibility};
 use crate::core::task::retry_utils::parse_max_retries;
-use crate::core::WorkflowSpecRegistry;
+use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
 use std::time::Instant;
 use uuid::Uuid;
@@ -14,7 +14,9 @@ use crate::workflow_engine::recovery_limit::{
     count_over_failure_limit, run_recovery_candidate, CandidateOutcome, CountFailures,
     FailureRecord, RecoveryCase, RecoveryFailurePolicy,
 };
-use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
+use crate::workflow_engine::start::{
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+};
 
 // ---------------------------------------------------------------------------
 // Recovery report
@@ -205,7 +207,9 @@ WHERE wt.status = 'READY'
   AND wt.workflow_id = ANY($1::uuid[])
 LIMIT CAST($2 AS bigint)";
 
-/// Case 1.6: Non-terminal sub-workflow wf_tasks where child workflow is terminal.
+/// Case 1.6: a RUNNING sub-workflow node whose child workflow is terminal, in a RUNNING parent. Every link
+/// path writes the parent node RUNNING, so Python's selection covers every linked node
+/// (`GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL`, `core/workflows/recovery.py:266-276`).
 const GLOBAL_CASE1_6_STALE_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.sub_workflow_id,
        cw.status as child_status, cw.result as child_result
@@ -214,7 +218,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
+  AND wt.status = 'RUNNING'
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
 LIMIT CAST($1 AS bigint)";
@@ -227,7 +231,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
+  AND wt.status = 'RUNNING'
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
   AND cw.id = ANY($1::uuid[])
@@ -497,10 +501,11 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND w.id = wt.workflow_id
   AND w.status = 'RUNNING'";
 
-/// Link workflow_task to a newly started child workflow.
+/// Link workflow_task to a newly started child workflow. A linked parent node is RUNNING while its child
+/// runs (Python `LINK_SUB_WORKFLOW_SQL`, `core/workflows/sql.py:271-275`).
 const LINK_SUBWORKFLOW_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1, status = 'ENQUEUED', started_at = NOW()
+SET sub_workflow_id = $1, status = 'RUNNING', started_at = NOW()
 WHERE workflow_id = $2 AND task_index = $3
   AND status = 'READY'";
 
@@ -782,6 +787,7 @@ async fn recover_stuck_workflows_in_scope(
         max_rows,
         &mut report,
         failure_policy,
+        payload,
         retention,
     )
     .await
@@ -1023,6 +1029,7 @@ async fn recover_case1_5(
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
     failure_policy: RecoveryFailurePolicy,
+    payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let started = Instant::now();
@@ -1058,7 +1065,7 @@ async fn recover_case1_5(
         let case = RecoveryCase::ReadySubworkflowNotStarted {
             task_index: row.task_index,
         };
-        let candidate = start_stuck_subworkflow(pool, registry, &row, retention);
+        let candidate = start_stuck_subworkflow(pool, registry, &row, payload, retention);
         match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
             CandidateOutcome::Finished(()) => {
                 report.case1_5_subworkflow_started += 1;
@@ -1465,8 +1472,8 @@ async fn fail_orphaned_workflow(
     pool: &PgPool,
     workflow_id: Uuid,
     name: &str,
-) -> Result<bool, sqlx::Error> {
-    let error_str = orphaned_workflow_error(name);
+) -> Result<bool, WorkflowError> {
+    let error_str = orphaned_workflow_error(workflow_id, name)?;
     let result = sqlx::query(FAIL_ORPHANED_WORKFLOW_SQL)
         .bind(workflow_id)
         .bind(error_str)
@@ -1480,8 +1487,8 @@ async fn fail_orphaned_workflow_with_claim(
     workflow_id: Uuid,
     name: &str,
     claim_token: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let error_str = orphaned_workflow_error(name);
+) -> Result<bool, WorkflowError> {
+    let error_str = orphaned_workflow_error(workflow_id, name)?;
     let result = sqlx::query(FAIL_ORPHANED_WORKFLOW_WITH_CLAIM_SQL)
         .bind(workflow_id)
         .bind(error_str)
@@ -1491,17 +1498,24 @@ async fn fail_orphaned_workflow_with_claim(
     Ok(result.rows_affected() == 1)
 }
 
-fn orphaned_workflow_error(name: &str) -> String {
-    let error_json = serde_json::json!({
-        "error_code": "E400",
-        "message": format!(
-            "Orphaned workflow '{}': no workflow_tasks found. \
-             Workflow was likely created but task DAG insertion failed.",
-            name,
-        ),
-        "recovery": "case_4",
-    });
-    serde_json::to_string(&error_json).unwrap_or_else(|_| "{}".to_owned())
+/// The stored error of a RUNNING workflow with no node rows (recovery case 4): its start did not finish.
+///
+/// Python stores `{"error_code": "E400", ...}` (`core/workflows/recovery.py:1001-1008, 1199-1206`), which is
+/// not a catalog error; the core stores the catalog code `WORKFLOW_START_INCOMPLETE` (approved rule), with
+/// Python's message.
+fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&TaskError {
+        error_code: Some(OperationalErrorCode::WorkflowStartIncomplete.into()),
+        message: Some(format!(
+            "Orphaned workflow '{name}': no workflow_tasks found. \
+             Workflow task insertion did not complete."
+        )),
+        cause: None,
+        data: Some(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "recovery": "case_4",
+        })),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,10 +1637,15 @@ async fn enqueue_ready_task(
 }
 
 /// Start a child workflow for a stuck READY sub-workflow task.
+///
+/// A child past the depth limit, or a child definition that is not registered under the node's key, fails
+/// the node (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `SUBWORKFLOW_LOAD_FAILED`) and applies the parent's
+/// `on_error`, as Python's case 1.5 does through `enqueue_subworkflow_task`.
 async fn start_stuck_subworkflow(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     row: &ReadySubworkflowRow,
+    payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let spec_name = row
@@ -1635,15 +1654,45 @@ async fn start_stuck_subworkflow(
         .or(row.sub_workflow_name.as_deref())
         .unwrap_or(&row.task_name);
 
-    // Resolve by definition_key first, then fall back to name.
-    let registered = registry
-        .resolve_child_registration(spec_name, row.sub_definition_key.as_deref())
-        .ok_or_else(|| {
-            WorkflowError::Validation(format!(
-                "sub-workflow spec not found (definition_key={:?}, name='{}')",
-                row.sub_definition_key, spec_name,
-            ))
-        })?;
+    let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
+        .bind(&row.workflow_id)
+        .fetch_one(pool)
+        .await?;
+    let child_depth = match child_workflow_depth(
+        depth_row.depth.unwrap_or(0),
+        row.workflow_id,
+        row.task_index,
+    ) {
+        Ok(child_depth) => child_depth,
+        Err(error) => {
+            return engine::fail_subworkflow_node(
+                pool,
+                row.workflow_id,
+                row.task_index,
+                error,
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
+    let Some(registered) = row
+        .sub_definition_key
+        .as_deref()
+        .and_then(|key| registry.resolve_child_registration(key))
+    else {
+        return engine::fail_subworkflow_node(
+            pool,
+            row.workflow_id,
+            row.task_index,
+            engine::subworkflow_load_failed_error(spec_name, row.sub_definition_key.as_deref()),
+            registry,
+            payload,
+            retention,
+        )
+        .await;
+    };
 
     let merged_kwargs = merge_args_from_for_ready(
         pool,
@@ -1663,12 +1712,6 @@ async fn start_stuck_subworkflow(
         registry,
     )?;
 
-    let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
-        .bind(&row.workflow_id)
-        .fetch_one(pool)
-        .await?;
-
-    let parent_depth = depth_row.depth.unwrap_or(0);
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);
 
     // Start child workflow + link in a single transaction.
@@ -1679,7 +1722,7 @@ async fn start_stuck_subworkflow(
         &child_spec,
         row.workflow_id,
         row.task_index,
-        parent_depth + 1,
+        child_depth,
         root_wf_id,
         registry,
         retention,
@@ -1876,6 +1919,64 @@ mod cap_tests {
         assert_eq!(snapshot["metrics"]["case1"]["limit_reached"], 0);
         assert_eq!(snapshot["metrics"]["case1_5"]["errors"], 1);
         assert_eq!(snapshot["metrics"]["case1_5"]["failures_counted"], 0);
+    }
+
+    #[test]
+    fn an_orphaned_workflow_stores_workflow_start_incomplete() {
+        let workflow_id = Uuid::new_v4();
+        let stored = orphaned_workflow_error(workflow_id, "orphan").unwrap();
+        let error: TaskError = serde_json::from_str(&stored).unwrap();
+        assert_eq!(
+            error
+                .error_code
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("WORKFLOW_START_INCOMPLETE")
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some(
+                "Orphaned workflow 'orphan': no workflow_tasks found. \
+                 Workflow task insertion did not complete."
+            )
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "recovery": "case_4",
+            }))
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn recovery_case_4_fails_an_orphaned_workflow_with_the_catalog_code() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let workflow_id = Uuid::new_v4();
+        insert_orphaned_workflow(&pool, workflow_id).await;
+        let mut report = RecoveryReport::default();
+        recover_tree_case4(&pool, &[workflow_id], None, &mut report)
+            .await
+            .unwrap();
+        assert_eq!(report.case4_orphaned_failed, 1);
+        let (status, error): (String, String) =
+            sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "FAILED");
+        let error: TaskError = serde_json::from_str(&error).unwrap();
+        assert_eq!(
+            error
+                .error_code
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("WORKFLOW_START_INCOMPLETE")
+        );
     }
 
     #[tokio::test]
@@ -3055,7 +3156,7 @@ mod cap_tests {
         .fetch_one(&pool)
         .await
         .expect("read recovery enqueue facts");
-        assert_eq!(facts.0, "q_bulk_7d");
+        assert_eq!(facts.0, "standard_7d");
         assert_eq!(facts.1, "NEVER_ELIGIBLE");
         assert_eq!(facts.2, 32);
         assert_eq!(facts.3, 32);

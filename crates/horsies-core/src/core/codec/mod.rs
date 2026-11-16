@@ -3,11 +3,17 @@ use serde::{de::DeserializeOwned, Serialize};
 use crate::core::task::result::TaskResult;
 
 mod strict;
+mod strict_read;
 pub use strict::{to_json_bytes_strict, to_json_value_strict};
+pub use strict_read::{
+    check_json_bytes, check_json_text, StrictJsonError, SyntaxReason, MAX_INT_DIGITS,
+    MAX_JSON_DEPTH,
+};
 
-/// Serialize a value to a JSON byte vector.
+/// Serialize a value to a JSON byte vector. Strict: a non-finite float at
+/// any depth is an error, never `null` (Python `dumps_json`).
 pub fn to_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(value)
+    to_json_bytes_strict(value)
 }
 
 /// Deserialize a value from a JSON byte slice.
@@ -15,9 +21,15 @@ pub fn from_json_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_jso
     serde_json::from_slice(bytes)
 }
 
-/// Serialize a value to a JSON string.
+/// Serialize a value to a JSON string. Strict, as [`to_json_bytes`].
 pub fn to_json_string<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
-    serde_json::to_string(value)
+    let bytes = to_json_bytes_strict(value)?;
+    // serde_json writes UTF-8 only; a failure here would be a serde_json defect.
+    String::from_utf8(bytes).map_err(|error| {
+        <serde_json::Error as serde::ser::Error>::custom(format!(
+            "serialized JSON is not UTF-8: {error}"
+        ))
+    })
 }
 
 /// Deserialize a value from a JSON string.
@@ -25,11 +37,11 @@ pub fn from_json_str<T: DeserializeOwned>(s: &str) -> Result<T, serde_json::Erro
     serde_json::from_str(s)
 }
 
-/// Serialize a `TaskResult<T>` to JSON bytes.
+/// Serialize a `TaskResult<T>` to JSON bytes. Strict, as [`to_json_bytes`].
 pub fn encode_task_result<T: Serialize>(
     result: &TaskResult<T>,
 ) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(result)
+    to_json_bytes_strict(result)
 }
 
 /// Deserialize a `TaskResult<T>` from JSON bytes.
@@ -39,11 +51,11 @@ pub fn decode_task_result<T: DeserializeOwned>(
     serde_json::from_slice(bytes)
 }
 
-/// Serialize a `TaskResult<T>` to a JSON string.
+/// Serialize a `TaskResult<T>` to a JSON string. Strict, as [`to_json_bytes`].
 pub fn task_result_to_json_string<T: Serialize>(
     result: &TaskResult<T>,
 ) -> Result<String, serde_json::Error> {
-    serde_json::to_string(result)
+    to_json_string(result)
 }
 
 /// Deserialize a `TaskResult<T>` from a JSON string.
@@ -120,6 +132,28 @@ mod tests {
         let json = task_result_to_json_string(&result).unwrap();
         let back: TaskResult<i32> = task_result_from_json_str(&json).unwrap();
         assert_eq!(back.unwrap(), 99);
+    }
+
+    /// Python `dumps_json` (`allow_nan=False`): every encoder of the codec
+    /// refuses a non-finite float instead of writing `null`.
+    #[test]
+    fn every_encoder_refuses_a_non_finite_float() {
+        #[derive(Serialize)]
+        struct Reading {
+            value: f64,
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let reading = Reading { value };
+            assert!(to_json_bytes(&reading).is_err());
+            assert!(to_json_string(&reading).is_err());
+            let result: TaskResult<Reading> = TaskResult::Ok(Reading { value });
+            assert!(encode_task_result(&result).is_err());
+            assert!(task_result_to_json_string(&result).is_err());
+        }
+        assert_eq!(
+            to_json_string(&Reading { value: 1.5 }).unwrap(),
+            "{\"value\":1.5}"
+        );
     }
 
     #[test]

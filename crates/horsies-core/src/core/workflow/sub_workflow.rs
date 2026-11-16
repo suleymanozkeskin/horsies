@@ -13,8 +13,10 @@ use crate::HorsiesError;
 
 /// Builder for a sub-workflow node within a parent workflow.
 ///
-/// Creates an `AnyNode` with `is_subworkflow: true` and the spec name
-/// stored in `task_name` (also available via `sub_workflow_spec_name`).
+/// Creates an `AnyNode` with `is_subworkflow: true` and the spec name of the
+/// child as its `task_name`, as Python stores it (the definition name). A
+/// sub-workflow node is never claimed as a task, so it has no queue and no
+/// priority; its stored row holds the constants `default` and 100.
 pub struct SubWorkflowNode<P = (), T = serde_json::Value> {
     spec_name: String,
     definition_key: Option<String>,
@@ -24,8 +26,6 @@ pub struct SubWorkflowNode<P = (), T = serde_json::Value> {
     args_from: HashMap<String, usize>,
     workflow_ctx_from_refs: Vec<usize>,
     workflow_ctx_from_ids: Option<Vec<String>>,
-    queue: Option<String>,
-    priority: Option<i32>,
     allow_failed_deps: bool,
     join: JoinType,
     min_success: Option<i32>,
@@ -53,8 +53,6 @@ impl<P, T> SubWorkflowNode<P, T> {
             args_from: HashMap::new(),
             workflow_ctx_from_refs: Vec::new(),
             workflow_ctx_from_ids: None,
-            queue: None,
-            priority: None,
             allow_failed_deps: false,
             join: JoinType::All,
             min_success: None,
@@ -78,8 +76,6 @@ impl<P, T> SubWorkflowNode<P, T> {
             args_from: HashMap::new(),
             workflow_ctx_from_refs: Vec::new(),
             workflow_ctx_from_ids: None,
-            queue: None,
-            priority: None,
             allow_failed_deps: false,
             join: JoinType::All,
             min_success: None,
@@ -240,18 +236,6 @@ impl<P, T> SubWorkflowNode<P, T> {
         self
     }
 
-    /// Override the queue for this sub-workflow's task slot.
-    pub fn queue(mut self, queue: impl Into<String>) -> Self {
-        self.queue = Some(queue.into());
-        self
-    }
-
-    /// Override the priority.
-    pub fn priority(mut self, priority: i32) -> Self {
-        self.priority = Some(priority);
-        self
-    }
-
     /// Allow running even if upstream dependencies failed.
     pub fn allow_failed_deps(mut self, allow: bool) -> Self {
         self.allow_failed_deps = allow;
@@ -297,7 +281,7 @@ impl<P, T> SubWorkflowNode<P, T> {
     /// Convert into a type-erased `AnyNode` with `is_subworkflow: true`.
     pub fn into_any_node(self, index: usize) -> AnyNode {
         AnyNode {
-            task_name: format!("__sub_workflow:{}", self.spec_name),
+            task_name: self.spec_name,
             args_json: self.args_json,
             kwargs_json: self.kwargs_json,
             dependencies: self.dependencies,
@@ -308,8 +292,8 @@ impl<P, T> SubWorkflowNode<P, T> {
             } else {
                 Some(self.workflow_ctx_from_refs)
             },
-            queue: self.queue,
-            priority: self.priority,
+            queue: None,
+            priority: None,
             allow_failed_deps: self.allow_failed_deps,
             join: self.join,
             min_success: self.min_success,
@@ -352,15 +336,15 @@ mod tests {
         let dep = NodeRef { index: 0 };
         let node = SubWorkflowNode::new("child_wf")
             .waits_for(dep)
-            .node_id("sub:0")
-            .priority(50);
+            .node_id("sub:0");
 
         let any = node.into_any_node(1);
         assert!(any.is_subworkflow);
-        assert_eq!(any.task_name, "__sub_workflow:child_wf");
+        assert_eq!(any.task_name, "child_wf");
         assert_eq!(any.dependencies, vec![0]);
         assert_eq!(any.node_id.as_deref(), Some("sub:0"));
-        assert_eq!(any.priority, Some(50));
+        assert_eq!(any.queue, None);
+        assert_eq!(any.priority, None);
         assert_eq!(any.index, 1);
     }
 

@@ -1,10 +1,7 @@
 """The single-column rules of the history table, as data.
 
 Each rule names one single-column CHECK of `horsies_task_history` and its
-predicate over the column. Writers that copy values from outside the move
-program (the cutover relocation) evaluate these predicates before they
-write, so a violating row is refused with its id and rule instead of
-failing on the constraint.
+predicate over the column.
 
 A rule fails only when its predicate is FALSE; NULL passes, as it does for
 a CHECK constraint. The predicates match the constraints that the frozen
@@ -12,11 +9,8 @@ and gated history DDL install; a test compares each one with the
 constraint that DDL creates.
 
 Schema v49 drops these constraints from the history parent
-(`DROP_SINGLE_COLUMN_CHECKS_DDL`). The writers hold the rules instead: the
-move family copies values that the live table and the enqueue path have
-already checked, relocation refuses a violating row with these
-predicates, and transcode refuses a target outside the version and codec
-bounds.
+(`DROP_SINGLE_COLUMN_CHECKS_DDL`). The move family copies values that the
+live table and the enqueue path have already checked.
 """
 
 from __future__ import annotations
@@ -119,27 +113,6 @@ HISTORY_COLUMN_RULES: Final[tuple[HistoryColumnRule, ...]] = (
     _rule('status', "status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')"),
     _rule('terminalization_kind', f'terminalization_kind IN ({_KINDS})'),
 )
-
-
-def first_rule_violation_sql(projection_sql: str) -> str:
-    """The first (task id, rule) whose predicate is FALSE over a projection.
-
-    `projection_sql` is a SELECT whose output columns carry the history
-    column names, including `task_id`. Returns no row when every rule holds.
-    """
-    rules = ',\n        '.join(
-        f"('{rule.constraint_name}', ({rule.predicate}))"
-        for rule in HISTORY_COLUMN_RULES
-    )
-    return f"""SELECT projected.task_id, rule.constraint_name
-FROM ({projection_sql}) AS projected
-CROSS JOIN LATERAL (
-    VALUES
-        {rules}
-) AS rule(constraint_name, holds)
-WHERE rule.holds IS FALSE
-ORDER BY projected.task_id, rule.constraint_name
-LIMIT 1"""
 
 
 def _single_column_checks_sql() -> str:
