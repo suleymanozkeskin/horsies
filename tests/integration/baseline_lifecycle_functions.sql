@@ -373,7 +373,7 @@ SELECT lc_expect(
 SELECT lc_task('00000000-0000-7000-8000-000000000b21', 'PENDING');
 UPDATE horsies_tasks SET command_fingerprint = sha256('b21'::bytea) WHERE id = '00000000-0000-7000-8000-000000000b21';
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-000000000b21', 'CANCELLED', 'CANCEL_ADMIN', now(), NULL, 'TASK_CANCELLED', 'r');
+    '00000000-0000-7000-8000-000000000b21'::uuid, 'CANCELLED', 'CANCEL_ADMIN', now(), NULL, 'TASK_CANCELLED', 'r');
 SELECT lc_expect(
     'enqueue: a repeat of a finished task with the same command',
     lc_send('00000000-0000-7000-8000-000000000b21', 'b21', now(), 'REPEAT'), 'SAME_COMMAND'

@@ -14,14 +14,16 @@
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
 //!
 //! A database error never decides between a retry and a failure: the write
-//! is sent again, at most [`PHASE1_MAX_RETRIES`] more times. A plain success
-//! sent again joins a later batch; a row whose batch committed before its
-//! reply was lost answers `AlreadyApplied`.
+//! is sent again, at most the retries of its [`WriteStage`]. After the last
+//! retry of a `TASK_TIMEOUT` write, crash recovery writes `TASK_TIMEOUT` at
+//! the same placement, with its own retries (Python
+//! `_recover_timed_out_row`). A plain success sent again joins a later batch;
+//! a row whose batch committed before its reply was lost answers
+//! `AlreadyApplied`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::dispatch::{AttemptEnd, ClaimedTask, Settlement};
@@ -29,21 +31,20 @@ use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
 use crate::broker::PostgresBroker;
-use crate::core::codec::check_json_text;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
-use crate::core::task::result::TaskResult;
+use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::db::Transience;
 use crate::worker::execution::{
     persist_failed_attempt, persist_ok_result, persist_undecodable_result, phase_retry_delay,
     run_phase2, unclaim_task_with_retry, FinalizeError, FinalizeOutcome, FinalizeStage, Phase2Work,
     PHASE1_MAX_RETRIES,
 };
-use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
+use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
 use crate::worker::retry::{admit_retry, RetryAdmission};
@@ -52,45 +53,33 @@ use crate::worker::retry::{admit_retry, RetryAdmission};
 /// `_WORKER_FAILURE_FALLBACK`).
 const WORKER_FAILURE_FALLBACK: &str = "Worker failure";
 
-/// The wire form of the result envelope: `{"__type": "ok" | "err", "value": ...}`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EnvelopeWire<'a> {
-    #[serde(rename = "__type")]
-    kind: String,
-    #[serde(borrow)]
-    value: &'a RawValue,
+/// Retries of a `TASK_TIMEOUT` write (Python `_FINALIZE_TIMEOUT_MAX_RETRIES`).
+pub const TIMEOUT_WRITE_MAX_RETRIES: u32 = 3;
+/// Retries of a crash-recovery write (Python `_FINALIZE_FUTURE_MAX_RETRIES`).
+pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
+
+/// The stage of an outcome write. Each stage has its own retry bound
+/// (Python `_max_retries_of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteStage {
+    /// The write of an end the child reported (Python `PHASE1`).
+    PhaseOne,
+    /// The `TASK_TIMEOUT` write of an attempt that reached its deadline
+    /// (Python `TIMEOUT`).
+    TimeoutWrite,
+    /// The write of a child the worker killed or lost, and the last step of
+    /// a `TASK_TIMEOUT` write whose retries all failed (Python `FUTURE`).
+    CrashRecovery,
 }
 
-/// What a reported result holds.
-pub(super) enum ReportedResult<'a> {
-    /// A success value, as the JSON text the child encoded.
-    Value(&'a RawValue),
-    /// A task error; the envelope text is stored as it came.
-    Error(TaskError),
-    /// The text does not read as the envelope.
-    Undecodable(String),
-}
-
-/// Read a result envelope with the strict JSON rule, then its shape. Pure.
-pub(super) fn read_envelope(envelope: &ResultEnvelopeText) -> ReportedResult<'_> {
-    let text = envelope.as_str();
-    if let Err(error) = check_json_text(text) {
-        return ReportedResult::Undecodable(error.to_string());
-    }
-    let wire = match serde_json::from_str::<EnvelopeWire<'_>>(text) {
-        Ok(wire) => wire,
-        Err(error) => return ReportedResult::Undecodable(error.to_string()),
-    };
-    match wire.kind.as_str() {
-        "ok" => ReportedResult::Value(wire.value),
-        "err" => match serde_json::from_str::<TaskError>(wire.value.get()) {
-            Ok(error) => ReportedResult::Error(error),
-            Err(error) => {
-                ReportedResult::Undecodable(format!("the task error does not read: {error}"))
-            }
-        },
-        other => ReportedResult::Undecodable(format!("unknown result kind '{other}'")),
+impl WriteStage {
+    /// How many times a failed write of this stage is sent again.
+    pub fn max_retries(self) -> u32 {
+        match self {
+            Self::PhaseOne => PHASE1_MAX_RETRIES,
+            Self::TimeoutWrite => TIMEOUT_WRITE_MAX_RETRIES,
+            Self::CrashRecovery => CRASH_RECOVERY_MAX_RETRIES,
+        }
     }
 }
 
@@ -225,14 +214,53 @@ pub fn killed_child_write(
     }
 }
 
-/// The result envelope of a success value: `{"__type": "ok", "value": ..}`
-/// with the value text kept byte for byte. Pure.
+/// The stored result of a success value (`TaskResult::Ok`), with the value
+/// text kept byte for byte. Pure.
 ///
 /// Errors: the diagnosis of a value that is not JSON; the caller fails the
 /// task with `WORKER_SERIALIZATION_ERROR`.
 fn ok_envelope(value: &[u8]) -> Result<String, String> {
     let raw = serde_json::from_slice::<&RawValue>(value).map_err(|error| error.to_string())?;
     serde_json::to_string(&TaskResult::Ok(raw)).map_err(|error| error.to_string())
+}
+
+/// The `TASK_TIMEOUT` write of an attempt that reached `timeout`. Pure.
+pub fn timeout_write(
+    task: &ClaimedTask,
+    worker_id: &str,
+    timeout: TaskTimeoutMs,
+    placement: RetryPlacement,
+) -> FinishFailedAttempt {
+    killed_child_write(
+        task,
+        worker_id,
+        OutcomeCode::TaskTimeout.into(),
+        format!("task exceeded timeout_ms={}", timeout.get()),
+        placement,
+    )
+}
+
+/// The crash-recovery write of an attempt that reached `timeout` and whose
+/// `TASK_TIMEOUT` write failed on every retry: the same code and placement,
+/// with a message that names the failed writes (Python
+/// `_recover_timed_out_row`). Pure.
+pub fn timeout_recovery_write(
+    task: &ClaimedTask,
+    worker_id: &str,
+    timeout: TaskTimeoutMs,
+    placement: RetryPlacement,
+) -> FinishFailedAttempt {
+    killed_child_write(
+        task,
+        worker_id,
+        OutcomeCode::TaskTimeout.into(),
+        format!(
+            "Task reached timeout_ms={}, and the TASK_TIMEOUT write failed {} times",
+            timeout.get(),
+            TIMEOUT_WRITE_MAX_RETRIES + 1,
+        ),
+        placement,
+    )
 }
 
 /// Writes the end of each attempt with the existing statements.
@@ -285,24 +313,20 @@ impl OutcomeWriter {
             }
             AttemptEnd::Reported(RunEnd::Result(envelope)) => {
                 let write = self.result_write(task, &envelope);
-                self.phase_one(task, write, ClaimedRowRule::Refuse).await
+                self.phase_one(task, write, ClaimedRowRule::Refuse, WriteStage::PhaseOne)
+                    .await
             }
             AttemptEnd::Reported(RunEnd::WorkerFailure(detail)) => {
                 let write = worker_failure_write(task, &self.worker_id, detail.as_str());
-                self.phase_one(task, PhaseOneWrite::Failure(write), ClaimedRowRule::Refuse)
-                    .await
-            }
-            AttemptEnd::TimedOut { timeout, retry } => {
-                let write = killed_child_write(
+                self.phase_one(
                     task,
-                    &self.worker_id,
-                    OutcomeCode::TaskTimeout.into(),
-                    format!("task exceeded timeout_ms={}", timeout.get()),
-                    retry,
-                );
-                self.phase_one(task, PhaseOneWrite::Failure(write), ClaimedRowRule::Release)
-                    .await
+                    PhaseOneWrite::Failure(write),
+                    ClaimedRowRule::Refuse,
+                    WriteStage::PhaseOne,
+                )
+                .await
             }
+            AttemptEnd::TimedOut { timeout, retry } => self.timed_out(task, timeout, retry).await,
             AttemptEnd::KilledForLoop {
                 code,
                 retry,
@@ -315,8 +339,13 @@ impl OutcomeWriter {
                     reason.into_string(),
                     retry,
                 );
-                self.phase_one(task, PhaseOneWrite::Failure(write), ClaimedRowRule::Release)
-                    .await
+                self.phase_one(
+                    task,
+                    PhaseOneWrite::Failure(write),
+                    ClaimedRowRule::Release,
+                    WriteStage::CrashRecovery,
+                )
+                .await
             }
             AttemptEnd::Crashed { reason } => {
                 let write = killed_child_write(
@@ -326,10 +355,57 @@ impl OutcomeWriter {
                     reason.into_string(),
                     RetryPlacement::SameClass,
                 );
-                self.phase_one(task, PhaseOneWrite::Failure(write), ClaimedRowRule::Release)
-                    .await
+                self.phase_one(
+                    task,
+                    PhaseOneWrite::Failure(write),
+                    ClaimedRowRule::Release,
+                    WriteStage::CrashRecovery,
+                )
+                .await
             }
         }
+    }
+
+    /// The `TASK_TIMEOUT` write and its retries. When every retry failed,
+    /// crash recovery writes `TASK_TIMEOUT` at the same placement, with its
+    /// own retries (Python `_after_the_last_retry`,
+    /// `_recover_timed_out_row`). A write that no retry can clear ends at
+    /// once: crash recovery would send the same statement.
+    async fn timed_out(
+        &self,
+        task: &ClaimedTask,
+        timeout: TaskTimeoutMs,
+        placement: RetryPlacement,
+    ) -> Settlement {
+        let write = timeout_write(task, &self.worker_id, timeout, placement);
+        let settled = self
+            .phase_one(
+                task,
+                PhaseOneWrite::Failure(write),
+                ClaimedRowRule::Release,
+                WriteStage::TimeoutWrite,
+            )
+            .await;
+        match settled {
+            Settlement::RetriesExhausted => {}
+            Settlement::Written
+            | Settlement::NothingOwed
+            | Settlement::NotHeld
+            | Settlement::LeftToRecovery
+            | Settlement::WriteFailed => return settled,
+        }
+        tracing::error!(
+            task_id = %task.task_id,
+            "every retry of the TASK_TIMEOUT write failed; crash recovery writes the row",
+        );
+        let recovery = timeout_recovery_write(task, &self.worker_id, timeout, placement);
+        self.phase_one(
+            task,
+            PhaseOneWrite::Failure(recovery),
+            ClaimedRowRule::Release,
+            WriteStage::CrashRecovery,
+        )
+        .await
     }
 
     fn result_write(&self, task: &ClaimedTask, envelope: &ResultEnvelopeText) -> PhaseOneWrite {
@@ -340,14 +416,16 @@ impl OutcomeWriter {
             PayloadKind::Result,
             envelope.as_str().len(),
         );
-        match read_envelope(envelope) {
-            ReportedResult::Value(value) => PhaseOneWrite::Success {
+        match read_task_result_text(envelope.as_str()) {
+            Ok(TaskResultText::Ok(value)) => PhaseOneWrite::Success {
                 value: value.get().as_bytes().to_vec(),
             },
-            ReportedResult::Error(error) => {
+            Ok(TaskResultText::Err(error)) => {
                 PhaseOneWrite::Failure(task_error_write(task, &self.worker_id, &error, envelope))
             }
-            ReportedResult::Undecodable(diagnosis) => PhaseOneWrite::Undecodable { diagnosis },
+            Err(refused) => PhaseOneWrite::Undecodable {
+                diagnosis: refused.to_string(),
+            },
         }
     }
 
@@ -450,37 +528,55 @@ impl OutcomeWriter {
         }
     }
 
-    /// The write and at most [`PHASE1_MAX_RETRIES`] retries of it; then
-    /// phase 2 when owed.
+    /// The write and at most the retries of its `stage`; then phase 2 when
+    /// owed.
     async fn phase_one(
         &self,
         task: &ClaimedTask,
         write: PhaseOneWrite,
         claimed_row: ClaimedRowRule,
+        stage: WriteStage,
     ) -> Settlement {
+        let max_retries = stage.max_retries();
         let mut retries_done: u32 = 0;
         let outcome = loop {
-            match self.write_once(task, &write).await {
+            let error = match self.write_once(task, &write).await {
                 Ok(outcome) => break outcome,
-                Err(error) if error.retryable && retries_done < PHASE1_MAX_RETRIES => {
+                Err(error) => error,
+            };
+            match (error.retryable, retries_done < max_retries) {
+                (true, true) => {
                     retries_done += 1;
                     tracing::warn!(
                         task_id = %task.task_id,
+                        stage = ?stage,
                         retry = retries_done,
-                        max = PHASE1_MAX_RETRIES,
+                        max = max_retries,
                         error = %error,
                         "the outcome write failed; sending it again",
                     );
                     tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(retries_done)))
                         .await;
                 }
-                Err(error) => {
+                (true, false) => {
                     tracing::error!(
                         task_id = %task.task_id,
+                        stage = ?stage,
+                        retries = max_retries,
                         error = %error,
-                        "the outcome write failed for good; the row waits for recovery",
+                        "every retry of the outcome write failed",
                     );
                     return Settlement::RetriesExhausted;
+                }
+                (false, _) => {
+                    tracing::error!(
+                        task_id = %task.task_id,
+                        stage = ?stage,
+                        error = %error,
+                        "the outcome write failed with an error no retry can clear; the row \
+                         waits for recovery",
+                    );
+                    return Settlement::WriteFailed;
                 }
             }
         };

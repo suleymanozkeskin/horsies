@@ -9,7 +9,6 @@
 //! `attempt_writes::tests::a_stale_claim_generation_writes_no_failure`.
 
 use serial_test::serial;
-use sqlx::Row;
 use uuid::Uuid;
 
 use super::support::*;
@@ -204,7 +203,6 @@ async fn reaper_then_retry_race_sequence() {
 /// runs before the failure write (differences ledger, row 18).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #711"]
 async fn the_claim_returns_the_retry_facts() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -217,34 +215,20 @@ async fn the_claim_returns_the_retry_facts() {
         },
     )
     .await;
-    let params = claim_pass(RETRY_FACTS_QUEUE);
-
-    let rows = sqlx::query(
-        "SELECT * FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    let pass = crate::broker::claims::claim_pass(
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        crate::broker::core_rows::StatementLog::Off,
+        &claim_request(RETRY_FACTS_QUEUE),
     )
-    .bind(&params.worker_id)
-    .bind(sqlx::types::Json(&params.queues))
-    .bind(sqlx::types::Json(&params.queue_priority))
-    .bind(sqlx::types::Json(&params.queue_max_concurrency))
-    .bind(params.hard_cap_mode)
-    .bind(10_i32)
-    .bind(0_i32)
-    .bind(0_i32)
-    .bind(0_i32)
-    .bind(None::<i32>)
-    .bind(60_000_i64)
-    .bind(sqlx::types::Json(&params.lock_keys))
-    .fetch_all(&pool)
     .await
     .expect("claim pass");
 
-    let row = rows
+    let row = pass
+        .claimed
         .iter()
-        .find(|row| row.try_get::<String, _>("id").ok() == Some(task_id.to_string()))
+        .find(|row| row.id == task_id)
         .expect("the claim returned the seeded task");
-    let retry_count: i32 = row.try_get("retry_count").expect("retry_count column");
-    let max_retries: i32 = row.try_get("max_retries").expect("max_retries column");
-    assert_eq!((retry_count, max_retries), (1, 3));
+    assert_eq!((row.retry_count, row.max_retries), (1, 3));
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
