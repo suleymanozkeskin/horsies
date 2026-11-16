@@ -25,7 +25,9 @@ use crate::broker::terminalization::log_terminalization_outcome;
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::outcomes::{decode_raw, RawOutcomeRow};
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::db::{CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement};
+use crate::db::{
+    CheckoutClass, CorePool, ParameterType, Row, StatementBound, Transience, TypedStatement,
+};
 
 /// `horsies_complete_tasks_fused`. Parameters in order: task ids, claim
 /// generations, result texts (one element per row, in input order), worker
@@ -204,9 +206,21 @@ impl WorkerPoolSuccessWrite {
 }
 
 impl SuccessBatchWrite for WorkerPoolSuccessWrite {
+    /// Errors: as [`complete_plain_successes`]; the core pools that cannot
+    /// be built are [`BatchWriteError::NotSent`], with nothing sent.
     async fn write(&self, batch: &SuccessBatch) -> Result<BatchOutcomes, BatchWriteError> {
+        let (open, _write) =
+            self.broker
+                .core_pools_for_write()
+                .map_err(|error| BatchWriteError::NotSent {
+                    transience: match error.is_retryable() {
+                        true => Transience::Transient,
+                        false => Transience::Permanent,
+                    },
+                    detail: error.to_string(),
+                })?;
         complete_plain_successes(
-            self.broker.core_main_pool(),
+            open.main(),
             self.broker.statement_log(),
             &self.worker_id,
             batch,
