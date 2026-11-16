@@ -122,7 +122,11 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
         HandleErrorCode::WorkflowNotFound => workflow_not_found(error.workflow_id),
         HandleErrorCode::DbOperationFailed
         | HandleErrorCode::LoopRunnerFailed
+        | HandleErrorCode::ResumeRecoveryFailed
         | HandleErrorCode::InternalFailed => detail(503, error.message),
+        // Stored data that does not parse: the request was valid, and a repeat gets the same answer
+        // (Python `_handle_failed`, `web/routes/actions.py`).
+        HandleErrorCode::StoredDataInvalid => detail(500, error.message),
     }
 }
 
@@ -257,10 +261,15 @@ mod tests {
         for code in [
             HandleErrorCode::DbOperationFailed,
             HandleErrorCode::LoopRunnerFailed,
+            HandleErrorCode::ResumeRecoveryFailed,
             HandleErrorCode::InternalFailed,
         ] {
             assert_eq!(handle_failed(error(code)).status_code(), 503);
         }
+        assert_eq!(
+            handle_failed(error(HandleErrorCode::StoredDataInvalid)).status_code(),
+            500
+        );
 
         let outcome = resolve_resume_failure(
             error(HandleErrorCode::DbOperationFailed),
