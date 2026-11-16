@@ -1375,3 +1375,45 @@ fn public_facade_exports_the_complete_typed_surface() {
         task_id: Uuid::nil(),
     });
 }
+
+/// A handle of another client family is refused before the rerun reads or
+/// writes anything: no new task row and no key reservation.
+#[tokio::test]
+#[serial]
+async fn a_handle_of_another_client_family_reruns_nothing() {
+    use crate::broker::client_family::{ClientFamily, RecordedFamily};
+
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    let broker = PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM horsies_tasks),
+                (SELECT count(*) FROM horsies_key_reservations)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let refused = broker
+        .rerun_task(
+            RerunTask::new(source, None, Some("family-refused".to_owned())),
+            policy(SOURCE_CLASS, true),
+        )
+        .await
+        .expect_err("a handle of another family must not rerun");
+    assert!(matches!(
+        refused,
+        RerunError::ClientFamilyMismatch {
+            stored: RecordedFamily::Recorded(ClientFamily::Rust),
+            own: ClientFamily::Python,
+        }
+    ));
+    let after: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM horsies_tasks),
+                (SELECT count(*) FROM horsies_key_reservations)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+    cleanup(&pool, &[source], &[]).await;
+}
