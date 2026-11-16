@@ -82,7 +82,7 @@ async def _seed_paused_workflow_with_claimed_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'FAIL', 0, :id,
+            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id},

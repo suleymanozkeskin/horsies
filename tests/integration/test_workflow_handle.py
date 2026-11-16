@@ -1215,11 +1215,11 @@ class TestWorkflowHandleCancel:
             text("""
                 INSERT INTO horsies_workflows
                     (id, name, status, on_error, depth, parent_workflow_id,
-                     root_workflow_id, sent_at, created_at, started_at,
-                     updated_at)
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
                 VALUES
-                    (:child_id, 'descendant_lock_child', 'RUNNING', 'FAIL', 1,
-                     :parent_id, :parent_id, NOW(), NOW(), NOW(), NOW())
+                    (:child_id, 'descendant_lock_child', 'RUNNING', 'fail', 1,
+                     :parent_id, 0, :parent_id, NOW(), NOW(), NOW(), NOW())
             """),
             {
                 'child_id': child_workflow_id,

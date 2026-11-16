@@ -225,7 +225,7 @@ async def _link_node(session: AsyncSession, task_id: str) -> None:
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'lock_order_wf', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'lock_order_wf', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},

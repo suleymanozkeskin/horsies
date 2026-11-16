@@ -111,7 +111,7 @@ async def _link_task_to_workflow(session: AsyncSession, task_id: str) -> str:
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
             VALUES
-                (:id, 'test_wf', 'RUNNING', 'FAIL', 0, :id,
+                (:id, 'test_wf', 'RUNNING', 'fail', 0, :id,
                  NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
@@ -223,7 +223,7 @@ async def _insert_running_node(session: AsyncSession) -> str:
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'wf_phase_notify', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'wf_phase_notify', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},

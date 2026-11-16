@@ -421,7 +421,7 @@ class TestOutputNodeUnderSuccessPolicy:
             text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
         )
-        injected = json.loads(task_row.one().kwargs)['upstream']
+        injected = json.loads(task_row.one().input)['upstream']
         assert _code(decode_task_result(injected['inner'], int)) == expected_code
 
     async def test_workflow_context_holds_the_named_outcome(
@@ -459,7 +459,7 @@ class TestOutputNodeUnderSuccessPolicy:
             text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
         )
-        context = json.loads(task_row.one().kwargs)['__h_workflow_ctx__']
+        context = json.loads(task_row.one().input)['__h_workflow_ctx__']
         entry = context['results_by_id'][f'{spec.name}:0']
         assert _code(decode_task_result(entry, int)) == (
             OutcomeCode.WORKFLOW_OUTPUT_SKIPPED.value
@@ -763,7 +763,7 @@ class TestOutputNodeUnderSuccessPolicy:
             text('SELECT input FROM horsies_tasks WHERE id = :id'),
             {'id': waiting.task_id},
         )
-        injected = json.loads(task_row.one().kwargs)['upstream']
+        injected = json.loads(task_row.one().input)['upstream']
         return _code(decode_task_result(injected['inner'], int))
 
     @pytest.mark.parametrize(

@@ -99,7 +99,7 @@ async def _link_task_to_workflow(
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
             VALUES
-                (:id, 'test_wf', :status, 'FAIL', 0, :id,
+                (:id, 'test_wf', :status, 'fail', 0, :id,
                  NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id, 'status': wf_status},

@@ -126,7 +126,7 @@ async def test_expired_terminal_workflows_deleted(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, 'wf_old_done', 'COMPLETED', 'FAIL', 0, :id,
+            (:id, 'wf_old_done', 'COMPLETED', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours')
     """), {'id': old_completed_wf})
@@ -137,7 +137,7 @@ async def test_expired_terminal_workflows_deleted(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at)
         VALUES
-            (:id, 'wf_old_running', 'RUNNING', 'FAIL', 0, :id,
+            (:id, 'wf_old_running', 'RUNNING', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours')
     """), {'id': old_running_wf})
@@ -148,7 +148,7 @@ async def test_expired_terminal_workflows_deleted(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, 'wf_recent_done', 'COMPLETED', 'FAIL', 0, :id,
+            (:id, 'wf_recent_done', 'COMPLETED', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
              NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')
     """), {'id': recent_completed_wf})
@@ -201,7 +201,7 @@ async def _insert_doomed_workflow(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, :name, 'COMPLETED', 'FAIL', 0, :id,
+            (:id, :name, 'COMPLETED', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours')
     """), {'id': workflow_id, 'name': name})
@@ -311,7 +311,7 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, 'wf_policy_complete_with_live_task', 'COMPLETED', 'FAIL', 0, :id,
+            (:id, 'wf_policy_complete_with_live_task', 'COMPLETED', 'fail', 0, :id,
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours')

@@ -154,7 +154,7 @@ async def _insert_running_task(
                     (id, name, status, on_error, depth, root_workflow_id,
                      sent_at, created_at, started_at, updated_at)
                 VALUES
-                    (:wf_id, 'persist_terminal_wf', 'RUNNING', 'FAIL', 0,
+                    (:wf_id, 'persist_terminal_wf', 'RUNNING', 'fail', 0,
                      :wf_id, NOW(), NOW(), NOW(), NOW())
             """),
             {'wf_id': workflow_id},

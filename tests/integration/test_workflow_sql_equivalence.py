@@ -62,7 +62,7 @@ async def _seed_random_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'equiv_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'equiv_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
@@ -184,7 +184,7 @@ async def test_terminal_two_step_handles_zero_task_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'empty_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'empty_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
@@ -219,7 +219,7 @@ async def test_child_info_counts_zero_for_taskless_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'taskless_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'taskless_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},

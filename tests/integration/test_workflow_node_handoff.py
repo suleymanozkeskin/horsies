@@ -78,7 +78,7 @@ async def _seed_running_workflow_with_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'node_handoff_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'node_handoff_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id},

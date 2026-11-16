@@ -149,7 +149,7 @@ async def _link_workflow_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'finalize_after_wf', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'finalize_after_wf', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},

@@ -66,7 +66,7 @@ async def _insert_workflow(
                 (id, name, status, on_error, depth, root_workflow_id,
                  parent_workflow_id, parent_task_index, result,
                  sent_at, created_at, started_at, updated_at, completed_at)
-            VALUES (:id, 'denest_wf', :status, 'FAIL', 0, :id,
+            VALUES (:id, 'denest_wf', :status, 'fail', :depth, :id,
                     :pwf, :pidx, :result,
                     NOW(), NOW(), NOW(), NOW(),
                     CASE WHEN :is_completed THEN NOW() END)
@@ -74,6 +74,7 @@ async def _insert_workflow(
         {
             'id': wf_id,
             'status': status,
+            'depth': 0 if parent_workflow_id is None else 1,
             'pwf': parent_workflow_id,
             'pidx': parent_task_index,
             'result': result,

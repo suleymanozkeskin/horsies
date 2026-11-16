@@ -166,7 +166,7 @@ async def _seed_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'characterize_wf', :status, 'FAIL', 0, :id,
+            VALUES (:id, 'characterize_wf', :status, 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id, 'status': wf_status},

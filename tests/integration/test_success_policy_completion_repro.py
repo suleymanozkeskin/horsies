@@ -30,7 +30,7 @@ async def test_success_policy_does_not_finalize_with_live_non_required_task(
                 (id, name, status, on_error, success_policy, depth,
                  root_workflow_id, sent_at, created_at, started_at, updated_at)
             VALUES
-                (:id, 'policy_waits_for_all_terminal', 'RUNNING', 'FAIL',
+                (:id, 'policy_waits_for_all_terminal', 'RUNNING', 'fail',
                  CAST(:policy AS JSONB), 0, :id, NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id, 'policy': policy},

@@ -1641,7 +1641,7 @@ async def _link_workflow_task(
                 sent_at, created_at, started_at, updated_at
             )
             VALUES (
-                :id, 'terminalization.test', :workflow_status, 'FAIL', 0, :id,
+                :id, 'terminalization.test', :workflow_status, 'fail', 0, :id,
                 NOW(), NOW(), NOW(), NOW()
             )
         """),
