@@ -38,6 +38,7 @@ fn no_options_and_empty_text_read_as_no_timeout_and_no_policy() {
             read_stored_options(text),
             StoredOptions::Readable {
                 timeout: StoredTimeout::NoTimeout,
+                cancel_grace: StoredCancelGrace::NotStored,
                 retry: StoredRetry::NoPolicy,
             }
         );
@@ -106,6 +107,7 @@ fn a_timeout_outside_its_rule_refuses_the_run() {
             options,
             StoredOptions::Readable {
                 timeout: StoredTimeout::Invalid(refusal),
+                cancel_grace: StoredCancelGrace::NotStored,
                 retry: StoredRetry::NoPolicy,
             },
             "{text}"
@@ -341,5 +343,168 @@ fn the_delay_is_at_least_one_second() {
     for _ in 0..200 {
         let delay = jittered.delay_seconds(1);
         assert!((1.0..=1.25).contains(&delay), "{delay}");
+    }
+}
+
+// --- stored retry limit ----------------------------------------------------
+//
+// Python `stored_max_retries` (`horsies/core/codec/task_options.py:80-103`);
+// `tests/unit/test_retry_utils.py::TestParseRetryPolicy` and
+// `tests/integration/test_enqueue_retry_limit.py`
+// (`test_valid_policies_store_their_limits`,
+// `test_a_malformed_policy_is_refused_without_a_row`).
+
+#[test]
+fn options_without_a_policy_store_zero_retries() {
+    for text in [
+        None,
+        Some(""),
+        Some("{}"),
+        Some(r#"{"queue": "default"}"#),
+        Some(r#"{"retry_policy": null, "timeout_ms": null}"#),
+    ] {
+        assert_eq!(stored_max_retries(text), Ok(0), "{text:?}");
+    }
+}
+
+#[test]
+fn a_policy_that_fits_the_rule_stores_its_limit() {
+    for (policy, limit) in [
+        (fixed_policy("[60]", 1, true), 1),
+        (fixed_policy("[60, 300, 900]", 3, false), 3),
+        (
+            r#"{"max_retries": 20, "intervals": [30], "backoff_strategy": "exponential",
+                "jitter": true, "auto_retry_for": ["X"]}"#
+                .to_owned(),
+            20,
+        ),
+    ] {
+        assert_eq!(
+            stored_max_retries(Some(&options_with_policy(&policy))),
+            Ok(limit),
+            "{policy}"
+        );
+    }
+}
+
+#[test]
+fn options_that_do_not_parse_or_are_not_an_object_are_refused() {
+    for text in ["not json", "{", "[]", "3", "\"x\"", "null"] {
+        assert!(
+            matches!(
+                stored_max_retries(Some(text)),
+                Err(RetryLimitRefused::UnreadableOptions { .. })
+            ),
+            "{text}"
+        );
+    }
+}
+
+/// Policies that a lenient reader would turn into a limit (3 for a policy
+/// without an integer `max_retries`, the stored number otherwise), and the
+/// other shapes that Python's `RetryPolicy` refuses.
+#[test]
+fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
+    let exponential = |max_retries: &str| {
+        format!(
+            r#"{{"max_retries": {max_retries}, "intervals": [60], "backoff_strategy": "exponential",
+                "jitter": true, "auto_retry_for": ["X"]}}"#
+        )
+    };
+    let refused = [
+        r#"{"backoff_strategy": "exponential"}"#.to_owned(),
+        r#"{"max_retries": 5}"#.to_owned(),
+        exponential("\"5\""),
+        exponential("3.5"),
+        exponential("true"),
+        exponential("0"),
+        exponential("-1"),
+        exponential("21"),
+        r#"5"#.to_owned(),
+        r#"[3]"#.to_owned(),
+        r#"{"max_retries": 2, "intervals": [60, 60], "backoff_strategy": "fixed",
+            "jitter": true, "auto_retry_for": []}"#
+            .to_owned(),
+        r#"{"max_retries": 2, "intervals": [60, 60], "backoff_strategy": "fixed",
+            "jitter": true, "auto_retry_for": ["X"], "extra": 1}"#
+            .to_owned(),
+    ];
+    for policy in refused {
+        assert!(
+            matches!(
+                stored_max_retries(Some(&options_with_policy(&policy))),
+                Err(RetryLimitRefused::InvalidPolicy { .. })
+            ),
+            "{policy}"
+        );
+    }
+}
+
+#[test]
+fn the_refusal_names_the_cause() {
+    let refusal = stored_max_retries(Some(&options_with_policy(r#"{"max_retries": 5}"#)))
+        .expect_err("a partial policy is refused");
+    assert!(refusal.to_string().contains("retry_policy"), "{refusal}");
+}
+
+// --- stored cancel grace ---------------------------------------------------
+
+#[test]
+fn a_cancel_grace_inside_the_bounds_is_kept() {
+    for ms in [MIN_CANCEL_GRACE_MS, 1_000, MAX_CANCEL_GRACE_MS] {
+        let options = read_stored_options(Some(&format!(r#"{{"cancel_grace_ms": {ms}}}"#)));
+        assert_eq!(
+            options.cancel_grace(),
+            StoredCancelGrace::Grace(Duration::from_millis(ms))
+        );
+    }
+    assert_eq!(
+        read_stored_options(Some(r#"{"cancel_grace_ms": null}"#)).cancel_grace(),
+        StoredCancelGrace::NotStored
+    );
+}
+
+/// Python `shared_async_grace_error`: each refusal and its text.
+#[test]
+fn a_cancel_grace_outside_its_rule_is_refused_with_python_text() {
+    let cases = [
+        (
+            r#"{"cancel_grace_ms": 99}"#,
+            GraceRefusal::BelowMinimum,
+            "stored cancel_grace_ms is below 100 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": -5}"#,
+            GraceRefusal::BelowMinimum,
+            "stored cancel_grace_ms is below 100 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": 10001}"#,
+            GraceRefusal::AboveMaximum,
+            "stored cancel_grace_ms is above 10000 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": true}"#,
+            GraceRefusal::NotAnInteger { found: "bool" },
+            "stored cancel_grace_ms is a bool, not an int",
+        ),
+        (
+            r#"{"cancel_grace_ms": 500.5}"#,
+            GraceRefusal::NotAnInteger { found: "float" },
+            "stored cancel_grace_ms is a JSON float, not an int",
+        ),
+        (
+            r#"{"cancel_grace_ms": "500"}"#,
+            GraceRefusal::NotAnInteger { found: "str" },
+            "stored cancel_grace_ms is a JSON str, not an int",
+        ),
+    ];
+    for (text, refusal, message) in cases {
+        assert_eq!(
+            read_stored_options(Some(text)).cancel_grace(),
+            StoredCancelGrace::Invalid(refusal),
+            "{text}"
+        );
+        assert_eq!(grace_refusal_message(refusal), message, "{text}");
     }
 }
