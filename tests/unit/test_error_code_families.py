@@ -455,7 +455,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 exception_mapper={ValueError: 'BROKER_ERROR'},
             ),
         )
@@ -476,7 +476,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 default_unhandled_error_code='BROKER_ERROR',
             ),
         )
@@ -496,7 +496,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
             ),
         )
         errors = app._check_runtime_policy_safety()
@@ -514,7 +514,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 exception_mapper={ValueError: 'MY_CUSTOM_CODE'},
             ),
         )
@@ -535,7 +535,7 @@ class TestCheckReservedCodeCollision:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://x/y'),
+                    database_url=SecretStr('postgresql://x/y'),
                 ),
                 exception_mapper={ValueError: 'PYDANTIC_HYDRATION_ERROR'},
             ),
@@ -553,7 +553,7 @@ class TestCheckReservedCodeCollision:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://x/y'),
+                    database_url=SecretStr('postgresql://x/y'),
                 ),
                 default_unhandled_error_code='PYDANTIC_HYDRATION_ERROR',
             ),
@@ -571,7 +571,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
             ),
         )
 
@@ -601,7 +601,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 exception_mapper=MappingProxyType({ValueError: 'BROKER_ERROR'}),
             ),
         )

@@ -51,6 +51,7 @@ from tests.dualrun.values import (
     RunWindowInvalid,
     make_run_window,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 FUNCTION_CALLS_SQL: Final = (
     Path(__file__).parent.parent / 'integration' / 'baseline_function_calls.sql'
@@ -239,9 +240,7 @@ async def _seed(url: str) -> None:
     """The production coverage pass: class registration, leaves, heartbeat leaves, staged readers."""
     from tests.integration.history_seeding import ensure_history_seedable
 
-    engine = create_async_engine(
-        url.replace('postgresql://', 'postgresql+psycopg://', 1)
-    )
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.begin() as connection:
             await ensure_history_seedable(connection)

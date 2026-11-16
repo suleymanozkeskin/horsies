@@ -65,7 +65,7 @@ def _app() -> Horsies:
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr(
-                    'postgresql+psycopg://user:pass@127.0.0.1:1/none'
+                    'postgresql://user:pass@127.0.0.1:1/none'
                 ),
             ),
         ),
@@ -315,7 +315,7 @@ class TestDeclarationsThatAreRefused:
 
                 app = Horsies(AppConfig(broker=PostgresConfig(
                     database_url=SecretStr(
-                        'postgresql+psycopg://user:pass@127.0.0.1:1/none',
+                        'postgresql://user:pass@127.0.0.1:1/none',
                     ),
                 )))
 

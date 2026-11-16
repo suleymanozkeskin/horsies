@@ -60,7 +60,7 @@ def _real_app(schedule: TaskSchedule) -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             schedule=ScheduleConfig(schedules=[schedule]),
         ),

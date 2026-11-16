@@ -34,7 +34,7 @@ DECLARED_KEY = period_class_key(DECLARED_DURATION.days)
 
 def _reaper_worker(broker: PostgresBroker) -> Worker:
     config = WorkerConfig(
-        dsn='postgresql+psycopg://unused:unused@localhost/unused',
+        dsn='postgresql://unused:unused@localhost/unused',
         psycopg_dsn='postgresql://unused:unused@localhost/unused',
         queues=['default'],
     )

@@ -44,7 +44,7 @@ _OUTPUTLESS_CHILD_RESULT_ENVELOPE = (
 def _make_worker(engine: AsyncEngine) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )

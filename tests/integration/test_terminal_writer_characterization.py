@@ -207,7 +207,7 @@ async def _task_state(
 
 
 def _psycopg_dsn(db_url: str) -> str:
-    return db_url.replace('postgresql+psycopg://', 'postgresql://')
+    return db_url
 
 
 # ---------------------------------------------------------------------------

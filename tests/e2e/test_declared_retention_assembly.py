@@ -38,13 +38,14 @@ pytestmark = [pytest.mark.e2e]
 INSTANCE = 'tests.e2e.tasks.instance_declared_retention:app'
 
 from tests.e2e.helpers.env import e2e_database_url
+from horsies.core.utils.url import sqlalchemy_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 
 def _registered_duration() -> object | None:
     """The class's duration as the database holds it, or None."""
-    engine = create_engine(DB_URL)
+    engine = create_engine(sqlalchemy_url(DB_URL))
     try:
         with engine.connect() as connection:
             return (

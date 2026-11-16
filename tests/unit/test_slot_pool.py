@@ -1216,7 +1216,7 @@ from horsies.core.models.broker import PostgresConfig
 app = Horsies(
     config=AppConfig(
         broker=PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         ),
     ),
 )
@@ -1760,7 +1760,7 @@ def _worker_without_database() -> Worker:
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
         ),

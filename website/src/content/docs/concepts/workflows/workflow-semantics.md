@@ -212,7 +212,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -904,7 +904,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -1009,7 +1009,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)

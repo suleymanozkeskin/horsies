@@ -225,7 +225,7 @@ async def _finish(
 async def wakes() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
     """A connection that listens on the capacity channel of ``QUEUE``."""
     connection = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     await connection.execute(f'LISTEN task_queue_{QUEUE}')

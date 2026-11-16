@@ -60,7 +60,7 @@ class _TaskRow(TypedDict):
 def _make_worker(engine: AsyncEngine) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -516,7 +516,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
         worker_id=worker.worker_instance_id,
     )
     listener = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     try:

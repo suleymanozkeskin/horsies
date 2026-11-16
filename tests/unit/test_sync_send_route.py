@@ -20,7 +20,7 @@ from horsies.core.process_role import ProcessRole
 
 pytestmark = [pytest.mark.unit]
 
-URL = 'postgresql+psycopg://user:pass@localhost/db'
+URL = 'postgresql://user:pass@localhost/db'
 
 
 @pytest.mark.parametrize(

@@ -5,8 +5,8 @@ Horsies-owned tables before spawning concurrent schema initializers. Use it
 only against a disposable database.
 
 Example:
-    DATABASE_URL="postgresql+psycopg://...pooler..." \
-    SESSION_DATABASE_URL="postgresql+psycopg://...direct..." \
+    DATABASE_URL="postgresql://...pooler..." \
+    SESSION_DATABASE_URL="postgresql://...direct..." \
     uv run python tests/manual/pgbouncer_schema_version_race.py --drop-schema
 '''
 

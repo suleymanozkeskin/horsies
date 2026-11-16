@@ -33,6 +33,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -84,7 +85,7 @@ class TestTaskDetailFromHistory:
         )
         try:
             await broker.ensure_schema_initialized()
-            engine = create_async_engine(url)
+            engine = create_async_engine(sqlalchemy_url(url))
             workflow_id = str(uuid.uuid4())
             try:
                 async with AsyncSession(engine) as session:

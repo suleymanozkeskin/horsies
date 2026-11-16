@@ -15,7 +15,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@host/db")),
 ))
 ```
 
@@ -299,13 +299,13 @@ from pydantic import SecretStr
 from horsies import PostgresConfig
 
 config = PostgresConfig(
-    database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
+    database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
 )
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `database_url` | `SecretStr` | required | Must start with `"postgresql+psycopg://"` (HRS-203 otherwise) |
+| `database_url` | `SecretStr` | required | Must start with `"postgresql://"` (HRS-203 otherwise) |
 | `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
@@ -322,7 +322,7 @@ config = PostgresConfig(
 | `tcp_user_timeout_ms` | `int` | `30000` | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the OS default |
 | `echo` | `bool` | `False` | Echo SQL (debug only); bound values are not shown |
 
-Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
+`database_url` and `session_database_url` take the scheme `postgresql://` or `postgres://` and name no driver; horsies opens the database with psycopg 3. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
 
 `worker_child_pool_min_size`, `worker_child_pool_max_size` and
 `worker_child_pool_check` were removed in 0.7.0: each child kind has its own
@@ -607,7 +607,7 @@ config = AppConfig(
         CustomQueueConfig(name="background", priority=50, max_concurrency=3),
     ],
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
 )
 ```
@@ -643,7 +643,7 @@ from pydantic import SecretStr
 from horsies import AppConfig, PayloadPolicy, PostgresConfig
 
 AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@host/db")),
     payload=PayloadPolicy(warn_bytes=1_048_576, reject_bytes=33_554_432),
 )
 ```
@@ -756,7 +756,7 @@ config = AppConfig(
         CustomQueueConfig(name="audit"),
     ],
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
     retention=RetentionConfig(
         queue_retention={
@@ -1086,7 +1086,7 @@ horsies check <module> [--live] [--loglevel LEVEL]
 
 ```bash
 horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--loglevel INFO]
-horsies web --database-url "postgresql+psycopg://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
+horsies web --database-url "postgresql://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 
 Serves the monitoring dashboard (requires the `web` extra). Fail-closed:

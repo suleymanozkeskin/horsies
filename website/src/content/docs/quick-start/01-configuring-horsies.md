@@ -25,7 +25,7 @@ from horsies import Horsies, AppConfig, IsolatedChildren, PostgresConfig, Worker
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
     worker_profiles={
         "default": WorkerProfile(isolated=IsolatedChildren(count=8)),
@@ -78,7 +78,7 @@ config = AppConfig(
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/db_name"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/db_name"),
     ),
 )
 

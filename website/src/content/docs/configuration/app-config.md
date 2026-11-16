@@ -13,7 +13,7 @@ from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 ```
@@ -324,7 +324,7 @@ Output:
 AppConfig:
   queue_mode: DEFAULT
   broker:
-    database_url: postgresql+psycopg://user:***@localhost/db
+    database_url: postgresql://user:***@localhost/db
     pool_size: 5
     max_overflow: 10
   recovery:

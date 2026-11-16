@@ -32,13 +32,14 @@ from horsies.core.history.ddl.classes import (
 from horsies.core.history.names import FOREVER_LEAF
 from horsies.core.types.result import Err, Ok
 from tests.attempt_snapshot_support import encode_attempt_snapshot
+from horsies.core.utils.url import sqlalchemy_url
 
 
 def _database_url() -> str:
     return (
         os.environ.get('HORSIES_TEST_DATABASE_URL')
         or os.environ.get('HORSES_E2E_DB_URL')
-        or 'postgresql+psycopg://postgres:'
+        or 'postgresql://postgres:'
         f'{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
     )
 
@@ -80,14 +81,16 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
     @pytest_asyncio.fixture()
     async def history_schema() -> AsyncGenerator[HistorySchema, None]:
         url = _database_url()
-        admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
+        admin_engine = create_async_engine(
+            sqlalchemy_url(url), isolation_level='AUTOCOMMIT',
+        )
         async with admin_engine.connect() as connection:
             await connection.execute(
                 text(f'DROP SCHEMA IF EXISTS {schema_name} CASCADE')
             )
             await connection.execute(text(f'CREATE SCHEMA {schema_name}'))
         engine = create_async_engine(
-            url,
+            sqlalchemy_url(url),
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:
@@ -230,14 +233,16 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
     @pytest_asyncio.fixture()
     async def terminalization_schema() -> AsyncGenerator[HistorySchema, None]:
         url = _database_url()
-        admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
+        admin_engine = create_async_engine(
+            sqlalchemy_url(url), isolation_level='AUTOCOMMIT',
+        )
         async with admin_engine.connect() as connection:
             await connection.execute(
                 text(f'DROP SCHEMA IF EXISTS {schema_name} CASCADE')
             )
             await connection.execute(text(f'CREATE SCHEMA {schema_name}'))
         engine = create_async_engine(
-            url,
+            sqlalchemy_url(url),
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:

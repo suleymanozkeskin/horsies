@@ -41,13 +41,14 @@ pytestmark = [pytest.mark.e2e]
 INSTANCE = 'tests.e2e.tasks.instance_queue_retention:app'
 
 from tests.e2e.helpers.env import e2e_database_url
+from horsies.core.utils.url import sqlalchemy_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 
 def _history_partition(task_id: str) -> str | None:
     """The relation the completed record landed in, or None if not moved."""
-    engine = create_engine(DB_URL)
+    engine = create_engine(sqlalchemy_url(DB_URL))
     try:
         with engine.connect() as connection:
             return (

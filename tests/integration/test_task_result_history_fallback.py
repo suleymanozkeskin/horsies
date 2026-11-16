@@ -50,6 +50,7 @@ from tests.integration.test_task_history_schema_emission import (
     make_database,
 )
 from tests.broker_resources_support import current_resources
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -98,7 +99,7 @@ async def seed_history_task(
 async def populated_history(url: str) -> tuple[str, str]:
     """History holds one COMPLETED task with a result and one CANCELLED
     task without one; the staged readers are published."""
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with AsyncSession(engine) as session:
             completed = await seed_history_task(
@@ -115,7 +116,7 @@ async def populated_history(url: str) -> tuple[str, str]:
 
 
 async def _execute(url: str, statement: str) -> None:
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.begin() as connection:
             await connection.execute(text(statement))
@@ -221,7 +222,7 @@ class TestHistoryFallback:
         try:
             await broker.ensure_schema_initialized()
             completed, _ = await populated_history(url)
-            engine = create_async_engine(url)
+            engine = create_async_engine(sqlalchemy_url(url))
             try:
                 async with engine.begin() as connection:
                     await connection.execute(
@@ -336,7 +337,7 @@ class TestStagedResultReader:
                     LookupManifest(leaves=())
                 ),
             )
-            engine = create_async_engine(url)
+            engine = create_async_engine(sqlalchemy_url(url))
             try:
                 async with engine.connect() as connection:
                     stale_rows = (

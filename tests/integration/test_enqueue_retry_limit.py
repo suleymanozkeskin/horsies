@@ -26,6 +26,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -45,7 +46,7 @@ async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[st
 
 
 async def _stored_limits(url: str) -> list[int]:
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
             return list(

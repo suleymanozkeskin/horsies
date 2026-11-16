@@ -42,7 +42,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -336,7 +336,7 @@ _WAKE_WAIT_S = 0.5
 
 async def _listen(channel: str) -> psycopg.AsyncConnection[Any]:
     connection = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     await connection.execute(

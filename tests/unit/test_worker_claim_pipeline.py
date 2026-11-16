@@ -48,7 +48,7 @@ from horsies.core.worker.sql import (
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 BROKER = PostgresConfig(
-    database_url='postgresql+psycopg://user:pass@localhost/db',
+    database_url='postgresql://user:pass@localhost/db',
     pool_size=5,
     max_overflow=5,
 )
@@ -93,7 +93,7 @@ class TestLeaseAlwaysBounded:
         from horsies.core.worker.worker import Worker, WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             claim_lease_ms=None,
@@ -114,7 +114,7 @@ class TestLeaseAlwaysBounded:
         from horsies.core.worker.worker import Worker, WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             prefetch_buffer=2,

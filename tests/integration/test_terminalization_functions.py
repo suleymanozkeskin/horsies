@@ -1347,7 +1347,7 @@ class TestExpireOwnedClaim:
         task_id = await _seed(session, status='CLAIMED')
         await _deadline(session, task_id, seconds_ago=60)
 
-        conninfo = DB_URL.replace('postgresql+psycopg://', 'postgresql://')
+        conninfo = DB_URL
         with psycopg.connect(conninfo) as connection:
             with connection.cursor() as cursor:
                 outcome = apply_sync(cursor, _expire_claim(task_id))
@@ -2443,7 +2443,7 @@ class TestCancelOwnedNode:
             claimed_at=None,
             is_workflow_task=True,
         )
-        conninfo = DB_URL.replace('postgresql+psycopg://', 'postgresql://')
+        conninfo = DB_URL
         with psycopg.connect(conninfo) as connection:
             with connection.cursor() as cursor:
                 outcome = apply_sync(cursor, _cancel_owned_node(task_id))

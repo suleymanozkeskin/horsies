@@ -47,6 +47,7 @@ from horsies.core.models.task_send_types import (
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.archive.versions import archive_digest
+from horsies.core.utils.url import sqlalchemy_url
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
@@ -149,7 +150,7 @@ def _listener_of(broker: Any) -> Any:
             raise AssertionError('broker has no listener')
 
 
-def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') -> Any:
+def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
     """Create a PostgresBroker with fully mocked internals."""
     from horsies.core.models.broker import PostgresConfig
 
@@ -283,7 +284,7 @@ class TestSchemaAdvisoryKey:
 
     def test_returns_stable_int_from_database_url(self) -> None:
         """Same URL should always produce the same advisory key."""
-        broker = _make_broker('postgresql+psycopg://u:p@host1/db')
+        broker = _make_broker('postgresql://u:p@host1/db')
 
         key1 = broker._schema_advisory_key()
         key2 = broker._schema_advisory_key()
@@ -293,8 +294,8 @@ class TestSchemaAdvisoryKey:
 
     def test_schema_key_is_url_independent(self) -> None:
         """Different URLs should share the new schema advisory key."""
-        broker_a = _make_broker('postgresql+psycopg://u:p@host_a/db')
-        broker_b = _make_broker('postgresql+psycopg://u:p@host_b/db')
+        broker_a = _make_broker('postgresql://u:p@host_a/db')
+        broker_b = _make_broker('postgresql://u:p@host_b/db')
 
         key_a = broker_a._schema_advisory_key()
         key_b = broker_b._schema_advisory_key()
@@ -379,9 +380,9 @@ class TestPostgresBrokerPgBouncerWiring:
         ):
             broker = PostgresBroker(
                 PostgresConfig(
-                    database_url='postgresql+psycopg://u:p@pooler:6432/db',
+                    database_url='postgresql://u:p@pooler:6432/db',
                     session_database_url=(
-                        'postgresql+psycopg://u:p@direct:5432/db'
+                        'postgresql://u:p@direct:5432/db'
                     ),
                     pgbouncer_transaction_mode=True,
                 )
@@ -403,8 +404,8 @@ class TestPostgresBrokerPgBouncerWiring:
         from horsies.core.models.broker import PostgresConfig
         from horsies.core.brokers.postgres import PostgresBroker
 
-        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
-        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+        database_url = 'postgresql://u:p@pooler:6432/db'
+        session_url = 'postgresql://u:p@direct:5432/db'
 
         with (
             patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
@@ -423,7 +424,8 @@ class TestPostgresBrokerPgBouncerWiring:
             PostgresBroker(config)._build_resources()
 
         assert mock_engine.call_count == 2
-        assert mock_engine.call_args_list[0].args[0] == database_url
+        # The engines open the configured URLs with the psycopg 3 driver.
+        assert mock_engine.call_args_list[0].args[0] == sqlalchemy_url(database_url)
         assert mock_engine.call_args_list[0].kwargs['connect_args'] == {
             'keepalives': 1,
             'keepalives_idle': 30,
@@ -432,7 +434,7 @@ class TestPostgresBrokerPgBouncerWiring:
             'tcp_user_timeout': 30_000,
             'prepare_threshold': None,
         }
-        assert mock_engine.call_args_list[1].args[0] == session_url
+        assert mock_engine.call_args_list[1].args[0] == sqlalchemy_url(session_url)
         assert mock_engine.call_args_list[1].kwargs['connect_args'] == {
             'keepalives': 1,
             'keepalives_idle': 30,
@@ -452,8 +454,8 @@ class TestPostgresBrokerPgBouncerWiring:
         runtime_engine = MagicMock()
         schema_engine = MagicMock()
         schema_engine.dispose = AsyncMock()
-        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
-        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+        database_url = 'postgresql://u:p@pooler:6432/db'
+        session_url = 'postgresql://u:p@direct:5432/db'
         lock_connection = _schema_lock_connection()
 
         with (
@@ -484,8 +486,8 @@ class TestPostgresBrokerPgBouncerWiring:
             broker = PostgresBroker(config)
             await broker._ensure_initialized(await resources_of(broker))
 
-        assert mock_engine.call_args_list[0].args[0] == database_url
-        assert mock_engine.call_args_list[1].args[0] == session_url
+        assert mock_engine.call_args_list[0].args[0] == sqlalchemy_url(database_url)
+        assert mock_engine.call_args_list[1].args[0] == sqlalchemy_url(session_url)
         assert connect_lock.await_args is not None
         assert connect_lock.await_args.args[0] == 'postgresql://u:p@direct:5432/db'
         schema_engine.dispose.assert_not_awaited()
@@ -517,8 +519,8 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
         ):
             config = PostgresConfig(
-                database_url='postgresql+psycopg://u:p@pooler:6432/db',
-                session_database_url='postgresql+psycopg://u:p@direct:5432/db',
+                database_url='postgresql://u:p@pooler:6432/db',
+                session_database_url='postgresql://u:p@direct:5432/db',
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
@@ -633,7 +635,7 @@ class TestPostgresBrokerPgBouncerWiring:
             ) as mock_listener_cls,
         ):
             broker = PostgresBroker(
-                PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db'),
+                PostgresConfig(database_url='postgresql://u:p@localhost/db'),
                 assume_initialized=True,
             )
             resources = broker._build_resources()
@@ -1943,7 +1945,7 @@ class TestPingWorkers:
         from horsies.core.brokers.postgres import PostgresBroker
 
         config = PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db'
+            database_url='postgresql://u:p@localhost/db'
         )
         broker = PostgresBroker(config, assume_initialized=True)
         assert isinstance((await resources_of(broker)).listener, ListenerDisabled)

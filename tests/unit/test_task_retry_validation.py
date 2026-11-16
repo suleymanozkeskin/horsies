@@ -19,7 +19,7 @@ def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
+                database_url='postgresql://user:pass@localhost/db',
             ),
         )
     )

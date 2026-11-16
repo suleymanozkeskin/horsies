@@ -31,6 +31,7 @@ from horsies.core.schemas import recovery as recovery_schema
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 from tests.broker_resources_support import current_resources
+from horsies.core.utils.url import sqlalchemy_url
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -50,7 +51,7 @@ async def bounded_recovery_database() -> AsyncIterator[
 
         async with current_resources(broker).engine.begin() as connection:
             await ensure_history_seedable(connection)
-        engine = create_async_engine(url)
+        engine = create_async_engine(sqlalchemy_url(url))
         try:
             yield broker, engine
         finally:
@@ -692,7 +693,9 @@ async def test_recovery_index_upgrade_rebuilds_a_malformed_canonical_index(
             'DELETE FROM horsies_schema_version WHERE version >= 36'
         ))
 
-    url = engine.url.render_as_string(hide_password=False)
+    url = engine.url.set(drivername='postgresql').render_as_string(
+        hide_password=False,
+    )
     upgrade = PostgresBroker(
         PostgresConfig(database_url=SecretStr(url))
     )
@@ -730,7 +733,9 @@ async def test_recovery_index_claim_refuses_foreign_name_reuse(
             'DELETE FROM horsies_schema_version WHERE version >= 36'
         ))
 
-    url = engine.url.render_as_string(hide_password=False)
+    url = engine.url.set(drivername='postgresql').render_as_string(
+        hide_password=False,
+    )
     upgrade = PostgresBroker(
         PostgresConfig(database_url=SecretStr(url))
     )

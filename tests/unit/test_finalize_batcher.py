@@ -734,7 +734,7 @@ def test_the_worker_leaves_the_claim_loop_and_the_reserve_free(
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             parent_pool_size=pool,
@@ -908,7 +908,7 @@ def test_the_worker_holds_a_connection_for_claims_and_one_per_steady_flusher() -
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             parent_pool_size=5,

@@ -234,7 +234,7 @@ def _keep_the_test_process_unfrozen(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _make_worker(
-    dsn: str = 'postgresql+psycopg://u:p@localhost/db',
+    dsn: str = 'postgresql://u:p@localhost/db',
     psycopg_dsn: str = 'postgresql://u:p@localhost/db',
     queues: list[str] | None = None,
     claim_lease_ms: int | None = None,
@@ -419,7 +419,7 @@ class TestAdvisoryKeyGlobal:
         assert w1._advisory_key_global() == w2._advisory_key_global()
 
     def test_key_is_dsn_independent(self) -> None:
-        w1 = _make_worker(psycopg_dsn='', dsn='postgresql+psycopg://u:p@h/mydb')
+        w1 = _make_worker(psycopg_dsn='', dsn='postgresql://u:p@h/mydb')
         w2 = _make_worker(psycopg_dsn='postgresql://other@elsewhere/db')
         assert w1._advisory_key_global() == w2._advisory_key_global()
 
@@ -4907,7 +4907,7 @@ class TestWorkerConfigRecycleValidation:
 
         with pytest.raises(ValueError, match='must be >= 1'):
             WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 max_tasks_per_child=-1,
@@ -4919,7 +4919,7 @@ class TestWorkerConfigRecycleValidation:
 
         with pytest.raises(ValueError, match='drain_timeout_s'):
             WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 drain_timeout_s=value,
@@ -4930,7 +4930,7 @@ class TestWorkerConfigRecycleValidation:
 
         with pytest.raises(ValueError, match='processes'):
             WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 processes=0,
@@ -4940,7 +4940,7 @@ class TestWorkerConfigRecycleValidation:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             max_tasks_per_child=0,
@@ -4951,7 +4951,7 @@ class TestWorkerConfigRecycleValidation:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             max_tasks_per_child=1,
@@ -5439,7 +5439,7 @@ def _make_claim_worker(
 ) -> Worker:
     """Build a Worker pre-configured for claim-and-dispatch testing."""
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=queues or ['default'],
         prefetch_buffer=prefetch_buffer,
@@ -5617,7 +5617,7 @@ class TestReaperGatePoolCapacity:
     @staticmethod
     def _capacity_worker(pool_size: int) -> Worker:
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
@@ -5694,7 +5694,7 @@ class TestReaperResourceSelection:
     def _ungated_reaper_worker() -> Worker:
         """A worker whose reaper runs passes without a gate session."""
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
