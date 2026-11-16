@@ -21,16 +21,17 @@ use crate::broker::PostgresBroker;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{
-    AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec,
+    AnyNode, BuilderHookName, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec,
     WorkflowSpecRegistry,
 };
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
+use crate::workflow_engine::args_merge::{child_build_input, ChildBuildInput};
 use crate::workflow_engine::engine::subworkflow_load_failed_error;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, node_task_facts, require_subworkflow_node_keys,
-    stored_queue_and_priority, ChildSpecError,
+    stored_queue_and_priority, ChildSpecError, ChildSpecFailure,
 };
 use crate::workflow_engine::steps::{
     run_alone, run_in_transaction, step_row_select, step_rows, ChildBuild, OwedParentAdvances,
@@ -196,6 +197,10 @@ pub(crate) enum ChildBuildOutcome {
 /// `str(exc)[:200]`, `core/workflows/engine.py:1206`).
 const BUILD_FAILURE_TEXT_CHARS: usize = 200;
 
+/// Characters of the refusal text of an `args_from` value that the node
+/// error keeps (Python: `str(refusal)[:200]`, `core/workflows/engine.py:1152`).
+const ARGS_FROM_REFUSAL_TEXT_CHARS: usize = 200;
+
 /// Builds the arguments of a start: the top-level workflow `workflow_id` of
 /// `spec`, a pre-built child for every sub-workflow node without
 /// dependencies (recursively), and a failed-node record for each such node
@@ -282,7 +287,18 @@ fn tree_arguments(
                     parent_depth: workflow.depth,
                     definition_key: node.sub_definition_key.as_deref(),
                 },
-                || Ok(NodeInput::Input(node.input_json.clone())),
+                // A root node has no dependencies, so it has no `args_from`.
+                || {
+                    Ok(match child_build_input(node.input_json.clone(), None) {
+                        Ok(input) => NodeInput::Input(input),
+                        Err(refused) => NodeInput::NodeFails(build_failed_error(
+                            workflow.workflow_id,
+                            &workflow.spec.name,
+                            task_index,
+                            &ChildSpecError::of_stored_input(refused),
+                        )),
+                    })
+                },
                 node.sub_workflow_params,
                 registry,
             )?;
@@ -327,8 +343,10 @@ pub(crate) struct ChildOfNode<'a> {
 ///
 /// A child past the depth limit, one with no registration under its key, an
 /// `args_from` key that names a member of the static input (from
-/// `input_of`), and a builder that fails are [`ChildBuildOutcome::NodeFails`].
-/// Errors: what `input_of` returns. Does no I/O.
+/// `input_of`), an input member that the builder's decode refuses
+/// ([`params_refused_error`]), and a builder that fails are
+/// [`ChildBuildOutcome::NodeFails`]. Errors: what `input_of` returns. Does no
+/// I/O.
 pub(crate) fn build_child<F>(
     node: ChildOfNode<'_>,
     input_of: F,
@@ -361,23 +379,100 @@ where
         NodeInput::Input(input) => input,
         NodeInput::NodeFails(error) => return Ok(ChildBuildOutcome::NodeFails(error)),
     };
-    match materialize_child_spec(registered, params, &input, registry) {
+    match materialize_child_spec(registered, params, &input.text, registry) {
         Ok(spec) => Ok(ChildBuildOutcome::Built { spec, depth }),
-        Err(error) => Ok(ChildBuildOutcome::NodeFails(build_failed_error(
-            node.parent_workflow_id,
-            node.parent_workflow_name,
-            node.task_index,
-            &error,
-        ))),
+        Err(ChildSpecFailure::BuildFailed(error)) => {
+            Ok(ChildBuildOutcome::NodeFails(build_failed_error(
+                node.parent_workflow_id,
+                node.parent_workflow_name,
+                node.task_index,
+                &error,
+            )))
+        }
+        Err(ChildSpecFailure::MemberRefused { key, cause }) => {
+            Ok(ChildBuildOutcome::NodeFails(params_refused_error(
+                node.parent_workflow_id,
+                node.task_index,
+                RefusedMember {
+                    key: &key,
+                    cause: &cause,
+                },
+                &input,
+                registry.builder_hook(),
+            )))
+        }
     }
 }
 
 /// The input that the registered builder of a child takes.
 pub(crate) enum NodeInput {
-    /// The encoded input, `args_from` members merged.
-    Input(String),
+    /// The encoded input, `args_from` members merged after the static
+    /// members.
+    Input(ChildBuildInput),
     /// The input cannot be built; the node fails with this error.
     NodeFails(TaskError),
+}
+
+/// An input member whose value the decode of the child's builder refused.
+pub(crate) struct RefusedMember<'a> {
+    pub(crate) key: &'a str,
+    /// The decode's text, with the path of the value.
+    pub(crate) cause: &'a str,
+}
+
+/// The error of the sub-workflow node `task_index` of the workflow
+/// `workflow_id` whose input member `refused` does not decode to the builder
+/// parameter of that name: `WORKER_SERIALIZATION_ERROR` with the workflow id
+/// and the node in `data` (Python `_fail_enqueued_task`,
+/// `core/workflows/engine.py:474-512`). The message:
+/// - an `args_from` member of `input`:
+///   `args_from value for '<key>' does not fit the type that <hook> declares (subworkflow task <index>): <cause, 200 characters>`
+///   (Python `:1134-1157`, which names `build_with`);
+/// - a static member:
+///   `Typed decode of subworkflow kwargs failed for task <index>: <cause>`
+///   (Python `:1063-1080`).
+///
+/// Python decodes the static members before it checks the `args_from`
+/// values; the builder decodes `input.text`, which holds the static members
+/// first, so a refused `args_from` member means that every static member
+/// decoded. Pure.
+pub(crate) fn params_refused_error(
+    workflow_id: Uuid,
+    task_index: i32,
+    refused: RefusedMember<'_>,
+    input: &ChildBuildInput,
+    hook: BuilderHookName,
+) -> TaskError {
+    let message = match input
+        .args_from_keys
+        .iter()
+        .any(|key| key.as_str() == refused.key)
+    {
+        true => {
+            let cause: String = refused
+                .cause
+                .chars()
+                .take(ARGS_FROM_REFUSAL_TEXT_CHARS)
+                .collect();
+            format!(
+                "args_from value for '{}' does not fit the type that {} declares \
+                 (subworkflow task {task_index}): {cause}",
+                refused.key,
+                hook.as_str(),
+            )
+        }
+        false => format!(
+            "Typed decode of subworkflow kwargs failed for task {task_index}: {}",
+            refused.cause,
+        ),
+    };
+    TaskError {
+        data: Some(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "task_index": task_index,
+        })),
+        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+    }
 }
 
 /// The error of the sub-workflow node `task_index` of the workflow
