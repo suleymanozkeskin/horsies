@@ -319,7 +319,6 @@ async fn orphan_sweep_is_bounded_and_replays_through_single_variant() {
 /// production code (the abandon applies), so it is not asserted.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #785"]
 async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -336,6 +335,38 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
         .handle_workflow_stop_before_start(task_id, "PAUSED", WORKER, generation())
         .await
         .expect("stop before start");
+
+    assert_eq!(
+        node_state(&pool, workflow_id).await,
+        ("COMPLETED".to_owned(), Some(task_id))
+    );
+    cleanup_tasks(&pool, &[task_id]).await;
+    cleanup_workflows(&pool, &[workflow_id]).await;
+}
+
+/// The node half of `coupled_node_failure_rolls_back_history_and_live_delete`
+/// on the post-claim path: the post-claim abandon of a task of a PAUSED
+/// workflow whose node is already COMPLETED leaves the node COMPLETED with
+/// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
+/// `horsies/core/worker/sql.py:291-296`).
+#[tokio::test]
+#[serial]
+async fn post_claim_abandon_keeps_a_finished_node() {
+    let pool = pool().await;
+    let task_id = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::WorkflowNode,
+            ..TaskSeed::claimed()
+        },
+    )
+    .await;
+    let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
+
+    PostgresBroker::from_pool(pool.clone())
+        .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
+        .await
+        .expect("post-claim workflow check");
 
     assert_eq!(
         node_state(&pool, workflow_id).await,

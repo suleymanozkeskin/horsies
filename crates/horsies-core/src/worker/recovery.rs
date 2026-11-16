@@ -23,6 +23,7 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
+use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
@@ -1029,6 +1030,10 @@ pub fn spawn_reaper(
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
+        // The fleet check runs after each pass, from one check interval after
+        // the start on (Python `reaper.py:622-628, 747-750`).
+        let mut coverage_log =
+            ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -1062,6 +1067,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                 }
                 GatePass::Held(tx) => {
                     run_reaper_pass(
@@ -1077,6 +1083,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                     release_gate(tx).await;
                 }
             }
@@ -2998,6 +3005,9 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod class_coverage_loop_tests;
 
 #[cfg(test)]
 mod retention_ports;
