@@ -723,11 +723,11 @@ fn history_attempt(record: &AttemptRecord) -> TaskAttemptInfo {
 }
 
 fn history_leaf(detail: &HistoryTaskDetail) -> LeafTaskInfo {
-    let completed_at = (detail.status == "COMPLETED").then_some(detail.terminal_at);
-    let failed_at = (detail.status != "COMPLETED").then_some(detail.terminal_at);
+    let completed_at = (detail.status == TaskStatus::Completed).then_some(detail.terminal_at);
+    let failed_at = (detail.status != TaskStatus::Completed).then_some(detail.terminal_at);
     LeafTaskInfo {
         task_id: detail.task_id,
-        status: detail.status.clone(),
+        status: detail.status.to_string(),
         error_code: normalize_optional_text(detail.error_code.as_deref()),
         failed_reason: normalize_optional_text(detail.final_failed_reason.as_deref()),
         retry_count: detail.retry_count,
@@ -1408,8 +1408,8 @@ async fn workflow_link(
 }
 
 /// The history row of a task, or `None`. A history status that is not a
-/// task status is a contract violation, as Python's detail decode
-/// (`horsies/monitoring/queries.py:1404-1499`).
+/// task status is a contract error of the detail read, as Python's detail
+/// decode (`horsies/core/history/reads/detail.py:248-259`).
 async fn history_detail_or_none(
     connection: &mut PgConnection,
     task_id: Uuid,
@@ -1418,12 +1418,7 @@ async fn history_detail_or_none(
         return Ok(None);
     }
     match read_task_detail(connection, task_id).await? {
-        TaskDetailResult::History(detail) => match detail.status.parse::<TaskStatus>() {
-            Ok(_) => Ok(Some(detail)),
-            Err(reason) => Err(HistoryError::contract(format!(
-                "history row of task {task_id} has an unknown status: {reason}"
-            ))),
-        },
+        TaskDetailResult::History(detail) => Ok(Some(detail)),
         TaskDetailResult::Live { .. } | TaskDetailResult::Absent { .. } => Ok(None),
     }
 }

@@ -18,6 +18,7 @@ use crate::core::history::reads::detail::{read_task_detail, TaskAbsenceReason, T
 use crate::core::history::rerun::input_envelope::{
     decode_framed_rerun_input, InputEnvelopeDecodeError,
 };
+use crate::core::types::status::TaskStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunTask {
@@ -194,7 +195,7 @@ pub async fn rerun_task_in_tx(
             reason: NotEligibleReason::WorkflowTask,
         });
     }
-    if detail.status == "COMPLETED" {
+    if detail.status == TaskStatus::Completed {
         return Ok(RerunOutcome::NotEligible {
             task_id: command.source_task_id,
             reason: NotEligibleReason::CompletedSource,
