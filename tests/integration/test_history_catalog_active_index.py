@@ -1,21 +1,28 @@
 """The leaf catalog's active-record index keeps retention scans off dropped leaves.
 
 A dropped leaf's catalog record stays, so the catalog grows by one record per
-class per day. The expired-leaf scan reads only records whose leaf is not
-dropped; with the partial index it never examines a dropped record.
+class per day. The expired-leaf read (``horsies_prune_candidates``) reads only
+records whose leaf is not dropped; with the partial index it never examines a
+dropped record.
+
+A plain ``EXPLAIN`` of a PL/pgSQL call shows a Function Scan only. The plan of
+the statement inside the function comes from ``auto_explain`` with
+``log_nested_statements``; ``client_min_messages = log`` sends it to this
+session as a notice.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Final, cast
 
+import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.commands import PRUNE_BOUNDS
-from horsies.core.history.maintenance.pruning import EXPIRED_HISTORY_LEAVES_SQL
 from horsies.core.history.names import LEAF_CATALOG
 from tests.integration.task_history_harness import register_class
 
@@ -27,6 +34,8 @@ ACTIVE_RECORDS = 20
 ACTIVE_INDEX: Final = 'horsies_task_history_leaf_catalog_active'
 MAX_PLAN_NODES: Final = 256
 """Upper bound of the plan nodes the walk reads; a larger plan fails the test."""
+PLAN_MARKER: Final = 'plan:\n'
+"""The text before the JSON plan in an ``auto_explain`` message."""
 
 type PlanNode = dict[str, object]
 
@@ -45,6 +54,17 @@ SEED_CATALOG_SQL = text(f"""
 """)
 
 INDEX_DEFINITION_SQL = text('SELECT pg_get_indexdef(to_regclass(:index_name))')
+
+AUTO_EXPLAIN_SETTINGS: Final = (
+    "LOAD 'auto_explain'",
+    'SET LOCAL auto_explain.log_min_duration = 0',
+    'SET LOCAL auto_explain.log_nested_statements = on',
+    'SET LOCAL auto_explain.log_analyze = on',
+    "SET LOCAL auto_explain.log_format = 'json'",
+    'SET LOCAL client_min_messages = log',
+)
+
+CANDIDATES_SQL = text('SELECT count(*) FROM horsies_prune_candidates(:limit)')
 
 
 def _plan_nodes(root: PlanNode) -> list[PlanNode]:
@@ -82,17 +102,36 @@ def _catalog_scan_indexes(root: PlanNode) -> list[frozenset[str]]:
     return scans
 
 
+def _logged_plans(messages: list[str]) -> list[PlanNode]:
+    """The root plan node of every ``auto_explain`` message."""
+    plans: list[PlanNode] = []
+    for message in messages:
+        if PLAN_MARKER not in message:
+            continue
+        document = json.loads(message.split(PLAN_MARKER, 1)[1])
+        plans.append(cast(PlanNode, document['Plan']))
+    return plans
+
+
 async def test_expired_leaf_scan_examines_only_active_records(
     broker: PostgresBroker,
     engine: AsyncEngine,
 ) -> None:
     _ = broker
+    messages: list[str] = []
+
+    def collect(diagnostic: psycopg.errors.Diagnostic) -> None:
+        if diagnostic.message_primary is not None:
+            messages.append(diagnostic.message_primary)
+
     async with engine.connect() as connection:
+        raw = await connection.get_raw_connection()
+        driver = cast(psycopg.AsyncConnection[object], raw.driver_connection)
+        driver.add_notice_handler(collect)
         transaction = await connection.begin()
         try:
-            parent = await register_class(connection, CLASS_KEY)
+            await register_class(connection, CLASS_KEY)
             await connection.execute(SEED_CATALOG_SQL, {
-                'parent': parent,
                 'class_key': CLASS_KEY,
                 'dropped': DROPPED_RECORDS,
                 'total': DROPPED_RECORDS + ACTIVE_RECORDS,
@@ -101,21 +140,26 @@ async def test_expired_leaf_scan_examines_only_active_records(
             definition = cast(str | None, (await connection.execute(
                 INDEX_DEFINITION_SQL, {'index_name': ACTIVE_INDEX},
             )).scalar_one())
-            plan = cast(PlanNode, (await connection.execute(
-                text('EXPLAIN (ANALYZE, FORMAT JSON) ' + EXPIRED_HISTORY_LEAVES_SQL),
-                {'limit': PRUNE_BOUNDS.candidates + 1},
-            )).scalar_one()[0]['Plan'])
+            for setting in AUTO_EXPLAIN_SETTINGS:
+                await connection.execute(text(setting))
+            candidates = (await connection.execute(
+                CANDIDATES_SQL, {'limit': PRUNE_BOUNDS.candidates + 1},
+            )).scalar_one()
         finally:
             await transaction.rollback()
+            driver.remove_notice_handler(collect)
 
     # The index holds only records whose leaf is not dropped, and every
-    # catalog scan reads through it: the scan examines no dropped record.
-    # Rows are not counted. EXPLAIN gives the rows of a scan as a mean per
-    # loop, rounded, so the mean times the loops is not the exact count.
+    # catalog scan inside the function reads through it: the read examines
+    # no dropped record. Rows are not counted. EXPLAIN gives the rows of a
+    # scan as a mean per loop, rounded, so the mean times the loops is not
+    # the exact count.
     assert definition is not None, f'{ACTIVE_INDEX} does not exist'
     assert definition.endswith(' WHERE (dropped_at IS NULL)'), definition
-    scans = _catalog_scan_indexes(plan)
-    assert scans, plan
-    assert all(scan == {ACTIVE_INDEX} for scan in scans), plan
-    # The seeded active records are expired, so the scan returns them.
-    assert cast(float, plan['Actual Rows']) >= ACTIVE_RECORDS
+    scans = [
+        scan for plan in _logged_plans(messages) for scan in _catalog_scan_indexes(plan)
+    ]
+    assert scans, messages
+    assert all(scan == {ACTIVE_INDEX} for scan in scans), messages
+    # The seeded active records are expired, so the read returns them.
+    assert cast(int, candidates) >= ACTIVE_RECORDS

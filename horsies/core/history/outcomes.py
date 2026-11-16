@@ -36,6 +36,14 @@ class CatalogConflictKind(Enum):
     RELATION_WITHOUT_CATALOG = 'RELATION_WITHOUT_CATALOG'
     METADATA_MISMATCH = 'METADATA_MISMATCH'
     PHYSICAL_NONCONFORMANT = 'PHYSICAL_NONCONFORMANT'
+    OPEN_LOWER_BOUND = 'OPEN_LOWER_BOUND'
+    """A finite leaf's catalog row has an open lower bound."""
+    DROPPED_RELATION_EXISTS = 'DROPPED_RELATION_EXISTS'
+    """The catalog recorded a drop and the relation exists."""
+    FOREIGN_PARENT = 'FOREIGN_PARENT'
+    """The leaf is attached to a parent other than its class parent."""
+    DETACH_RECORDED_WHILE_ATTACHED = 'DETACH_RECORDED_WHILE_ATTACHED'
+    """The catalog recorded a detach and the leaf is attached."""
 
 
 @dataclass(frozen=True, slots=True)

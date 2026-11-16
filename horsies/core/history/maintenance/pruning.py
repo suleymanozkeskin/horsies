@@ -2,14 +2,14 @@
 
 Partition-drop retention has two halves: coverage creates leaves ahead
 of writes, and pruning removes leaves whose class duration has elapsed.
-This module owns the second half — discovery from the leaf catalog
-joined to the retention classes, then the shared manager machinery per
-leaf. An interrupted detach is finalized before anything else, because
-PostgreSQL refuses every further detach on a parent while one is
-pending finalization; then each expired leaf is detached and dropped.
-Forever is never a candidate: discovery selects ``PERIOD`` and
-``HEARTBEAT`` classes by kind, and the static forever leaf has no
-anchored lower bound.
+This module owns the second half — one candidate read
+(``horsies_prune_candidates``: the expired PERIOD and HEARTBEAT leaves
+and their attachment), then the shared manager machinery per leaf. An
+interrupted detach (attachment ``DETACH_PENDING``) is finalized before
+anything else, because PostgreSQL refuses every further detach on a
+parent while one is pending finalization; then each expired leaf is
+detached and dropped. Forever is never a candidate: the candidate read
+selects ``PERIOD`` and ``HEARTBEAT`` classes by kind.
 
 Refusals are outcomes, not errors: a pending locator pinning a leaf, a
 loader still referencing a relation, or a blocked finalization each
@@ -24,12 +24,9 @@ tick.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Final
+from dataclasses import dataclass
 
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import (
     DETACH_STATEMENT_TIMEOUT_MS,
@@ -45,12 +42,10 @@ from ..commands import (
 from .database import PartitionMaintenanceDatabase
 from ..heartbeats.partitioning import (
     HeartbeatLeafSwept,
-    sweep_expired_heartbeat_leaves,
+    sweep_heartbeat_leaves,
 )
-from ..names import LEAF_CATALOG, RETENTION_CLASSES
 from ..outcomes import (
     LeafDetached,
-    LeafDetachInterrupted,
     LeafDrop,
     LeafDropped,
     LeafInspection,
@@ -59,7 +54,6 @@ from ..outcomes import (
     PruneReach,
     counts_toward_prune_bound,
 )
-from ..partitions.catalog import decode_leaf_bounds
 from ..partitions.manager import (
     detach_expired_leaf,
     drop_detached_leaf,
@@ -67,6 +61,12 @@ from ..partitions.manager import (
     inspect_leaf,
 )
 from ..partitions.publication import LoaderPublication
+from ..partitions.retirement import (
+    CandidateAttachment,
+    PruneCandidates,
+    RetiredClassKind,
+    read_prune_candidates,
+)
 
 __all__ = [
     'DETACH_STATEMENT_TIMEOUT_MS',
@@ -76,42 +76,6 @@ __all__ = [
     'prune_expired_partitions',
     'sweep_expired_history_leaves',
 ]
-
-
-# Period classes past their retention. Forever is excluded by kind; the
-# heartbeat class has its own sweep.
-EXPIRED_HISTORY_LEAVES_SQL: Final = f"""
-SELECT c.leaf_name, c.class_key, c.lower_anchor, c.upper_anchor
-FROM {LEAF_CATALOG} AS c
-JOIN {RETENTION_CLASSES} AS r ON r.class_key = c.class_key
-WHERE r.class_kind = 'PERIOD'
-  AND c.lower_bound_kind = 'AT'
-  AND c.dropped_at IS NULL
-  AND c.upper_anchor + r.retention_days * interval '1 day'
-      <= statement_timestamp()
-ORDER BY c.lower_anchor
-LIMIT :limit
-"""
-
-# Every finite-class candidate, heartbeats included: the finalize
-# pre-phase must see all parents, because one pending finalization
-# blocks every further detach on its parent.
-EXPIRED_FINITE_LEAVES_SQL: Final = f"""
-SELECT c.leaf_name, c.class_key, c.lower_anchor, c.upper_anchor
-FROM {LEAF_CATALOG} AS c
-JOIN {RETENTION_CLASSES} AS r ON r.class_key = c.class_key
-WHERE r.class_kind IN ('PERIOD', 'HEARTBEAT')
-  AND c.lower_bound_kind = 'AT'
-  AND c.dropped_at IS NULL
-  AND c.upper_anchor
-      + COALESCE(
-          r.retention_days * interval '1 day',
-          r.heartbeat_horizon_hours * interval '1 hour'
-      )
-      <= statement_timestamp()
-ORDER BY c.lower_anchor
-LIMIT :limit
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,76 +137,38 @@ class PrunePass:
 
 
 @dataclass(frozen=True, slots=True)
-class _Candidates:
-    leaves: tuple[LeafRef, ...]
-    reach: PruneReach
-
-
-async def _expired_candidates(
-    connection: AsyncConnection,
-    statement: str,
-    bounds: PruneBounds,
-) -> _Candidates:
-    """The oldest expired leaves that `statement` selects, at most
-    `bounds.candidates`, and whether more remain."""
-    rows = (
-        await connection.execute(text(statement), {'limit': bounds.candidates + 1})
-    ).all()
-    return _Candidates(
-        leaves=tuple(
-            LeafRef(
-                leaf_name=row.leaf_name,
-                class_key=row.class_key,
-                bounds=decode_leaf_bounds(row.lower_anchor, row.upper_anchor),
-            )
-            for row in rows[: bounds.candidates]
-        ),
-        reach=(
-            PruneReach.TRUNCATED
-            if len(rows) > bounds.candidates
-            else PruneReach.WITHIN_BOUNDS
-        ),
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class _Finalized:
     leaves: tuple[str, ...]
     refusals: tuple[str, ...]
     errors: tuple[str, ...]
-    reach: PruneReach
 
 
 async def _finalize_interrupted_detaches(
     database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
-    bounds: PruneBounds,
+    candidates: PruneCandidates,
 ) -> _Finalized:
-    """Finalize every interrupted detach among the expired candidates.
+    """Finalize every candidate whose concurrent detach is pending.
 
-    A blocked finalization is a refusal — the manager returns the leaf
-    re-inspected and it stays pending until its blockers drain.
-    Finalizations do not count toward `bounds.acted_leaves`.
+    A finalization that does not end detached is a refusal — for example a
+    blocked leaf stays pending until its blockers drain. A database error
+    of one leaf is reported as `finalize leaf: cause`. Finalizations do not
+    count toward the acted-leaf bound.
     """
-    async with database.connect() as connection:
-        candidates = await _expired_candidates(
-            connection, EXPIRED_FINITE_LEAVES_SQL, bounds
-        )
-        interrupted: list[LeafRef] = []
-        for ref in candidates.leaves:
-            inspection = await inspect_leaf(
-                connection,
-                InspectHistoryLeaf(leaf=ref, lifecycle=LeafLifecycle.RETENTION),
-            )
-            match inspection:
-                case LeafDetachInterrupted():
-                    interrupted.append(ref)
-                case _:
-                    pass
     finalized: list[str] = []
     refusals: list[str] = []
     errors: list[str] = []
-    for ref in interrupted:
+    for candidate in candidates.leaves:
+        match candidate.attachment:
+            case CandidateAttachment.DETACH_PENDING:
+                pass
+            case (
+                CandidateAttachment.ATTACHED
+                | CandidateAttachment.DETACHED
+                | CandidateAttachment.MISSING
+            ):
+                continue
+        ref = candidate.leaf
         try:
             outcome = await finalize_interrupted_detach(
                 database,
@@ -264,39 +190,31 @@ async def _finalize_interrupted_detaches(
                     f'finalize {ref.leaf_name}: {type(outcome).__name__}'
                 )
     return _Finalized(
-        leaves=tuple(finalized),
-        refusals=tuple(refusals),
-        errors=tuple(errors),
-        reach=candidates.reach,
+        leaves=tuple(finalized), refusals=tuple(refusals), errors=tuple(errors)
     )
 
 
-async def sweep_expired_history_leaves(
+async def sweep_history_leaves(
     database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
-    bounds: PruneBounds = PRUNE_BOUNDS,
+    leaves: tuple[LeafRef, ...],
+    max_acted_leaves: int,
 ) -> LeafSweep[HistoryLeafSwept]:
-    """Detach and drop the oldest finite task-history leaves past their horizon.
+    """Detach and drop expired task-history leaves, in the given order.
 
-    Discovery reads at most `bounds.candidates` expired leaves, oldest
-    first. Mirrors the heartbeat sweep's sequence per leaf — detach,
-    re-inspect for the crashed-between-detach-and-drop state, drop — with
-    a statement timeout on the concurrent detach. The sweep stops when
-    `bounds.acted_leaves` leaves count toward the bound
-    (`counts_toward_prune_bound`). A database error of one leaf is
-    reported as `leaf: cause`, counts toward the bound, and the sweep
-    goes on with the next leaf; a database error of the discovery raises.
+    Per leaf: detach, re-inspect for the crashed-between-detach-and-drop
+    state, drop, with a statement timeout on the concurrent detach. The
+    sweep stops when `max_acted_leaves` leaves count toward the bound
+    (`counts_toward_prune_bound`); it is then `TRUNCATED`. A database
+    error of one leaf is reported as `leaf: cause`, counts toward the
+    bound, and the sweep goes on with the next leaf.
     """
-    async with database.connect() as connection:
-        candidates = await _expired_candidates(
-            connection, EXPIRED_HISTORY_LEAVES_SQL, bounds
-        )
     swept: list[HistoryLeafSwept] = []
     errors: list[str] = []
     acted = 0
-    reach = candidates.reach
-    for ref in candidates.leaves:
-        if acted >= bounds.acted_leaves:
+    reach = PruneReach.WITHIN_BOUNDS
+    for ref in leaves:
+        if acted >= max_acted_leaves:
             reach = PruneReach.TRUNCATED
             break
         try:
@@ -310,6 +228,42 @@ async def sweep_expired_history_leaves(
     return LeafSweep(
         swept=tuple(swept), errors=tuple(errors), acted=acted, reach=reach
     )
+
+
+async def sweep_expired_history_leaves(
+    database: PartitionMaintenanceDatabase,
+    publisher: LoaderPublication,
+    bounds: PruneBounds = PRUNE_BOUNDS,
+) -> LeafSweep[HistoryLeafSwept]:
+    """Read the candidates of one pass and sweep its task-history leaves.
+
+    `TRUNCATED` when the candidate read or the leaf bound left expired
+    leaves for the next pass. A database error of the candidate read
+    raises.
+    """
+    async with database.connect() as connection:
+        candidates = await read_prune_candidates(connection, bounds)
+    sweep = await sweep_history_leaves(
+        database,
+        publisher,
+        candidates.of_kind(RetiredClassKind.PERIOD),
+        bounds.acted_leaves,
+    )
+    return LeafSweep(
+        swept=sweep.swept,
+        errors=sweep.errors,
+        acted=sweep.acted,
+        reach=_combined_reach(candidates.reach, sweep.reach),
+    )
+
+
+def _combined_reach(*reaches: PruneReach) -> PruneReach:
+    """`TRUNCATED` when any part of a pass was truncated."""
+    match [reach for reach in reaches if reach is PruneReach.TRUNCATED]:
+        case []:
+            return PruneReach.WITHIN_BOUNDS
+        case _:
+            return PruneReach.TRUNCATED
 
 
 async def _sweep_history_leaf(
@@ -382,55 +336,44 @@ async def prune_expired_partitions(
     publisher: LoaderPublication,
     bounds: PruneBounds = PRUNE_BOUNDS,
 ) -> PrunePass:
-    """One pruning pass: finalize interrupted detaches, then the heartbeat
-    and finite-history sweeps.
+    """One pruning pass: one candidate read, finalize interrupted
+    detaches, then the heartbeat and finite-history sweeps.
 
-    The finalize phase runs first across every finite class because one
-    pending finalization blocks all further detaches on its parent. Both
-    sweeps contain a database error per leaf: the leaf is reported and
-    the sweep goes on with the next leaf. A failed heartbeat discovery is
-    one pass error (`heartbeat sweep: cause`) and the task-history sweep
-    still runs. The sweeps act on at most `bounds.acted_leaves` leaves,
-    heartbeat leaves first; each candidate read returns at most
-    `bounds.candidates` leaves.
+    The candidate read returns at most `bounds.candidates` expired leaves,
+    oldest first. The finalize phase runs first across every finite class
+    because one pending finalization blocks all further detaches on its
+    parent. Both sweeps contain a database error per leaf: the leaf is
+    reported and the sweep goes on with the next leaf. The sweeps act on
+    at most `bounds.acted_leaves` leaves, heartbeat leaves first. A
+    database error of the candidate read raises.
     """
-    finalized = await _finalize_interrupted_detaches(database, publisher, bounds)
-    errors: list[str] = list(finalized.errors)
-    heartbeat_swept: tuple[HeartbeatLeafSwept, ...] = ()
-    heartbeat_acted = 0
-    heartbeat_reach = PruneReach.WITHIN_BOUNDS
-    try:
-        heartbeat = await sweep_expired_heartbeat_leaves(database, publisher, bounds)
-    except SQLAlchemyError as error:
-        errors.append(f'heartbeat sweep: {error}')
-    else:
-        heartbeat_swept = heartbeat.swept
-        heartbeat_acted = heartbeat.acted
-        heartbeat_reach = heartbeat.reach
-        errors.extend(f'heartbeat {error}' for error in heartbeat.errors)
-    history = await sweep_expired_history_leaves(
+    async with database.connect() as connection:
+        candidates = await read_prune_candidates(connection, bounds)
+    finalized = await _finalize_interrupted_detaches(database, publisher, candidates)
+    heartbeat = await sweep_heartbeat_leaves(
         database,
         publisher,
-        replace(bounds, acted_leaves=bounds.acted_leaves - heartbeat_acted),
+        candidates.of_kind(RetiredClassKind.HEARTBEAT),
+        bounds.acted_leaves,
     )
-    errors.extend(history.errors)
-    match finalized.reach, heartbeat_reach, history.reach:
-        case (
-            PruneReach.WITHIN_BOUNDS,
-            PruneReach.WITHIN_BOUNDS,
-            PruneReach.WITHIN_BOUNDS,
-        ):
-            reach = PruneReach.WITHIN_BOUNDS
-        case _:
-            reach = PruneReach.TRUNCATED
+    history = await sweep_history_leaves(
+        database,
+        publisher,
+        candidates.of_kind(RetiredClassKind.PERIOD),
+        bounds.acted_leaves - heartbeat.acted,
+    )
     return PrunePass(
         finalized_leaves=finalized.leaves,
-        heartbeat_swept=heartbeat_swept,
+        heartbeat_swept=heartbeat.swept,
         history_swept=history.swept,
         refusals=(
             *finalized.refusals,
-            *_sweep_refusals(heartbeat_swept, history.swept),
+            *_sweep_refusals(heartbeat.swept, history.swept),
         ),
-        errors=tuple(errors),
-        reach=reach,
+        errors=(
+            *finalized.errors,
+            *(f'heartbeat {error}' for error in heartbeat.errors),
+            *history.errors,
+        ),
+        reach=_combined_reach(candidates.reach, heartbeat.reach, history.reach),
     )

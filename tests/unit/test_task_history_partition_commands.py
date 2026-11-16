@@ -439,35 +439,3 @@ class TestDerivedNames:
             leaf_id_index_name('horsies_task_history_finite_30d_2026_08_06')
             == 'horsies_task_history_finite_30d_2026_08_06_task_idx'
         )
-
-
-class TestFinalizeAppliesItsTimeout:
-    """Carrying the field is not the same as using it.
-
-    Adding `statement_timeout_ms` to the command would look like a fix
-    while the executor ignored it, so this reads the executor's own
-    source for the two statements that make the timeout real: reading
-    the prior value, and setting the new one. A FINALIZE that waits
-    unbounded blocks every future detach on its parent, so the failure
-    this guards is the expensive one in the family.
-    """
-
-    def test_finalize_reads_and_sets_the_statement_timeout(self) -> None:
-        import inspect as _inspect
-
-        from horsies.core.history.partitions import manager
-
-        source = _inspect.getsource(manager.finalize_interrupted_detach)
-        assert 'command.statement_timeout_ms' in source, (
-            'the finalize executor never reads the timeout it is given'
-        )
-        assert '_read_session_timeouts' in source, (
-            'the prior timeout is not captured, so it cannot be restored'
-        )
-        assert '_set_session_timeouts' in source, (
-            'the operation timeout is not applied'
-        )
-        cleanup_source = _inspect.getsource(manager._cleanup_session_leaf_lock)
-        assert "set_config('statement_timeout'" in cleanup_source, (
-            'the timeout must be both applied and restored'
-        )
