@@ -5025,6 +5025,35 @@ class TestUpdateWorkerState:
         }
 
     @pytest.mark.asyncio
+    async def test_unset_maps_are_written_as_empty_objects(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No queue map, no recovery config and no pass health: the three
+        NOT NULL map columns get ``{}``."""
+        worker = _make_worker()
+        worker.cfg.processes = 1
+        _unstarted_pool(worker)
+        monkeypatch.setattr(
+            'horsies.core.worker.health._collect_psutil_metrics',
+            lambda: (1.0, 1.0, 1.0, 1.0),
+        )
+        worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._update_worker_state()  # pyright: ignore[reportPrivateUsage]
+
+        params = session.execute.await_args.args[1]
+        assert params['qp'].obj == {}
+        assert params['qmc'].obj == {}
+        assert params['recovery'].obj == {}
+
+    @pytest.mark.asyncio
     async def test_a_degraded_worker_reports_its_down_slots(
         self,
         monkeypatch: pytest.MonkeyPatch,

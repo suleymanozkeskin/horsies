@@ -7,7 +7,6 @@ from sqlalchemy import (
     String,
     Text,
     Boolean,
-    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -257,7 +256,8 @@ class TaskModel(Base):
 
 
 class TaskAttemptModel(Base):
-    """Immutable per-attempt history for task executions."""
+    """Immutable per-attempt history for task executions, keyed by
+    ``(task_id, attempt)``."""
 
     __tablename__ = 'horsies_task_attempts'
     __table_args__ = (
@@ -268,17 +268,14 @@ class TaskAttemptModel(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(
         Uuid(as_uuid=False),
-        ForeignKey('horsies_tasks.id', ondelete='CASCADE'),
-        nullable=False,
+        ForeignKey('horsies_tasks.id'),
+        primary_key=True,
     )
-    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
-    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
-    will_retry: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=sa_false(),
-    )
+    attempt: Mapped[int] = mapped_column(Integer, primary_key=True)
+    outcome: Mapped[str] = mapped_column(String(14), nullable=False)
+    will_retry: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
     )
@@ -288,19 +285,18 @@ class TaskAttemptModel(Base):
     error_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     failed_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    worker_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    worker_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    worker_pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    worker_process_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        server_default=text('NOW()'),
-    )
+    worker_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    worker_hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    worker_pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_process_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class TaskHeartbeatModel(Base):
-    """Normalized heartbeat entries for task liveness tracking."""
+    """Normalized heartbeat entries for task liveness tracking.
+
+    The table has no key. ``(task_id, role, sent_at)`` is the mapper's
+    identity only; the database does not hold it unique.
+    """
 
     __tablename__ = 'horsies_heartbeats'
     __table_args__ = (
@@ -312,17 +308,14 @@ class TaskHeartbeatModel(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    task_id: Mapped[str] = mapped_column(
-        Uuid(as_uuid=False), nullable=False
-    )
+    task_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True)
     sender_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    role: Mapped[str] = mapped_column(String(7), primary_key=True)
     sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True), default=utc_now, primary_key=True,
     )
-    hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    pid: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class WorkerStateModel(Base):
@@ -336,15 +329,12 @@ class WorkerStateModel(Base):
 
     __tablename__ = 'horsies_worker_states'
 
-    # Timeseries primary key
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    worker_id: Mapped[str] = mapped_column(
-        String(255), nullable=False,
-    )  # served by idx_horsies_worker_states_worker_snapshot (schema v3)
+    # Identity: one snapshot per (worker_id, snapshot_at), the unique index
+    # horsies_worker_states_identity.
+    worker_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     snapshot_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
-        index=True,
+        primary_key=True,
         default=utc_now,
     )
 
@@ -359,18 +349,14 @@ class WorkerStateModel(Base):
     cluster_wide_cap: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     queues: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
 
-    # Queue configuration (CUSTOM mode)
-    queue_priorities: Mapped[Optional[dict[str, int]]] = mapped_column(
-        JSONB, nullable=True
-    )
-    queue_max_concurrency: Mapped[Optional[dict[str, int]]] = mapped_column(
-        JSONB, nullable=True
+    # Queue configuration (CUSTOM mode); an empty map when none is set.
+    queue_priorities: Mapped[dict[str, int]] = mapped_column(JSONB, nullable=False)
+    queue_max_concurrency: Mapped[dict[str, int]] = mapped_column(
+        JSONB, nullable=False,
     )
 
-    # Recovery configuration snapshot
-    recovery_config: Mapped[Optional[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=True
-    )
+    # Recovery configuration snapshot; an empty map when none is set.
+    recovery_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
     # Current load at snapshot time
     tasks_running: Mapped[int] = mapped_column(
@@ -397,20 +383,12 @@ class WorkerStateModel(Base):
 
     # The slots that were down for a cause that can clear: a JSON array of
     # {slot, cause, detail, down_since, failed_boots}, empty when none was.
-    # NULL in a row from a worker version that did not record it.
-    slots_down: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
+    slots_down: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
 
     # The claim budgets: each budget class to {capacity, serves}, where
     # capacity counts the children or seats of that class in service and
     # serves lists the execution classes whose rows the budget claims.
-    # NULL in a row from a worker version that did not record it.
-    class_capacity: Mapped[Optional[dict[str, Any]]] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
+    class_capacity: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
 class ScheduleStateModel(Base):
