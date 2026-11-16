@@ -294,6 +294,7 @@ pub enum SchemaMode {
 pub struct SendManifest {
     /// Keep the rerun input at enqueue when the task does not choose.
     pub retain_rerun_input_default: bool,
+    /// The reservation window of a keyed send, in microseconds.
     pub idempotency_reservation_window: ReservationWindowMicros,
 }
 

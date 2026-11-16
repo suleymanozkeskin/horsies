@@ -163,6 +163,7 @@ class SendManifest:
     """Keep the rerun input at enqueue when the task does not choose."""
 
     idempotency_reservation_window: int
+    """The reservation window of a keyed send, in microseconds."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
