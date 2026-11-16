@@ -42,8 +42,8 @@ use crate::broker::row::task::{
 };
 
 use crate::broker::process_listener::{
-    default_payload_capacity, fixed_channel, ListenError, ListenerDisabledCause, ProcessListener,
-    TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
+    default_payload_capacity, fixed_channel, ListenError, ProcessListener, TASK_DONE_CHANNEL,
+    WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
     BoundedTaskList, StaleMinutes, TASK_LIST_BOUND, TASK_LIST_READ_LIMIT,
@@ -682,23 +682,6 @@ fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
     with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
-/// The listener of a broker built from a config: on the session URL, or none
-/// in observe-only mode (Python `assume_initialized=True` opens no listener,
-/// `horsies/core/brokers/postgres.py:1098-1107`).
-fn config_listener(
-    schema_initialization_mode: SchemaInitializationMode,
-    session_url: &str,
-) -> ProcessListener {
-    match schema_initialization_mode {
-        SchemaInitializationMode::MigrateAndValidate => {
-            ProcessListener::on_session_url(session_url)
-        }
-        SchemaInitializationMode::ObserveOnly => {
-            ProcessListener::disabled(ListenerDisabledCause::ObserveOnly)
-        }
-    }
-}
-
 fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
     BrokerError::ConnectionFailed(format!(
         "Postgres LISTEN delivery probe failed; session_database_url must be direct/session-capable and able to preserve LISTEN/NOTIFY session state: {err}",
@@ -772,7 +755,8 @@ pub enum SchemaInitializationMode {
     /// Apply migrations and require the validated task-history fleet gate.
     MigrateAndValidate,
     /// Connect for monitoring reads without executing schema DDL or fleet
-    /// gates. The broker opens no listener (Python `assume_initialized=True`).
+    /// gates. The broker keeps its listener, as Python's web tool, which runs
+    /// with `run_schema_migrations=False`.
     ObserveOnly,
 }
 
@@ -799,14 +783,14 @@ impl PostgresBroker {
     /// Useful for tests and for applications that already manage their own
     /// `PgPool` lifecycle. The broker has no session URL, so it has no
     /// listener: result waits poll, and an operation that needs a listener is
-    /// refused with [`ListenError::Disabled`]. Use
+    /// refused with [`ListenError::NoSessionUrl`]. Use
     /// [`from_pool_and_session_url`](Self::from_pool_and_session_url) for a
     /// broker with a listener.
     pub fn from_pool(pool: PgPool) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::MigrateAndValidate,
-            ProcessListener::disabled(ListenerDisabledCause::NoSessionUrl),
+            ProcessListener::without_session_url(),
         )
     }
 
@@ -822,12 +806,12 @@ impl PostgresBroker {
     }
 
     /// Construct a monitoring broker that never applies migrations or checks
-    /// the fleet cutover gate. It has no listener.
+    /// the fleet cutover gate. It has no session URL, so it has no listener.
     pub fn from_pool_observe_only(pool: PgPool) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::ObserveOnly,
-            ProcessListener::disabled(ListenerDisabledCause::ObserveOnly),
+            ProcessListener::without_session_url(),
         )
     }
 
@@ -933,10 +917,7 @@ impl PostgresBroker {
                 IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
             )
             .num_seconds(),
-            listener: config_listener(
-                schema_initialization_mode,
-                config.effective_session_database_url(),
-            ),
+            listener: ProcessListener::on_session_url(config.effective_session_database_url()),
             listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
@@ -1782,7 +1763,7 @@ impl PostgresBroker {
             .await
         {
             Ok(subscription) => ResultWaitMode::Subscribed(subscription),
-            Err(error @ ListenError::Disabled { .. }) => {
+            Err(error @ ListenError::NoSessionUrl) => {
                 tracing::debug!(%task_id, error = %error, "the result wait polls");
                 ResultWaitMode::Polling
             }
@@ -3115,7 +3096,7 @@ fn worker_ping_error(operation: &str, err: sqlx::Error) -> BrokerOperationError 
 /// `WORKER_PING_FAILED` with the listener's retryable flag.
 fn worker_ping_subscribe_error(error: &ListenError) -> BrokerOperationError {
     match error {
-        ListenError::Disabled { .. } => BrokerOperationError {
+        ListenError::NoSessionUrl => BrokerOperationError {
             code: BrokerErrorCode::ListenerDisabled,
             message: format!("ping_workers needs a listener: {error}"),
             retryable: false,
@@ -5820,8 +5801,9 @@ mod broker_operation_error_tests {
         assert!(!refused.retryable);
     }
 
-    /// Python `ping_workers` with `assume_initialized=True`: no listener, so
-    /// `LISTENER_DISABLED`, not retryable, before any database call.
+    /// A broker with no listener (built from a pool with no session URL):
+    /// `LISTENER_DISABLED`, not retryable, before any database call, as
+    /// Python's broker with no listener.
     #[tokio::test]
     async fn ping_workers_on_a_broker_without_a_listener_is_listener_disabled() {
         let observe_only = PostgresBroker::from_pool_observe_only(
@@ -5947,8 +5929,8 @@ mod result_wait_tests {
         );
     }
 
-    /// A broker with no listener (built from a pool, or observe-only) polls,
-    /// as Python's broker with no listener. Nothing connects.
+    /// A broker with no listener (built from a pool with no session URL)
+    /// polls, as Python's broker with no listener. Nothing connects.
     #[tokio::test]
     async fn a_broker_without_a_listener_makes_the_wait_poll() {
         let observe_only = PostgresBroker::from_pool_observe_only(
@@ -6042,6 +6024,35 @@ mod result_wait_tests {
             started.elapsed()
         );
         assert!(matches!(mode, ResultWaitMode::Subscribed(_)));
+    }
+
+    /// An observe-only broker keeps its listener, as Python's web tool
+    /// (`run_schema_migrations=False`): its waits subscribe and it can ping.
+    #[tokio::test]
+    #[serial]
+    async fn an_observe_only_broker_keeps_its_listener() {
+        let config = PostgresConfig {
+            database_url: crate::broker::terminalization_matrix::migrated_database_url().await,
+            session_database_url: None,
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            pool_size: 2,
+            max_overflow: 0,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        };
+        let broker = PostgresBroker::connect_observe_only(&config)
+            .await
+            .expect("connect an observe-only broker");
+
+        let mode = broker.result_wait_mode(Uuid::new_v4()).await;
+        assert!(matches!(mode, ResultWaitMode::Subscribed(_)));
+        let pinged = broker
+            .ping_workers(None, Duration::from_millis(200), None)
+            .await;
+        assert!(pinged.is_ok(), "{:?}", pinged.err());
     }
 
     /// Dropping the broker stops its listener. The wait turns into polling,

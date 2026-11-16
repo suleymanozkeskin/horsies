@@ -31,7 +31,7 @@ pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS
 pub use postgres::{
     ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
 };
-pub use process_listener::{ListenError, ListenerDisabledCause, ListenerPlanError};
+pub use process_listener::{ListenError, ListenerPlanError};
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{

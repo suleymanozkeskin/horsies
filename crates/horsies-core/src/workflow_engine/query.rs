@@ -207,7 +207,7 @@ impl WorkflowWaitMode {
             .await
         {
             Ok(subscription) => WorkflowWaitMode::Subscribed(subscription),
-            Err(error @ ListenError::Disabled { .. }) => {
+            Err(error @ ListenError::NoSessionUrl) => {
                 tracing::debug!(%workflow_id, error = %error, "the workflow wait polls");
                 WorkflowWaitMode::Polling
             }
