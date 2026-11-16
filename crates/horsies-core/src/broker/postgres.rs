@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, FromRow, Postgres, Transaction};
+use sqlx::{ConnectOptions, Postgres, Transaction};
 use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -15,11 +15,9 @@ use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
-use crate::core::history::reads::detail::{
-    read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
-};
+use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
-    read_task_result, HistoryResultPayload, HistoryTaskResult, TaskResultRead,
+    HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
@@ -29,13 +27,15 @@ use crate::core::{
 };
 
 use crate::broker::core_rows::{
-    expired_task_row, one_row, read_rows, stale_task_row, stored_worker_state, RowDecodeError,
+    column, expired_task_row, one_row, read_rows, stale_task_row, stored_worker_state,
+    task_result_row, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
     read_worker_snapshot, read_worker_snapshots, DatabasePing, WorkerPingRequest, WorkerPong,
     WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
+use crate::broker::history_reads::{read_history_detail, read_task_result};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
@@ -264,6 +264,21 @@ const GET_RAW_RESULT_RECORD_SQL: &str = "\
 SELECT id, task_name, status, result
 FROM horsies_tasks
 WHERE id = $1";
+
+static GET_RESULT: TypedStatement =
+    TypedStatement::new("get_result", GET_RESULT_SQL, &[ParameterType::Uuid]);
+
+static GET_RAW_RESULT_PROBE: TypedStatement = TypedStatement::new(
+    "get_raw_result_probe",
+    GET_RAW_RESULT_PROBE_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_RAW_RESULT_RECORD: TypedStatement = TypedStatement::new(
+    "get_raw_result_record",
+    GET_RAW_RESULT_RECORD_SQL,
+    &[ParameterType::Uuid],
+);
 
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
@@ -809,24 +824,6 @@ pub enum SchemaInitializationMode {
     ObserveOnly,
 }
 
-/// Whether the broker logs each core statement it runs
-/// (`PostgresConfig::echo`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatementLog {
-    Off,
-    /// Statement name and SQL text at debug level, target `horsies.sql`.
-    Debug,
-}
-
-impl StatementLog {
-    fn from_echo(echo: bool) -> Self {
-        match echo {
-            true => Self::Debug,
-            false => Self::Off,
-        }
-    }
-}
-
 /// PostgreSQL-backed task broker.
 ///
 /// Two sets of pools on the same URLs:
@@ -1211,15 +1208,7 @@ impl PostgresBroker {
     }
 
     fn log_statement(&self, statement: &TypedStatement) {
-        match self.statement_log {
-            StatementLog::Off => {}
-            StatementLog::Debug => tracing::debug!(
-                target: "horsies.sql",
-                statement = statement.name(),
-                sql = statement.sql(),
-                "statement",
-            ),
-        }
+        self.statement_log.log(statement);
     }
 
     /// Whether this broker's runtime pool is configured for PgBouncer
@@ -2800,11 +2789,7 @@ impl PostgresBroker {
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        let read = read_task_result(&mut connection, task_id)
-            .await
-            .map_err(map_history_read_error)?;
-        drop(connection);
+        let read = read_task_result(self.core.main(), self.statement_log, task_id).await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
@@ -2836,24 +2821,24 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<ResultRowProbe, BrokerError> {
-        let live: Option<TaskResultRow> = sqlx::query_as(GET_RESULT_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        if let Some(row) = live {
+        let live = self
+            .read_main(&GET_RESULT.bind().value(&task_id).finish(), task_result_row)
+            .await?;
+        if let Some(row) = live.into_iter().next() {
             return Ok(ResultRowProbe::Row(row));
         }
         self.confirm_result_absence(task_id).await
     }
 
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
-        let live: Option<RawResultProbeRow> = sqlx::query_as(GET_RAW_RESULT_PROBE_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
+        let live = self
+            .read_main(
+                &GET_RAW_RESULT_PROBE.bind().value(&task_id).finish(),
+                raw_result_probe_row,
+            )
             .await
-            .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
-        if let Some(row) = live {
+            .map_err(raw_result_operation_error)?;
+        if let Some(row) = live.into_iter().next() {
             let status: crate::core::TaskStatus = row
                 .status
                 .parse()
@@ -2864,12 +2849,14 @@ impl PostgresBroker {
                     | crate::core::TaskStatus::Failed
                     | crate::core::TaskStatus::Expired
             ) {
-                let terminal: Option<RawResultDbRow> = sqlx::query_as(GET_RAW_RESULT_RECORD_SQL)
-                    .bind(task_id)
-                    .fetch_optional(&self.pool)
+                let terminal = self
+                    .read_main(
+                        &GET_RAW_RESULT_RECORD.bind().value(&task_id).finish(),
+                        raw_result_db_row,
+                    )
                     .await
-                    .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
-                let Some(terminal) = terminal else {
+                    .map_err(raw_result_operation_error)?;
+                let Some(terminal) = terminal.into_iter().next() else {
                     return self.history_raw_result_probe(task_id).await;
                 };
                 let terminal_status: crate::core::TaskStatus =
@@ -2911,17 +2898,7 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<Option<TaskDetailResult>, BrokerError> {
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        if !staged_detail_published(&mut connection)
-            .await
-            .map_err(map_history_read_error)?
-        {
-            return Ok(None);
-        }
-        read_task_detail(&mut connection, task_id)
-            .await
-            .map(Some)
-            .map_err(map_history_read_error)
+        read_history_detail(self.core.main(), self.statement_log, task_id).await
     }
 
     /// Poll the result row once for the wait loop.
@@ -3005,13 +2982,6 @@ fn rerun_family_error(error: BrokerError) -> RerunError {
     }
 }
 
-fn map_history_read_error(error: HistoryError) -> BrokerError {
-    match error {
-        HistoryError::Database(error) => BrokerError::Database(error),
-        other => BrokerError::HistoryReadContract(other.to_string()),
-    }
-}
-
 /// The task info code of a read error, by Python's rule
 /// (`horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`): only a
 /// stored result that fails its check is `INVALID_JSON_PAYLOAD`; a status or
@@ -3037,19 +3007,42 @@ enum ResultRowProbe {
     Absent,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct RawResultProbeRow {
     id: Uuid,
     task_name: String,
     status: String,
 }
 
-#[derive(Debug, FromRow)]
+fn raw_result_probe_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<RawResultProbeRow, RowDecodeError> {
+    Ok(RawResultProbeRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+    })
+}
+
+#[derive(Debug)]
 struct RawResultDbRow {
     id: Uuid,
     task_name: String,
     status: String,
     result: Option<String>,
+}
+
+fn raw_result_db_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<RawResultDbRow, RowDecodeError> {
+    Ok(RawResultDbRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+        result: column(row, statement, "result")?,
+    })
 }
 
 enum RawResultProbe {
