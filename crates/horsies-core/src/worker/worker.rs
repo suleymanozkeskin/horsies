@@ -3907,6 +3907,7 @@ mod tests {
                 db_retry_max_attempts: 1,
                 notify_poll_interval_ms: 100,
             },
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
