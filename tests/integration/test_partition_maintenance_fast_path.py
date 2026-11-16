@@ -35,7 +35,6 @@ from horsies.core.history.names import (
 from horsies.core.history.outcomes import LeafCreation
 from horsies.core.history.partitions import manager as partition_manager
 from horsies.core.history.partitions.catalog import (
-    capture_partition_bound_utc,
     database_now,
     leaf_enqueued_index_name,
 )
@@ -173,17 +172,6 @@ async def test_current_heartbeat_wrong_physical_range_refuses_startup(
                 f'CREATE INDEX {row.id_index_name} ON {row.leaf_name} '
                 '(task_id, role, sent_at DESC)'
             )
-        )
-        wrong_bound = await capture_partition_bound_utc(
-            connection,
-            str(row.leaf_name),
-        )
-        await connection.execute(
-            text(
-                f'UPDATE {LEAF_CATALOG} SET partition_bound = :bound '
-                'WHERE leaf_name = :leaf_name'
-            ),
-            {'bound': wrong_bound, 'leaf_name': row.leaf_name},
         )
 
     startup = await ensure_startup_coverage_in_database(
@@ -415,7 +403,7 @@ async def test_failed_final_publication_is_retried(
     first = await maintain_partition_coverage(
         database,
         history_horizon_days=1,
-        heartbeat_horizon_hours=1,
+        heartbeat_horizon_hours=2,
     )
     assert isinstance(first, CoverageEnsured), first
     original = StagedLoaderPublisher.republish

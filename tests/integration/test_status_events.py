@@ -86,8 +86,15 @@ async def _events_until_sentinel(
 
 
 async def _set_status(session: AsyncSession, task_id: str, status: str) -> None:
+    """Set a live status; only a CLAIMED row keeps its lease
+    (CHECK horsies_tasks_status_live)."""
     _ = await session.execute(
-        text('UPDATE horsies_tasks SET status = :status WHERE id = CAST(:id AS uuid)'),
+        text(
+            'UPDATE horsies_tasks SET status = CAST(:status AS varchar), '
+            "claim_expires_at = CASE WHEN CAST(:status AS varchar) = 'CLAIMED' "
+            "THEN COALESCE(claim_expires_at, NOW() + INTERVAL '1 hour') END "
+            'WHERE id = CAST(:id AS uuid)'
+        ),
         {'status': status, 'id': task_id},
     )
     await session.commit()

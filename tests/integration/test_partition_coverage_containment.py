@@ -337,7 +337,8 @@ async def test_a_database_error_does_not_poison_the_pass(
 # this file refuses at offset 0 or raises first, so none of them can tell
 # the two apart. This one makes the class CREATE and THEN refuse.
 
-_SURVIVOR_KEY = 'q_survivor_7d'
+_SURVIVOR_KEY = 'standard_11d'
+_SURVIVOR_DAYS = 11
 
 
 async def _drop_if_present(broker: PostgresBroker, relation: str) -> None:
@@ -412,7 +413,7 @@ async def test_a_refusal_keeps_the_leaves_created_before_it(
             registration = await register_finite_retention_class(
                 connection,
                 class_key=_SURVIVOR_KEY,
-                duration=timedelta(days=7),
+                duration=timedelta(days=_SURVIVOR_DAYS),
             )
             assert isinstance(
                 registration, (ClassRegistered, ClassAlreadyRegistered)
