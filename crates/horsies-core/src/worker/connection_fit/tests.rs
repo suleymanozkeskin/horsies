@@ -62,6 +62,12 @@ fn isolated_only(children: u32) -> WorkerProfile {
     }
 }
 
+/// A broker config whose session work uses the worker pool (no separate
+/// session URL).
+fn direct() -> PostgresConfig {
+    PostgresConfig::from_url("postgresql://postgres:none@127.0.0.1:1/none")
+}
+
 fn limit(max_connections: i32, superuser_reserved: i32, reserved: i32) -> ServerConnectionLimit {
     server_connection_limit(max_connections, superuser_reserved, reserved)
         .expect("a limit with no negative setting")
@@ -140,7 +146,7 @@ fn the_formula_names_each_mode_and_the_one_listener_connection() {
     let thread_pool = shared_thread_pool_of(&profile);
     let total = u64::from(parent) + 1 + 1 + 2 + 3 * u64::from(async_pool) + u64::from(thread_pool);
 
-    let need = worker_connection_need(&profile);
+    let need = worker_connection_need(&profile, &direct());
 
     assert_eq!(need.listener, 1);
     assert_eq!(need.runner_heartbeat, 1);
@@ -171,7 +177,7 @@ fn a_mode_without_children_has_no_term() {
     let profile = isolated_only(1);
     let parent = profile.resolved_parent_pool().get();
 
-    let need = worker_connection_need(&profile);
+    let need = worker_connection_need(&profile, &direct());
 
     assert_eq!(
         need.formula(),
@@ -180,6 +186,39 @@ fn a_mode_without_children_has_no_term() {
              + 1 isolated children x isolated.pool max_size 1 = {}",
             u64::from(parent) + 3
         )
+    );
+}
+
+/// The core's worker broker builds a pool of its own on a session URL that
+/// differs from `database_url`, sized as the worker pool; the sum counts it
+/// right after the worker pool. Python does not count its session engine.
+#[test]
+fn a_separate_session_url_adds_a_session_pool_sized_as_the_worker_pool() {
+    let profile = isolated_only(1);
+    let parent = profile.resolved_parent_pool().get();
+    let mut separate = direct();
+    separate.session_database_url =
+        Some("postgresql://postgres:none@127.0.0.1:1/none?application_name=session".to_owned());
+    let mut same_url = direct();
+    same_url.session_database_url = Some(same_url.database_url.clone());
+
+    let need = worker_connection_need(&profile, &separate);
+
+    assert_eq!(
+        need.session_pool,
+        SessionPoolTerm::Separate { max_size: parent }
+    );
+    assert_eq!(
+        need.formula(),
+        format!(
+            "parent pool max_size {parent} + session pool max_size {parent} + listener 1 \
+             + runner heartbeat 1 + 1 isolated children x isolated.pool max_size 1 = {}",
+            2 * u64::from(parent) + 3
+        )
+    );
+    assert_eq!(
+        worker_connection_need(&profile, &same_url).session_pool,
+        SessionPoolTerm::SharedWithWorkerPool
     );
 }
 
@@ -213,15 +252,15 @@ fn a_negative_setting_makes_the_limit_unreadable_by_name() {
 #[test]
 fn a_sum_equal_to_the_usable_slots_fits_and_one_more_does_not() {
     let profile = isolated_only(1);
-    let total = worker_connection_need(&profile).total();
+    let total = worker_connection_need(&profile, &direct()).total();
     let at_total = i32::try_from(total).expect("a small total");
 
     assert!(matches!(
-        compare_connections(&profile, limit(at_total, 0, 0)),
+        compare_connections(&profile, &direct(), limit(at_total, 0, 0)),
         ConnectionFit::Fits { .. }
     ));
     assert!(matches!(
-        compare_connections(&profile, limit(at_total - 1, 0, 0)),
+        compare_connections(&profile, &direct(), limit(at_total - 1, 0, 0)),
         ConnectionFit::ExceedsServer { .. }
     ));
 }
@@ -231,7 +270,7 @@ fn a_sum_equal_to_the_usable_slots_fits_and_one_more_does_not() {
 #[test]
 fn a_fitting_profile_is_described_with_its_task_sends() {
     let profile = isolated_only(1);
-    let fit = compare_connections(&profile, limit(100, 3, 0));
+    let fit = compare_connections(&profile, &direct(), limit(100, 3, 0));
     let ConnectionFit::Fits { need, .. } = &fit else {
         panic!("a small profile fits: {fit:?}");
     };
@@ -254,9 +293,9 @@ fn a_profile_above_the_usable_slots_is_refused_with_the_formula_and_the_task_sen
         ("big".to_owned(), big),
         ("small".to_owned(), isolated_only(1)),
     ]);
-    let need = worker_connection_need(&big);
+    let need = worker_connection_need(&big, &direct());
 
-    let errors = worker_connection_errors(&profiles, limit(30, 3, 2));
+    let errors = worker_connection_errors(&profiles, &direct(), limit(30, 3, 2));
 
     let [error] = errors.as_slice() else {
         panic!("expected one error, got {errors:?}");
@@ -282,7 +321,7 @@ fn every_profile_that_does_not_fit_is_reported_in_name_order() {
         ("alpha".to_owned(), isolated_only(60)),
     ]);
 
-    let errors = worker_connection_errors(&profiles, limit(20, 0, 0));
+    let errors = worker_connection_errors(&profiles, &direct(), limit(20, 0, 0));
 
     let paths: Vec<bool> = errors
         .iter()

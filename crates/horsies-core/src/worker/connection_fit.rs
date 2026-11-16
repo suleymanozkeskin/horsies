@@ -2,8 +2,9 @@
 //! (Python `horsies/core/worker/profile_fit.py`, the connection part).
 //!
 //! One worker of a profile opens connections itself: its pool (the resolved
-//! `WorkerProfile.pool`), its listener, its runner heartbeat connection, and
-//! the pool of each child. The sum is compared with the slots that an
+//! `WorkerProfile.pool`), its session pool when the session URL differs, its
+//! listener, its runner heartbeat connection, and the pool of each child.
+//! The sum is compared with the slots that an
 //! ordinary role can use on the server: `max_connections` minus
 //! `superuser_reserved_connections` minus `reserved_connections`
 //! (PostgreSQL 16 and later). `horsies check --live` reports a profile whose
@@ -11,14 +12,24 @@
 //! PgBouncer transaction pool nothing is read: pooled client connections do
 //! not map to server connections.
 //!
-//! The terms follow the core's connection layout:
-//! - the worker pool holds the reserve of the reaper and the per-task writes
-//!   ([`crate::db::WORKER_RESERVED_CONNECTIONS`]) inside its size, so the
-//!   reserve adds no term;
-//! - the process listener holds one connection for every LISTEN of the
-//!   process ([`crate::db::Listener`]); Python's listener holds two;
-//! - the runner heartbeat has a connection of its own
-//!   ([`crate::db::PoolRole::RunnerHeartbeat`]).
+//! The terms are the connections that the core opens for a worker process:
+//! - worker pool: [`PostgresConfig::worker_process_config`] sizes the worker
+//!   broker to the resolved parent pool with no overflow, and the broker's
+//!   pool holds `pool_size + max_overflow`. The reserve of the reaper and the
+//!   per-task writes ([`crate::db::WORKER_RESERVED_CONNECTIONS`]) is kept
+//!   inside that size, so it adds no term;
+//! - session pool: a pool of its own on `session_database_url` only when that
+//!   URL differs from `database_url`, sized as the worker pool (the broker
+//!   builds both from one config; Python's session engine is sized the same
+//!   way and Python does not count it);
+//! - listener: one dedicated connection on the session URL carries every
+//!   LISTEN of the process ([`crate::db::Listener`]); Python's listener holds
+//!   two;
+//! - runner heartbeat: a pool of one connection of its own
+//!   ([`crate::worker::runner_beats::runner_beat_pool`]).
+//!
+//! The broker's sqlx adapter pools, kept beside the core pools until the
+//! call sites move, are not terms: the layout above is the one they move to.
 //!
 //! Task code that sends opens the `task_send_pool` of its child kind in its
 //! child, for each event loop that it sends from. Whether it sends is known
@@ -34,7 +45,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::{
     profile_path, IsolatedSetting, SharedAsyncSetting, SharedThreadSetting, WorkerProfile,
 };
-use crate::core::config::AppConfig;
+use crate::core::config::{AppConfig, PostgresConfig};
 use crate::core::error::{ErrorCode, HorsiesError};
 
 /// Connections of the process listener of a worker: one connection carries
@@ -226,12 +237,40 @@ impl ModePools {
     }
 }
 
+/// The session pool of a worker process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPoolTerm {
+    /// `session_database_url` is absent or equal to `database_url`: session
+    /// work takes connections of the worker pool, so there is no term.
+    SharedWithWorkerPool,
+    /// A pool of its own on `session_database_url` of up to `max_size`
+    /// connections.
+    Separate { max_size: u32 },
+}
+
+impl SessionPoolTerm {
+    pub fn connections(&self) -> u64 {
+        match self {
+            Self::SharedWithWorkerPool => 0,
+            Self::Separate { max_size } => u64::from(*max_size),
+        }
+    }
+
+    fn term(&self) -> Option<String> {
+        match self {
+            Self::SharedWithWorkerPool => None,
+            Self::Separate { max_size } => Some(format!("session pool max_size {max_size}")),
+        }
+    }
+}
+
 /// The Postgres connections of one worker, by part. `total` counts the
 /// connections that the worker opens itself; `with_task_sends` adds one
 /// sending loop of task code in each child.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerConnectionNeed {
     pub parent_pool: u32,
+    pub session_pool: SessionPoolTerm,
     pub listener: u32,
     pub runner_heartbeat: u32,
     /// One entry for each mode with children: isolated, shared async, shared
@@ -242,6 +281,7 @@ pub struct WorkerConnectionNeed {
 impl WorkerConnectionNeed {
     pub fn total(&self) -> u64 {
         u64::from(self.parent_pool)
+            + self.session_pool.connections()
             + u64::from(self.listener)
             + u64::from(self.runner_heartbeat)
             + self
@@ -262,11 +302,13 @@ impl WorkerConnectionNeed {
     /// The sum, term by term (Python `WorkerConnectionNeed.formula`).
     pub fn formula(&self) -> String {
         let terms: Vec<String> = [
-            format!("parent pool max_size {}", self.parent_pool),
-            format!("listener {}", self.listener),
-            format!("runner heartbeat {}", self.runner_heartbeat),
+            Some(format!("parent pool max_size {}", self.parent_pool)),
+            self.session_pool.term(),
+            Some(format!("listener {}", self.listener)),
+            Some(format!("runner heartbeat {}", self.runner_heartbeat)),
         ]
         .into_iter()
+        .flatten()
         .chain(self.child_pools.iter().map(ModePools::term))
         .collect();
         format!("{} = {}", terms.join(" + "), self.total())
@@ -327,11 +369,27 @@ fn shared_thread_pools(shared_thread: &SharedThreadSetting) -> Option<ModePools>
     }
 }
 
-/// The connections of one worker of this profile (Python
-/// `worker_connection_need`). Pure.
-pub fn worker_connection_need(profile: &WorkerProfile) -> WorkerConnectionNeed {
+/// The session pool that a worker process of `broker` opens beside a worker
+/// pool of `parent_pool` connections. Pure.
+fn session_pool_term(broker: &PostgresConfig, parent_pool: u32) -> SessionPoolTerm {
+    match broker.effective_session_database_url() == broker.database_url {
+        true => SessionPoolTerm::SharedWithWorkerPool,
+        false => SessionPoolTerm::Separate {
+            max_size: parent_pool,
+        },
+    }
+}
+
+/// The connections of one worker of this profile on the database of
+/// `broker` (Python `worker_connection_need`, with the session pool). Pure.
+pub fn worker_connection_need(
+    profile: &WorkerProfile,
+    broker: &PostgresConfig,
+) -> WorkerConnectionNeed {
+    let parent_pool = profile.resolved_parent_pool().get();
     WorkerConnectionNeed {
-        parent_pool: profile.resolved_parent_pool().get(),
+        parent_pool,
+        session_pool: session_pool_term(broker, parent_pool),
         listener: LISTENER_CONNECTIONS_PER_WORKER,
         runner_heartbeat: RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
         child_pools: [
@@ -395,8 +453,12 @@ fn exceeds_server_text(need: &WorkerConnectionNeed, limit: ServerConnectionLimit
 
 /// Compares the connections that one worker of the profile opens itself
 /// with the usable slots (Python `compare_connections`). Pure.
-pub fn compare_connections(profile: &WorkerProfile, limit: ServerConnectionLimit) -> ConnectionFit {
-    let need = worker_connection_need(profile);
+pub fn compare_connections(
+    profile: &WorkerProfile,
+    broker: &PostgresConfig,
+    limit: ServerConnectionLimit,
+) -> ConnectionFit {
+    let need = worker_connection_need(profile, broker);
     match need.total() > u64::from(limit.usable()) {
         true => ConnectionFit::ExceedsServer { need, limit },
         false => ConnectionFit::Fits { need, limit },
@@ -426,12 +488,13 @@ fn exceeds_server_error(
 /// `_worker_connection_errors`). Pure.
 pub fn worker_connection_errors(
     profiles: &BTreeMap<String, WorkerProfile>,
+    broker: &PostgresConfig,
     limit: ServerConnectionLimit,
 ) -> Vec<HorsiesError> {
     profiles
         .iter()
         .filter_map(
-            |(name, profile)| match compare_connections(profile, limit) {
+            |(name, profile)| match compare_connections(profile, broker, limit) {
                 ConnectionFit::ExceedsServer { need, limit } => {
                     Some(exceeds_server_error(name, &need, limit))
                 }
@@ -469,7 +532,7 @@ pub async fn check_worker_connections(
     ) {
         (true, _) | (_, true) => Vec::new(),
         (false, false) => match read_server_connection_limit(broker).await {
-            Ok(limit) => worker_connection_errors(&config.worker_profiles, limit),
+            Ok(limit) => worker_connection_errors(&config.worker_profiles, &config.broker, limit),
             Err(cause) => vec![connection_limit_unreadable_error(&cause)],
         },
     }
