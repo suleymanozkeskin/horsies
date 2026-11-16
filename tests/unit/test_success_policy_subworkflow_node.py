@@ -52,7 +52,7 @@ def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
 
 pytestmark = [pytest.mark.unit]
 
-DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
+DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
 _key_counter = 0
 

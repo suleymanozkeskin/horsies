@@ -18,8 +18,19 @@ use uuid::Uuid;
 use super::{process_schedule, schedule_slot_task_id, state};
 use crate::broker::PostgresBroker;
 use crate::core::config::{AppConfig, IntervalSchedule, SchedulePattern, TaskSchedule};
+use crate::core::{
+    OperationalErrorCode, PreparedSchedules, RetryPolicy, ScheduleSendFacts, TaskErrorCode,
+    TaskOptions,
+};
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
+
+/// The timeout that the scheduled task declares (Python `TASK_TIMEOUT_MS`).
+const TASK_TIMEOUT_MS: u32 = 30_000;
+
+/// The fixed retry intervals that the scheduled task declares (Python
+/// `RETRY_INTERVALS_SECONDS`).
+const RETRY_INTERVALS_SECONDS: [u32; 2] = [1, 2];
 
 /// The fingerprint byte of the earlier row: no command of this schedule
 /// hashes to 32 equal bytes.
@@ -56,6 +67,32 @@ async fn seed_earlier_slot_row(pool: &PgPool, task_id: Uuid, task_name: &str, sl
     .execute(pool)
     .await
     .expect("seed the earlier slot row");
+}
+
+/// The send facts of the schedule: the default queue and the options text of
+/// a task that declares a timeout and a retry policy (Python
+/// `_app_with_scheduled_task`). The earlier row stores no options.
+fn prepared_schedules(schedule_name: &str, task_name: &str) -> PreparedSchedules {
+    let options = TaskOptions {
+        task_name: task_name.to_owned(),
+        queue_name: None,
+        good_until: None,
+        auto_retry_for: Some(vec![TaskErrorCode::from(
+            OperationalErrorCode::TaskException,
+        )]),
+        retry_policy: Some(
+            RetryPolicy::fixed(RETRY_INTERVALS_SECONDS.to_vec(), true)
+                .expect("two intervals inside the bounds"),
+        ),
+        timeout_ms: Some(TASK_TIMEOUT_MS),
+    };
+    PreparedSchedules::from([(
+        schedule_name.to_owned(),
+        ScheduleSendFacts {
+            queue_name: "default".to_owned(),
+            task_options: options.serialize_retry_options(),
+        },
+    )])
 }
 
 #[tokio::test]
@@ -100,6 +137,7 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
         check_time,
         1,
         &AppConfig::for_database_url("postgresql://unused/test"),
+        &prepared_schedules(&schedule_name, &task_name),
     )
     .await
     .expect("the tick");

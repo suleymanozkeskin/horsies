@@ -11,12 +11,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 
 from horsies.core.exception_mapper import ExceptionMapper, resolve_exception_error_code
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.tasks import OperationalErrorCode, RetryPolicy
 from horsies.core.utils.retry import calculate_retry_delay
 from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.failed_attempt import (
@@ -139,6 +138,8 @@ class TestRetryRequestFor:
             json.dumps({'retry_policy': 'string'}),
             _task_options_json([]),
             json.dumps({'retry_policy': {'backoff_strategy': 'fixed'}}),
+            _task_options_json(['RATE_LIMITED'], intervals=[]),
+            _task_options_json(['RATE_LIMITED'], backoff_strategy='quadratic'),
         ],
         ids=[
             'no_options',
@@ -147,6 +148,8 @@ class TestRetryRequestFor:
             'policy_not_a_dict',
             'empty_auto_retry_for',
             'auto_retry_for_missing',
+            'empty_intervals',
+            'unknown_backoff',
         ],
     )
     def test_options_without_a_usable_policy_ask_for_none(
@@ -339,121 +342,65 @@ class TestCalculateRetryDelay:
 
     def test_exponential_delays_strictly_increase_with_jitter(self) -> None:
         """Exponential backoff delays must strictly increase across attempts, even with jitter."""
-        policy_data = {
-            'intervals': [1],
-            'backoff_strategy': 'exponential',
-            'jitter': True,
-        }
+        policy = _exponential(1, jitter=True)
         # Run many iterations to catch jitter-induced collisions
         for _ in range(200):
-            delay_1 = calculate_retry_delay(1, policy_data)
-            delay_2 = calculate_retry_delay(2, policy_data)
-            delay_3 = calculate_retry_delay(3, policy_data)
+            delay_1 = calculate_retry_delay(1, policy)
+            delay_2 = calculate_retry_delay(2, policy)
+            delay_3 = calculate_retry_delay(3, policy)
             assert delay_2 > delay_1, f'delay_2={delay_2} must be > delay_1={delay_1}'
             assert delay_3 > delay_2, f'delay_3={delay_3} must be > delay_2={delay_2}'
 
     def test_exponential_delay_returns_float(self) -> None:
         """Delay must be float to preserve sub-second precision from jitter."""
-        policy_data = {
-            'intervals': [1],
-            'backoff_strategy': 'exponential',
-            'jitter': True,
-        }
-        delay = calculate_retry_delay(1, policy_data)
+        delay = calculate_retry_delay(1, _exponential(1, jitter=True))
         assert isinstance(delay, float)
 
     def test_fixed_delay_returns_float(self) -> None:
         """Fixed strategy also returns float for type consistency."""
-        policy_data = {
-            'intervals': [5, 10],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-        }
-        delay = calculate_retry_delay(1, policy_data)
+        delay = calculate_retry_delay(1, _fixed([5, 10]))
         assert isinstance(delay, float)
 
     def test_minimum_delay_is_one_second(self) -> None:
         """Delay must never drop below 1.0 second."""
-        policy_data = {
-            'intervals': [1],
-            'backoff_strategy': 'exponential',
-            'jitter': True,
-        }
+        policy = _exponential(1, jitter=True)
         for _ in range(200):
-            delay = calculate_retry_delay(1, policy_data)
+            delay = calculate_retry_delay(1, policy)
             assert delay >= 1.0, f'delay={delay} is below 1.0s minimum'
 
     # --- U-1a: fixed strategy picks intervals[index] ---
 
     def test_fixed_first_attempt_uses_first_interval(self) -> None:
         """Fixed strategy, attempt=1 → intervals[0]."""
-        policy_data = {
-            'intervals': [10, 30, 90],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-        }
-        delay = calculate_retry_delay(1, policy_data)
-        assert delay == 10.0
+        assert calculate_retry_delay(1, _fixed([10, 30, 90])) == 10.0
 
     def test_fixed_second_attempt_uses_second_interval(self) -> None:
         """Fixed strategy, attempt=2 → intervals[1]."""
-        policy_data = {
-            'intervals': [10, 30, 90],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-        }
-        delay = calculate_retry_delay(2, policy_data)
-        assert delay == 30.0
+        assert calculate_retry_delay(2, _fixed([10, 30, 90])) == 30.0
 
     # --- U-1b: fixed strategy clamps out-of-bounds attempts ---
 
     def test_fixed_attempt_exceeds_intervals_clamps_to_last(self) -> None:
         """Fixed strategy, attempt > len(intervals) → clamped to last interval."""
-        policy_data = {
-            'intervals': [10, 30],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-        }
-        delay = calculate_retry_delay(5, policy_data)
-        assert delay == 30.0
+        assert calculate_retry_delay(5, _fixed([10, 30])) == 30.0
 
     # --- U-1c: exponential exact values ---
 
     def test_exponential_exact_values_without_jitter(self) -> None:
         """Exponential strategy: base * 2^(attempt-1) with jitter off."""
-        policy_data = {
-            'intervals': [10],
-            'backoff_strategy': 'exponential',
-            'jitter': False,
-        }
-        assert calculate_retry_delay(1, policy_data) == 10.0
-        assert calculate_retry_delay(2, policy_data) == 20.0
-        assert calculate_retry_delay(3, policy_data) == 40.0
-        assert calculate_retry_delay(4, policy_data) == 80.0
-
-    # --- U-1d: unknown strategy → fallback ---
-
-    def test_unknown_strategy_falls_back_to_first_interval(self) -> None:
-        """Unknown backoff_strategy uses intervals[0] as fallback."""
-        policy_data = {
-            'intervals': [42],
-            'backoff_strategy': 'nonexistent_strategy',
-            'jitter': False,
-        }
-        delay = calculate_retry_delay(1, policy_data)
-        assert delay == 42.0
+        policy = _exponential(10)
+        assert calculate_retry_delay(1, policy) == 10.0
+        assert calculate_retry_delay(2, policy) == 20.0
+        assert calculate_retry_delay(3, policy) == 40.0
+        assert calculate_retry_delay(4, policy) == 80.0
 
     # --- U-1e: jitter band ±25% ---
 
     def test_jitter_stays_within_25_percent_band(self) -> None:
         """With jitter=True, delay stays within ±25% of base_delay."""
-        policy_data = {
-            'intervals': [100],
-            'backoff_strategy': 'fixed',
-            'jitter': True,
-        }
+        policy = _fixed([100], jitter=True)
         for _ in range(300):
-            delay = calculate_retry_delay(1, policy_data)
+            delay = calculate_retry_delay(1, policy)
             assert (
                 75.0 <= delay <= 125.0
             ), f'delay={delay} outside ±25% band of base=100'
@@ -462,49 +409,29 @@ class TestCalculateRetryDelay:
 
     def test_jitter_disabled_gives_exact_delay(self) -> None:
         """With jitter=False, delay equals base_delay exactly."""
-        policy_data = {
-            'intervals': [60, 300, 900],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-        }
+        policy = _fixed([60, 300, 900])
         # Repeated calls must all return the same value
         for attempt, expected in [(1, 60.0), (2, 300.0), (3, 900.0)]:
-            delay = calculate_retry_delay(attempt, policy_data)
+            delay = calculate_retry_delay(attempt, policy)
             assert (
                 delay == expected
             ), f'attempt={attempt}: expected {expected}, got {delay}'
-
-    # --- U-1g: empty intervals → fallback 60 ---
-
-    def test_exponential_empty_intervals_falls_back_to_60(self) -> None:
-        """Exponential with empty intervals list uses 60 as base."""
-        policy_data: dict[str, Any] = {
-            'intervals': [],
-            'backoff_strategy': 'exponential',
-            'jitter': False,
-        }
-        assert calculate_retry_delay(1, policy_data) == 60.0
-        assert calculate_retry_delay(2, policy_data) == 120.0
-
-    def test_unknown_strategy_empty_intervals_falls_back_to_60(self) -> None:
-        """Unknown strategy with empty intervals list uses 60 as fallback."""
-        policy_data: dict[str, Any] = {
-            'intervals': [],
-            'backoff_strategy': 'bogus',
-            'jitter': False,
-        }
-        delay = calculate_retry_delay(1, policy_data)
-        assert delay == 60.0
 
     # --- U-1h: floor at 1.0 with small base and negative jitter ---
 
     def test_floor_at_one_second_with_tiny_base_and_jitter(self) -> None:
         """Even with a tiny base interval and worst-case jitter, floor is 1.0."""
-        policy_data = {
-            'intervals': [1],
-            'backoff_strategy': 'fixed',
-            'jitter': True,
-        }
+        policy = _fixed([1], jitter=True)
         for _ in range(300):
-            delay = calculate_retry_delay(1, policy_data)
+            delay = calculate_retry_delay(1, policy)
             assert delay >= 1.0, f'delay={delay} below 1.0s floor'
+
+
+def _fixed(intervals: list[int], *, jitter: bool = False) -> RetryPolicy:
+    return RetryPolicy.fixed(intervals, auto_retry_for=['E'], jitter=jitter)
+
+
+def _exponential(base: int, *, jitter: bool = False) -> RetryPolicy:
+    return RetryPolicy.exponential(
+        base, max_retries=5, auto_retry_for=['E'], jitter=jitter,
+    )

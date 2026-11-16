@@ -438,7 +438,7 @@ class TestBatchedPromotionSemantics:
 
 async def _listen_all(channels: tuple[str, ...]) -> psycopg.AsyncConnection[Any]:
     connection = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     for channel in channels:

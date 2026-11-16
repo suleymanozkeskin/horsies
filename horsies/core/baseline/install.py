@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from horsies.core.baseline.migration import BASELINE_VERSION, BaselineMigration
 from horsies.core.history.reads.publisher import (
-    RENDERED_READER_SIGNATURES,
+    PUBLISHED_READER_SIGNATURES,
     StagedLoaderPublisher,
 )
 from horsies.core.types.result import Err, Ok, Result
@@ -70,7 +70,7 @@ RecordedFamily = FamilyRecorded | FamilyNotRecorded
 
 @dataclass(frozen=True, slots=True)
 class ReadersPublished:
-    """Every published history reader exists (``RENDERED_READER_SIGNATURES``)."""
+    """Every published history reader exists (``PUBLISHED_READER_SIGNATURES``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +329,7 @@ async def read_database_state(
     try:
         cursor = await connection.execute(
             _CATALOG_SQL,
-            {'limit': CATALOG_NAME_LIMIT, 'readers': list(RENDERED_READER_SIGNATURES)},
+            {'limit': CATALOG_NAME_LIMIT, 'readers': list(PUBLISHED_READER_SIGNATURES)},
         )
         catalog = await cursor.fetchone()
         assert catalog is not None, 'the catalog read returns one row'

@@ -17,9 +17,9 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement,
-    RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
+use crate::broker::postgres::PostgresBroker;
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, TerminalizationKind,
 };
@@ -102,7 +102,7 @@ async fn future_failure_on_non_retryable_running_task_is_terminal_failed() {
         RetryAdmission::NoPolicy
     );
 
-    let outcome = finish_failed_attempt(&pool, &crash_write(task_id, RetryRequest::NoRetry))
+    let outcome = write_failed_attempt(&pool, &crash_write(task_id, RetryRequest::NoRetry))
         .await
         .expect("crash write");
 
@@ -135,7 +135,7 @@ async fn future_failure_retry_replays_committed_terminal_phase() {
     let task_id = seed_task(&pool, &running(Origin::WorkflowNode)).await;
     let workflow_id = link_workflow_task(&pool, task_id, "RUNNING", "RUNNING").await;
     let command = crash_write(task_id, RetryRequest::NoRetry);
-    let first = finish_failed_attempt(&pool, &command)
+    let first = write_failed_attempt(&pool, &command)
         .await
         .expect("crash write");
     assert!(
@@ -149,9 +149,7 @@ async fn future_failure_retry_replays_committed_terminal_phase() {
         "{first:?}"
     );
 
-    let replay = finish_failed_attempt(&pool, &command)
-        .await
-        .expect("replay");
+    let replay = write_failed_attempt(&pool, &command).await.expect("replay");
 
     assert!(
         matches!(
@@ -177,7 +175,7 @@ async fn future_failure_replay_of_a_plain_task_sends_no_second_wake() {
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let task_id = seed_task(&pool, &running(Origin::Send)).await;
     let command = crash_write(task_id, RetryRequest::NoRetry);
-    let first = finish_failed_attempt(&pool, &command)
+    let first = write_failed_attempt(&pool, &command)
         .await
         .expect("crash write");
     assert!(
@@ -195,9 +193,7 @@ async fn future_failure_replay_of_a_plain_task_sends_no_second_wake() {
         vec![format!("capacity:{task_id}")]
     );
 
-    let replay = finish_failed_attempt(&pool, &command)
-        .await
-        .expect("replay");
+    let replay = write_failed_attempt(&pool, &command).await.expect("replay");
 
     assert!(
         matches!(
@@ -236,7 +232,7 @@ async fn future_failure_on_retryable_running_task_respects_retry_policy() {
         },
     )
     .await;
-    let outcome = finish_failed_attempt(
+    let outcome = write_failed_attempt(
         &pool,
         &crash_write(
             task_id,
@@ -267,7 +263,7 @@ async fn finalize_worker_failure_runs_phase2() {
     let task_id = seed_task(&pool, &running(Origin::WorkflowNode)).await;
     let workflow_id = link_workflow_task(&pool, task_id, "RUNNING", "RUNNING").await;
 
-    let outcome = finish_failed_attempt(&pool, &worker_failure(task_id))
+    let outcome = write_failed_attempt(&pool, &worker_failure(task_id))
         .await
         .expect("worker failure");
 
@@ -295,7 +291,7 @@ async fn plain_worker_failure_wakes_the_queue_in_its_write() {
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let task_id = seed_task(&pool, &running(Origin::Send)).await;
 
-    let outcome = finish_failed_attempt(&pool, &worker_failure(task_id))
+    let outcome = write_failed_attempt(&pool, &worker_failure(task_id))
         .await
         .expect("worker failure");
 
@@ -427,7 +423,9 @@ async fn pause_resets_retry_window_claimed_workflow_task() {
     .expect("open the retry window");
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
 
-    let paused = pause_workflow(&pool, workflow_id).await.expect("pause");
+    let paused = pause_workflow(&PostgresBroker::from_pool(pool.clone()), workflow_id)
+        .await
+        .expect("pause");
 
     assert!(paused);
     let workflow_status: String =

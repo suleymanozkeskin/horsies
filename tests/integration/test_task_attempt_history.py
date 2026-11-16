@@ -79,7 +79,7 @@ def _test_app() -> Horsies:
     if _TEST_APP is None:
         cfg = AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://u:p@localhost/db',
+                database_url='postgresql://u:p@localhost/db',
             )
         )
         _TEST_APP = Horsies(cfg)
@@ -111,7 +111,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB (no listener needed)."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -944,6 +944,52 @@ async def test_attempt_number_reflects_retry_count(
         True,
         False,
     ]
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_info_lists_attempts_newest_first_live_and_history(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """TaskInfo.attempts is newest first while the task is live and after
+    its terminal record moved to history."""
+    task_id = await _insert_running_task(session, retry_count=2)
+    await _insert_retried_attempts(session, task_id, through=2)
+
+    live = await broker.get_task_info_async(uuid.UUID(task_id), include_attempts=True)
+    assert is_ok(live)
+    live_info = live.ok_value
+    assert live_info is not None
+    assert live_info.attempts is not None
+    assert [a.attempt for a in live_info.attempts] == [2, 1]
+
+    worker = _make_worker(engine)
+    persist = worker._persist_task_terminal_state  # pyright: ignore[reportPrivateUsage]
+    finished = await persist(
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=_serialize_ok('after retries'),
+        failed_reason=None,
+        task_name='attempt_history_test',
+        queue_name='default',
+        is_workflow_task=False,
+        claim=claim_at(CLAIMED_AT),
+    )
+    assert is_ok(finished)
+
+    history = await broker.get_task_info_async(
+        uuid.UUID(task_id), include_attempts=True,
+    )
+    assert is_ok(history)
+    history_info = history.ok_value
+    assert history_info is not None
+    assert history_info.execution is None  # read from the history archive
+    assert history_info.attempts is not None
+    assert [a.attempt for a in history_info.attempts] == [3, 2, 1]
+    assert history_info.attempts[0].outcome.value == 'COMPLETED'
 
 
 # ---------------------------------------------------------------------------

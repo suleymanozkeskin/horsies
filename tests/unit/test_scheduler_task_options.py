@@ -47,7 +47,7 @@ from horsies.core.utils.fingerprint import schedule_slot_task_id
 TASK_NAME = 'scheduled_task'
 SCHEDULE_NAME = 'every_five_seconds'
 SLOT = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-URL = 'postgresql+psycopg://user:pass@localhost/db'
+URL = 'postgresql://user:pass@localhost/db'
 
 
 def _schedule(*, catch_up_missed: bool = False) -> TaskSchedule:
@@ -65,7 +65,7 @@ def _real_app(schedule: TaskSchedule) -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             schedule=ScheduleConfig(schedules=[schedule]),
         ),

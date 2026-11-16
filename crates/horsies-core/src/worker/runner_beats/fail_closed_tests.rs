@@ -22,10 +22,10 @@ use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::config::recovery::RecoveryConfigError;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
-    ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame,
-    PoolMaxSize, PoolMinSize, ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd,
-    RunFrame, TaskInputText, TaskSendPool, TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel,
+    ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
+    ParentFrame, PoolMaxSize, PoolMinSize, ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading,
+    RunEnd, RunFrame, TaskInputText, TaskSendPool, TaskTimeoutMs,
 };
 use crate::worker::executor::slots::{
     AttemptEnd, ChildLayout, ClaimedTask, ExecutionClass, ExitNotSeen, IsolatedDeadline,
@@ -699,6 +699,7 @@ fn init_frame() -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-test-child".to_owned(),
         child_kind: ChildKind::Isolated(IsolatedChild {
             pool: ChildPool {
