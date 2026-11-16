@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::PgPool;
 use sysinfo::{Pid, System};
-use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -11,12 +8,15 @@ use crate::core::config::app::AppConfig;
 use crate::core::config::worker_profile::{TaskLimitSetting, WorkerProfile};
 use crate::core::task::execution::Execution;
 
+use crate::worker::children::ChildrenView;
 use crate::worker::config::WorkerConfig;
+use crate::worker::executor::slots::{DownState, PoolService};
+use crate::worker::executor::supervisor::BootFailureCause;
 use crate::worker::recovery::ReaperHealth;
 
 /// One worker snapshot. Every NOT NULL column of the baseline table is named
 /// (the baseline has no column defaults); `children_memory_mb` is left NULL:
-/// this worker runs no children.
+/// the core does not read the RSS of the children yet.
 const INSERT_WORKER_STATE_SQL: &str = "\
 INSERT INTO horsies_worker_states (
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch, max_claim_per_worker,
@@ -28,11 +28,46 @@ INSERT INTO horsies_worker_states (
     $11::jsonb, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb
 )";
 
-/// The slot health of a worker that runs task bodies in its own process. It
-/// has no child slots, so no slot is down: Python stores `[]` for a worker
-/// with no slot down (`core/models/health.py`, `slots_down_json`). Pure.
-fn in_process_slots_down() -> serde_json::Value {
-    serde_json::Value::Array(Vec::new())
+/// The JSON of the cause of a down slot (Python `boot_cause_json`). A slot
+/// goes down only for a cause that can clear, so any other cause is a
+/// defect of the board.
+fn down_cause_json(slot: usize, cause: &BootFailureCause) -> serde_json::Value {
+    match cause {
+        BootFailureCause::ResourceShortage(errno) => {
+            serde_json::json!({ "kind": "resource_shortage", "errno": errno.as_str() })
+        }
+        BootFailureCause::ThreadStartRefused => {
+            serde_json::json!({ "kind": "thread_start_refused" })
+        }
+        BootFailureCause::AppLoadFailed
+        | BootFailureCause::ChildPoolSetupFailed
+        | BootFailureCause::TaskLoopCreateFailed
+        | BootFailureCause::SpawnFailed
+        | BootFailureCause::LostBeforeReady { .. }
+        | BootFailureCause::NotReadyInTime
+        | BootFailureCause::ProtocolMismatch(_) => {
+            panic!("slot {slot} is down for a cause that repeats: {cause}")
+        }
+    }
+}
+
+/// The `slots_down` column: each slot that is down, in slot order (Python
+/// `core/models/health.py`, `slots_down_json`). An empty list means that no
+/// slot was down. Pure.
+pub fn slots_down_json(down: &[(usize, DownState)]) -> serde_json::Value {
+    serde_json::Value::Array(
+        down.iter()
+            .map(|(slot, state)| {
+                serde_json::json!({
+                    "slot": slot,
+                    "cause": down_cause_json(*slot, &state.cause),
+                    "detail": state.detail,
+                    "down_since": state.down_since.to_rfc3339_opts(SecondsFormat::Micros, false),
+                    "failed_boots": state.failed_boots.get(),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// One budget of a worker's claim plan, as the snapshot stores it.
@@ -68,24 +103,22 @@ pub fn class_capacity_json(budgets: &[BudgetColumn]) -> serde_json::Value {
     serde_json::Value::Object(capacity)
 }
 
-/// The class capacity of a worker that runs task bodies in its own process.
-///
-/// Its claim has one budget of `concurrency` and takes rows of every
-/// execution class. The stored form of that plan is one `ISOLATED` budget
-/// that serves every class, as Python stores it for a worker that runs only
-/// isolated children (`core/worker/claim_plan.py`, `isolated_children_plan`):
-/// `{"ISOLATED": {"capacity": concurrency, "serves": ["ISOLATED",
-/// "SHARED_ASYNC", "SHARED_THREAD"]}}`. Pure.
-fn in_process_class_capacity(concurrency: u32) -> serde_json::Value {
-    class_capacity_json(&[BudgetColumn {
-        budget: Execution::Isolated,
-        capacity: concurrency,
-        serves: vec![
-            Execution::Isolated,
-            Execution::SharedAsync,
-            Execution::SharedThread,
-        ],
-    }])
+/// The `class_capacity` column of the worker's slots now: each budget of
+/// the plan with its capacity in service and the classes it claims (Python
+/// `class_capacity_json(self.cfg.claim_plan(), self._claim_capacity())`).
+/// Pure.
+pub fn class_capacity_of(service: &PoolService) -> serde_json::Value {
+    let plan = service.plan();
+    let columns: Vec<BudgetColumn> = service
+        .capacities()
+        .into_iter()
+        .map(|capacity| BudgetColumn {
+            budget: capacity.budget,
+            capacity: capacity.in_service,
+            serves: plan.served_by(capacity.budget),
+        })
+        .collect();
+    class_capacity_json(&columns)
 }
 
 /// The columns of a worker snapshot that the children and the claim limits
@@ -108,10 +141,6 @@ impl ClaimColumns {
     /// queue limit or 0, and its claimed limit or else its seat count
     /// (Python: `cfg.max_claim_per_worker if > 0 else cfg.seat_count()`).
     /// Pure.
-    #[allow(
-        dead_code,
-        reason = "the snapshot loop calls it once the worker runs a profile"
-    )]
     pub fn of_profile(profile: &WorkerProfile) -> Self {
         Self {
             processes: profile.child_count(),
@@ -122,21 +151,6 @@ impl ClaimColumns {
             max_claim_per_worker: match profile.claim.claimed_per_worker {
                 TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
                 TaskLimitSetting::NoTaskLimit {} => profile.seat_count(),
-            },
-        }
-    }
-
-    /// The columns of a worker that runs task bodies in its own process, the
-    /// worker loop until it runs every task through the executor. Its
-    /// `concurrency` permits are its seats, so `max_claim_per_worker = 0`
-    /// ("auto") is stored as `concurrency`. Pure.
-    pub fn of_in_process(worker_config: &WorkerConfig) -> Self {
-        Self {
-            processes: worker_config.concurrency,
-            max_claim_batch: worker_config.max_claim_batch,
-            max_claim_per_worker: match worker_config.max_claim_per_worker {
-                0 => worker_config.concurrency,
-                limit => limit,
             },
         }
     }
@@ -189,15 +203,30 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
     }
 }
 
-/// Query the count of tasks currently claimed by this worker.
-async fn query_tasks_claimed(pool: &PgPool, worker_id: &str) -> Result<i32, sqlx::Error> {
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED'",
+/// The RUNNING and the CLAIMED rows that this worker holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeldRows {
+    running: i32,
+    claimed: i32,
+}
+
+/// Count the RUNNING and the CLAIMED rows of this worker in one statement
+/// (Python `_count_only_running_for_worker` and `_count_claimed_for_worker`,
+/// two statements on one session).
+async fn query_held_rows(pool: &PgPool, worker_id: &str) -> Result<HeldRows, sqlx::Error> {
+    let (running, claimed): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE status = 'RUNNING'),
+                COUNT(*) FILTER (WHERE status = 'CLAIMED')
+         FROM horsies_tasks
+         WHERE claimed_by_worker_id = $1 AND status IN ('RUNNING', 'CLAIMED')",
     )
     .bind(worker_id)
     .fetch_one(pool)
     .await?;
-    Ok(count.0 as i32)
+    Ok(HeldRows {
+        running: i32::try_from(running).unwrap_or(i32::MAX),
+        claimed: i32::try_from(claimed).unwrap_or(i32::MAX),
+    })
 }
 
 /// Spawn a background loop that inserts worker state snapshots on
@@ -206,6 +235,12 @@ async fn query_tasks_claimed(pool: &PgPool, worker_id: &str) -> Result<i32, sqlx
 /// Tracks the worker's liveness, task counts, and resource metrics
 /// (memory/CPU via sysinfo) in `horsies_worker_states` as a timeseries.
 /// Each snapshot is a new row (INSERT), enabling historical analysis.
+///
+/// `children` gives the slots of the worker at each snapshot: the down
+/// slots (`slots_down`) and the capacity in service of each budget
+/// (`class_capacity`). `claim_columns` are the profile's
+/// ([`ClaimColumns::of_profile`]).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_state_loop(
     pool: PgPool,
     worker_id: String,
@@ -214,12 +249,12 @@ pub fn spawn_worker_state_loop(
     worker_config: WorkerConfig,
     app_config: AppConfig,
     reaper_health: ReaperHealth,
-    semaphore: Arc<Semaphore>,
+    children: ChildrenView,
+    claim_columns: ClaimColumns,
     worker_started_at: DateTime<Utc>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let total_permits = worker_config.concurrency as usize;
         let snapshot_interval =
             std::time::Duration::from_millis(app_config.recovery.worker_state_snapshot_interval_ms);
 
@@ -227,9 +262,6 @@ pub fn spawn_worker_state_loop(
         // NULL (both columns are NOT NULL on the baseline).
         let queue_priorities = sqlx::types::Json(&worker_config.queue_priorities);
         let queue_max_concurrency = sqlx::types::Json(&worker_config.queue_max_concurrency);
-        let slots_down = in_process_slots_down();
-        let class_capacity = in_process_class_capacity(worker_config.concurrency);
-        let claim_columns = ClaimColumns::of_in_process(&worker_config);
 
         // Initialize sysinfo System for resource metrics.
         let sys_pid = Pid::from(pid as usize);
@@ -245,14 +277,12 @@ pub fn spawn_worker_state_loop(
         // (Python `_worker_state_heartbeat_loop`: write, then wait), so the
         // fleet check sees a starting worker at once.
         while !cancel.is_cancelled() {
-            let tasks_running = (total_permits - semaphore.available_permits()) as i32;
-
             // Python counts and inserts under one `try`, so a failed count
             // writes no snapshot (`core/worker/health.py`,
             // `_update_worker_state`). Storing 0 would record "no claimed
             // row" for a count that was not taken.
-            let tasks_claimed = match query_tasks_claimed(&pool, &worker_id).await {
-                Ok(count) => count,
+            let held = match query_held_rows(&pool, &worker_id).await {
+                Ok(held) => held,
                 Err(error) => {
                     tracing::error!(
                         worker_id = %worker_id,
@@ -267,6 +297,8 @@ pub fn spawn_worker_state_loop(
                 }
             };
 
+            let slots_down = slots_down_json(&children.down_slots());
+            let class_capacity = class_capacity_of(&children.service());
             let metrics = collect_resource_metrics(&mut sys, sys_pid);
             let health = reaper_health.read().await.clone();
             let mut recovery_value = serde_json::to_value(&app_config.recovery)
@@ -312,8 +344,8 @@ pub fn spawn_worker_state_loop(
                 .bind(queue_priorities)
                 .bind(queue_max_concurrency)
                 .bind(&recovery_value)
-                .bind(tasks_running)
-                .bind(tasks_claimed)
+                .bind(held.running)
+                .bind(held.claimed)
                 .bind(metrics.memory_usage_mb)
                 .bind(metrics.memory_percent)
                 .bind(metrics.cpu_percent)
@@ -338,7 +370,37 @@ pub fn spawn_worker_state_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::worker::children::SeatsPerChild;
+    use crate::worker::executor::slots::{ChildLayout, PoolBoard, SlotService};
+
+    /// The view of a worker of `isolated` isolated children, every slot
+    /// booting.
+    fn isolated_children(isolated: usize) -> ChildrenView {
+        ChildrenView::new(
+            Arc::new(PoolBoard::new(ChildLayout {
+                isolated,
+                shared_async: 0,
+                shared_thread: 0,
+            })),
+            SeatsPerChild {
+                shared_async: 0,
+                shared_thread: 0,
+            },
+        )
+    }
+
+    /// The claim columns of a worker of `isolated` isolated children with no
+    /// claim limit.
+    fn isolated_claim_columns(isolated: u32) -> ClaimColumns {
+        ClaimColumns {
+            processes: isolated,
+            max_claim_batch: 0,
+            max_claim_per_worker: isolated,
+        }
+    }
 
     #[tokio::test]
     #[serial_test::serial]
@@ -354,10 +416,7 @@ mod tests {
         health.write().await.phase2_recovery = Some(phase2.clone());
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 10;
-        let worker_config = WorkerConfig {
-            concurrency: 1,
-            ..Default::default()
-        };
+        let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
             pool.clone(),
@@ -367,7 +426,8 @@ mod tests {
             worker_config,
             app_config,
             health.clone(),
-            Arc::new(Semaphore::new(1)),
+            isolated_children(1),
+            isolated_claim_columns(1),
             Utc::now(),
             cancel.clone(),
         );
@@ -424,9 +484,61 @@ mod tests {
         assert!(!INSERT_WORKER_STATE_SQL.contains("ON CONFLICT"));
     }
 
+    /// Python `core/models/health.py`, `slots_down_json`: no slot down is
+    /// `[]`.
     #[test]
-    fn an_in_process_worker_has_no_slot_down() {
-        assert_eq!(in_process_slots_down(), serde_json::json!([]));
+    fn no_down_slot_is_an_empty_list() {
+        assert_eq!(slots_down_json(&[]), serde_json::json!([]));
+        assert_eq!(
+            slots_down_json(&isolated_children(2).down_slots()),
+            serde_json::json!([])
+        );
+    }
+
+    /// Python `slots_down_json`: each down slot with its index, its cause as
+    /// `boot_cause_json` writes it, its detail, the time it went down and
+    /// its failed boots.
+    #[test]
+    fn a_down_slot_is_written_with_its_cause_and_boots() {
+        use crate::worker::executor::protocol::ShortageErrno;
+        use chrono::TimeZone;
+        use std::num::NonZeroU32;
+
+        let down_since = Utc
+            .with_ymd_and_hms(2026, 11, 16, 9, 30, 0)
+            .single()
+            .expect("a valid test instant");
+        let down = [
+            (
+                1,
+                DownState {
+                    cause: BootFailureCause::ResourceShortage(ShortageErrno::Emfile),
+                    detail: "Too many open files".to_owned(),
+                    down_since,
+                    failed_boots: NonZeroU32::new(3).expect("3"),
+                },
+            ),
+            (
+                2,
+                DownState {
+                    cause: BootFailureCause::ThreadStartRefused,
+                    detail: "can't start new thread".to_owned(),
+                    down_since,
+                    failed_boots: NonZeroU32::new(1).expect("1"),
+                },
+            ),
+        ];
+        assert_eq!(
+            slots_down_json(&down),
+            serde_json::json!([
+                {"slot": 1, "cause": {"kind": "resource_shortage", "errno": "EMFILE"},
+                 "detail": "Too many open files", "down_since": "2026-11-16T09:30:00.000000+00:00",
+                 "failed_boots": 3},
+                {"slot": 2, "cause": {"kind": "thread_start_refused"},
+                 "detail": "can't start new thread", "down_since": "2026-11-16T09:30:00.000000+00:00",
+                 "failed_boots": 1},
+            ])
+        );
     }
 
     /// Python `test_claim_plan.py::test_budgets_and_worker_state_capacity`:
@@ -495,40 +607,25 @@ mod tests {
         );
     }
 
-    /// #804: a worker that runs task bodies in its own process stores
-    /// `max_claim_per_worker = 0` ("auto") as its seats, `concurrency`; a set
-    /// limit is stored as it is.
+    /// Python `class_capacity_json(plan, capacity)` of a worker of isolated
+    /// children: one `ISOLATED` budget of its slots in service that serves
+    /// every class.
     #[test]
-    fn an_in_process_worker_stores_auto_as_its_concurrency() {
-        let auto = WorkerConfig {
-            concurrency: 4,
-            max_claim_batch: 2,
-            max_claim_per_worker: 0,
-            ..Default::default()
+    fn the_class_capacity_of_isolated_slots_serves_every_class() {
+        let service = PoolService {
+            isolated: vec![
+                SlotService::Booting,
+                SlotService::InService,
+                SlotService::Down,
+            ],
+            shared_async: Vec::new(),
+            shared_thread: Vec::new(),
         };
         assert_eq!(
-            ClaimColumns::of_in_process(&auto),
-            ClaimColumns {
-                processes: 4,
-                max_claim_batch: 2,
-                max_claim_per_worker: 4,
-            },
-        );
-
-        let set = WorkerConfig {
-            max_claim_per_worker: 6,
-            ..auto
-        };
-        assert_eq!(ClaimColumns::of_in_process(&set).max_claim_per_worker, 6);
-    }
-
-    #[test]
-    fn an_in_process_worker_has_one_budget_that_serves_every_class() {
-        assert_eq!(
-            in_process_class_capacity(3),
+            class_capacity_of(&service),
             serde_json::json!({
                 "ISOLATED": {
-                    "capacity": 3,
+                    "capacity": 2,
                     "serves": ["ISOLATED", "SHARED_ASYNC", "SHARED_THREAD"]
                 }
             })
@@ -551,10 +648,7 @@ mod tests {
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
-        let worker_config = WorkerConfig {
-            concurrency: 2,
-            ..Default::default()
-        };
+        let worker_config = WorkerConfig::default();
         assert!(worker_config.queue_priorities.is_empty());
         assert!(worker_config.queue_max_concurrency.is_empty());
         let cancel = CancellationToken::new();
@@ -566,7 +660,8 @@ mod tests {
             worker_config,
             app_config,
             new_reaper_health(),
-            Arc::new(Semaphore::new(2)),
+            isolated_children(2),
+            isolated_claim_columns(2),
             Utc::now(),
             cancel.clone(),
         );
@@ -613,8 +708,11 @@ mod tests {
         assert_eq!(queue_priorities, serde_json::json!({}));
         assert_eq!(queue_max_concurrency, serde_json::json!({}));
         assert_eq!(slots_down, serde_json::json!([]));
-        assert_eq!(class_capacity, in_process_class_capacity(2));
-        // "auto" (0) is stored resolved: the seats of the worker (#804).
+        assert_eq!(
+            class_capacity,
+            class_capacity_of(&isolated_children(2).service())
+        );
+        // No limit is stored resolved: the seats of the worker (#804).
         assert_eq!(max_claim_per_worker, 2);
     }
 
@@ -635,13 +733,11 @@ mod tests {
             worker_id.to_owned(),
             "claimed-count-test".to_owned(),
             std::process::id() as i32,
-            WorkerConfig {
-                concurrency: 1,
-                ..Default::default()
-            },
+            WorkerConfig::default(),
             app_config,
             new_reaper_health(),
-            Arc::new(Semaphore::new(1)),
+            isolated_children(1),
+            isolated_claim_columns(1),
             Utc::now(),
             cancel.clone(),
         );
@@ -727,10 +823,7 @@ mod tests {
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
-        let worker_config = WorkerConfig {
-            concurrency: 1,
-            ..Default::default()
-        };
+        let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
             pool.clone(),
@@ -740,7 +833,8 @@ mod tests {
             worker_config,
             app_config,
             new_reaper_health(),
-            Arc::new(Semaphore::new(1)),
+            isolated_children(1),
+            isolated_claim_columns(1),
             Utc::now(),
             cancel.clone(),
         );

@@ -49,7 +49,7 @@ mod placement_tests;
 #[cfg(test)]
 mod plain_success_tests;
 #[cfg(test)]
-mod scripted;
+pub(crate) mod scripted;
 #[cfg(test)]
 mod settle_tests;
 #[cfg(test)]
@@ -72,6 +72,8 @@ mod stop_and_loss_tests;
 mod tests;
 #[cfg(test)]
 mod timeout_order_tests;
+#[cfg(test)]
+mod worker_children_tests;
 
 pub use board::{
     ChildBaseline, ChildLayout, DownState, PoolBoard, PoolFailure, PoolHealth, ReadyChild,

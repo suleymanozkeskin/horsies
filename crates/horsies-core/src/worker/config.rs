@@ -4,28 +4,16 @@ use crate::core::AppConfig;
 
 use crate::worker::cli::LogLevel;
 
-/// Worker-specific configuration.
+/// Worker-specific configuration: the queues and how the worker claims from
+/// them.
 ///
-/// Combined with `AppConfig` (which provides broker, recovery, prefetch settings)
-/// to fully configure a worker instance.
+/// Combined with `AppConfig` (which provides broker, recovery, prefetch
+/// settings) and the worker's profile (its children, seats and claim
+/// limits) to fully configure a worker instance.
 #[derive(Clone)]
 pub struct WorkerConfig {
     /// Queues this worker will serve.
     pub queues: Vec<String>,
-
-    /// Maximum number of tasks executing concurrently.
-    pub concurrency: u32,
-
-    /// Per-queue claim limit per pass. `0` (the default) auto-fills the
-    /// available local/global budget; a positive value is an explicit per-queue
-    /// fairness cap. Mirrors Python's `WorkerConfig.max_claim_batch`.
-    pub max_claim_batch: u32,
-
-    /// Per-worker limit on total CLAIMED tasks to prevent over-claiming.
-    /// 0 = auto (defaults to `concurrency` in hard-cap mode, or
-    /// `concurrency + prefetch_buffer` in soft-cap mode).
-    /// Mirrors Python's `WorkerConfig.max_claim_per_worker`.
-    pub max_claim_per_worker: u32,
 
     /// Optional priority ordering for queues (lower number = higher priority).
     /// When set, queues are claimed in priority order (greedy fill).
@@ -48,14 +36,8 @@ pub struct WorkerConfig {
 
 impl Default for WorkerConfig {
     fn default() -> Self {
-        let concurrency = std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(2);
         Self {
             queues: vec!["default".to_owned()],
-            concurrency,
-            max_claim_batch: 0,
-            max_claim_per_worker: 0,
             queue_priorities: HashMap::new(),
             queue_max_concurrency: HashMap::new(),
             coalesce_notifies: 100,
@@ -70,10 +52,6 @@ impl WorkerConfig {
         if self.queues.is_empty() {
             return Err("at least one queue must be specified".to_owned());
         }
-        if self.concurrency == 0 {
-            return Err("concurrency must be at least 1".to_owned());
-        }
-        // max_claim_batch == 0 is valid: it means auto-fill the available budget.
         Ok(())
     }
 
@@ -112,41 +90,12 @@ mod tests {
         let config = WorkerConfig::default();
         assert!(config.validate().is_ok());
         assert_eq!(config.queues, vec!["default"]);
-        assert!(config.concurrency >= 1);
-        assert_eq!(config.max_claim_batch, 0, "default is auto-fill");
-    }
-
-    #[test]
-    fn max_claim_batch_zero_is_valid() {
-        let config = WorkerConfig {
-            max_claim_batch: 0,
-            ..Default::default()
-        };
-        assert!(config.validate().is_ok(), "0 = auto-fill, must be valid");
-    }
-
-    #[test]
-    fn max_claim_batch_positive_is_valid() {
-        let config = WorkerConfig {
-            max_claim_batch: 5,
-            ..Default::default()
-        };
-        assert!(config.validate().is_ok());
     }
 
     #[test]
     fn empty_queues_rejected() {
         let config = WorkerConfig {
             queues: vec![],
-            ..Default::default()
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn zero_concurrency_rejected() {
-        let config = WorkerConfig {
-            concurrency: 0,
             ..Default::default()
         };
         assert!(config.validate().is_err());
