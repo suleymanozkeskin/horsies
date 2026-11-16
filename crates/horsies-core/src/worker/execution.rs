@@ -87,8 +87,9 @@ pub(crate) enum PhaseTwoForm {
 /// Outcome of Phase 1 finalize: persisting the terminal task state.
 pub(crate) enum FinalizeOutcome {
     /// Task completed or failed terminally. Needs Phase 2 (workflow callback).
+    /// The node status comes from the kind of the phase-2 record, which the
+    /// node finish reads; phase 2 does not take the task's status.
     Terminal {
-        is_success: bool,
         /// Phase 1 already fired the capacity wake (the fused success path
         /// notifies in-statement); Phase 2 must not wake capacity twice.
         capacity_notified: bool,
@@ -114,7 +115,6 @@ pub(crate) enum FinalizeOutcome {
 /// before running potentially slow workflow callbacks + retries.
 pub(crate) struct Phase2Work {
     pub task_id: Uuid,
-    pub is_success: bool,
     pub queue_name: String,
     pub is_workflow_task: bool,
     /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
@@ -820,7 +820,6 @@ async fn persist_workflow_success(
         .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
-            is_success: true,
             capacity_notified: false,
             phase_two: PhaseTwoForm::Step(phase_two.step),
         }),
@@ -890,7 +889,6 @@ async fn persist_failed_attempt(
             after: AfterFailure::PhaseTwoOwed(owed),
             ..
         } => Ok(FinalizeOutcome::Terminal {
-            is_success: false,
             capacity_notified: false,
             phase_two: PhaseTwoForm::Step(owed.step),
         }),
@@ -955,13 +953,12 @@ async fn replay_of_committed_write(
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
-        true => match load_pending_terminal_success(pool, task_id).await? {
-            Some(is_success) => Ok(FinalizeOutcome::Terminal {
-                is_success,
+        true => match load_pending_phase_two(pool, task_id).await? {
+            PendingPhaseTwo::Owed => Ok(FinalizeOutcome::Terminal {
                 capacity_notified: false,
                 phase_two: PhaseTwoForm::NotKnown,
             }),
-            None => Ok(FinalizeOutcome::Finalized),
+            PendingPhaseTwo::Consumed => Ok(FinalizeOutcome::Finalized),
         },
         false => Ok(FinalizeOutcome::Finalized),
     }
@@ -1147,38 +1144,45 @@ fn node_finish_outcome(
     }
 }
 
-/// Read the durable phase-2 terminal status after a Phase-1 replay.
+/// Whether a task has a phase-2 record. Its status is not read: the node
+/// finish takes the node status from the record's kind.
+const PENDING_PHASE_TWO_EXISTS_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)";
+
+/// What the phase-2 record of a committed workflow write owes, as a replay
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPhaseTwo {
+    /// The record exists: phase 2 is owed.
+    Owed,
+    /// No record: phase 2 consumed it, so the replay owes nothing.
+    Consumed,
+}
+
+/// Read whether a workflow task's phase-2 record exists after a phase-1
+/// replay. One statement; writes nothing. The moved history row is not read:
+/// the record is the evidence that phase 2 is still owed.
 ///
-/// `None` means the outbox evidence has already been durably consumed. The
-/// moved terminal row is deliberately not queried: v35 live rows are live-only.
-async fn load_pending_terminal_success(
+/// Errors: the read fails: [`FinalizeError`] at
+/// [`FinalizeStage::Phase2Workflow`], retryable.
+async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
-) -> Result<Option<bool>, FinalizeError> {
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT terminal_status FROM horsies_workflow_phase2_pending WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| FinalizeError {
-        stage: FinalizeStage::Phase2Workflow,
-        task_id,
-        message: format!("failed to load phase-2 terminal status: {}", e),
-        retryable: true,
-    })?;
-    status
-        .map(|status| match status.as_str() {
-            "COMPLETED" => Ok(true),
-            "FAILED" | "CANCELLED" | "EXPIRED" => Ok(false),
-            other => Err(FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
-                task_id,
-                message: format!("phase-2 outbox has non-terminal status {other:?}"),
-                retryable: false,
-            }),
-        })
-        .transpose()
+) -> Result<PendingPhaseTwo, FinalizeError> {
+    let owed: bool = sqlx::query_scalar(PENDING_PHASE_TWO_EXISTS_SQL)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase2Workflow,
+            task_id,
+            message: format!("failed to load the phase-2 record: {error}"),
+            retryable: true,
+        })?;
+    Ok(match owed {
+        true => PendingPhaseTwo::Owed,
+        false => PendingPhaseTwo::Consumed,
+    })
 }
 
 pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
@@ -1232,7 +1236,6 @@ pub(crate) async fn finalize_pre_execution_failure(
         OwnershipOutcome::ExpiredBeforeStart => {
             return Some(Phase2Work {
                 task_id,
-                is_success: false,
                 queue_name,
                 is_workflow_task,
                 capacity_notified: false,
@@ -1256,12 +1259,10 @@ pub(crate) async fn finalize_pre_execution_failure(
     .await
     {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
@@ -1384,7 +1385,6 @@ pub(crate) async fn execute_and_finalize(
         OwnershipOutcome::ExpiredBeforeStart => {
             return Some(Phase2Work {
                 task_id,
-                is_success: false,
                 queue_name,
                 is_workflow_task,
                 capacity_notified: false,
@@ -1449,12 +1449,10 @@ pub(crate) async fn execute_and_finalize(
 
     match phase1_outcome {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,

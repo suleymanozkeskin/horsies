@@ -257,12 +257,10 @@ fn ok_result(text: &str) -> TaskResult<Vec<u8>> {
 fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match outcome {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
-             phase_two: {phase_two:?} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -532,7 +530,6 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
 /// owes its phase 2 for the committed failure.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
 async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
@@ -569,17 +566,12 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: false,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
     }
+    assert_eq!(committed["status"], "FAILED");
     assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
     cleanup(&pool, &seeded).await;
 }
@@ -589,7 +581,6 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 /// adds no attempt and leaves the committed record as it was.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
 async fn a_workflow_success_replay_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
@@ -626,13 +617,7 @@ async fn a_workflow_success_replay_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: true,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
