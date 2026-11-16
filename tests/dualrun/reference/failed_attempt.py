@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, LiteralString, assert_never
 
-from horsies.core.utils.retry import admitted_retry_policy, calculate_retry_delay
+from horsies.core.utils.retry import RetryPolicy, admitted_retry_policy, calculate_retry_delay
 from tests.dualrun.capture import Connection
 
 READ_IN_FLIGHT_ATTEMPT_SQL: Final[LiteralString] = """
@@ -133,7 +133,7 @@ def _retry(attempt: _Running, error_code: str, placement: str) -> dict[str, Any]
     match policy:
         case None:
             return _NO_RETRY
-        case dict():
+        case RetryPolicy():
             return {
                 'retry_kind': 'RETRY',
                 'expected_retry_count': attempt.retry_count,

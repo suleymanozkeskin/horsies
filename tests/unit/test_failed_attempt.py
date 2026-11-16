@@ -24,6 +24,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedTaskState,
     OutcomeDecodeError,
     PhaseTwoOwed,
+    PhaseTwoStep,
     RetryNotRequested,
     RetryPastDeadline,
     RetryScheduled,
@@ -94,6 +95,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         'queue_name': 'q1',
         'task_name': 'task_a',
         'node_has_dependents': None,
+        'downstream_subworkflow': None,
     }
     row.update(overrides)
     return row
@@ -147,11 +149,39 @@ class TestDecodeWrites:
 
     def test_a_workflow_failure_owes_phase_two(self) -> None:
         decoded = decode_failed_attempt_row(
-            _row(is_workflow_task=True, node_has_dependents=True),
+            _row(is_workflow_task=True, node_has_dependents=True, downstream_subworkflow='NONE'),
         )
 
         assert isinstance(decoded, FailureApplied)
-        assert decoded.after == PhaseTwoOwed(task_name='task_a', queue_name='q1')
+        assert decoded.after == PhaseTwoOwed(
+            task_name='task_a',
+            queue_name='q1',
+            step=PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW,
+        )
+
+    @pytest.mark.parametrize(
+        ('has_dependents', 'downstream', 'step'),
+        [
+            (False, 'NONE', PhaseTwoStep.NO_DEPENDENTS),
+            (False, None, PhaseTwoStep.NO_DEPENDENTS),
+            (True, 'NONE', PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW),
+            (True, 'REACHABLE', PhaseTwoStep.SUBWORKFLOW_REACHABLE),
+        ],
+        ids=['no_dependents', 'no_linked_node', 'dependents', 'subworkflow_reachable'],
+    )
+    def test_the_node_facts_give_the_phase_two_step(
+        self, has_dependents: bool, downstream: str | None, step: PhaseTwoStep,
+    ) -> None:
+        decoded = decode_failed_attempt_row(
+            _row(
+                is_workflow_task=True,
+                node_has_dependents=has_dependents,
+                downstream_subworkflow=downstream,
+            ),
+        )
+
+        assert isinstance(decoded, FailureApplied)
+        assert decoded.after == PhaseTwoOwed(task_name='task_a', queue_name='q1', step=step)
 
     def test_a_retry_past_its_deadline_carries_both_instants(self) -> None:
         decoded = decode_failed_attempt_row(
@@ -237,10 +267,21 @@ class TestDecodeFailsClosed:
             _row(retry_count=1),
             _row(terminalization_kind='FAIL_STALE'),
             _row(is_workflow_task=None),
-            _row(is_workflow_task=True, node_has_dependents=True, task_name=None),
+            _row(
+                is_workflow_task=True,
+                node_has_dependents=True,
+                downstream_subworkflow='NONE',
+                task_name=None,
+            ),
             _row(is_workflow_task=True),
+            _row(is_workflow_task=True, node_has_dependents=False, downstream_subworkflow='REACHABLE'),
+            _row(is_workflow_task=True, node_has_dependents=True),
+            _row(is_workflow_task=True, node_has_dependents=True, downstream_subworkflow='BELOW'),
+            _row(is_workflow_task=True, node_has_dependents=1, downstream_subworkflow='NONE'),
             _row(node_has_dependents=False),
+            _row(downstream_subworkflow='NONE'),
             _retry_row(node_has_dependents=False),
+            _retry_row(downstream_subworkflow='NONE'),
             _retry_row(terminal_at=NOW),
             _retry_row(retry_count=None),
             _retry_row(queue_name=None),
@@ -259,8 +300,14 @@ class TestDecodeFailsClosed:
             'applied_without_the_task_kind',
             'phase_two_without_a_task_name',
             'workflow_failure_without_the_dependents_fact',
+            'no_dependents_and_a_reachable_subworkflow',
+            'dependents_and_no_downstream_fact',
+            'unknown_downstream_fact',
+            'dependents_fact_not_a_boolean',
             'plain_failure_with_a_dependents_fact',
+            'plain_failure_with_a_downstream_fact',
             'retry_with_a_dependents_fact',
+            'retry_with_a_downstream_fact',
             'retry_with_a_terminal_time',
             'retry_without_a_count',
             'retry_without_a_queue',
