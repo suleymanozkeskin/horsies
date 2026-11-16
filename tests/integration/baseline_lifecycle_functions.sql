@@ -554,6 +554,38 @@ SELECT lc_expect(
     '0'
 );
 
+-- One budget per class (#711): the queue q_budget holds three due rows of each class. The worker's budgets take one
+-- ISOLATED and two SHARED_ASYNC rows; it has no route for SHARED_THREAD, so those rows stay.
+SELECT lc_task(('00000000-0000-7000-8000-00000000c1' || n)::uuid, 'PENDING') FROM generate_series(10, 18) n;
+UPDATE horsies_tasks
+SET queue_name = 'q_budget',
+    execution = (ARRAY['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'])[1 + (right(id::text, 2)::int - 10) % 3]
+WHERE id BETWEEN '00000000-0000-7000-8000-00000000c110' AND '00000000-0000-7000-8000-00000000c118';
+CREATE TEMP TABLE lc_budget_claimed ON COMMIT DROP AS
+SELECT * FROM horsies_claim(
+    'wb', '["q_budget"]'::jsonb, '{}'::jsonb, '{}'::jsonb, FALSE, '{"ISOLATED": 1, "SHARED_ASYNC": 2}'::jsonb,
+    '{"ISOLATED": "ISOLATED", "SHARED_ASYNC": "SHARED_ASYNC"}'::jsonb, 0, 10, 10, NULL, 45000, '[]'::jsonb
+);
+SELECT lc_expect(
+    'claim (#711): each class takes its own budget, an unrouted class stays',
+    (SELECT string_agg(execution || ':' || n, ',' ORDER BY execution) FROM (
+        SELECT execution, count(*) AS n FROM lc_budget_claimed WHERE row_kind = 'CLAIMED' GROUP BY execution) c),
+    'ISOLATED:1,SHARED_ASYNC:2'
+);
+SELECT lc_expect(
+    'claim (#711): the budget counts of the worker after the pass',
+    (SELECT budget_counts::text FROM horsies_claim_in_flight(
+        'wb', ARRAY[]::text[], FALSE, '{"ISOLATED": "ISOLATED", "SHARED_ASYNC": "SHARED_ASYNC"}'::jsonb)),
+    '{"ISOLATED": 1, "SHARED_ASYNC": 2}'
+);
+SELECT lc_expect(
+    'claim (#711): a full budget takes nothing more of its class',
+    (SELECT count(*)::text FROM horsies_claim(
+        'wb', '["q_budget"]'::jsonb, '{}'::jsonb, '{}'::jsonb, FALSE, '{"ISOLATED": 1, "SHARED_ASYNC": 2}'::jsonb,
+        '{"ISOLATED": "ISOLATED", "SHARED_ASYNC": "SHARED_ASYNC"}'::jsonb, 0, 10, 10, NULL, 45000, '[]'::jsonb)),
+    '0'
+);
+
 ------------------------------------------------------------------------------------------------------------------------
 -- horsies_start_attempt
 ------------------------------------------------------------------------------------------------------------------------
@@ -956,7 +988,7 @@ SELECT lc_expect(
 -- A killed child: the RELEASE rule.
 SELECT lc_task('00000000-0000-7000-8000-000000002006', 'CLAIMED');
 SELECT lc_expect(
-    'failed attempt: RELEASE returns a CLAIMED row of this generation with no attempt',
+    'failed attempt (#713): RELEASE returns a CLAIMED row of this generation with no attempt',
     (SELECT outcome || ':' || observed_status FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002006', 'w1', now() - interval '1 second', 'RETRY', 0, 1.0, 'SAME_CLASS',
         '{"err":6}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE)),
@@ -969,9 +1001,17 @@ SELECT lc_expect(
      FROM horsies_tasks t WHERE t.id = '00000000-0000-7000-8000-000000002006'),
     'PENDING|0|3|0'
 );
+SELECT lc_task('00000000-0000-7000-8000-00000000200a', 'RUNNING');
+SELECT lc_expect(
+    'failed attempt (#713): RELEASE on a row the child started writes the failure',
+    (SELECT outcome || ':' || terminalization_kind FROM horsies_finish_failed_attempt(
+        '00000000-0000-7000-8000-00000000200a', 'w1', now() - interval '1 second', 'NONE', NULL, NULL, NULL,
+        '{"err":10}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE)),
+    'APPLIED:FAIL_RUNNING'
+);
 SELECT lc_task('00000000-0000-7000-8000-000000002007', 'CLAIMED');
 SELECT lc_expect(
-    'failed attempt: RELEASE of another claim generation is a lost claim',
+    'failed attempt (#713): RELEASE of another claim generation is a lost claim',
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002007', 'w1', now() - interval '2 seconds', 'NONE', NULL, NULL, NULL,
         '{"err":7}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE)),
