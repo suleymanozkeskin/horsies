@@ -488,7 +488,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
 | `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 | `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Accepted | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry; `retryable` is the driver classification |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the driver classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
@@ -505,7 +505,7 @@ class TaskSendPayload:
     args_json: str | None, kwargs_json: str | None
     sent_at: datetime, good_until: datetime | None
     enqueue_delay_seconds: int | None, task_options: str | None
-    enqueue_sha: str  # SHA-256 hex digest for same-payload guarantee
+    enqueue_sha: str  # SHA-256 hex digest of the payload; the broker compares the command fingerprint and sent_at
 ```
 
 Pre-serialized at send time. Never construct manually — created by the library internally.

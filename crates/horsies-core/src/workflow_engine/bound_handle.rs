@@ -249,9 +249,9 @@ mod tests {
             TaskResult::Err(err) => {
                 assert_eq!(
                     err.error_code,
-                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
                         RetrievalCode::WorkflowNotFound,
-                    )))
+                    ))
                 );
             }
         }
@@ -278,9 +278,9 @@ mod tests {
             TaskResult::Err(err) => {
                 assert_eq!(
                     err.error_code,
-                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
                         OperationalErrorCode::BrokerError,
-                    )))
+                    ))
                 );
             }
         }
@@ -341,9 +341,9 @@ mod shared_listener_tests {
             match result {
                 TaskResult::Err(err) => assert_eq!(
                     err.error_code,
-                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
                         RetrievalCode::WaitTimeout,
-                    ))),
+                    )),
                     "each waiter must time out via the shared listener, not fail on pool exhaustion: {:?}",
                     err.error_code,
                 ),
