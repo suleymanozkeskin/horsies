@@ -41,6 +41,7 @@ from horsies.core.workflows.engine import (
     on_workflow_task_complete,
     try_make_ready_and_enqueue,
 )
+from horsies.core.workflows.stored_success_policy import StoredSuccessPolicyError
 from horsies.core.workflows.sql import (
     COMPLETE_WORKFLOW_TASK_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
@@ -1442,6 +1443,7 @@ class TestGetDependencyResults:
         row = SimpleNamespace(
             task_index=0,
             task_name='task_a',
+            node_id='node-0',
             status='COMPLETED',
             result='not{json',
             sub_definition_key=None,
@@ -1477,6 +1479,7 @@ class TestGetDependencyResults:
         row = SimpleNamespace(
             task_index=0,
             task_name='task_a',
+            node_id='node-0',
             status='COMPLETED',
             # Valid JSON, but envelope marker is missing → decode rejects.
             result='{"unexpected": "shape"}',
@@ -1496,6 +1499,40 @@ class TestGetDependencyResults:
         assert results[0].is_err()
         assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert names[0] == 'task_a'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', ['COMPLETED', 'FAILED'])
+    async def test_no_stored_result_gives_the_deserialization_error(
+        self, status: str,
+    ) -> None:
+        """A terminal dependency with no stored result is an entry naming the
+        node; it used to be left out of the results."""
+        row = SimpleNamespace(
+            task_index=3,
+            task_name='task_a',
+            node_id='node-3',
+            status=status,
+            result=None,
+            sub_definition_key=None,
+        )
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            return _rows_result([row])
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        results, names, _def_keys = await get_dependency_results(session, 'wf-1', [3])
+
+        entry = results[3]
+        assert entry.is_err()
+        assert entry.err is not None
+        assert entry.err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.err.message == (
+            f'Dependency node node-3 (index 3, task task_a) is {status} '
+            'with no stored result'
+        )
+        assert entry.err.data == {'dependency_index': 3}
+        assert names[3] == 'task_a'
 
 
 # ── 8. get_dependency_results_with_names ─────────────────────────────
@@ -1566,10 +1603,16 @@ class TestGetDependencyResultsWithNames:
         )
 
     @pytest.mark.asyncio
-    async def test_no_stored_result_skipped(self) -> None:
+    @pytest.mark.parametrize('status', ['COMPLETED', 'FAILED'])
+    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
+    async def test_no_stored_result_gives_the_deserialization_error(
+        self, status: str, stored: str | None,
+    ) -> None:
+        """A terminal dependency with no stored result is an entry naming the
+        node; it used to be left out, and the context had no key for it."""
         row = SimpleNamespace(
             task_index=0, task_name='task_a', node_id='node-0',
-            status='COMPLETED', result=None,
+            status=status, result=stored,
             sub_definition_key=None,
         )
 
@@ -1579,8 +1622,18 @@ class TestGetDependencyResultsWithNames:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         results = await get_dependency_results_with_names(session, 'wf-1', ['node-0'])
-        # result=None with status COMPLETED → continue (skip), not stored
-        assert 0 not in results.by_index
+
+        entry = results.by_index[0]
+        assert results.by_id['node-0'] is entry
+        assert results.by_name['task_a#0'] is entry
+        assert entry.is_err()
+        assert entry.err is not None
+        assert entry.err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.err.message == (
+            f'Dependency node node-0 (index 0, task task_a) is {status} '
+            'with no stored result'
+        )
+        assert entry.err.data == {'dependency_index': 0}
 
 
 # ── 9. evaluate_workflow_success ─────────────────────────────────────
@@ -1608,16 +1661,14 @@ class TestEvaluateWorkflowSuccess:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_corrupt_policy_falls_back(self) -> None:
-        """Policy parses to non-dict → default behavior."""
+    async def test_corrupt_policy_fails_the_step(self) -> None:
+        """A policy that parses to a non-object fails the completion step; it
+        no longer falls back to the default rule (which gave True here)."""
         session = AsyncMock()
         session.execute = AsyncMock(return_value=_empty_result())
-        # String that parses to a list, not dict
-        result = await evaluate_workflow_success(
-            session, 'wf-1', '[1,2,3]', False, 0,
-        )
-        # Default: not has_error and failed == 0 → True
-        assert result is True
+        with pytest.raises(StoredSuccessPolicyError, match='not an object'):
+            await evaluate_workflow_success(session, 'wf-1', '[1,2,3]', False, 0)
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_required_indices_skipped(self) -> None:
@@ -1696,12 +1747,14 @@ class TestGetWorkflowFailureError:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_corrupt_policy_returns_none(self) -> None:
+    async def test_corrupt_policy_fails_the_step(self) -> None:
+        """A policy that parses to a non-object fails the step; it no longer
+        returns None (which kept the stored error)."""
         session = AsyncMock()
         session.execute = AsyncMock(return_value=_empty_result())
-        # Parses to list, not dict
-        result = await get_workflow_failure_error(session, 'wf-1', '[1,2]')
-        assert result is None
+        with pytest.raises(StoredSuccessPolicyError, match='not an object'):
+            await get_workflow_failure_error(session, 'wf-1', '[1,2]')
+        session.execute.assert_not_awaited()
 
 
 # ── 11. get_workflow_final_result ────────────────────────────────────

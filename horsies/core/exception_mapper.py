@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import cast
+from typing import Final, cast
 
 ExceptionMapper = dict[type[BaseException], str]
 ERROR_CODE_RE = re.compile(r'^[A-Z][A-Z0-9_]*$')
 EXCEPTION_NAME_RE = re.compile(r'^[A-Z][A-Za-z0-9_]*(Error|Exception)$')
+
+RESERVED_NON_TASK_CODES: Final = frozenset({'WORKFLOW_STOPPED'})
+"""Code names that are reserved and are not task codes. ``WORKFLOW_STOPPED``
+names a run that stopped before the task body ran (the wire reason of the
+child); no task error carries it, so a finalize never reads a returned error
+as a stop."""
 
 
 def resolve_exception_error_code(
@@ -73,7 +79,17 @@ def validate_error_code_string(
             f"{field_name} '{value}' is invalid; expected UPPER_SNAKE_CASE "
             "(e.g. RATE_LIMITED)"
         )
+    if value in RESERVED_NON_TASK_CODES:
+        return reserved_code_message(value, field_name=field_name)
     return None
+
+
+def reserved_code_message(value: str, *, field_name: str) -> str:
+    """The refusal text of a code in ``RESERVED_NON_TASK_CODES``."""
+    return (
+        f"{field_name} '{value}' is a reserved error code name and is not a "
+        'task code; use another UPPER_SNAKE_CASE code'
+    )
 
 
 def validate_exception_mapper(

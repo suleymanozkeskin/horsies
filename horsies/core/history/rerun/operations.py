@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -70,7 +71,7 @@ class RerunTask:
     """One rerun request. The deadline is explicit: a value or the
     explicit no-deadline choice, never a silent default."""
 
-    source_task_id: str
+    source_task_id: UUID
     deadline: datetime | None
     caller_key: str | None = None
 
@@ -113,16 +114,16 @@ class NotEligibleReason(Enum):
 class RerunEnqueued:
     """The new request exists; the source record is untouched."""
 
-    new_task_id: str
-    source_task_id: str
-    rerun_root_task_id: str
+    new_task_id: UUID
+    source_task_id: UUID
+    rerun_root_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
 class RerunSourceLive:
     """The source is live; its own lifecycle owns retry."""
 
-    task_id: str
+    task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +133,7 @@ class RerunSourceAbsent:
     ``reason`` says whether retention can explain the absence. Nothing is
     written."""
 
-    task_id: str
+    task_id: UUID
     reason: TaskAbsenceReason
 
 
@@ -146,13 +147,13 @@ class RerunSourceCorrupt:
     define. Nothing is written. A repeat gives the same result until the
     stored row or the server changes."""
 
-    task_id: str
+    task_id: UUID
     exception: HistoryContractError
 
 
 @dataclass(frozen=True, slots=True)
 class RerunNotEligible:
-    task_id: str
+    task_id: UUID
     reason: NotEligibleReason
 
 
@@ -162,7 +163,7 @@ class RerunInputUnavailable:
     envelope. ``disposition`` is the stored reason, for example
     ``DECLINED_BY_POLICY`` or ``OVER_BOUND``."""
 
-    task_id: str
+    task_id: UUID
     disposition: str
 
 
@@ -170,7 +171,7 @@ class RerunInputUnavailable:
 class RerunInputCorrupt:
     """Stored envelope fails integrity or shape; fail closed."""
 
-    task_id: str
+    task_id: UUID
     detail: str
 
 
@@ -180,8 +181,8 @@ class RerunKeyConflict:
     including the source request itself, whose fingerprint differs
     from its rerun's by lineage. The contract working, not a defect."""
 
-    task_id: str
-    reserved_by_task_id: str
+    task_id: UUID
+    reserved_by_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +190,7 @@ class RerunKeyReplay:
     """The key already reserved this exact rerun command; the committed
     request is returned instead of a duplicate."""
 
-    existing_task_id: str
+    existing_task_id: UUID
 
 
 type RerunOutcome = (
@@ -325,8 +326,8 @@ async def rerun_task(
         task_options_json=options_json,
         retention_class_key=policy.retention_class_key,
         retain_rerun_input=policy.retain_rerun_input,
-        rerun_of_task_id=detail.task_id,
-        rerun_root_task_id=root_task_id,
+        rerun_of_task_id=str(detail.task_id),
+        rerun_root_task_id=str(root_task_id),
     ).fingerprint
 
     if command.caller_key is not None:
@@ -358,7 +359,7 @@ async def rerun_task(
     await connection.execute(
         _INSERT_RERUN_SQL,
         {
-            'id': new_task_id,
+            'id': str(new_task_id),
             'task_name': detail.task_name,
             'queue_name': detail.queue_name,
             'priority': detail.priority,
@@ -378,8 +379,8 @@ async def rerun_task(
             'max_retries': detail.max_retries,
             'good_until': command.deadline,
             'retain': policy.retain_rerun_input,
-            'rerun_of': detail.task_id,
-            'rerun_root': root_task_id,
+            'rerun_of': str(detail.task_id),
+            'rerun_root': str(root_task_id),
         },
     )
     return RerunEnqueued(

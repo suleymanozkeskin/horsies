@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::broker::PostgresConfig;
@@ -7,7 +9,12 @@ use super::recovery::RecoveryConfig;
 use super::resilience::WorkerResilienceConfig;
 use super::retention::RetentionConfig;
 use super::schedule::ScheduleConfig;
+use super::worker_profile::{
+    describe_worker_profile, worker_profiles_claim_errors, worker_profiles_shape_errors,
+    WorkerProfile,
+};
 use crate::core::defaults::{DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS};
+use crate::core::error::HorsiesError;
 
 /// Application configuration.
 ///
@@ -65,6 +72,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub resilience: WorkerResilienceConfig,
 
+    /// Named worker settings: a worker runs the profile of its name. An app
+    /// that runs no worker defines none. Every profile is checked with the
+    /// app config, not only the one that a worker starts with.
+    #[serde(default)]
+    pub worker_profiles: BTreeMap<String, WorkerProfile>,
+
     /// Scheduler configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<ScheduleConfig>,
@@ -115,6 +128,10 @@ pub enum AppConfigError {
     Schedule(String),
     #[error("{0}")]
     Payload(String),
+    /// A worker profile refusal. The message names the field path; the
+    /// error also carries Python's notes and help.
+    #[error("{}", .0.message)]
+    WorkerProfile(HorsiesError),
 }
 
 impl AppConfigError {
@@ -134,16 +151,32 @@ impl AppConfigError {
             Self::Resilience(_) => Some(ErrorCode::ConfigInvalidResilience),
             Self::Schedule(_) => Some(ErrorCode::ConfigInvalidSchedule),
             Self::Payload(_) => None,
+            Self::WorkerProfile(_) => Some(ErrorCode::ConfigInvalidWorkerProfile),
         }
     }
 
     /// The refusal as a [`crate::core::error::HorsiesError`] that carries
     /// its catalog code.
-    pub fn to_horsies_error(&self) -> crate::core::error::HorsiesError {
-        let converted = crate::core::error::HorsiesError::new(self.to_string());
-        match self.error_code() {
-            Some(code) => converted.with_code(code),
-            None => converted,
+    ///
+    /// A worker profile refusal keeps its notes and help.
+    pub fn to_horsies_error(&self) -> HorsiesError {
+        match self {
+            Self::WorkerProfile(refusal) => refusal.clone(),
+            Self::QueueMode(_)
+            | Self::ClusterCap(_)
+            | Self::Prefetch(_)
+            | Self::Broker(_)
+            | Self::Recovery(_)
+            | Self::Retention(_)
+            | Self::Resilience(_)
+            | Self::Schedule(_)
+            | Self::Payload(_) => {
+                let converted = HorsiesError::new(self.to_string());
+                match self.error_code() {
+                    Some(code) => converted.with_code(code),
+                    None => converted,
+                }
+            }
         }
     }
 }
@@ -181,6 +214,7 @@ impl AppConfig {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -310,6 +344,14 @@ impl AppConfig {
             "    notify_poll_interval: {}ms",
             self.resilience.notify_poll_interval_ms,
         ));
+
+        // Worker profiles, in name order
+        if !self.worker_profiles.is_empty() {
+            lines.push("  worker_profiles:".to_owned());
+            for (name, profile) in &self.worker_profiles {
+                lines.push(format!("    {name}: {}", describe_worker_profile(profile)));
+            }
+        }
 
         // Schedule config
         if let Some(ref schedule) = self.schedule {
@@ -489,6 +531,16 @@ impl AppConfig {
             }
         }
 
+        // Every worker profile is checked, not only the one that a worker
+        // starts with, so a worker with a valid profile does not start from
+        // a config with an invalid one.
+        for refusal in worker_profiles_shape_errors(&self.worker_profiles) {
+            errors.push(AppConfigError::WorkerProfile(refusal));
+        }
+        for refusal in worker_profiles_claim_errors(&self.worker_profiles, self.prefetch_buffer) {
+            errors.push(AppConfigError::WorkerProfile(refusal));
+        }
+
         errors
     }
 }
@@ -543,8 +595,10 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         }
     }
 
@@ -562,6 +616,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -594,6 +649,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: overrides("default"),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -637,6 +693,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -658,6 +715,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -679,6 +737,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -701,6 +760,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -724,8 +784,10 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: Some(0),
             prefetch_buffer: 0,
@@ -734,6 +796,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -760,6 +823,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -789,6 +853,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -851,8 +916,10 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -861,6 +928,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -888,6 +956,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -1313,5 +1382,119 @@ mod tests {
                 "{json}: {error}"
             );
         }
+    }
+
+    fn with_profiles(document: &str) -> AppConfig {
+        serde_json::from_str(&format!(
+            r#"{{"broker": {{"database_url": "postgresql://localhost/db"}},
+                "worker_profiles": {document}}}"#
+        ))
+        .expect("the worker profiles parse")
+    }
+
+    /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_no_profiles_is_valid`
+    /// and `::test_valid_profiles_are_kept`: an app that runs no worker
+    /// defines none, and valid profiles are kept by name.
+    #[test]
+    fn worker_profiles_default_to_none_and_are_kept_by_name() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"broker": {"database_url": "postgresql://localhost/db"}}"#)
+                .expect("known keys only");
+        assert!(config.worker_profiles.is_empty());
+        assert!(AppConfig::for_database_url("postgresql://localhost/db")
+            .worker_profiles
+            .is_empty());
+
+        let config = with_profiles(
+            r#"{"default": {"isolated": {"kind": "isolated_children", "count": 4}},
+                "io": {"shared_async": {"kind": "shared_async_children", "count": 1, "seats": 4}}}"#,
+        );
+        assert!(config.validate().is_empty());
+        let names: Vec<&str> = config.worker_profiles.keys().map(String::as_str).collect();
+        assert_eq!(names, ["default", "io"]);
+    }
+
+    /// Python `AppConfig.validate_queue_configuration`: every worker profile
+    /// is checked with the app config, and a refusal keeps
+    /// `CONFIG_INVALID_WORKER_PROFILE`, its notes and its help.
+    #[test]
+    fn worker_profiles_are_checked_with_the_app_config() {
+        let config = with_profiles(r#"{"empty": {}}"#);
+
+        let errors = config.validate();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "worker_profiles['empty']: the profile starts no children",
+        );
+        assert_eq!(
+            errors[0].error_code(),
+            Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile),
+        );
+        let refusal = errors[0].to_horsies_error();
+        assert_eq!(
+            refusal.code,
+            Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile),
+        );
+        assert_eq!(
+            refusal.notes,
+            ["a worker needs at least one child to run a task"],
+        );
+        assert!(refusal
+            .help_text
+            .as_deref()
+            .is_some_and(|help| help.contains("isolated=IsolatedChildren(count=4)")));
+        assert_eq!(
+            crate::core::error::ErrorCode::ConfigInvalidWorkerProfile.to_string(),
+            "HRS-218"
+        );
+    }
+
+    /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_capacity_includes_the_prefetch_buffer`
+    /// and `::test_capacity_with_prefetch_buffer_is_still_a_bound`: the claim
+    /// check uses the app's `prefetch_buffer`.
+    #[test]
+    fn the_claim_check_of_a_profile_counts_the_prefetch_buffer() {
+        let soft = |tasks: u32| {
+            let mut config = with_profiles(&format!(
+                r#"{{"soft": {{"isolated": {{"kind": "isolated_children", "count": 2}},
+                    "claim": {{"claimed_per_worker": {{"kind": "task_limit", "tasks": {tasks}}}}}}}}}"#
+            ));
+            config.prefetch_buffer = 3;
+            config.claim_lease_ms = Some(60_000);
+            config
+        };
+
+        assert!(soft(5).validate().is_empty());
+        let errors = soft(6).validate();
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].to_string().contains("capacity of the worker (5)"),
+            "{}",
+            errors[0],
+        );
+    }
+
+    /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_log_config_lists_each_profile`.
+    #[test]
+    fn format_for_logging_lists_each_profile() {
+        let config = with_profiles(
+            r#"{"default": {"isolated": {"kind": "isolated_children", "count": 2}}}"#,
+        );
+        let profile = config.worker_profiles["default"];
+
+        let formatted = config.format_for_logging();
+
+        assert!(formatted.contains("  worker_profiles:"), "{formatted}");
+        assert!(
+            formatted.contains(&format!(
+                "    default: {}",
+                crate::core::config::worker_profile::describe_worker_profile(&profile)
+            )),
+            "{formatted}",
+        );
+        let without = AppConfig::for_database_url("postgresql://localhost/db").format_for_logging();
+        assert!(!without.contains("worker_profiles"), "{without}");
     }
 }

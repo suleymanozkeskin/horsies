@@ -96,6 +96,17 @@ END $$;
 
 DO $$
 DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000104';
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"sub":true,"params":"GIVEN"},{"idx":2,"sub":true}]');
+    PERFORM wft_check((wft_node(v_wf, 1)).sub_workflow_params = 'GIVEN'
+                      AND (wft_node(v_wf, 2)).sub_workflow_params = 'NOT_GIVEN'
+                      AND (wft_node(v_wf, 0)).sub_workflow_params IS NULL,
+                      'start: sub_workflow_params is stored as passed on sub-workflow nodes, NULL on task nodes');
+END $$;
+
+DO $$
+DECLARE
     v_wf uuid := '00000000-0000-7000-8000-000000000111';
     v_child uuid := '00000000-0000-7000-8000-000000000112';
     v_row horsies_workflow_step_row;
@@ -559,6 +570,51 @@ END $$;
 
 DO $$
 DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000272';
+    v_top uuid := '00000000-0000-7000-8000-000000000273';
+    v_mid uuid := '00000000-0000-7000-8000-000000000274';
+    v_child_starts bigint;
+    v_named bigint;
+    v_unnamed bigint;
+BEGIN
+    -- Phase 2 owes the child start of a promoted node: the CHILD_START row names the workflow of the node; the
+    -- SOURCE and OUTCOME rows carry no name.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(jsonb_build_object('id', v_wf, 'name', 'parent.wf', 'on_error', 'fail')),
+        '[{"idx":0},{"idx":1,"deps":[0],"sub":true,"args_from":{"x":0}}]'
+    );
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('5'));
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START'),
+           count(*) FILTER (WHERE row_kind = 'CHILD_START' AND workflow_name = 'parent.wf'),
+           count(*) FILTER (WHERE row_kind IN ('OUTCOME', 'SOURCE') AND workflow_name IS NULL)
+    INTO v_child_starts, v_named, v_unnamed
+    FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), FALSE, 'READ');
+    PERFORM wft_check(v_child_starts = 1 AND v_named = 1,
+                      'workflow name: the CHILD_START row of a phase 2 carries the parent workflow name');
+    PERFORM wft_check(v_unnamed = 2, 'workflow name: the OUTCOME and SOURCE rows carry NULL');
+
+    -- A start owes the child start of a pre-built child's sub-workflow root: the row names the pre-built child that
+    -- holds the node, not the top-level workflow.
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START'),
+           count(*) FILTER (WHERE row_kind = 'CHILD_START' AND workflow_id = v_mid AND workflow_name = 'mid.wf'),
+           count(*) FILTER (WHERE row_kind = 'OUTCOME' AND workflow_name IS NULL)
+    INTO v_child_starts, v_named, v_unnamed
+    FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_top, 'name', 'top.wf', 'on_error', 'fail'),
+            jsonb_build_object('id', v_mid, 'name', 'mid.wf', 'on_error', 'fail', 'parent', v_top,
+                               'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_mid, 'idx', 0, 'sub', true))
+    );
+    PERFORM wft_check(v_child_starts = 1 AND v_named = 1,
+                      'workflow name: the CHILD_START row of a start names the workflow that holds the node');
+    PERFORM wft_check(v_unnamed = 1, 'workflow name: the OUTCOME row of a start carries NULL');
+END $$;
+
+DO $$
+DECLARE
     v_parent uuid;
     v_wf uuid := '00000000-0000-7000-8000-000000000281';
     v_depth integer;
@@ -705,6 +761,150 @@ BEGIN
     PERFORM wft_check((wft_workflow(v_required)).status = 'FAILED'
                       AND ((wft_workflow(v_required)).error::json ->> 'error_code') = 'REQUIRED',
                       'policy: the first FAILED required node gives the error');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000471';
+    v_form record;
+    v_reader text;
+    v_message text;
+BEGIN
+    -- A RUNNING workflow with no live node: the completion reads the stored policy. Each refused form raises XX001
+    -- with the cause of Python's read_stored_success_policy, in both readers, and writes nothing.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
+    WHERE workflow_id = v_wf AND task_index = 0;
+    FOR v_form IN
+        SELECT f.policy::jsonb AS policy, f.cause
+        FROM (VALUES
+            ('[1, 2, 3]', 'the policy is a JSON array, not an object'),
+            ('"text"', 'the policy is a JSON string, not an object'),
+            ('7', 'the policy is a JSON number, not an object'),
+            ('true', 'the policy is a JSON boolean, not an object'),
+            ('{}', 'the policy has no cases'),
+            ('{"cases": "not a list"}', 'cases is a JSON string, not an array'),
+            ('{"cases": null}', 'cases is a JSON null, not an array'),
+            ('{"cases": [1]}', 'cases[0]: the case is a JSON number, not an object'),
+            ('{"cases": [{}]}', 'cases[0]: the case has no required_indices'),
+            ('{"cases": [{"required_indices": null}]}', 'cases[0]: required_indices: a JSON null, not an array'),
+            ('{"cases": [{"required_indices": [0]}, {"required_indices": [true]}]}',
+             'cases[1]: required_indices: item 0 is a JSON boolean, not an index'),
+            ('{"cases": [{"required_indices": [0, -1]}]}', 'cases[0]: required_indices: item 1 is below 0'),
+            ('{"cases": [{"required_indices": [1.0]}]}',
+             'cases[0]: required_indices: item 0 is a JSON number, not an index'),
+            ('{"cases": [{"required_indices": [-1.5]}]}',
+             'cases[0]: required_indices: item 0 is a JSON number, not an index'),
+            ('{"cases": [{"required_indices": ["0"]}]}',
+             'cases[0]: required_indices: item 0 is a JSON string, not an index'),
+            ('{"cases": [{"required_indices": [null]}]}',
+             'cases[0]: required_indices: item 0 is a JSON null, not an index'),
+            ('{"cases": [], "optional_indices": "x"}', 'optional_indices: a JSON string, not an array'),
+            ('{"cases": [{"required_indices": [0]}], "optional_indices": [0, 0.5]}',
+             'optional_indices: item 1 is a JSON number, not an index')
+        ) AS f(policy, cause)
+    LOOP
+        UPDATE horsies_workflows SET success_policy = v_form.policy WHERE id = v_wf;
+        FOREACH v_reader IN ARRAY ARRAY['try_complete', 'failure_error'] LOOP
+            v_message := NULL;
+            BEGIN
+                CASE v_reader
+                    WHEN 'try_complete' THEN PERFORM horsies_workflow_try_complete(v_wf);
+                    WHEN 'failure_error' THEN PERFORM horsies_workflow_failure_error(v_wf, v_form.policy);
+                END CASE;
+            EXCEPTION
+                WHEN data_corrupted THEN
+                    v_message := SQLERRM;
+            END;
+            PERFORM wft_check(
+                v_message = format('stored success_policy of workflow %s does not parse: %s', v_wf, v_form.cause),
+                format('unreadable policy: %s refuses %s with %L (raised %L)', v_reader, v_form.policy,
+                       v_form.cause, v_message)
+            );
+        END LOOP;
+    END LOOP;
+    PERFORM wft_check((wft_workflow(v_wf)).status = 'RUNNING' AND (wft_workflow(v_wf)).error IS NULL
+                      AND (wft_workflow(v_wf)).completed_at IS NULL,
+                      'unreadable policy: the workflow row is not written');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000481';
+    v_form record;
+    v_row horsies_workflows;
+BEGIN
+    -- Node 0 COMPLETED, node 1 FAILED with the user code SECOND. Each accepted form reads as no policy or as its
+    -- cases; the completion writes the expected status and error code.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
+    WHERE workflow_id = v_wf AND task_index = 0;
+    UPDATE horsies_workflow_tasks SET status = 'FAILED', result = wft_err('SECOND'), completed_at = now()
+    WHERE workflow_id = v_wf AND task_index = 1;
+    FOR v_form IN
+        SELECT f.policy::jsonb AS policy, f.status, f.code, f.name
+        FROM (VALUES
+            ('null', 'FAILED', 'SECOND', 'JSON null is no policy: the first FAILED node gives the error'),
+            ('{"cases": [{"required_indices": [0]}], "optional_indices": null, "extra": 1}', 'COMPLETED', NULL,
+             'a null optional_indices and an unknown policy key are accepted'),
+            ('{"cases": [{"required_indices": [0], "extra": "x"}], "optional_indices": [1]}', 'COMPLETED', NULL,
+             'an unknown case key is accepted'),
+            ('{"cases": [{"required_indices": [0e0]}]}', 'COMPLETED', NULL,
+             'jsonb stores 0e0 as the index 0'),
+            ('{"cases": []}', 'FAILED', 'WORKFLOW_SUCCESS_CASE_NOT_MET', 'a policy with no case is not met'),
+            ('{"cases": [{"required_indices": []}]}', 'FAILED', 'WORKFLOW_SUCCESS_CASE_NOT_MET',
+             'a case with no required node is skipped'),
+            ('{"cases": [{"required_indices": [0, 3000000000]}]}', 'FAILED', 'WORKFLOW_SUCCESS_CASE_NOT_MET',
+             'an index above the integer range names no node'),
+            ('{"cases": [{"required_indices": [3000000000]}, {"required_indices": [0]}]}', 'COMPLETED', NULL,
+             'a case with an index above the integer range is not met; another case is'),
+            ('{"cases": [{"required_indices": [1, 0]}]}', 'FAILED', 'SECOND',
+             'the first FAILED required node gives the error')
+        ) AS f(policy, status, code, name)
+    LOOP
+        UPDATE horsies_workflows
+        SET status = 'RUNNING', success_policy = v_form.policy, result = NULL, error = NULL, completed_at = NULL
+        WHERE id = v_wf;
+        PERFORM wft_check(horsies_workflow_try_complete(v_wf) = v_form.status,
+                          'accepted policy: ' || v_form.name || ' (status)');
+        v_row := wft_workflow(v_wf);
+        PERFORM wft_check(
+            v_row.status = v_form.status
+            AND coalesce(v_row.error::json -> 'error_code' ->> '__builtin_task_code__',
+                         v_row.error::json ->> 'error_code') IS NOT DISTINCT FROM v_form.code,
+            'accepted policy: ' || v_form.name || ' (error)'
+        );
+    END LOOP;
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000491';
+    v_task uuid;
+    v_pass integer;
+    v_row record;
+    v_limit_error text := horsies_task_error_object('WORKFLOW_ENQUEUE_FAILED', 'limit', NULL);
+    v_limit_node text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'limit node', NULL, NULL, NULL);
+BEGIN
+    -- The phase-2 step of the last node reads a policy that does not parse: each pass raises and writes nothing,
+    -- the caller counts the raise, and the recovery limit fails the workflow closed.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]', NULL, '{"cases":[{"required_indices":[0]}]}');
+    UPDATE horsies_workflows SET success_policy = '{"cases":[{"required_indices":["0"]}]}' WHERE id = v_wf;
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_phase1(v_task, wft_ok('1'));
+    FOR v_pass IN 1..3 LOOP
+        PERFORM wft_refused(format('SELECT * FROM horsies_workflow_node_finish(%L, TRUE, %L)', v_task, 'READ'),
+                            'XX001', 'unreadable policy: the phase-2 step raises (pass ' || v_pass || ')');
+        PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED' AND (wft_workflow(v_wf)).status = 'RUNNING'
+                          AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = v_task),
+                          'unreadable policy: the raised step writes nothing (pass ' || v_pass || ')');
+        SELECT * INTO v_row FROM horsies_workflow_phase2_record_raise(v_task, 3, v_limit_error, v_limit_node);
+    END LOOP;
+    PERFORM wft_check(v_row.outcome = 'LIMIT_REACHED' AND v_row.limit_outcome = 'LIMIT_REACHED_FAILED',
+                      'unreadable policy: the third raise reaches the recovery limit');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED' AND (wft_workflow(v_wf)).status = 'FAILED'
+                      AND (wft_workflow(v_wf)).error = v_limit_error,
+                      'unreadable policy: the recovery limit fails the workflow closed');
 END $$;
 
 DO $$

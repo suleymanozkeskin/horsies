@@ -17,8 +17,10 @@ applies migrations). Coverage:
 
 from __future__ import annotations
 
-import asyncio
+import logging
+import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
 
@@ -41,12 +43,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.typed import encode_task_result
+from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
-from horsies.monitoring import queries as queries_module
+from horsies.core.history.reads.aggregates import plan_rows_from_explain
+from horsies.monitoring.queries import LIST_ROW_BOUND
 from horsies.monitoring import (
+    Breakdown,
     BreakdownLimit,
+    BreakdownUnclaimedGroup,
+    BreakdownValueGroup,
+    MonitoringResult,
     TaskPage,
     WorkflowRunsLimit,
     ErrorCategory,
@@ -63,6 +73,7 @@ from horsies.monitoring import (
     list_workflow_names,
     list_workflow_runs,
     TaskSummary,
+    categorize_error_code,
     task_breakdown,
     task_facets,
     task_stats,
@@ -88,10 +99,6 @@ from tests.integration.monitoring_seeding import insert_rows as seed_rows
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 UTC = timezone.utc
-
-# Bound of the detail read that commits a task row while it is open. A lock
-# wait between the two sessions fails the test instead of stopping the run.
-_SNAPSHOT_READ_TIMEOUT_S = 30
 
 # Upper bound for "counts up to now" assertions: generous enough to survive a
 # slow runner, tight enough to catch a span measured from the wrong origin.
@@ -269,7 +276,7 @@ def make_node(
     is_subworkflow: bool = False,
     sub_workflow_id: str | None = None,
     allow_failed_deps: bool = False,
-    error: str | None = None,
+    result: str | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
 ) -> NodeRow:
@@ -291,7 +298,7 @@ def make_node(
             if is_subworkflow
             else TaskNode(task_id=task_id)
         ),
-        error=error,
+        result=result,
         created_at=ago(120),
         started_at=started_at,
         completed_at=completed_at,
@@ -413,6 +420,30 @@ class TestTaskStats:
         assert is_ok(result)
         assert sum(row.count for row in result.ok_value) == expected_total
 
+    async def test_a_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(status=TaskStatus.FAILED)
+        await insert_rows(session, task, make_task(status=TaskStatus.PENDING))
+
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
+            result = await task_stats(
+                broker,
+                window=_test_window(),
+                task_names=[],
+                queues=[],
+                workers=[],
+                error_codes=[],
+                error_categories=[],
+                retried_only=False,
+            )
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert 'NOT_KNOWN' in error.message
+
 
 # --------------------------------------------------------------------------- #
 # task_facets
@@ -467,7 +498,6 @@ class TestTaskFacets:
             event.remove(engine, 'before_cursor_execute', _record)
 
         assert is_ok(result)
-        assert len([s for s in statements if 'GROUPING SETS' in s]) == 1
         assert len(statements) == 1
 
     async def test_ties_follow_the_database_collation(
@@ -525,13 +555,24 @@ class TestTaskFacets:
                 for index in range(distinct_codes)
             ],
         )
-        sql, params = queries_module.facets_statement(
-            window=_test_window().history,
-            statuses=[],
-            retried_only=False,
-        )
-
-        rows = (await session.execute(text(sql), params)).all()
+        window = _test_window()
+        builtin = sorted(BUILTIN_CODE_REGISTRY)
+        rows = (
+            await session.execute(
+                text(
+                    'SELECT facet FROM horsies_monitoring_task_facets('
+                    'CAST(:lower AS timestamptz), CAST(:upper AS timestamptz), '
+                    "CAST('{}' AS text[]), FALSE, "
+                    'CAST(:codes AS text[]), CAST(:categories AS text[]))'
+                ),
+                {
+                    'lower': window.lower,
+                    'upper': window.upper,
+                    'codes': builtin,
+                    'categories': [_builtin_category(code) for code in builtin],
+                },
+            )
+        ).all()
         result = await task_facets(
             broker,
             window=_test_window(),
@@ -818,7 +859,7 @@ class TestTaskFacets:
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestTaskBreakdown:
-    """Group pivot: rollup row, 'unknown' NULL key, limit independent of TOTAL."""
+    """Group pivot: counts of every group, the unclaimed group, limit independent of the total."""
 
     async def test_groups_by_worker_with_rollup_total(
         self, broker: PostgresBroker, session: AsyncSession
@@ -847,12 +888,11 @@ class TestTaskBreakdown:
         assert is_ok(result)
         breakdown = result.ok_value
         rows = {row.group: row for row in breakdown.groups}
-        assert rows['w1'].total == 2
-        assert rows['w1'].completed == 1
-        assert rows['w1'].failed == 1
-        assert rows['w1'].retried == 1
-        assert rows['w2'].running == 1
-        assert breakdown.total.group == 'TOTAL'
+        assert rows[BreakdownValueGroup(value='w1')].total == 2
+        assert rows[BreakdownValueGroup(value='w1')].completed == 1
+        assert rows[BreakdownValueGroup(value='w1')].failed == 1
+        assert rows[BreakdownValueGroup(value='w1')].retried == 1
+        assert rows[BreakdownValueGroup(value='w2')].running == 1
         assert breakdown.total.total == 3
         assert breakdown.group_count == 2
 
@@ -876,30 +916,65 @@ class TestTaskBreakdown:
         assert is_ok(result)
         assert result.ok_value.groups == []
         assert result.ok_value.group_count == 0
-        assert result.ok_value.total.group == 'TOTAL'
         assert result.ok_value.total.total == 0
 
-    async def test_null_group_key_is_labelled_unknown(
+    async def test_tasks_no_worker_claimed_are_the_unclaimed_group(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        await insert_rows(session, make_task(worker_id=None))
-
-        result = await task_breakdown(
-            broker,
-            window=_test_window(),
-            group_by='worker',
-            statuses=[],
-            task_names=[],
-            queues=[],
-            workers=[],
-            error_codes=[],
-            error_categories=[],
-            retried_only=False,
-            limit=BreakdownLimit(value=50),
+        await insert_rows(
+            session,
+            make_task(worker_id=None),
+            make_task(worker_id=None, status=TaskStatus.CANCELLED),
         )
 
+        result = await _worker_breakdown(broker)
+
         assert is_ok(result)
-        assert [row.group for row in result.ok_value.groups] == ['unknown']
+        assert [(row.group, row.total) for row in result.ok_value.groups] == [
+            (BreakdownUnclaimedGroup(), 2),
+        ]
+
+    async def test_a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_task(worker_id='unknown', status=TaskStatus.COMPLETED),
+            make_task(worker_id=None),
+        )
+
+        result = await _worker_breakdown(broker)
+
+        assert is_ok(result)
+        breakdown = result.ok_value
+        assert [(row.group, row.total) for row in breakdown.groups] == [
+            (BreakdownValueGroup(value='unknown'), 2),
+            (BreakdownUnclaimedGroup(), 1),
+        ]
+        assert breakdown.group_count == 2
+        assert breakdown.total.total == sum(row.total for row in breakdown.groups)
+
+    async def test_with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(worker_id=None, status=TaskStatus.COMPLETED),
+            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_task(worker_id='a-worker', status=TaskStatus.RUNNING),
+            make_task(worker_id='zz-worker', status=TaskStatus.RUNNING),
+        )
+
+        result = await _worker_breakdown(broker)
+
+        assert is_ok(result)
+        assert [row.group for row in result.ok_value.groups] == [
+            BreakdownValueGroup(value='a-worker'),
+            BreakdownValueGroup(value='unknown'),
+            BreakdownUnclaimedGroup(),
+            BreakdownValueGroup(value='zz-worker'),
+        ]
 
     async def test_limit_caps_groups_but_not_total_or_group_count(
         self, broker: PostgresBroker, session: AsyncSession
@@ -955,8 +1030,8 @@ class TestTaskBreakdown:
         assert is_ok(result)
         assert result.ok_value.group_by == 'task_name'
         assert [row.group for row in result.ok_value.groups] == [
-            'alpha_task',
-            'beta_task',
+            BreakdownValueGroup(value='alpha_task'),
+            BreakdownValueGroup(value='beta_task'),
         ]
 
     async def test_filters_apply_to_groups_and_total(
@@ -983,8 +1058,101 @@ class TestTaskBreakdown:
         )
 
         assert is_ok(result)
-        assert [row.group for row in result.ok_value.groups] == ['w1']
+        assert [row.group for row in result.ok_value.groups] == [
+            BreakdownValueGroup(value='w1'),
+        ]
         assert result.ok_value.total.total == 1
+
+
+def _stored_error(message: str) -> str:
+    """The stored result text of a failed node whose error has ``message``."""
+    failed: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(error_code='ORDER_REJECTED', message=message),
+    )
+    match dumps_json(encode_task_result(failed, type(None))):
+        case Ok(text_value):
+            return text_value
+        case Err(cause):
+            raise AssertionError(f'the failed result does not encode: {cause}')
+
+
+def _stored_value(value: int) -> str:
+    """The stored result text of a node that completed with ``value``."""
+    completed: TaskResult[int, TaskError] = TaskResult(ok=value)
+    match dumps_json(encode_task_result(completed, int)):
+        case Ok(text_value):
+            return text_value
+        case Err(cause):
+            raise AssertionError(f'the result does not encode: {cause}')
+
+
+def _uuid7_born_at(birth: datetime) -> str:
+    """A UUIDv7 text whose embedded birth is ``birth``, with random tail bits."""
+    milliseconds = int(birth.timestamp() * 1000)
+    value = (milliseconds << 80) | int.from_bytes(os.urandom(10), 'big')
+    value = (value & ~(0xF << 76)) | (0x7 << 76)
+    value = (value & ~(0x3 << 62)) | (0x2 << 62)
+    return str(uuid.UUID(int=value))
+
+
+@asynccontextmanager
+async def _detached_period_leaf(
+    session: AsyncSession, *, upper_anchor: datetime
+) -> AsyncGenerator[None, None]:
+    """A catalog row of a detached and dropped leaf of the default class, for the block.
+
+    Only the absence rule reads it: it names no relation. The row is
+    deleted at the end, so later tests see no detached leaf.
+    """
+    leaf_name = f'itest_detached_{uuid.uuid4().hex}'
+    _ = await session.execute(
+        text(
+            'INSERT INTO horsies_task_history_leaf_catalog ('
+            'leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor, '
+            'index_schema_version, created_at, detached_at, dropped_at'
+            ") VALUES (:leaf, 'standard_30d', 'AT', :lower, :upper, 1, now(), now(), now())"
+        ),
+        {
+            'leaf': leaf_name,
+            'lower': upper_anchor - timedelta(days=1),
+            'upper': upper_anchor,
+        },
+    )
+    await session.commit()
+    try:
+        yield
+    finally:
+        _ = await session.execute(
+            text('DELETE FROM horsies_task_history_leaf_catalog WHERE leaf_name = :leaf'),
+            {'leaf': leaf_name},
+        )
+        await session.commit()
+
+
+def _builtin_category(code: str) -> str:
+    """The category of a built-in error code, as the facet function takes it."""
+    match categorize_error_code(code):
+        case ErrorCategory() as category:
+            return category.value
+        case None:
+            raise AssertionError(f'built-in code {code!r} has no category')
+
+
+async def _worker_breakdown(broker: PostgresBroker) -> MonitoringResult[Breakdown]:
+    """The worker breakdown of every task in the test window, with no filter."""
+    return await task_breakdown(
+        broker,
+        window=_test_window(),
+        group_by='worker',
+        statuses=[],
+        task_names=[],
+        queues=[],
+        workers=[],
+        error_codes=[],
+        error_categories=[],
+        retried_only=False,
+        limit=BreakdownLimit(value=50),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1123,6 +1291,90 @@ class TestListTasks:
         assert [row.task_name for row in result.ok_value.rows] == [
             'finished',
             'never_ran',
+        ]
+
+    @pytest.mark.parametrize(
+        'sort_dir,expected_priorities',
+        [('asc', [50, 50, 50, 100, 100, 100]), ('desc', [100, 100, 100, 50, 50, 50])],
+    )
+    async def test_rows_of_one_side_and_one_sort_value_come_by_task_id(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        sort_dir: Any,
+        expected_priorities: list[int],
+    ) -> None:
+        """Each side's rows of one priority come by id, ascending in both directions.
+
+        The rows are written in descending id order, so a read in write
+        order would answer the ids descending.
+        """
+        live_ids = sorted((str(uuid.uuid4()) for _ in range(3)), reverse=True)
+        history_ids = sorted((str(uuid.uuid4()) for _ in range(3)), reverse=True)
+        await insert_rows(
+            session,
+            *[make_task(task_id=task_id, priority=100) for task_id in live_ids],
+            *[
+                make_task(task_id=task_id, priority=50, status=TaskStatus.COMPLETED)
+                for task_id in history_ids
+            ],
+        )
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='priority',
+            sort_dir=sort_dir,
+            page=TaskPage(offset=0, limit=50),
+        )
+
+        assert is_ok(result)
+        rows = result.ok_value.rows
+        assert [row.priority for row in rows] == expected_priorities
+        by_priority = {
+            priority: [row.id for row in rows if row.priority == priority]
+            for priority in (50, 100)
+        }
+        assert by_priority == {50: sorted(history_ids), 100: sorted(live_ids)}
+
+    @pytest.mark.parametrize('sort_dir', ['asc', 'desc'])
+    async def test_a_live_row_comes_before_a_history_row_of_one_sort_value(
+        self, broker: PostgresBroker, session: AsyncSession, sort_dir: Any
+    ) -> None:
+        """On one sort value the side decides before the id: the live row has the higher id."""
+        lower_id, higher_id = sorted(str(uuid.uuid4()) for _ in range(2))
+        await insert_rows(
+            session,
+            make_task(task_id=lower_id, task_name='same_name', status=TaskStatus.FAILED),
+            make_task(task_id=higher_id, task_name='same_name'),
+        )
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='task_name',
+            sort_dir=sort_dir,
+            page=TaskPage(offset=0, limit=50),
+        )
+
+        assert is_ok(result)
+        assert [(row.id, row.status) for row in result.ok_value.rows] == [
+            (higher_id, 'PENDING'),
+            (lower_id, 'FAILED'),
         ]
 
     async def test_live_rows_sort_as_null_on_derived_spans(
@@ -1375,57 +1627,36 @@ class TestListTasks:
         assert is_ok(result)
         assert result.ok_value.total == 5
 
-    async def test_list_page_does_not_fetch_payload_columns(
+    async def test_one_statement_reads_the_page_and_no_payload_column(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        """The list SELECT must not reference args/kwargs/result/task_options.
+        """One statement reads the page and the total; the function returns no payload column.
 
-        The wire statement is the contract: payload columns fetched here ship
-        every task's payload on every page and detoast large results.
+        A payload column on a list page would ship every task's payload on
+        every poll and detoast large values.
         """
-        await insert_rows(session, make_task())
-        captured: list[str] = []
+        await insert_rows(session, make_task(), make_task(status=TaskStatus.COMPLETED))
 
-        def capture_statement(
-            conn: Any,
-            cursor: Any,
-            statement: str,
-            parameters: Any,
-            context: Any,
-            executemany: bool,
-        ) -> None:
-            captured.append(statement)
-
-        sync_engine = current_resources(broker).engine.sync_engine
-        event.listen(sync_engine, 'before_cursor_execute', capture_statement)
-        try:
-            result = await list_tasks(
-                broker,
-            window=_test_window(),
-                statuses=[],
-                task_names=[],
-                queues=[],
-                workers=[],
-                error_codes=[],
-                error_categories=[],
-                retried_only=False,
-                sort_by='enqueued_at',
-                sort_dir='desc',
-                page=TaskPage(offset=0, limit=50),
-            )
-        finally:
-            event.remove(sync_engine, 'before_cursor_execute', capture_statement)
+        with _StatementCapture(broker) as capture:
+            result = await _unfiltered_list(broker)
 
         assert is_ok(result)
-        list_statements = [
-            s for s in captured if 'FROM horsies_tasks' in s and 'ORDER BY' in s
-        ]
-        assert len(list_statements) == 1
-        statement = list_statements[0]
-        for excluded in ('input', 'task_options'):
-            assert f'horsies_tasks.{excluded}' not in statement
-        for included in ('task_name', 'enqueued_at', 'worker_hostname'):
-            assert f'horsies_tasks.{included}' in statement
+        assert len(capture.statements) == 1
+        assert 'horsies_monitoring_task_list(' in capture.statements[0]
+        returned = (
+            await session.execute(
+                text(
+                    'SELECT pg_get_function_result(p.oid) FROM pg_proc AS p '
+                    "WHERE p.proname = 'horsies_monitoring_task_list'"
+                )
+            )
+        ).scalar_one()
+        columns = {
+            column.strip().split(' ', 1)[0]
+            for column in str(returned).removeprefix('TABLE(').removesuffix(')').split(',')
+        }
+        assert 'task_name' in columns
+        assert not columns & {'input', 'task_options', 'result_payload', 'attempt_snapshot'}
 
 
 # --------------------------------------------------------------------------- #
@@ -1690,42 +1921,40 @@ class TestGetTaskDetail:
             task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
         )
 
-    async def test_a_task_inserted_during_the_read_is_not_in_its_snapshot(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_an_absent_v7_task_with_no_detached_leaf_is_within_retained_history(
+        self, broker: PostgresBroker
     ) -> None:
-        """The task row commits after the live read and before the staged
-        read. Both reads see the snapshot of the live read, so the staged
-        read does not find the row live."""
-        # Seed one row first, so the history setup that insert_rows runs
-        # has nothing left to create while the detail read is open.
-        await insert_rows(session, make_task())
-        task = make_task()
-        staged_detail_published = queries_module.staged_detail_published
+        task_id = _uuid7_born_at(datetime.now(UTC) - timedelta(days=2))
 
-        async def commit_task_then_probe(connection: Any) -> bool:
-            await insert_rows(session, task)
-            return await staged_detail_published(connection)
+        result = await get_task_detail(broker, task_id)
 
-        monkeypatch.setattr(
-            queries_module, 'staged_detail_published', commit_task_then_probe,
+        assert result == Ok(
+            TaskDetailNotFound(
+                task_id=task_id, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
+            )
         )
 
-        result = await asyncio.wait_for(
-            get_task_detail(broker, task.id), timeout=_SNAPSHOT_READ_TIMEOUT_S,
-        )
+    async def test_an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        detached_upper = datetime.now(UTC) - timedelta(days=1)
+        before = _uuid7_born_at(detached_upper - timedelta(hours=1))
+        after = _uuid7_born_at(detached_upper + timedelta(hours=1))
 
-        assert is_ok(result), result
-        assert isinstance(result.ok_value, TaskDetailNotFound)
-        # The row is committed: a new read finds it live.
-        monkeypatch.setattr(
-            queries_module, 'staged_detail_published', staged_detail_published,
+        async with _detached_period_leaf(session, upper_anchor=detached_upper):
+            before_result = await get_task_detail(broker, before)
+            after_result = await get_task_detail(broker, after)
+
+        assert before_result == Ok(
+            TaskDetailNotFound(
+                task_id=before, reason=TaskAbsenceReason.PREDATES_RETAINED_HISTORY,
+            )
         )
-        again = await get_task_detail(broker, task.id)
-        assert is_ok(again)
-        assert isinstance(again.ok_value, TaskDetail)
+        assert after_result == Ok(
+            TaskDetailNotFound(
+                task_id=after, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
+            )
+        )
 
     async def test_returns_attempts_in_ascending_order(
         self, broker: PostgresBroker, session: AsyncSession
@@ -2088,6 +2317,22 @@ class TestListWorkflowRuns:
         assert is_ok(result)
         assert [run.name for run in result.ok_value] == ['beta_flow', 'alpha_flow']
 
+    async def test_runs_created_at_one_time_come_by_id_highest_first(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        created = ago(60)
+        runs = [make_workflow(name=f'flow_{index}', created_at=created) for index in range(4)]
+        await insert_rows(session, *runs)
+
+        result = await list_workflow_runs(
+            broker, name=None, status=None, limit=WorkflowRunsLimit(value=30)
+        )
+
+        assert is_ok(result)
+        assert [run.id for run in result.ok_value] == sorted(
+            (run.id for run in runs), key=uuid.UUID, reverse=True
+        )
+
     async def test_name_and_status_filters_combine(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
@@ -2362,7 +2607,7 @@ class TestGetWorkflowNode:
                 node_id='step-one',
                 status='FAILED',
                 task_id=task.id,
-                error='node blew up',
+                result=_stored_error('node blew up'),
             ),
             make_attempt(task_id=task.id, attempt=2),
             make_attempt(task_id=task.id, attempt=1, will_retry=True),
@@ -2462,7 +2707,10 @@ class TestGetWorkflowNode:
         run = make_workflow()
         await insert_rows(session, run)
         await insert_rows(
-            session, make_node(workflow_id=run.id, task_index=0, error='')
+            session,
+            make_node(
+                workflow_id=run.id, task_index=0, status='FAILED', result=_stored_error(''),
+            ),
         )
 
         result = await get_workflow_node(broker, run.id, 0)
@@ -2470,6 +2718,43 @@ class TestGetWorkflowNode:
         assert is_ok(result)
         assert result.ok_value is not None
         assert result.ok_value.node_error is None
+
+    async def test_a_node_whose_result_holds_a_value_has_no_error(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        run = make_workflow()
+        await insert_rows(session, run)
+        await insert_rows(
+            session,
+            make_node(
+                workflow_id=run.id, task_index=0, status='COMPLETED', result=_stored_value(7),
+            ),
+        )
+
+        result = await get_workflow_node(broker, run.id, 0)
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.node_error is None
+
+    async def test_a_node_result_that_does_not_decode_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        run = make_workflow()
+        await insert_rows(session, run)
+        await insert_rows(
+            session,
+            make_node(
+                workflow_id=run.id, task_index=0, status='FAILED', result='{"err": "boom"}',
+            ),
+        )
+
+        result = await get_workflow_node(broker, run.id, 0)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
 
 
 # --------------------------------------------------------------------------- #
@@ -2508,6 +2793,115 @@ class TestListSchedules:
             'later',
         ]
         assert result.ok_value[0].run_count == 4
+
+    async def test_schedules_due_at_one_time_come_by_name(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        due = datetime.now(UTC) + timedelta(minutes=5)
+        await insert_rows(
+            session,
+            *[
+                make_schedule(schedule_name=name, next_run_at=due)
+                for name in ('gamma', 'alpha', 'delta', 'beta')
+            ],
+        )
+
+        result = await list_schedules(broker)
+
+        assert is_ok(result)
+        assert [row.schedule_name for row in result.ok_value] == [
+            'alpha',
+            'beta',
+            'delta',
+            'gamma',
+        ]
+
+
+@pytest.mark.usefixtures('clean_monitoring_tables')
+class TestListBounds:
+    """The names and schedules lists stop at the bound and log the cut."""
+
+    async def _seed_schedules(self, session: AsyncSession, count: int) -> None:
+        _ = await session.execute(
+            text(
+                'INSERT INTO horsies_schedule_state ('
+                'schedule_name, next_run_at, last_run_at, last_task_id, run_count, '
+                'config_hash, updated_at'
+                ") SELECT 'schedule_' || lpad(n::text, 6, '0'), now() + interval '1 hour', "
+                "NULL, NULL, 0, sha256(n::text::bytea), now() "
+                'FROM generate_series(1, :count) AS n'
+            ),
+            {'count': count},
+        )
+        await session.commit()
+
+    async def test_schedules_past_the_bound_are_cut_and_the_cut_is_logged(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        await self._seed_schedules(session, LIST_ROW_BOUND + 1)
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_schedules(broker)
+
+        assert is_ok(result)
+        names = [row.schedule_name for row in result.ok_value]
+        assert len(names) == LIST_ROW_BOUND
+        assert names[-1] == f'schedule_{LIST_ROW_BOUND:06d}'
+        assert [record.getMessage() for record in caplog.records] == [
+            f'schedule state: the list is cut at {LIST_ROW_BOUND} schedules; '
+            'more exist and are not returned',
+        ]
+
+    async def test_schedules_at_the_bound_are_complete_and_nothing_is_logged(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        await self._seed_schedules(session, LIST_ROW_BOUND)
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_schedules(broker)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == LIST_ROW_BOUND
+        assert caplog.records == []
+
+    async def test_workflow_names_past_the_bound_are_cut_and_the_cut_is_logged(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _ = await session.execute(
+            text(
+                'INSERT INTO horsies_workflows ('
+                'id, name, definition_key, status, on_error, output_task_index, '
+                'success_policy, result, error, parent_workflow_id, parent_task_index, '
+                'root_workflow_id, depth, sent_at, created_at, started_at, completed_at, '
+                'updated_at'
+                ') SELECT run.id, '
+                "'flow_' || lpad(run.n::text, 6, '0'), NULL, 'RUNNING', 'fail', NULL, "
+                'NULL, NULL, NULL, NULL, NULL, run.id, 0, now(), now(), NULL, NULL, now() '
+                'FROM (SELECT horsies_uuidv7() AS id, n FROM generate_series(1, :count) AS n) AS run'
+            ),
+            {'count': LIST_ROW_BOUND + 1},
+        )
+        await session.commit()
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_workflow_names(broker)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == LIST_ROW_BOUND
+        assert result.ok_value[-1] == f'flow_{LIST_ROW_BOUND:06d}'
+        assert [record.getMessage() for record in caplog.records] == [
+            f'workflow names: the list is cut at {LIST_ROW_BOUND} root workflow names; '
+            'more exist and are not returned',
+        ]
 
 
 # --------------------------------------------------------------------------- #
@@ -2631,14 +3025,21 @@ class TestUnfilteredHistoryTotalContract:
     """The documented total contract holds on the history side.
 
     ``TaskListPage`` documents the unfiltered total as a planner
-    estimate; the live side branches on scope and the history side must
-    branch with it — estimate together, exact together. The proof is
-    the statements themselves: which ran, and which provably did not.
+    estimate: the live side and the history side estimate together, and
+    count exactly together when any filter is active. The function answers
+    which one it ran in its TOTALS row; the history estimate is EXPLAIN
+    text that ``list_tasks`` decodes, so the decode runs only for the
+    estimate.
     """
 
     async def test_unfiltered_total_estimates_and_never_counts_history(
-        self, broker: PostgresBroker, session: AsyncSession
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from horsies.monitoring import queries as queries_module
+
         await insert_rows(
             session,
             make_task(),
@@ -2651,24 +3052,29 @@ class TestUnfilteredHistoryTotalContract:
             text('ANALYZE horsies_tasks, horsies_task_history')
         )
         await session.commit()
+        decoded: list[object] = []
 
-        with _StatementCapture(broker) as capture:
-            result = await _unfiltered_list(broker)
+        def _decode(payload: object) -> int:
+            decoded.append(payload)
+            return plan_rows_from_explain(payload)
+
+        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', _decode)
+
+        result = await _unfiltered_list(broker)
 
         assert is_ok(result)
-        assert isinstance(result.ok_value.total, int)
-        assert any(
-            statement.startswith('EXPLAIN (FORMAT JSON)')
-            for statement in capture.statements
-        ), capture.statements
-        assert not any(
-            'count(*) FROM horsies_task_history' in statement
-            for statement in capture.statements
-        ), 'the unfiltered view must never run the exact history count'
+        assert len(decoded) == 1
+        assert str(decoded[0]).startswith('[')
+        assert result.ok_value.total == 2 + plan_rows_from_explain(decoded[0])
 
     async def test_filtered_total_counts_history_exactly(
-        self, broker: PostgresBroker, session: AsyncSession
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from horsies.monitoring import queries as queries_module
+
         await insert_rows(
             session,
             make_task(),
@@ -2677,32 +3083,28 @@ class TestUnfilteredHistoryTotalContract:
             make_task(status=TaskStatus.COMPLETED),
         )
 
-        with _StatementCapture(broker) as capture:
-            result = await list_tasks(
-                broker,
-                window=_test_window(),
-                statuses=[TaskStatus.COMPLETED],
-                task_names=[],
-                queues=[],
-                workers=[],
-                error_codes=[],
-                error_categories=[],
-                retried_only=False,
-                sort_by='enqueued_at',
-                sort_dir='desc',
-                page=TaskPage(offset=0, limit=50),
-            )
+        def _refuse(payload: object) -> int:
+            raise AssertionError('a filtered total is exact; no estimate may be decoded')
+
+        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', _refuse)
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[TaskStatus.COMPLETED],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='enqueued_at',
+            sort_dir='desc',
+            page=TaskPage(offset=0, limit=50),
+        )
 
         assert is_ok(result)
         assert result.ok_value.total == 3
-        assert any(
-            'count(*) FROM horsies_task_history' in statement
-            for statement in capture.statements
-        ), capture.statements
-        assert not any(
-            statement.startswith('EXPLAIN')
-            for statement in capture.statements
-        ), 'a filtered total is exact; no estimate statement may run'
 
     async def test_truncated_history_reports_zero_not_stale_estimate(
         self, broker: PostgresBroker, session: AsyncSession

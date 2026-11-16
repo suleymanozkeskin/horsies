@@ -43,7 +43,7 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
-from horsies.core.history.errors import HistoryContractError
+from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.monitoring import (
     TaskActionDbOperationFailed,
     TaskActionErrorCode,
@@ -312,8 +312,6 @@ async def complete_fused(
             task_id=task_id,
             fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
             result_json=result_json,
-            notify_channel='task_queue_default',
-            notify_payload=task_id,
         ),
     )
 
@@ -573,7 +571,7 @@ class TestCancelTaskRefuses:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.exception, OutcomeDecodeError)
         assert error.task_id == task.id
         assert error.retryable is False
         assert "'NOT_KNOWN'" in error.message
@@ -740,7 +738,7 @@ class TestWorkflowBoundRowsAreUntouched:
                 dependencies=(),
                 allow_failed_deps=False,
                 kind=TaskNode(task_id=task.id),
-                error=None,
+                result=None,
                 created_at=ago(120),
                 started_at=None,
                 completed_at=None,
