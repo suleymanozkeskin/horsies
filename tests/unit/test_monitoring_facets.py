@@ -1,4 +1,8 @@
-"""The Python side of ``task_facets``: the rank is SQL's, the filter is here."""
+"""The Python side of ``task_facets``: the rank is SQL's, the filter is here.
+
+The facet statement itself is ``horsies_monitoring_task_facets``; its cases
+are in ``tests/integration/baseline_scheduler_monitoring_cases.sql``.
+"""
 
 from __future__ import annotations
 
@@ -11,9 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.types.result import Ok, is_ok
-from horsies.core.types.status import TaskStatus
 from horsies.monitoring import ErrorCategory, MonitoringWindow, task_facets
-from horsies.monitoring.queries import facets_statement
 
 pytestmark = pytest.mark.unit
 
@@ -23,31 +25,37 @@ _WINDOW = MonitoringWindow(
 )
 
 
-def _row(facet: str, value: str, count: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        facet=facet,
-        facet_value=value,
-        facet_count=count,
-        category=None,
-        category_total=None,
-    )
+type _FacetRow = dict[str, object]
 
 
-def _code(value: str, count: int, category: ErrorCategory, total: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        facet='error_code',
-        facet_value=value,
-        facet_count=count,
-        category=category.value,
-        category_total=total,
-    )
+def _row(facet: str, value: str, count: int) -> _FacetRow:
+    return {
+        'facet': facet,
+        'facet_value': value,
+        'facet_count': count,
+        'category': None,
+        'category_total': None,
+    }
 
 
-def _broker(rows: Sequence[SimpleNamespace]) -> MagicMock:
+def _code(value: str, count: int, category: ErrorCategory, total: int) -> _FacetRow:
+    return {
+        'facet': 'error_code',
+        'facet_value': value,
+        'facet_count': count,
+        'category': category.value,
+        'category_total': total,
+    }
+
+
+def _broker(rows: Sequence[_FacetRow]) -> MagicMock:
+    """A broker whose one function statement answers ``rows``."""
     result = MagicMock()
-    result.all.return_value = list(rows)
+    result.mappings.return_value.all.return_value = list(rows)
+    connection = AsyncMock()
+    connection.execute = AsyncMock(return_value=result)
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=result)
+    session.connection = AsyncMock(return_value=connection)
     factory = MagicMock()
     factory.return_value.__aenter__ = AsyncMock(return_value=session)
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -59,7 +67,7 @@ def _broker(rows: Sequence[SimpleNamespace]) -> MagicMock:
 
 
 async def _facets(
-    rows: Sequence[SimpleNamespace],
+    rows: Sequence[_FacetRow],
     categories: list[ErrorCategory],
 ) -> Any:
     result = await task_facets(
@@ -176,57 +184,3 @@ async def test_no_rows_give_empty_facets() -> None:
 
     assert facets.workers == []
     assert facets.error_category_totals == {}
-
-
-def test_the_statement_bounds_the_code_list_per_category() -> None:
-    """An error code is a free string, so the rows must not follow the codes."""
-    sql, params = facets_statement(
-        window=_WINDOW.history,
-        statuses=[TaskStatus.FAILED],
-        retried_only=True,
-    )
-
-    assert sql.count('GROUPING SETS') == 2
-    assert 'category_rank <= :error_limit' in sql
-    assert params['error_limit'] == 30
-    assert params['status_filter'] == ['FAILED']
-    assert sql.count('retry_count > 0') == 2
-
-
-def test_the_statement_names_each_built_in_family() -> None:
-    sql, params = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
-
-    for category in ErrorCategory:
-        assert f"'{category.value}'" in sql
-    operational_codes = params['category_operational_codes']
-    assert isinstance(operational_codes, list)
-    assert 'WORKER_CRASHED' in operational_codes
-    assert "ELSE 'DOMAIN'" in sql
-
-
-def test_the_statement_scopes_only_the_history_side_by_the_window() -> None:
-    sql, _ = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
-
-    assert sql.count('terminal_at') == 2
-    assert 'WHERE TRUE' in sql
-
-
-def test_the_live_side_has_no_error_code_facet() -> None:
-    """The live table has no error code: its side groups three columns.
-
-    ``GROUPING()`` over three columns sets the bits 3, 5 and 6 for the sets
-    of the first, second and third column; over four columns, 7, 11, 13, 14.
-    """
-    sql, _ = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
-    live, history = sql.split('UNION ALL')
-
-    assert 'error_code' not in live
-    for arm in ("WHEN 3 THEN 'worker'", "WHEN 5 THEN 'task_name'", "WHEN 6 THEN 'queue_name'"):
-        assert arm in live
-    for arm in (
-        "WHEN 7 THEN 'worker'",
-        "WHEN 11 THEN 'task_name'",
-        "WHEN 13 THEN 'queue_name'",
-        "WHEN 14 THEN 'error_code'",
-    ):
-        assert arm in history

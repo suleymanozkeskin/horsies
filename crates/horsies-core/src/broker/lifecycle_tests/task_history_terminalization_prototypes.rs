@@ -29,7 +29,8 @@ use super::support::*;
 use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::terminalization::{terminalize, terminalize_in_tx};
+use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
 use crate::core::lifecycle::{
     BatchSize, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
@@ -43,8 +44,6 @@ fn fused(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: RESULT.to_owned(),
-        notify_channel: "task_queue_default".to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -63,6 +62,8 @@ fn running_workflow_task() -> TaskSeed {
     }
 }
 
+/// The sqlx error of a command run in a sqlx transaction
+/// (`terminalize_in_tx`).
 fn database_error(result: Result<Vec<TerminalizationOutcome>, BrokerError>) -> sqlx::Error {
     match result {
         Err(BrokerError::Database(error)) => error,
@@ -214,9 +215,9 @@ async fn pending_expiry_missing_workflow_link_aborts_whole_batch() {
     let plain = seed_task(&pool, &TaskSeed::pending()).await;
     set_deadline(&pool, plain, Deadline::PassedSecondsAgo(2.0)).await;
 
-    let refused = database_error(terminalize(&pool, &expire_pending()).await);
+    let refused = server_refusal(terminalize(&pool, &expire_pending()).await);
 
-    assert_refused_with_message(Err::<(), _>(refused), "23503", "lacks exactly one node row");
+    assert_server_refusal(&refused, "23503", "lacks exactly one node row");
     for task_id in [unlinked, plain] {
         assert_eq!(status_of(&pool, task_id).await, "PENDING");
         assert_eq!(history_row(&pool, task_id).await, None);
@@ -319,7 +320,6 @@ async fn orphan_sweep_is_bounded_and_replays_through_single_variant() {
 /// production code (the abandon applies), so it is not asserted.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #785"]
 async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -336,6 +336,38 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
         .handle_workflow_stop_before_start(task_id, "PAUSED", WORKER, generation())
         .await
         .expect("stop before start");
+
+    assert_eq!(
+        node_state(&pool, workflow_id).await,
+        ("COMPLETED".to_owned(), Some(task_id))
+    );
+    cleanup_tasks(&pool, &[task_id]).await;
+    cleanup_workflows(&pool, &[workflow_id]).await;
+}
+
+/// The node half of `coupled_node_failure_rolls_back_history_and_live_delete`
+/// on the post-claim path: the post-claim abandon of a task of a PAUSED
+/// workflow whose node is already COMPLETED leaves the node COMPLETED with
+/// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
+/// `horsies/core/worker/sql.py:291-296`).
+#[tokio::test]
+#[serial]
+async fn post_claim_abandon_keeps_a_finished_node() {
+    let pool = pool().await;
+    let task_id = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::WorkflowNode,
+            ..TaskSeed::claimed()
+        },
+    )
+    .await;
+    let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
+
+    PostgresBroker::from_pool(pool.clone())
+        .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
+        .await
+        .expect("post-claim workflow check");
 
     assert_eq!(
         node_state(&pool, workflow_id).await,
@@ -516,37 +548,50 @@ async fn terminalization_boundary_failure_rolls_back_every_relation() {
     }
 }
 
-/// Python `test_capacity_notification_failure_rolls_back_fused_completion`:
-/// a capacity wake that the server refuses (a payload over 8000 bytes)
-/// fails the fused completion, and nothing of the move stays.
+/// Python `test_capacity_notification_failure_rolls_back_fused_completion`.
+/// The baseline function builds the wake from the locked row: channel
+/// `task_queue_<queue>`, payload `capacity`. The queue name CHECK bounds the
+/// name to 52 bytes, so the channel fits PostgreSQL's 63-byte limit and the
+/// wake cannot be refused: the CHECK refuses a 53-byte queue name, and the
+/// completion of a seeded row applies with its wake.
 #[tokio::test]
 #[serial]
 async fn capacity_notification_failure_rolls_back_fused_completion() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = terminalize(
+    let refused = sqlx::query("UPDATE horsies_tasks SET queue_name = $2 WHERE id = $1")
+        .bind(task_id)
+        .bind("q".repeat(53))
+        .execute(&pool)
+        .await
+        .map(|done| done.rows_affected());
+    assert_refused(
+        refused,
+        "23514",
+        Constraint::Named("horsies_tasks_queue_name_length"),
+    );
+    assert_eq!(live_row(&pool, task_id).await, before);
+
+    let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id,
             fence: owned_claim(),
             result_json: RESULT.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: "x".repeat(9_000),
         },
     )
-    .await;
-
-    assert_refused_with_message(
-        Err::<(), _>(database_error(refused)),
-        "22023",
-        "payload string too long",
+    .await
+    .expect("fused completion");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ),
+        "{outcomes:?}"
     );
-    assert_eq!(live_row(&pool, task_id).await, before);
-    assert_eq!(live_attempts(&pool, task_id).await.len(), 1);
-    assert_eq!(history_row(&pool, task_id).await, None);
+    assert_eq!(live_row(&pool, task_id).await, None);
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -646,9 +691,9 @@ async fn missing_history_leaf_rolls_back_fused_attempt_and_live_delete() {
     .await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = database_error(terminalize(&pool, &fused(task_id)).await);
+    let refused = server_refusal(terminalize(&pool, &fused(task_id)).await);
 
-    assert_refused(Err::<(), _>(refused), "23514", Constraint::Unnamed);
+    assert_eq!(refused.code().code(), "23514", "{refused}");
     assert_eq!(live_row(&pool, task_id).await, before);
     assert!(live_attempts(&pool, task_id).await.is_empty());
     assert_eq!(history_row(&pool, task_id).await, None);
@@ -666,13 +711,9 @@ async fn fused_completion_rejects_workflow_task_without_losing_phase2() {
     let workflow_id = link_workflow_task(&pool, task_id, "RUNNING", "RUNNING").await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = database_error(terminalize(&pool, &fused(task_id)).await);
+    let refused = server_refusal(terminalize(&pool, &fused(task_id)).await);
 
-    assert_refused_with_message(
-        Err::<(), _>(refused),
-        "22023",
-        "cannot terminalize a workflow task",
-    );
+    assert_server_refusal(&refused, "22023", "cannot terminalize a workflow task");
     assert_eq!(live_row(&pool, task_id).await, before);
     assert!(!phase2_pending(&pool, task_id).await);
     assert_eq!(

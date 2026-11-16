@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from horsies.core.history.reads.detail import TaskAbsenceReason
 from horsies.core.models.tasks import Execution
@@ -121,14 +121,37 @@ class Facets(BaseModel):
     error_category_totals: dict[str, int]
 
 
-class GroupRow(BaseModel):
-    """One group's per-status task counts.
+class BreakdownValueGroup(BaseModel):
+    """The tasks whose group column holds ``value``: a worker id, a task name or a queue name."""
 
-    ``group`` is the grouped value, ``'TOTAL'`` for the rollup row, or
-    ``'unknown'`` for a null group key.
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal['value'] = 'value'
+    value: str
+
+
+class BreakdownUnclaimedGroup(BaseModel):
+    """The tasks that no worker claimed. Only the ``worker`` grouping has this group.
+
+    A worker whose id is the text ``'unknown'`` is a ``BreakdownValueGroup``
+    of its own, never this group.
     """
 
-    group: str
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal['unclaimed'] = 'unclaimed'
+
+
+BreakdownGroup = Annotated[
+    BreakdownValueGroup | BreakdownUnclaimedGroup,
+    Field(discriminator='kind'),
+]
+"""What one breakdown group holds: one stored value, or the unclaimed tasks."""
+
+
+class BreakdownCounts(BaseModel):
+    """Task counts per status, the task total, and the tasks retried at least once."""
+
     total: int
     pending: int
     claimed: int
@@ -140,17 +163,26 @@ class GroupRow(BaseModel):
     retried: int
 
 
+class GroupRow(BreakdownCounts):
+    """One group's per-status task counts."""
+
+    group: BreakdownGroup
+
+
 class Breakdown(BaseModel):
-    """Per-group status pivot plus the rollup TOTAL row.
+    """Per-group status pivot plus the counts of every group.
 
     ``groups`` is capped to the top ``limit`` by task count; ``group_count``
-    is the true number of distinct groups, so the UI can flag truncation. The
-    ``total`` row always covers every matching task, not just shown groups.
+    is the true number of distinct groups, so the UI can flag truncation.
+    ``total`` always covers every matching task, not just shown groups.
+    Groups come by total, highest first, then by the group text in
+    code-point order; the unclaimed group sorts as the text ``'unknown'``,
+    after a value group ``'unknown'`` with the same total.
     """
 
     group_by: str
     groups: list[GroupRow]
-    total: GroupRow
+    total: BreakdownCounts
     group_count: int
 
 

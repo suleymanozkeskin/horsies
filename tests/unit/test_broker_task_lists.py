@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -24,6 +25,9 @@ from tests.unit.test_broker_postgres import _make_broker, _set_resources  # pyri
 pytestmark = pytest.mark.unit
 
 _STARTED = datetime(2026, 1, 1, tzinfo=timezone.utc)
+# The engine reads uuid columns as text; the dicts carry the ``uuid.UUID``.
+_TASK_1 = UUID('0198c0de-0000-7000-8000-000000000001')
+_TASK_2 = UUID('0198c0de-0000-7000-8000-000000000002')
 
 
 def _list_end(state: str) -> dict[str, Any]:
@@ -75,13 +79,13 @@ class TestStaleList:
     @pytest.mark.asyncio
     async def test_rows_become_the_dicts_of_the_client_statement(self) -> None:
         broker = _make_broker()
-        _ = _answer(broker, [_stale_row('task-1'), _stale_row('task-2'), _list_end('COMPLETE')])
+        _ = _answer(broker, [_stale_row(str(_TASK_1)), _stale_row(str(_TASK_2)), _list_end('COMPLETE')])
 
         result = await broker.get_stale_tasks(stale_threshold_minutes=5)
 
         assert is_ok(result)
         assert result.ok_value[0] == {
-            'id': 'task-1',
+            'id': _TASK_1,
             'worker_hostname': 'host-1',
             'worker_pid': 1234,
             'worker_process_name': 'child-1',
@@ -89,7 +93,7 @@ class TestStaleList:
             'started_at': _STARTED,
             'task_name': 'slow_task',
         }
-        assert [row['id'] for row in result.ok_value] == ['task-1', 'task-2']
+        assert [row['id'] for row in result.ok_value] == [_TASK_1, _TASK_2]
 
     @pytest.mark.asyncio
     async def test_only_the_list_end_is_an_empty_list(self) -> None:
@@ -113,7 +117,7 @@ class TestStaleList:
     @pytest.mark.asyncio
     async def test_a_complete_list_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         broker = _make_broker()
-        _ = _answer(broker, [_stale_row('task-1'), _list_end('COMPLETE')])
+        _ = _answer(broker, [_stale_row(str(_TASK_1)), _list_end('COMPLETE')])
 
         with caplog.at_level('WARNING'):
             result = await broker.get_stale_tasks(stale_threshold_minutes=5)
@@ -124,13 +128,13 @@ class TestStaleList:
     @pytest.mark.asyncio
     async def test_a_truncated_list_logs_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         broker = _make_broker()
-        _ = _answer(broker, [_stale_row('task-1'), _list_end('TRUNCATED')])
+        _ = _answer(broker, [_stale_row(str(_TASK_1)), _list_end('TRUNCATED')])
 
         with caplog.at_level('WARNING'):
             result = await broker.get_stale_tasks(stale_threshold_minutes=5)
 
         assert is_ok(result)
-        assert [row['id'] for row in result.ok_value] == ['task-1']
+        assert [row['id'] for row in result.ok_value] == [_TASK_1]
         warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
         assert warnings == [
             f'get_stale_tasks returned the first {TASK_LIST_ROW_BOUND} rows; more rows match',
@@ -183,7 +187,7 @@ class TestExpiredList:
     @pytest.mark.asyncio
     async def test_rows_become_the_dicts_of_the_client_statement(self) -> None:
         broker = _make_broker()
-        connection = _answer(broker, [_expired_row('task-1'), _list_end('COMPLETE')])
+        connection = _answer(broker, [_expired_row(str(_TASK_1)), _list_end('COMPLETE')])
 
         result = await broker.get_expired_tasks()
 
@@ -198,13 +202,13 @@ class TestExpiredList:
             'good_until',
             'expired_for',
         ]
-        assert result.ok_value[0]['id'] == 'task-1'
+        assert result.ok_value[0]['id'] == _TASK_1
         assert len(connection.execute.await_args.args) == 1
 
     @pytest.mark.asyncio
     async def test_a_truncated_list_logs_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         broker = _make_broker()
-        _ = _answer(broker, [_expired_row('task-1'), _list_end('TRUNCATED')])
+        _ = _answer(broker, [_expired_row(str(_TASK_1)), _list_end('TRUNCATED')])
 
         with caplog.at_level('WARNING'):
             result = await broker.get_expired_tasks()

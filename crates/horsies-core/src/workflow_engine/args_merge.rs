@@ -19,6 +19,8 @@ pub const ARGS_FROM_ENTRY_KEYS: [&str; 3] = ["source_task_name", "source_definit
 
 /// A dependency row of the node that receives `args_from`: every status, not only terminal ones.
 pub struct DepResult {
+    /// The node id of the dependency; `None` for a node stored without one.
+    pub node_id: Option<String>,
     /// The task name of the dependency node (`__sub_workflow:<name>` for a sub-workflow node).
     pub task_name: String,
     /// The definition key of a sub-workflow node; `None` for a task node.
@@ -116,19 +118,15 @@ impl ArgsFromConflict {
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
-        TaskError {
-            data: Some(serde_json::json!({
-                "workflow_id": workflow_id.to_string(),
-                "task_index": task_index,
-            })),
-            ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
-                format!(
-                    "args_from key '{}' conflicts with static kwarg ({node})",
-                    self.key
-                ),
-            )
-        }
+        crate::workflow_engine::engine::node_not_prepared_error(
+            workflow_id,
+            task_index,
+            OperationalErrorCode::WorkflowEnqueueFailed,
+            format!(
+                "args_from key '{}' conflicts with static kwarg ({node})",
+                self.key
+            ),
+        )
     }
 }
 
@@ -181,6 +179,7 @@ pub(crate) fn merge_args_from_sync(
 #[derive(Debug, sqlx::FromRow)]
 struct DepRow {
     task_index: i32,
+    node_id: Option<String>,
     task_name: String,
     sub_definition_key: Option<String>,
     status: String,
@@ -207,7 +206,7 @@ pub(crate) async fn merge_args_from_async(
     };
 
     let rows: Vec<DepRow> = sqlx::query_as(
-        "SELECT task_index, task_name, sub_definition_key, status, result \
+        "SELECT task_index, node_id, task_name, sub_definition_key, status, result \
          FROM horsies_workflow_tasks \
          WHERE workflow_id = $1 AND task_index = ANY($2)",
     )
@@ -222,6 +221,7 @@ pub(crate) async fn merge_args_from_async(
             (
                 r.task_index,
                 DepResult {
+                    node_id: r.node_id,
                     task_name: r.task_name,
                     sub_definition_key: r.sub_definition_key,
                     status: r.status,
@@ -338,23 +338,13 @@ fn args_from_inner(
         })
 }
 
-/// The input that a child workflow's spec builder reads: each `args_from` entry of an object input replaced by
-/// its `inner` result envelope. The builder runs in the engine, so it gets the result itself, not the wrap that
-/// crosses to a worker (Python `core/workflows/engine.py:1164-1173`). An input with no entry is returned
-/// unchanged.
-pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> {
-    let parsed: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
-        WorkflowError::Validation(format!("stored node input refused: {error}"))
-    })?;
-    let serde_json::Value::Object(mut object) = parsed else {
-        return Ok(input.to_owned());
-    };
-    let unwrapped = unwrap_args_from_entries(&mut object)
-        .map_err(|refusal| WorkflowError::Validation(refusal.to_string()))?;
-    match unwrapped.is_empty() {
-        true => Ok(input.to_owned()),
-        false => Ok(serde_json::to_string(&object)?),
-    }
+/// A merged node input from which [`child_build_input`] cannot make the builder input: the text does not
+/// parse, it is not an object while the node has `args_from` keys, or an `args_from` entry is malformed. The
+/// engine wrote that text, so this is corrupt stored data, not a user error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredInputRefused {
+    /// Why the text is refused.
+    pub(crate) refusal: String,
 }
 
 /// The result of one dependency, as the `inner` envelope of its `args_from` entry. Python:
@@ -363,22 +353,25 @@ pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> 
 /// - SKIPPED: `UPSTREAM_SKIPPED` with `data.dependency_index`, also when a result is stored.
 /// - COMPLETED or FAILED with a stored result: that result, read under the stored result rules; one that does
 ///   not read gives `RESULT_DESERIALIZATION_ERROR`.
-/// - COMPLETED or FAILED with no stored result: `RESULT_DESERIALIZATION_ERROR` naming the dependency
-///   (decided: no writer stores such a node, so it is stored data that does not parse).
+/// - COMPLETED or FAILED with a NULL or empty stored result: [`missing_result_error`] (decided: no writer stores
+///   such a node, so it is stored data that does not parse).
 /// - A dependency that is not terminal: `UPSTREAM_SKIPPED`. Python leaves the key out for such a dependency
 ///   (workflow ledger row 18).
 fn dependency_result(dep_idx: i32, dep: &DepResult) -> TaskResult<serde_json::Value> {
     match (dep.status.as_str(), dep.result.as_deref()) {
         ("SKIPPED", _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
-        ("COMPLETED" | "FAILED", Some(text)) => {
+        ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => {
             serde_json::from_str::<TaskResult<serde_json::Value>>(text).unwrap_or_else(|e| {
                 tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
                 TaskResult::Err(dep_parse_error(dep_idx, &e))
             })
         }
-        ("COMPLETED" | "FAILED", None) => {
-            TaskResult::Err(missing_result_error(dep_idx, &dep.status))
-        }
+        (status @ ("COMPLETED" | "FAILED"), _) => TaskResult::Err(missing_result_error(
+            dep_idx,
+            dep.node_id.as_deref(),
+            &dep.task_name,
+            status,
+        )),
         (_, _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
     }
 }
@@ -394,15 +387,24 @@ pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
     }
 }
 
-/// The entry of a terminal dependency with no stored result: `RESULT_DESERIALIZATION_ERROR` naming the
-/// dependency.
-pub(crate) fn missing_result_error(dep_idx: i32, status: &str) -> TaskError {
+/// The entry of a COMPLETED or FAILED dependency whose stored result is NULL or empty:
+/// `RESULT_DESERIALIZATION_ERROR` naming the source node (its id, or `-` when it has none, its index and its
+/// task) and its status, with `data` `{"dependency_index": <index>}`. One form for the three readers: the
+/// baseline function `horsies_workflow_source_value` (`0005_workflow_functions.sql`) and Python
+/// `_missing_result_entry` (`core/workflows/engine.py`) build the same entry. Pure.
+pub(crate) fn missing_result_error(
+    dep_idx: i32,
+    node_id: Option<&str>,
+    task_name: &str,
+    status: &str,
+) -> TaskError {
+    let node = node_id.unwrap_or("-");
     TaskError {
         exception: None,
         error_code: OperationalErrorCode::ResultDeserializationError.into(),
-        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
+        data: Some(serde_json::json!({ "dependency_index": dep_idx })),
         message: Some(format!(
-            "Upstream dependency at index {dep_idx} is {status} with no stored result"
+            "Dependency node {node} (index {dep_idx}, task {task_name}) is {status} with no stored result"
         )),
         kind: TaskErrorKind::Plain,
     }
@@ -418,6 +420,114 @@ fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
     )
 }
 
+/// The input of a child build: the node input after the `args_from` merge, with its members in the
+/// order in which Python checks them, and the `args_from` keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildBuildInput {
+    /// The input text: the members of the stored input, then one member per `args_from` key in
+    /// [`args_from_keys`](Self::args_from_keys) order, each `args_from` entry replaced by its `inner`
+    /// result envelope. For a node with no `args_from`: the stored text, unchanged.
+    pub(crate) text: String,
+    /// The `args_from` keys in the order in which Python reads the stored `args_from` (`jsonb` key
+    /// order: shorter keys first, then by bytes). Empty for a node with no `args_from`.
+    pub(crate) args_from_keys: Vec<String>,
+}
+
+impl ChildBuildInput {
+    /// The stored input of a node with no `args_from`, unchanged.
+    pub(crate) fn without_args_from(text: String) -> Self {
+        Self {
+            text,
+            args_from_keys: Vec::new(),
+        }
+    }
+}
+
+/// The child build input of `merged`, the text of [`ArgsFromMerge::Merged`] for the same
+/// `args_from`: the one place where a child's builder input is made. Each `args_from` entry is
+/// replaced by its `inner` result envelope, because the builder runs in the engine and gets the
+/// result itself, not the wrap that crosses to a worker (Python `core/workflows/engine.py:1164-1173`).
+/// The members are written static members first, then the `args_from` members in `jsonb` key
+/// order, so a decode in text order meets every static member before any `args_from` member, as
+/// Python decodes the static members before it checks the `args_from` values (`:1063-1157`).
+///
+/// Errors: [`StoredInputRefused`] for a merged text that does not parse, that is not an object
+/// while `args_from` has keys (the merge writes an object then), or that holds a malformed
+/// `args_from` entry. Pure.
+pub(crate) fn child_build_input(
+    merged: String,
+    args_from: Option<&serde_json::Value>,
+) -> Result<ChildBuildInput, StoredInputRefused> {
+    let args_from_keys = jsonb_key_order(args_from);
+    if args_from_keys.is_empty() {
+        return Ok(ChildBuildInput::without_args_from(merged));
+    }
+    let mut object = merged_object(&merged)?;
+    let _unwrapped =
+        unwrap_args_from_entries(&mut object).map_err(|refusal| StoredInputRefused {
+            refusal: refusal.to_string(),
+        })?;
+    let args_from_members: Vec<(String, serde_json::Value)> = args_from_keys
+        .iter()
+        .filter_map(|key| object.remove(key).map(|value| (key.clone(), value)))
+        .collect();
+    let mut members: Vec<(&String, &serde_json::Value)> = object.iter().collect();
+    members.extend(args_from_members.iter().map(|(key, value)| (key, value)));
+    let mut text = String::from("{");
+    for (position, (key, value)) in members.into_iter().enumerate() {
+        if position > 0 {
+            text.push(',');
+        }
+        text.push_str(&serde_json::Value::String(key.clone()).to_string());
+        text.push(':');
+        text.push_str(&value.to_string());
+    }
+    text.push('}');
+    Ok(ChildBuildInput {
+        text,
+        args_from_keys,
+    })
+}
+
+/// The object of a merged node input. The merge wrote this text from values that it read with
+/// serde_json's depth limit, and the object of the merge adds levels above them: the parse takes
+/// every level it wrote.
+///
+/// Errors: [`StoredInputRefused`] for a text that does not parse or that is not an object. Pure.
+fn merged_object(
+    merged: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, StoredInputRefused> {
+    let mut deserializer = serde_json::Deserializer::from_str(merged);
+    deserializer.disable_recursion_limit();
+    let parsed = <serde_json::Value as serde::Deserialize>::deserialize(&mut deserializer)
+        .and_then(|parsed| deserializer.end().map(|()| parsed))
+        .map_err(|error| StoredInputRefused {
+            refusal: error.to_string(),
+        })?;
+    match parsed {
+        serde_json::Value::Object(object) => Ok(object),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_)
+        | serde_json::Value::Array(_) => Err(StoredInputRefused {
+            refusal: "a node input merged with args_from members is not a JSON object".to_owned(),
+        }),
+    }
+}
+
+/// The keys of a stored `args_from` object in `jsonb` key order (shorter keys first, then by
+/// bytes), the order in which Python reads them. Empty when `args_from` is absent, not an object,
+/// or empty. Pure.
+fn jsonb_key_order(args_from: Option<&serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = args_from
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort_by(|left, right| (left.len(), left.as_bytes()).cmp(&(right.len(), right.as_bytes())));
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +535,7 @@ mod tests {
 
     fn dep(status: &str, result: Option<String>) -> DepResult {
         DepResult {
+            node_id: Some("source".to_owned()),
             task_name: "produce".to_owned(),
             sub_definition_key: None,
             status: status.to_owned(),
@@ -452,6 +563,57 @@ mod tests {
             ArgsFromMerge::StaticMemberConflict(conflict) => {
                 panic!("unexpected args_from conflict on '{}'", conflict.key)
             }
+        }
+    }
+
+    /// The child build input holds the static members first and the `args_from` members after
+    /// them, in `jsonb` key order; it holds the members of the merged input, each `args_from`
+    /// entry replaced by its `inner` envelope.
+    #[test]
+    fn a_child_build_input_holds_its_static_members_first() {
+        let mut deps = HashMap::new();
+        for index in [0, 1] {
+            deps.insert(
+                index,
+                dep(
+                    "COMPLETED",
+                    Some(serde_json::to_string(&TaskResult::Ok(json!(index))).unwrap()),
+                ),
+            );
+        }
+        let args_from = Some(json!({"bb": 0, "a": 1}));
+        let merged_text = merged(r#"{"z": 1, "c": 2}"#, &args_from, &deps);
+
+        let input = child_build_input(merged_text, args_from.as_ref()).unwrap();
+
+        assert_eq!(input.args_from_keys, vec!["a".to_owned(), "bb".to_owned()]);
+        let position = |member: &str| {
+            input
+                .text
+                .find(&format!("\"{member}\":"))
+                .unwrap_or_else(|| panic!("member {member} in {}", input.text))
+        };
+        assert!(position("c") < position("z"), "{}", input.text);
+        assert!(position("z") < position("a"), "{}", input.text);
+        assert!(position("a") < position("bb"), "{}", input.text);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&input.text).unwrap(),
+            json!({
+                "z": 1,
+                "c": 2,
+                "bb": {"__h_task_result__": true, "ok": 0, "err": null},
+                "a": {"__h_task_result__": true, "ok": 1, "err": null},
+            })
+        );
+    }
+
+    /// With no `args_from` the child build input is the stored text, unchanged, also when it is
+    /// not an object.
+    #[test]
+    fn a_child_build_input_without_args_from_is_the_stored_text() {
+        for args_from in [None, Some(json!({}))] {
+            let input = child_build_input("null".to_owned(), args_from.as_ref()).unwrap();
+            assert_eq!(input, ChildBuildInput::without_args_from("null".to_owned()));
         }
     }
 
@@ -557,6 +719,7 @@ mod tests {
         deps.insert(
             1,
             DepResult {
+                node_id: Some("child".to_owned()),
                 task_name: "__sub_workflow:child".to_owned(),
                 sub_definition_key: Some("app.child".to_owned()),
                 status: "COMPLETED".to_owned(),
@@ -640,21 +803,37 @@ mod tests {
         assert_eq!(error.data, Some(json!({"dependency_index": 3})));
     }
 
+    /// The entry of `horsies_workflow_source_value` (0005) and Python `_missing_result_entry`, for a NULL and an
+    /// empty stored result.
     #[test]
     fn a_terminal_dependency_with_no_result_gives_result_deserialization_error() {
         for status in ["COMPLETED", "FAILED"] {
-            let mut deps = HashMap::new();
-            deps.insert(2, dep(status, None));
-            let result = merged("{}", &Some(json!({"answer": 2})), &deps);
-            let TaskResult::Err(error) = inner_of(&result, "answer") else {
-                panic!("a dependency with no result must give an error entry");
-            };
-            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
-            assert_eq!(
-                error.data,
-                Some(json!({"dependency_index": 2, "status": status}))
-            );
+            for result in [None, Some(String::new())] {
+                let mut deps = HashMap::new();
+                deps.insert(2, dep(status, result.clone()));
+                let merged = merged("{}", &Some(json!({"answer": 2})), &deps);
+                let TaskResult::Err(error) = inner_of(&merged, "answer") else {
+                    panic!("a {status} dependency with result {result:?} must give an error entry");
+                };
+                let expected = format!(
+                    "Dependency node source (index 2, task produce) is {status} with no stored result"
+                );
+                assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+                assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+                assert_eq!(error.data, Some(json!({"dependency_index": 2})));
+            }
         }
+    }
+
+    /// A node stored without a node id is named `-`, as in the baseline function.
+    #[test]
+    fn a_dependency_with_no_node_id_is_named_with_a_dash() {
+        let error = missing_result_error(4, None, "produce", "COMPLETED");
+        assert_eq!(
+            error.message.as_deref(),
+            Some("Dependency node - (index 4, task produce) is COMPLETED with no stored result")
+        );
+        assert_eq!(error.data, Some(json!({"dependency_index": 4})));
     }
 
     /// A child workflow's builder gets the result envelope, not the wrap (Python
@@ -664,16 +843,38 @@ mod tests {
         let mut deps = HashMap::new();
         let stored = serde_json::to_string(&TaskResult::Ok(json!(3))).unwrap();
         deps.insert(0, dep("COMPLETED", Some(stored)));
-        let merged = merged(r#"{"x": 1}"#, &Some(json!({"answer": 0})), &deps);
-        let builder_input = child_builder_input(&merged).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&builder_input).unwrap();
+        let args_from = Some(json!({"answer": 0}));
+        let merged = merged(r#"{"x": 1}"#, &args_from, &deps);
+        let input = child_build_input(merged, args_from.as_ref()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&input.text).unwrap();
         assert_eq!(
             parsed,
             json!({"x": 1, "answer": {"__h_task_result__": true, "ok": 3, "err": null}})
         );
-        for unchanged in ["null", "{}", r#"{"x":1}"#, "[1]"] {
-            assert_eq!(child_builder_input(unchanged).unwrap(), unchanged);
-        }
+    }
+
+    /// A merged input that holds a malformed `args_from` entry, that does not parse, or that is
+    /// not an object is a refused stored input.
+    #[test]
+    fn a_merged_input_the_builder_cannot_read_is_a_refused_stored_input() {
+        let args_from = Some(json!({"answer": 0}));
+        let no_inner =
+            json!({"answer": {"__h_taskresult_envelope__": true, "source_task_name": "t"}})
+                .to_string();
+        assert_eq!(
+            child_build_input(no_inner, args_from.as_ref()),
+            Err(StoredInputRefused {
+                refusal: "args_from envelope for kwarg 'answer' has no inner result".to_owned(),
+            })
+        );
+        assert!(child_build_input("{".to_owned(), args_from.as_ref()).is_err());
+        assert_eq!(
+            child_build_input("[1]".to_owned(), args_from.as_ref()),
+            Err(StoredInputRefused {
+                refusal: "a node input merged with args_from members is not a JSON object"
+                    .to_owned(),
+            })
+        );
     }
 
     #[test]

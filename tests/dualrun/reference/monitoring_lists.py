@@ -61,9 +61,8 @@ def _rows(connection: Connection, statement: LiteralString, parameters: dict[str
     cursor = connection.execute(statement, parameters)
     assert cursor.description is not None, 'a list statement returns rows'
     columns = [column.name for column in cursor.description]
+    # psycopg reads the id column as ``uuid.UUID``, the type of the public API.
     rows = [dict(zip(columns, record, strict=True)) for record in cursor.fetchall()]
-    for row in rows:
-        row['id'] = str(row['id'])
     return rows[:ROW_BOUND]
 
 

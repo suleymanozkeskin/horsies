@@ -1,15 +1,15 @@
-"""A scheduler whose runtime pool holds one connection still enqueues.
+# pyright: reportPrivateUsage=false
+"""A scheduler whose runtime pool holds one connection still fires.
 
-The schedule's lock transaction stays open while the enqueue checks out a
-runtime connection. The lock must not occupy the runtime pool, or the
-enqueue waits for ``pool_timeout`` and the due run never fires.
+The fire is one statement on one connection (``horsies_fire_schedule``): no
+lock transaction holds a connection while the slot is written, so a runtime
+pool of one connection never waits for ``pool_timeout``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
 
 import pytest
 from pydantic import SecretStr
@@ -96,10 +96,7 @@ async def test_due_schedule_enqueues_with_a_one_connection_runtime_pool(
     try:
         await _make_schedule_due(session, schedule_name)
         await asyncio.wait_for(
-            scheduler._check_schedule(
-                scheduler.schedule_config.schedules[0],
-                datetime.now(timezone.utc),
-            ),
+            scheduler._check_and_run_schedules(),
             SCHEDULE_CHECK_TIMEOUT_SECONDS,
         )
     finally:

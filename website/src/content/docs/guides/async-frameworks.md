@@ -62,7 +62,7 @@ An `async def` endpoint uses `send_async()`, `start_async()` and `get_async()`.
 async def welcome(address: str) -> dict[str, str]:
     match await send_welcome_email.send_async(address=address):
         case Ok(handle):
-            return {"task_id": handle.task_id}
+            return {"task_id": str(handle.task_id)}
         case Err(send_error):
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
@@ -78,7 +78,7 @@ FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event l
 def welcome_blocking(address: str) -> dict[str, str]:
     match send_welcome_email.send(address=address):
         case Ok(handle):
-            return {"task_id": handle.task_id}
+            return {"task_id": str(handle.task_id)}
         case Err(send_error):
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```

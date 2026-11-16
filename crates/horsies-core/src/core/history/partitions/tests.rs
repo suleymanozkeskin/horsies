@@ -303,6 +303,8 @@ fn database_url() -> String {
     format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
+mod read_round_trips;
+
 #[derive(Clone)]
 struct StatementPause {
     pattern: Arc<str>,
@@ -1992,10 +1994,10 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .expect("insert blocker workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, is_subworkflow, created_at
-         ) VALUES ($1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
+         ) VALUES ('NONE', $1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    $3, 'RUNNING', FALSE, NOW())",
     )
