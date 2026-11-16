@@ -9,8 +9,14 @@
 //! `NOW()` in SQL, as the Python tests do, so the worker clock never enters a
 //! comparison.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
 use crate::broker::terminalization::terminalize;
@@ -835,4 +841,264 @@ pub(super) async fn cleanup_workflows(pool: &PgPool, workflow_ids: &[Uuid]) {
         .execute(pool)
         .await
         .expect("clean up workflow rows");
+}
+
+/// The status and the task link of the one node of a workflow.
+pub(super) async fn node_state(pool: &PgPool, workflow_id: Uuid) -> (String, Option<Uuid>) {
+    sqlx::query_as(
+        "SELECT status::text, task_id FROM horsies_workflow_tasks WHERE workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_one(pool)
+    .await
+    .expect("read node state")
+}
+
+/// Bound of the wait for a terminated backend to exit: 50 polls of 100 ms.
+const BACKEND_EXIT_POLLS: u32 = 50;
+const BACKEND_EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Bound of the wait for a released connection to be idle in its pool.
+const IDLE_POLLS: u32 = 100;
+const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// A pool of one connection that does not ping a connection at checkout, so
+/// a dead pooled connection shows at its first statement (Python's worker
+/// pre-ping off).
+pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .connect_with(options)
+        .await
+        .expect("open a single-connection pool")
+}
+
+/// The connect options of the shared test database.
+pub(super) fn database_options(pool: &PgPool) -> PgConnectOptions {
+    (*pool.connect_options()).clone()
+}
+
+/// Wait until the one connection of `pool` is back in the pool; the release
+/// check of the pool runs in the background after a query.
+pub(super) async fn wait_until_idle(pool: &PgPool) {
+    for _ in 0..IDLE_POLLS {
+        if pool.num_idle() == 1 {
+            return;
+        }
+        tokio::time::sleep(IDLE_POLL_INTERVAL).await;
+    }
+    panic!("the pooled connection did not return to its pool");
+}
+
+/// Open the one connection of `pool`, wait until it is idle again, and
+/// return its backend pid.
+pub(super) async fn pooled_backend_pid(pool: &PgPool) -> i32 {
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(pool)
+        .await
+        .expect("read the pooled backend pid");
+    wait_until_idle(pool).await;
+    pid
+}
+
+/// Terminate the server side of a connection and wait until it is gone. The
+/// client side stays in its pool.
+pub(super) async fn terminate_backend(observer: &PgPool, pid: i32) {
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .fetch_one(observer)
+        .await
+        .expect("terminate backend");
+    assert!(terminated, "backend {pid} was not terminated");
+    for _ in 0..BACKEND_EXIT_POLLS {
+        let alive: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+            .bind(pid)
+            .fetch_one(observer)
+            .await
+            .expect("read backend activity");
+        if alive == 0 {
+            return;
+        }
+        tokio::time::sleep(BACKEND_EXIT_POLL_INTERVAL).await;
+    }
+    panic!("backend {pid} still runs after pg_terminate_backend");
+}
+
+/// Connections that one proxy relays before it stops accepting.
+const PROXY_CONNECTION_LIMIT: u32 = 16;
+/// Reads that one relay direction makes before it ends its connection.
+const PROXY_READ_LIMIT: u32 = 100_000;
+const PROXY_BUFFER_BYTES: usize = 16 * 1024;
+/// Time that the server gets to finish the statement whose reply is
+/// dropped, before the client's connection ends.
+const REPLY_DROP_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A TCP proxy to the test database that can drop the reply of the next
+/// request (Python's `RoundTripProxy.drop_next_execute_reply`). The server
+/// receives and runs the request; the client gets no reply and then a
+/// closed connection.
+pub(super) struct ReplyDroppingProxy {
+    port: u16,
+    armed: Arc<AtomicBool>,
+    dropped: Arc<AtomicBool>,
+    accept_loop: tokio::task::JoinHandle<()>,
+}
+
+impl ReplyDroppingProxy {
+    /// Listen on a free local port and relay to the server of `upstream`.
+    pub(super) async fn start(upstream: &PgConnectOptions) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind the proxy");
+        let port = listener.local_addr().expect("proxy address").port();
+        let armed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let accept_loop = tokio::spawn(accept_connections(
+            listener,
+            upstream.get_host().to_owned(),
+            upstream.get_port(),
+            Arc::clone(&armed),
+            Arc::clone(&dropped),
+        ));
+        Self {
+            port,
+            armed,
+            dropped,
+            accept_loop,
+        }
+    }
+
+    /// Connect options that reach the database through this proxy.
+    pub(super) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
+        upstream.clone().host("127.0.0.1").port(self.port)
+    }
+
+    /// Drop the reply to the next request that a client sends.
+    pub(super) fn drop_next_reply(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a reply was dropped.
+    pub(super) fn reply_was_dropped(&self) -> bool {
+        self.dropped.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ReplyDroppingProxy {
+    fn drop(&mut self) {
+        self.accept_loop.abort();
+    }
+}
+
+async fn accept_connections(
+    listener: TcpListener,
+    upstream_host: String,
+    upstream_port: u16,
+    armed: Arc<AtomicBool>,
+    dropped: Arc<AtomicBool>,
+) {
+    for _ in 0..PROXY_CONNECTION_LIMIT {
+        let Ok((client, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(upstream) = TcpStream::connect((upstream_host.as_str(), upstream_port)).await else {
+            return;
+        };
+        let _relay = tokio::spawn(relay(
+            client,
+            upstream,
+            Arc::clone(&armed),
+            Arc::clone(&dropped),
+        ));
+    }
+}
+
+/// Relay one client connection. When the proxy is armed, the next request
+/// of the client marks the connection; the reply to it is not relayed, and
+/// the client's connection ends after `REPLY_DROP_SETTLE`.
+async fn relay(
+    client: TcpStream,
+    upstream: TcpStream,
+    armed: Arc<AtomicBool>,
+    dropped: Arc<AtomicBool>,
+) {
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut upstream_read, mut upstream_write) = upstream.into_split();
+    let cut = Arc::new(AtomicBool::new(false));
+    let cut_by_request = Arc::clone(&cut);
+    let requests = tokio::spawn(async move {
+        let mut buffer = vec![0_u8; PROXY_BUFFER_BYTES];
+        for _ in 0..PROXY_READ_LIMIT {
+            let read = match client_read.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => read,
+            };
+            if armed.swap(false, Ordering::SeqCst) {
+                cut_by_request.store(true, Ordering::SeqCst);
+            }
+            if upstream_write.write_all(&buffer[..read]).await.is_err() {
+                return;
+            }
+        }
+    });
+    let mut buffer = vec![0_u8; PROXY_BUFFER_BYTES];
+    for _ in 0..PROXY_READ_LIMIT {
+        let read = match upstream_read.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        if cut.load(Ordering::SeqCst) {
+            dropped.store(true, Ordering::SeqCst);
+            tokio::time::sleep(REPLY_DROP_SETTLE).await;
+            break;
+        }
+        if client_write.write_all(&buffer[..read]).await.is_err() {
+            break;
+        }
+    }
+    requests.abort();
+}
+
+/// The status of a task: of its live row, else of its history row.
+pub(super) async fn status_of(pool: &PgPool, task_id: Uuid) -> String {
+    sqlx::query_scalar(
+        "SELECT status::text FROM horsies_tasks WHERE id = $1
+         UNION ALL
+         SELECT status::text FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read task status")
+}
+
+/// A workflow task that `WORKER` claimed at `claimed_at`.
+pub(super) fn workflow_task_claimed_at(claimed_at: DateTime<Utc>) -> TaskSeed {
+    TaskSeed {
+        origin: Origin::WorkflowNode,
+        holder: Holder::Claim {
+            worker_id: WORKER.to_owned(),
+            claimed_at,
+        },
+        ..TaskSeed::claimed()
+    }
+}
+
+/// The parameters of one claim pass of `WORKER` over `queue`, with no cap.
+pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParams {
+    crate::broker::postgres::ClaimPassParams {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        processes: 10,
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
 }
