@@ -6,7 +6,9 @@
 extern crate self as horsies;
 
 // `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
-// which this crate reaches through its own name.
+// and `#[derive(horsies_macros::ManifestSchema)]` names
+// `::horsies_core::manifest_schema`; this crate reaches both through its own
+// name.
 extern crate self as horsies_core;
 
 // Internal modules (merged from formerly separate crates).
@@ -19,6 +21,7 @@ pub mod catalog;
 pub mod core;
 pub mod db;
 pub mod manifest;
+pub mod manifest_schema;
 pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;

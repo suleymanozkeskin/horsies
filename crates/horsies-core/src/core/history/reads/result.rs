@@ -8,7 +8,25 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::names::TASK_RESULT_FUNCTION;
 
 /// SQLSTATE `undefined_function`.
-const UNDEFINED_FUNCTION: &str = "42883";
+pub(crate) const UNDEFINED_FUNCTION: &str = "42883";
+
+/// Whether the function named by `$1` (a `regprocedure` text) exists.
+pub(crate) const FUNCTION_PUBLISHED_SQL: &str = "SELECT to_regprocedure($1) IS NOT NULL";
+
+/// The staged result read: one row per task id that the live table or the
+/// history holds, none otherwise. `$1` is the task id.
+pub(crate) fn task_result_sql() -> String {
+    format!(
+        "SELECT location, status, live_result, failed_reason,
+                result_envelope_version, result_payload, result_digest, task_name
+         FROM {TASK_RESULT_FUNCTION}($1)"
+    )
+}
+
+/// The `regprocedure` text of the staged result function.
+pub(crate) fn task_result_function_signature() -> String {
+    format!("{TASK_RESULT_FUNCTION}(uuid)")
+}
 
 /// Result columns of a live task row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,11 +94,7 @@ pub async fn read_task_result(
     connection: &mut PgConnection,
     task_id: Uuid,
 ) -> Result<TaskResultRead, HistoryError> {
-    let sql = format!(
-        "SELECT location, status, live_result, failed_reason,
-                result_envelope_version, result_payload, result_digest, task_name
-         FROM {TASK_RESULT_FUNCTION}($1)"
-    );
+    let sql = task_result_sql();
     let fetched = sqlx::query_as::<_, ResultWireRow>(&sql)
         .bind(task_id)
         .fetch_optional(&mut *connection)
@@ -158,8 +172,8 @@ fn is_undefined_function(error: &sqlx::Error) -> bool {
 }
 
 pub async fn staged_result_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
-    Ok(sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
-        .bind(format!("{TASK_RESULT_FUNCTION}(uuid)"))
+    Ok(sqlx::query_scalar(FUNCTION_PUBLISHED_SQL)
+        .bind(task_result_function_signature())
         .fetch_one(connection)
         .await?)
 }
