@@ -1,0 +1,5 @@
+error: task functions must have an explicit return type: -> Result<T, TaskError>
+ --> tests/compile_fail/no_return_type.rs:4:7
+  |
+4 | async fn bad(_: ()) {
+  |       ^^

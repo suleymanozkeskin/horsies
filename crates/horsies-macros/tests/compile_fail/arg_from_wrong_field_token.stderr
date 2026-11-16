@@ -1,0 +1,25 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail/arg_from_wrong_field_token.rs:19:19
+   |
+19 |         .arg_from(other_number::params::value(), dep);
+   |          -------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `consume_number::Input`, found `other_number::Input`
+   |          |
+   |          arguments to this method are incorrect
+   |
+   = note: `other_number::Input` and `consume_number::Input` have similar names, but are actually distinct types
+note: `other_number::Input` is defined in module `crate::other_number` of the current crate
+  --> tests/compile_fail/arg_from_wrong_field_token.rs:9:1
+   |
+ 9 | #[task("other_number")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+note: `consume_number::Input` is defined in module `crate::consume_number` of the current crate
+  --> tests/compile_fail/arg_from_wrong_field_token.rs:3:1
+   |
+ 3 | #[task("consume_number")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+note: method defined here
+  --> $WORKSPACE/horsies/src/core/workflow/node.rs
+   |
+   |     pub fn arg_from<S>(
+   |            ^^^^^^^^
+   = note: this error originates in the attribute macro `task` (in Nightly builds, run with -Z macro-backtrace for more info)

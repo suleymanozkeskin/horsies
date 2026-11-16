@@ -1,0 +1,50 @@
+name: Acme Showcase
+
+on:
+  push:
+    paths:
+      - "showcase/**"
+      - "horsies/**"
+      - "macros/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/showcase.yml"
+  pull_request:
+    paths:
+      - "showcase/**"
+      - "horsies/**"
+      - "macros/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/showcase.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Showcase build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Enforce repository-only package
+        run: |
+          grep -Eq '^publish[[:space:]]*=[[:space:]]*false[[:space:]]*$' showcase/Cargo.toml
+
+      - name: Check default features
+        run: cargo check -p acme-showcase --tests
+
+      - name: Test default features
+        run: cargo test -p acme-showcase --all-targets
+
+      - name: Check web feature
+        run: cargo check -p acme-showcase --features web --tests
+
+      - name: Test web feature
+        run: cargo test -p acme-showcase --features web --all-targets

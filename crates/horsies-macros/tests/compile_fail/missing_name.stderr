@@ -1,0 +1,15 @@
+error: unexpected end of input, expected string literal
+ --> tests/compile_fail/missing_name.rs:4:1
+  |
+4 | #[task]
+  | ^^^^^^^
+  |
+  = note: this error originates in the attribute macro `task` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/missing_name.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

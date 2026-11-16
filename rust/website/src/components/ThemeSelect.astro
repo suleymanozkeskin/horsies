@@ -1,0 +1,132 @@
+---
+/**
+ * Custom theme toggle replacing Starlight's native <select>.
+ * Three styled buttons: Dark / Light / Auto.
+ * Wires into Starlight's ThemeProvider via localStorage('starlight-theme')
+ * and StarlightThemeProvider.updatePickers().
+ */
+---
+
+<starlight-theme-select>
+	<div class="theme-toggle" role="radiogroup" aria-label="Select theme">
+		<button type="button" class="theme-btn" data-theme-value="dark" role="radio" aria-checked="false">
+			<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+				<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+			</svg>
+			Dark
+		</button>
+		<button type="button" class="theme-btn" data-theme-value="light" role="radio" aria-checked="false">
+			<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+			</svg>
+			Light
+		</button>
+		<button type="button" class="theme-btn" data-theme-value="auto" role="radio" aria-checked="false">
+			<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>
+			</svg>
+			Auto
+		</button>
+	</div>
+</starlight-theme-select>
+
+{/* Inlined to avoid FOUC. Uses global scope from ThemeProvider.astro */}
+<script is:inline>
+	StarlightThemeProvider.updatePickers();
+</script>
+
+<script>
+	type Theme = 'auto' | 'dark' | 'light';
+
+	const storageKey = 'starlight-theme';
+
+	const parseTheme = (theme: unknown): Theme =>
+		theme === 'auto' || theme === 'dark' || theme === 'light' ? theme : 'auto';
+
+	const loadTheme = (): Theme =>
+		parseTheme(typeof localStorage !== 'undefined' && localStorage.getItem(storageKey));
+
+	function storeTheme(theme: Theme): void {
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(storageKey, theme === 'light' || theme === 'dark' ? theme : '');
+		}
+	}
+
+	const getPreferredColorScheme = (): Theme =>
+		matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+
+	function onThemeChange(theme: Theme): void {
+		document.documentElement.dataset.theme = theme === 'auto' ? getPreferredColorScheme() : theme;
+		storeTheme(theme);
+		updateButtons(theme);
+	}
+
+	function updateButtons(theme: Theme): void {
+		document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+			picker.querySelectorAll<HTMLButtonElement>('.theme-btn').forEach((btn) => {
+				const isActive = btn.dataset.themeValue === theme;
+				btn.classList.toggle('active', isActive);
+				btn.setAttribute('aria-checked', String(isActive));
+			});
+		});
+	}
+
+	matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+		if (loadTheme() === 'auto') onThemeChange('auto');
+	});
+
+	class StarlightThemeSelect extends HTMLElement {
+		constructor() {
+			super();
+			const theme = loadTheme();
+			onThemeChange(theme);
+			this.querySelectorAll<HTMLButtonElement>('.theme-btn').forEach((btn) => {
+				btn.addEventListener('click', () => {
+					onThemeChange(parseTheme(btn.dataset.themeValue));
+				});
+			});
+		}
+	}
+	customElements.define('starlight-theme-select', StarlightThemeSelect);
+</script>
+
+<style>
+	.theme-toggle {
+		display: flex;
+		gap: 2px;
+		border: 1px solid var(--horsie-gold-dark, #B8860B);
+		border-radius: 5px;
+		padding: 2px;
+		background: var(--horsie-black, #050505);
+	}
+
+	.theme-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		padding: 0.3rem 0.55rem;
+		border: 1px solid transparent;
+		border-radius: 3px;
+		background: transparent;
+		color: var(--sl-color-gray-3, #8B8B7A);
+		font-family: 'Departure Mono', ui-monospace, monospace;
+		font-size: 0.7rem;
+		cursor: pointer;
+		transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+		white-space: nowrap;
+	}
+
+	.theme-btn:hover {
+		color: var(--horsie-gold, #DAA520);
+	}
+
+	.theme-btn.active {
+		color: var(--horsie-neon-green, #00FFAA);
+		background: rgba(0, 255, 170, 0.08);
+		border-color: rgba(0, 255, 170, 0.25);
+	}
+
+	.theme-btn svg {
+		flex-shrink: 0;
+	}
+</style>

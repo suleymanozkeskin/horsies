@@ -1,0 +1,73 @@
+name: Tests Full
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Web UI Contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+      - name: Check design tokens
+        run: bun run lint:tokens
+
+      - name: Check committed distribution
+        run: bun run check:dist
+
+  pgbouncer:
+    name: PgBouncer Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start PgBouncer fixture stack
+        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
+
+      - name: Build test worker binary
+        run: cargo build -p horsies-test-worker --bin horsies-test-worker
+
+      - name: Run PgBouncer contracts
+        env:
+          HORSIES_PGBOUNCER_TEST: "1"
+          DB_PASSWORD: testpassword
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql://postgres:testpassword@localhost:16435/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
+        run: cargo test -p horsies-test-worker --test pgbouncer_contract -- --test-threads=1
+
+      - name: Stop PgBouncer fixture stack
+        if: always()
+        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml down -v

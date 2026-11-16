@@ -1,0 +1,77 @@
+Upstream source
+===============
+
+Repository: /Users/suleyman/Desktop/Personal-Projects/task-lib
+Commit: a43b7780
+Tree: webui/
+
+Sync recipe
+===========
+
+1. Create or use a clean worktree at the pinned source commit.
+2. Copy its complete webui/ directory into this repository.
+3. Verify the copy with `diff -qr <worktree>/webui webui` before applying the
+   differences listed below.
+4. Apply WV-8 and WV-9 only when the replacement upstream tree still has the
+   corresponding contract gaps.
+5. Restore the Rust build integration changes.
+6. Run the frontend gates and rebuild horsies/webui-dist.
+
+The next conforming upstream sync supersedes WV-8 and WV-9. Do not preserve a
+patch after upstream supplies the matching behavior.
+
+Vendored differences
+====================
+
+WV-8: stale manual-retry removal
+--------------------------------
+
+Reason: the pinned SPA calls a task retry route that its pinned backend does
+not expose. Rerun is a separate lineage-bearing operation and has no pinned UI
+contract. This patch removes the unreachable action. It adds no replacement.
+
+Files:
+
+- src/actions/action-bar.tsx
+- src/actions/copy.ts
+- src/actions/eligibility.test.ts
+- src/actions/eligibility.ts
+- src/actions/managed-by-workflow.test.tsx
+- src/actions/settle.test.ts
+- src/actions/settle.ts
+- src/actions/use-entity-action.test.tsx
+- src/actions/use-entity-action.ts
+- src/actions/use-task-actions.ts
+- src/actions/use-workflow-actions.ts
+- src/services/actions-api.ts
+- src/types/actions.ts
+- src/types/workflows.ts
+
+WV-9: SCHEMA_UNKNOWN conflict handling
+--------------------------------------
+
+Reason: the pinned backend emits SCHEMA_UNKNOWN when action safety cannot be
+confirmed. The pinned SPA recognizes only SCHEMA_INCOMPATIBLE. Both codes now
+revoke actions for the session and use the same refusal path.
+
+Files:
+
+- src/actions/capability.tsx
+- src/actions/copy.ts
+- src/actions/use-entity-action.test.tsx
+- src/actions/use-entity-action.ts
+- src/types/actions.ts
+
+Rust build integration
+----------------------
+
+Reason: the Rust crate commits and embeds the production build. The frontend
+source and API contract are unchanged.
+
+Files:
+
+- package.json: adds the committed-dist staleness command
+- vite.config.ts: writes the production build to ../horsies/webui-dist
+
+The staleness implementation lives at ../scripts/check-webui-dist.sh and is
+not part of the upstream webui tree.

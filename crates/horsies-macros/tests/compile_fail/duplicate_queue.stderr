@@ -1,0 +1,13 @@
+error: duplicate `queue` attribute
+ --> tests/compile_fail/duplicate_queue.rs:4:28
+  |
+4 | #[task("bad", queue = "a", queue = "b")]
+  |                            ^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/duplicate_queue.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
