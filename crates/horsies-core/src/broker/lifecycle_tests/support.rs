@@ -149,6 +149,7 @@ pub(super) struct TaskSeed {
     pub(super) origin: Origin,
     pub(super) queue_name: &'static str,
     pub(super) execution: &'static str,
+    pub(super) input: &'static str,
     pub(super) task_options: Option<String>,
     pub(super) retry_count: i32,
     pub(super) max_retries: i32,
@@ -165,6 +166,7 @@ impl TaskSeed {
             origin: Origin::Send,
             queue_name: "default",
             execution: "ISOLATED",
+            input: "{}",
             task_options: None,
             retry_count: 0,
             max_retries: 0,
@@ -211,7 +213,7 @@ pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'lifecycle.test', $2, 100, '{}', $3, $13,
+            $1, 'lifecycle.test', $2, 100, $14, $3, $13,
             'forever', NOW(), NOW(),
             $4, $5, NULL,
             $6, NOW(), $7, $8,
@@ -237,6 +239,7 @@ pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
     .bind(is_workflow_task)
     .bind(seed.retain_rerun_input)
     .bind(seed.execution)
+    .bind(seed.input)
     .execute(pool)
     .await
     .expect("seed live task row");
@@ -571,6 +574,18 @@ pub(super) async fn seed_node(
     task_id: Option<Uuid>,
     node_status: &str,
 ) -> Uuid {
+    try_seed_node(pool, workflow_id, task_id, node_status)
+        .await
+        .expect("seed workflow node")
+}
+
+/// `seed_node`, with the database's answer, so a test can assert a refusal.
+pub(super) async fn try_seed_node(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_id: Option<Uuid>,
+    node_status: &str,
+) -> Result<Uuid, sqlx::Error> {
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
@@ -597,9 +612,8 @@ pub(super) async fn seed_node(
     .bind(node_status)
     .bind(task_id)
     .execute(pool)
-    .await
-    .expect("seed workflow node");
-    node_row_id
+    .await?;
+    Ok(node_row_id)
 }
 
 /// A workflow with `workflow_status` and one task node linked to
@@ -1196,5 +1210,103 @@ impl Wakes {
             payloads.push(notification.payload().to_owned());
         }
         panic!("sentinel wake not seen; payloads {payloads:?}");
+    }
+}
+
+/// The rerun-input columns of a history row.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(super) struct RerunInputImage {
+    pub(super) rerun_input_disposition: String,
+    pub(super) rerun_input_version: Option<i16>,
+    pub(super) rerun_input_digest: Option<Vec<u8>>,
+    pub(super) rerun_input_inline: Option<Vec<u8>>,
+}
+
+/// The rerun-input columns of the history row of a task.
+pub(super) async fn rerun_input_of(pool: &PgPool, task_id: Uuid) -> RerunInputImage {
+    sqlx::query_as(
+        "SELECT rerun_input_disposition::text AS rerun_input_disposition,
+                rerun_input_version, rerun_input_digest, rerun_input_inline
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the rerun input columns")
+}
+
+/// The phase-2 record that a deferred terminalization wrote.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(super) struct Phase2Record {
+    pub(super) workflow_id: Uuid,
+    pub(super) workflow_node_row_id: Uuid,
+    pub(super) recovery_source: String,
+    pub(super) history_class: Option<String>,
+    pub(super) history_anchor: Option<DateTime<Utc>>,
+    pub(super) result_digest: Vec<u8>,
+    pub(super) terminalization_kind: String,
+}
+
+/// The phase-2 record of a task.
+pub(super) async fn phase2_record_of(pool: &PgPool, task_id: Uuid) -> Phase2Record {
+    sqlx::query_as(
+        "SELECT workflow_id, workflow_node_row_id, recovery_source::text AS recovery_source,
+                history_class::text AS history_class, history_anchor, result_digest,
+                terminalization_kind::text AS terminalization_kind
+         FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the phase-2 record")
+}
+
+/// The `terminal_at` of the history row of a task.
+pub(super) async fn terminal_at_of(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
+    sqlx::query_scalar("SELECT terminal_at FROM horsies_task_history WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read terminal_at")
+}
+
+/// The SHA-256 digest of `bytes`.
+pub(super) fn sha256_of(bytes: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).to_vec()
+}
+
+/// Call the internal move of a live task directly, as the deferred guard
+/// of every deferring family sees it.
+pub(super) async fn move_to_history(
+    pool: &PgPool,
+    task_id: Uuid,
+    status: &str,
+    kind: &str,
+    result: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query("SELECT horsies_move_task_to_history($1, $2, $3, NOW(), $4, NULL, NULL)")
+        .bind(task_id)
+        .bind(status)
+        .bind(kind)
+        .bind(result)
+        .execute(pool)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+/// Assert that the database refused a statement with `sqlstate` and a
+/// message that contains `fragment`.
+pub(super) fn assert_refused_with_message<T: std::fmt::Debug>(
+    result: Result<T, sqlx::Error>,
+    sqlstate: &str,
+    fragment: &str,
+) {
+    match result {
+        Err(sqlx::Error::Database(error)) => {
+            assert_eq!(error.code().as_deref(), Some(sqlstate), "{error}");
+            assert!(error.message().contains(fragment), "{error}");
+        }
+        other => panic!("expected SQLSTATE {sqlstate}, got {other:?}"),
     }
 }
