@@ -41,8 +41,8 @@ use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask, OutcomeWriter,
-    PoolBoard, PoolFailure, PoolStopReport, RetryFacts, TaskKind,
+    BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask, OrphanSelfHeal,
+    OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts, TaskKind,
 };
 use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -1047,6 +1047,11 @@ impl Worker {
             self.app_config.payload.clone(),
             self.app_config.retention.clone(),
             batcher.clone(),
+            OrphanSelfHeal::of_recovery_flag(
+                self.app_config
+                    .recovery
+                    .auto_terminate_orphaned_workflow_tasks,
+            ),
         ));
         let stops = ChildrenStopCell::default();
         let services = match self.spawn_services(&children, &live, &stops) {

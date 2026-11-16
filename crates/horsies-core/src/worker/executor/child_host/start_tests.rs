@@ -11,7 +11,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::host::{ChildApp, OrphanSelfHeal};
+use super::host::ChildApp;
 use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
 use crate::broker::PostgresBroker;
@@ -29,7 +29,6 @@ fn context(pool: PgPool) -> (HostContext, UnixStream) {
         broker: Arc::new(PostgresBroker::from_pool(pool)),
         app: Arc::new(ChildApp {
             registry: Arc::new(TaskRegistry::new()),
-            orphan_self_heal: OrphanSelfHeal::Off,
             hostname: "start-host".to_owned(),
         }),
         pid: PID,

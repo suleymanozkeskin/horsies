@@ -87,7 +87,7 @@ pub use dispatch::{
     AttemptEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause, RetryFacts,
     Settlement, TaskKind,
 };
-pub use outcome::OutcomeWriter;
+pub use outcome::{OrphanSelfHeal, OutcomeWriter};
 pub use pool::{
     ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,
     TaskLimit,

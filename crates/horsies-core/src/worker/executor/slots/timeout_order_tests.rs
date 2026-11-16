@@ -202,6 +202,7 @@ fn writer(pool: PgPool) -> OutcomeWriter {
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
+        OrphanSelfHeal::On,
     )
 }
 

@@ -8,15 +8,14 @@ use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::host::{ChildApp, OrphanSelfHeal};
+use super::host::ChildApp;
 use super::link::FrameWriter;
 use crate::broker::claims::{
     release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
     ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
 };
-use crate::broker::terminalization::terminalize;
 use crate::broker::{BrokerError, PostgresBroker, WorkflowStop, WorkflowStopBeforeStart};
-use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
@@ -136,7 +135,7 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
 /// | `NotHeld`, `LeaseExpired` | none | `ClaimLost` |
 /// | `WorkflowPaused` | abandon and node reset, one transaction | `WorkflowStopped`, or a new start after a resume |
 /// | `WorkflowCancelled` | cancel and node skip, one transaction | `WorkflowStopped` |
-/// | `NodeNotLinked` | the orphan cancel when the app turns it on | `NodeNotLinked` |
+/// | `NodeNotLinked` | none in the child; the worker's outcome writer cancels the owned orphan | `NodeNotLinked` |
 ///
 /// Errors: the [`BrokerError`] of a write of the path.
 async fn after_missed_start(
@@ -167,10 +166,7 @@ async fn after_missed_start(
         StartMiss::WorkflowCancelled => {
             stop_for_workflow(context, facts, WorkflowStop::Cancelled).await
         }
-        StartMiss::NodeNotLinked => {
-            cancel_orphan(context, facts).await?;
-            Ok(MissedStart::Stop(StopReason::NodeNotLinked))
-        }
+        StartMiss::NodeNotLinked => Ok(node_not_linked(facts)),
     }
 }
 
@@ -209,34 +205,20 @@ async fn stop_for_workflow(
     }
 }
 
-/// Cancel a claimed workflow task that no live node links, when the app's
-/// `auto_terminate_orphaned_workflow_tasks` is on. The cancel judges the
-/// link again under its own lock and refuses when a runnable link exists.
-async fn cancel_orphan(context: &HostContext, facts: &RunFacts) -> Result<(), BrokerError> {
-    match context.app.orphan_self_heal {
-        OrphanSelfHeal::Off => Ok(()),
-        OrphanSelfHeal::On => {
-            let outcomes = terminalize(
-                context.broker.pool(),
-                &TerminalizationCommand::CancelOwnedOrphan {
-                    task_id: facts.task_id,
-                    fence: OwnedClaim {
-                        worker_id: facts.worker_id.clone(),
-                        claimed_at: facts.claimed_at,
-                    },
-                },
-            )
-            .await?;
-            if let Some(TerminalizationOutcome::Applied { .. }) = outcomes.first() {
-                tracing::warn!(
-                    task_id = %facts.task_id,
-                    "workflow task orphaned (no runnable workflow_task linkage); cancelled \
-                     before start",
-                );
-            }
-            Ok(())
-        }
-    }
+/// The stop of a workflow task start whose node is not linked to the task.
+/// Logs an error and writes nothing (Python
+/// `horsies/core/worker/child_runner.py:1233-1247`, the node check of
+/// `_confirm_ownership_and_set_running`). The worker's outcome writer
+/// cancels the owned orphan when the app's
+/// `auto_terminate_orphaned_workflow_tasks` is on
+/// (`slots::outcome::OutcomeWriter`); with it off the row stays CLAIMED.
+fn node_not_linked(facts: &RunFacts) -> MissedStart {
+    tracing::error!(
+        task_id = %facts.task_id,
+        "Failed to update workflow_tasks to RUNNING for task {}",
+        facts.task_id,
+    );
+    MissedStart::Stop(StopReason::NodeNotLinked)
 }
 
 /// Release the claim of a start that failed with a database error, at once,

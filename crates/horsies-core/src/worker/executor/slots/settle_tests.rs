@@ -21,7 +21,8 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::executor::protocol::{
-    CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StoredOptionsRefusal,
+    CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StopReason,
+    StoredOptionsRefusal,
 };
 use crate::worker::retry::read_stored_options;
 
@@ -290,6 +291,10 @@ fn test_queue() -> String {
 }
 
 fn writer(pool: PgPool) -> OutcomeWriter {
+    writer_with_self_heal(pool, OrphanSelfHeal::On)
+}
+
+fn writer_with_self_heal(pool: PgPool, orphan_self_heal: OrphanSelfHeal) -> OutcomeWriter {
     let broker = Arc::new(PostgresBroker::from_pool(pool));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
@@ -299,6 +304,7 @@ fn writer(pool: PgPool) -> OutcomeWriter {
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
+        orphan_self_heal,
     )
 }
 
@@ -681,6 +687,85 @@ async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
 // ---------------------------------------------------------------------------
 // The retries of a write
 // ---------------------------------------------------------------------------
+
+/// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
+/// linked to it. Returns the claimed task.
+async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask {
+    let (task_id, generation) = seed(
+        pool,
+        queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .expect("mark the row a workflow task");
+    ClaimedTask {
+        kind: TaskKind::WorkflowTask,
+        ..claimed_row(
+            task_id,
+            queue,
+            generation,
+            ExecutionClass::Isolated,
+            None,
+            0,
+        )
+    }
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_enabled_cancels_the_orphan`
+/// and `::test_orphan_cancel_fences_on_the_dispatched_generation`: a start
+/// that found no linked node cancels the owned orphan of this claim.
+#[tokio::test]
+#[serial]
+async fn a_task_whose_node_is_not_linked_is_cancelled_when_the_self_heal_is_on() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
+
+    let settled = writer_with_self_heal(pool.clone(), OrphanSelfHeal::On)
+        .settle(
+            &claimed,
+            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::Written);
+    let history = history_row(&pool, claimed.task_id).await;
+    assert_eq!(history["status"], "CANCELLED");
+    assert_eq!(history["error_code"], "WORKFLOW_CHECK_FAILED");
+    remove_task(&pool, claimed.task_id).await;
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
+/// with the self-heal off the row stays CLAIMED by this claim.
+#[tokio::test]
+#[serial]
+async fn a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
+
+    let settled = writer_with_self_heal(pool.clone(), OrphanSelfHeal::Off)
+        .settle(
+            &claimed,
+            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    let row = live_row(&pool, claimed.task_id)
+        .await
+        .expect("the row stays live");
+    assert_eq!(row["status"], "CLAIMED");
+    assert_eq!(row["claimed_by_worker_id"], WORKER_ID);
+    remove_task(&pool, claimed.task_id).await;
+}
 
 /// No server listens on port 1, so every write fails with a retryable pool
 /// timeout after 100 ms.
