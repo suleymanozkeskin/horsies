@@ -11,7 +11,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1122,7 +1122,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
             .await
             .unwrap();
     assert!(unlocked);
-    let url = options.to_url_lossy().to_string();
+    let url = crate::broker::pools::test_url_of(&options);
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
             .await
