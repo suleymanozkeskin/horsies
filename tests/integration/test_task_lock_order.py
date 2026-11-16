@@ -89,7 +89,7 @@ from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     success_statement,
 )
-from horsies.monitoring.task_actions import cancel_task
+from horsies.monitoring.task_actions import CANCEL_TASK_SQL
 from tests.broker_resources_support import listener_of
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
@@ -489,32 +489,32 @@ async def test_the_stale_move_waits_for_a_workflow_success_that_holds_its_locks(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks(
     engine: AsyncEngine,
-    broker: PostgresBroker,
     stale_task: Callable[..., Awaitable[tuple[str, datetime]]],
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A cancel of the RUNNING task holds the task's locks before its move;
-    the failure finalize starts and waits; the cancel then moves the row."""
+    """The monitoring cancel's statement runs in a transaction that stays
+    open, so it holds the task's locks after its move; the failure finalize
+    starts and waits; the commit then releases both, and the finalize finds
+    the row moved."""
     task_id, claimed_at = await stale_task()
     worker = _make_worker(engine)
-    import horsies.monitoring.task_actions as task_actions_module
-
-    gate = _Gate(task_actions_module.apply_async)
-    monkeypatch.setattr(task_actions_module, 'apply_async', gate)
 
     with caplog.at_level(logging.ERROR):
-        cancel = asyncio.ensure_future(
-            cancel_task(broker, task_id, include_running=True),
-        )
-        await asyncio.wait_for(gate.holding.wait(), WAIT_POLL_S * WAIT_POLLS)
-        finalize = asyncio.ensure_future(_fail_by_worker(worker, task_id, claimed_at))
-        await _until_a_backend_waits_on_a_lock(engine, 'horsies_finish_failed_attempt')
-        gate.release.set()
-        cancelled, finalized = await asyncio.gather(cancel, finalize)
+        async with engine.connect() as holder:
+            transaction = await holder.begin()
+            outcome = (
+                await holder.execute(
+                    CANCEL_TASK_SQL,
+                    {'task_id': task_id, 'include_running': True},
+                )
+            ).mappings().one()
+            assert outcome['outcome'] == 'APPLIED'
+            finalize = asyncio.ensure_future(_fail_by_worker(worker, task_id, claimed_at))
+            await _until_a_backend_waits_on_a_lock(engine, 'horsies_finish_failed_attempt')
+            await transaction.commit()
+        finalized = await finalize
 
     assert _deadlocks(caplog) == []
-    assert is_ok(cancelled)
     assert is_ok(finalized) and finalized.ok_value is None
     assert await _history(engine, task_id) == [('CANCELLED', 'CANCEL_ADMIN')]
 
