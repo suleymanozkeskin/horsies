@@ -10,8 +10,9 @@
 -- - each single terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...), and
 --   each batch terminal write calls the batch move stage horsies_move_tasks_to_history
 --   (0006_history_functions.sql);
--- - each terminal write that misses passes its own kind to horsies_terminalization_miss(uuid, text, text,
---   timestamptz) (0008_history_maintenance_functions.sql), which owns the equivalence classes of the kinds;
+-- - each terminal write that misses passes its own kind and its fence kind (NONE, OWNER, OWNER_AND_GENERATION) to
+--   horsies_terminalization_miss(uuid, text, text, text, timestamptz) (0008_history_maintenance_functions.sql),
+--   which owns the equivalence classes of the kinds;
 -- - the owned-claim functions require the claim generation (22023 on NULL, or on a NULL element of a batch) and
 --   fence on it with no NULL arm.
 -- The trigger functions are in 0001_tables.sql. The published history readers are rendered by
@@ -188,7 +189,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, 'PAUSE_ABANDON_CLAIM',
+            p_task_id, 'PAUSE_ABANDON_CLAIM', 'OWNER_AND_GENERATION',
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -361,7 +362,7 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, 'PAUSE_ABANDON_CLAIM_BATCH',
+        input.task_id, 'PAUSE_ABANDON_CLAIM_BATCH', 'OWNER_AND_GENERATION',
         p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
@@ -393,7 +394,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, 'CANCEL_ADMIN',
+            p_task_id, 'CANCEL_ADMIN', 'NONE',
             NULL::text, NULL::timestamptz
         );
         RETURN;
@@ -649,7 +650,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, 'WORKFLOW_CANCEL_CLAIM',
+            p_task_id, 'WORKFLOW_CANCEL_CLAIM', 'OWNER_AND_GENERATION',
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -755,7 +756,7 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, 'WORKFLOW_CANCEL_CLAIM_BATCH',
+        input.task_id, 'WORKFLOW_CANCEL_CLAIM_BATCH', 'OWNER_AND_GENERATION',
         p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
@@ -831,7 +832,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, 'CANCEL_ORPHAN',
+        p_task_id, 'CANCEL_ORPHAN', 'OWNER_AND_GENERATION',
         p_worker_id, p_claimed_at
     );
 END
@@ -963,7 +964,7 @@ BEGIN
         AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, 'COMPLETE_LOCKED',
+            p_task_id, 'COMPLETE_LOCKED', 'OWNER',
             p_worker_id, NULL::timestamptz
         );
         RETURN;
@@ -1089,7 +1090,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, 'EXPIRE_CLAIMED',
+        p_task_id, 'EXPIRE_CLAIMED', 'OWNER',
         p_worker_id, NULL::timestamptz
     );
 END
@@ -1173,7 +1174,7 @@ BEGIN
         AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, 'FAIL_RUNNING',
+            p_task_id, 'FAIL_RUNNING', 'OWNER',
             p_worker_id, NULL::timestamptz
         );
         RETURN;
@@ -1288,7 +1289,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, 'FAIL_STALE',
+        p_task_id, 'FAIL_STALE', 'NONE',
         NULL::text, NULL::timestamptz
     );
 END

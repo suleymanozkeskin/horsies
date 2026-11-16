@@ -15,7 +15,9 @@ Each side then moves the same tasks through
 the move) and reads every task back: the Python state and result reads, the
 guard, the provenance reader, and the miss classifier for each of the 15
 kinds. The reference classifier receives the class of the kind as an array,
-as each terminal write passed it; the candidate receives the kind.
+as each terminal write passed it, and turns the fence off for a NULL worker;
+the candidate receives the kind and names the fence: NONE without a worker,
+OWNER with one.
 
 The snapshots must be equal and the answers must be equal.
 """
@@ -230,7 +232,7 @@ _MISS_BEFORE_SQL: Final[LiteralString] = (
 )
 _MISS_AFTER_SQL: Final[LiteralString] = (
     'SELECT outcome, terminal_at, terminalization_kind, observed_status, observed_worker_id, guard_kind '
-    'FROM horsies_terminalization_miss(%(id)s, %(kind)s, %(worker)s, NULL)'
+    'FROM horsies_terminalization_miss(%(id)s, %(kind)s, %(fence)s, %(worker)s, NULL)'
 )
 
 
@@ -360,11 +362,21 @@ def _miss_before_with_the_kind_alone(
     return _miss_answer(record, task_id)
 
 
+def _fence_kind(worker: str | None) -> str:
+    """The fence kind of the 0008 classifier that the reference expresses by a NULL or given worker."""
+    match worker:
+        case None:
+            return 'NONE'
+        case str():
+            return 'OWNER'
+
+
 def _miss_after(
     connection: Connection, task_id: str, kind: TerminalizationKind, worker: str | None
 ) -> MissAnswer:
     record = connection.execute(
-        _MISS_AFTER_SQL, {'id': task_id, 'kind': kind.value, 'worker': worker}
+        _MISS_AFTER_SQL,
+        {'id': task_id, 'kind': kind.value, 'fence': _fence_kind(worker), 'worker': worker},
     ).fetchone()
     return _miss_answer(record, task_id)
 

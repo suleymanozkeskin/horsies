@@ -2,9 +2,10 @@
 --
 -- Each function is the one statement of a history operation in the core design: the move to history of one locked
 -- row and of a batch of locked rows, the absence reason of a task id, the rerun read, and the transactional parts
--- of pruning. The terminal writes of 0003_interim_functions.sql call the two moves; horsies_monitoring_task_detail
--- (0007_scheduler_monitoring_functions.sql) calls horsies_task_absence_reason. No client calls the other functions
--- yet. Each function names the Python code it replaces (paths at the 0.7.0 tag, under horsies/core/).
+-- of pruning. The terminal writes of 0003_interim_functions.sql and 0004_lifecycle_functions.sql call the two moves;
+-- horsies_monitoring_task_detail (0007_scheduler_monitoring_functions.sql) calls horsies_task_absence_reason. No
+-- client calls the other functions yet. Each function names the Python code it replaces (paths at the 0.7.0 tag,
+-- under horsies/core/).
 --
 -- Results are plain rows of built-in types. Closed sets of values are text columns; each function lists its values.
 --

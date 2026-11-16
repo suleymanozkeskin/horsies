@@ -8,8 +8,8 @@
 -- The published readers. horsies_publish_history_readers renders four functions from the leaf catalog:
 -- horsies_task_history_duplicate_staged(uuid), horsies_task_provenance_staged(uuid), horsies_task_detail_staged(uuid)
 -- and horsies_task_result_staged(uuid). It is the one renderer: the Python client publishes through it, and the
--- terminal writes of 0003_interim_functions.sql pass their kind to horsies_terminalization_miss, which reads
--- history through the provenance reader.
+-- terminal writes of 0003_interim_functions.sql and 0004_lifecycle_functions.sql pass their kind and fence kind
+-- to horsies_terminalization_miss, which reads history through the provenance reader.
 --
 -- Results are plain rows of built-in types. Closed sets of values are text columns; each function lists its values.
 -- Leaf names and bounds are UTC in any session time zone.
@@ -1114,9 +1114,15 @@ CREATE FUNCTION horsies_terminalization_family(p_kind text) RETURNS text
     END
 $$;
 
--- horsies_terminalization_miss(p_task_id uuid, p_kind text, p_worker_id text, p_claimed_at timestamptz): the one
--- outcome of a terminal write of kind p_kind that did not apply. Internal: the terminal writes call it, in their
--- transaction, after their own fenced read missed.
+-- horsies_terminalization_miss(p_task_id uuid, p_kind text, p_fence_kind text, p_worker_id text,
+-- p_claimed_at timestamptz): the one outcome of a terminal write of kind p_kind that did not apply. Internal: the
+-- terminal writes call it, in their transaction, after their own fenced read missed.
+--
+-- p_fence_kind names the caller's fence, a closed set:
+-- - NONE: the caller fences on no claim (p_worker_id and p_claimed_at NULL);
+-- - OWNER: the caller fences on the worker only (p_worker_id given, p_claimed_at NULL);
+-- - OWNER_AND_GENERATION: the caller fences on the worker and the claim generation (both given).
+-- No NULL argument carries a meaning: the fence kind decides the fence.
 --
 -- Outcomes (horsies_terminalization_outcome rows, one row), in the order they are decided:
 -- - TASK_ABSENT: no live row and no history row (published provenance reader).
@@ -1124,29 +1130,31 @@ $$;
 --   carries its terminal time, kind and status.
 -- - SOURCE_STATE_CONFLICT with guard_kind FOREIGN_TERMINALIZATION: history holds the task with a kind of another
 --   class.
--- - LOST_CLAIM: the live row exists, p_worker_id is given, and the row's claim owner differs from p_worker_id or
---   (p_claimed_at given) its claimed_at differs from p_claimed_at.
--- - SOURCE_STATE_CONFLICT: the live row exists in another state; the row carries its status and claim.
--- p_worker_id NULL means a write without a claim fence (for example a pending expiry); p_claimed_at NULL means a fence
--- on the worker only.
+-- - LOST_CLAIM: the live row exists and the fence does not hold: OWNER, the row's claim owner differs from
+--   p_worker_id; OWNER_AND_GENERATION, the owner differs or the row's claimed_at differs from p_claimed_at.
+-- - SOURCE_STATE_CONFLICT: the live row exists in another state and the fence holds (always for NONE); the row
+--   carries its status and claim.
 -- History is read through the published reader horsies_task_provenance_staged(uuid), never through the parent. The
 -- live row is read FOR UPDATE.
--- Refusals: 22023 invalid_parameter_value for a NULL task id or a kind outside the 15 kinds. A missing provenance
--- reader raises 42883 undefined_function: the readers are published at install and by every coverage pass.
+-- Refusals: 22023 invalid_parameter_value for a NULL task id, a kind outside the 15 kinds, a fence kind outside the
+-- three, or a worker or claim generation that does not fit the fence kind. A missing provenance reader raises 42883
+-- undefined_function: the readers are published at install and by every coverage pass.
 -- Lock order: the live row FOR UPDATE (the caller holds the task advisory lock).
 -- Indexes: horsies_tasks_pkey; the leaf task_id indexes (provenance reader).
 -- Returns: one row.
 -- Replaces: history/terminalization/outcome.py:43-114 (MISS_CLASSIFIER_DDL). Changes from it: the caller passes its
 -- kind and this function owns the equivalence classes, instead of each caller writing the class as an array
--- literal; the provenance reader takes no include_live argument and has no live probe, so the LIVE-after-miss
--- refusal has nothing to check.
-CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
+-- literal; the caller names its fence kind, instead of a NULL argument turning a part of the fence off; the
+-- provenance reader takes no include_live argument and has no live probe, so the LIVE-after-miss refusal has
+-- nothing to check.
+CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_kind text, p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
 DECLARE
     v_family text;
     v_row horsies_tasks%ROWTYPE;
     v_provenance record;
+    v_held boolean;
 BEGIN
     v_family := horsies_terminalization_family(p_kind);
     IF p_task_id IS NULL OR v_family IS NULL THEN
@@ -1154,6 +1162,26 @@ BEGIN
             p_task_id, p_kind
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    CASE p_fence_kind
+        WHEN 'NONE' THEN
+            IF num_nulls(p_worker_id, p_claimed_at) <> 2 THEN
+                RAISE EXCEPTION 'fence NONE takes no worker and no claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER' THEN
+            IF p_worker_id IS NULL OR p_claimed_at IS NOT NULL THEN
+                RAISE EXCEPTION 'fence OWNER takes a worker and no claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER_AND_GENERATION' THEN
+            IF num_nulls(p_worker_id, p_claimed_at) <> 0 THEN
+                RAISE EXCEPTION 'fence OWNER_AND_GENERATION takes a worker and a claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'unknown fence kind %', p_fence_kind
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
 
     SELECT * INTO v_row
     FROM horsies_tasks AS t
@@ -1186,10 +1214,14 @@ BEGIN
         RETURN;
     END IF;
 
-    IF p_worker_id IS NOT NULL AND (
-        v_row.claimed_by_worker_id IS DISTINCT FROM p_worker_id::varchar
-        OR (p_claimed_at IS NOT NULL AND v_row.claimed_at IS DISTINCT FROM p_claimed_at)
-    ) THEN
+    v_held := CASE p_fence_kind
+        WHEN 'NONE' THEN TRUE
+        WHEN 'OWNER' THEN v_row.claimed_by_worker_id IS NOT DISTINCT FROM p_worker_id::varchar
+        WHEN 'OWNER_AND_GENERATION' THEN
+            v_row.claimed_by_worker_id IS NOT DISTINCT FROM p_worker_id::varchar
+            AND v_row.claimed_at IS NOT DISTINCT FROM p_claimed_at
+    END;
+    IF NOT v_held THEN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'LOST_CLAIM'::text,
             NULL::timestamptz, NULL::text,

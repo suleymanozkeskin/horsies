@@ -431,7 +431,7 @@ SELECT * FROM dblink('a', $q$
 $q$) AS t(done text);
 SELECT dblink_send_query('b', $q$
     SELECT outcome FROM horsies_terminalization_miss(
-        (SELECT id FROM fixture_ids WHERE name = 'replayed'), 'COMPLETE_LOCKED', 'w1', NULL)
+        (SELECT id FROM fixture_ids WHERE name = 'replayed'), 'COMPLETE_LOCKED', 'OWNER', 'w1', NULL)
 $q$);
 SELECT fixture_check(
     'miss after a concurrent write: the classifier waits on the live row that the mover holds',
@@ -452,7 +452,7 @@ SELECT * FROM dblink('a', $q$
 $q$) AS t(done text);
 SELECT dblink_send_query('b', $q$
     SELECT outcome || '/' || guard_kind FROM horsies_terminalization_miss(
-        (SELECT id FROM fixture_ids WHERE name = 'overtaken'), 'COMPLETE_FUSED', 'w1', NULL)
+        (SELECT id FROM fixture_ids WHERE name = 'overtaken'), 'COMPLETE_FUSED', 'OWNER', 'w1', NULL)
 $q$);
 SELECT fixture_check(
     'miss after a concurrent write of another class: the classifier waits on the live row',
