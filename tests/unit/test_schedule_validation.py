@@ -450,7 +450,7 @@ def _make_real_app(schedule: ScheduleConfig | None) -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
+                database_url='postgresql://user:pass@localhost/db',
             ),
             schedule=schedule,
         )
@@ -508,7 +508,7 @@ class TestCheckValidatesSchedules:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://user:pass@localhost/db',
+                    database_url='postgresql://user:pass@localhost/db',
                 ),
                 schedule=ScheduleConfig(schedules=[schedule]),
                 payload=PayloadPolicy(warn_bytes=None, reject_bytes=256),

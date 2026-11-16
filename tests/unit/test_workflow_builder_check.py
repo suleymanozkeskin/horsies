@@ -36,7 +36,7 @@ def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
+                database_url='postgresql://user:pass@localhost/db',
             ),
         ),
     )
@@ -730,7 +730,7 @@ def _make_custom_app(*queues: tuple[str, int]) -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
+                database_url='postgresql://user:pass@localhost/db',
             ),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[

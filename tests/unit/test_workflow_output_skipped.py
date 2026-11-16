@@ -189,7 +189,7 @@ def app() -> Horsies:
     return Horsies(
         AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+                database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
             ),
         ),
     )

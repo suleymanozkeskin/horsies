@@ -152,7 +152,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 horsies web myapp.tasks:app
 
 # Monitor a database directly
-horsies web --database-url postgresql+psycopg://user:pw@host/db
+horsies web --database-url postgresql://user:pw@host/db
 
 # Behind a proxy that authenticates callers and sets the header
 horsies web myapp.tasks:app --host 0.0.0.0 \
@@ -276,7 +276,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskError, TaskResult
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))  # Auto-discovered
 
 @app.task("my_task")
@@ -314,7 +314,7 @@ Workers wait up to the `drain_timeout` of their profile for running tasks. See [
 ## Environment Variables
 
 ```bash
-DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app --profile default
+DATABASE_URL=postgresql://... horsies worker myapp.instance:app --profile default
 ```
 
 Use in config:
