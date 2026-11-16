@@ -45,7 +45,7 @@ from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.worker.child_runner import _handle_workflow_stop_before_start
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
 
@@ -78,24 +78,26 @@ async def _insert_claimed_task(
 ) -> str:
     """Insert one task row at a known claim generation."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='fence_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='fence_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha,
-                 is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'fence_test', 'default', 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, :claimed_at, :worker_id, :enqueue_sha, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, claimed_at,
+                    claimed_by_worker_id, is_workflow_task, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, claim_expires_at,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'fence_test', 'default', 100, '{}', :status, :sent_at, NOW(),
+                    NOW(), 0, 0, :claimed_at, :worker_id, TRUE, 'standard_30d', NULL,
+                    NULL, FALSE, 'ISOLATED', NOW(),
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
@@ -103,7 +105,7 @@ async def _insert_claimed_task(
             'sent_at': sent_at,
             'claimed_at': claimed_at,
             'worker_id': worker_id,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     return task_id
@@ -202,8 +204,7 @@ def _dispatch_rows(*pairs: tuple[str, datetime | None]) -> list[dict[str, Any]]:
         {
             'id': task_id,
             'task_name': 'fence_test',
-            'args': '[]',
-            'kwargs': '{}',
+            'input': '{}',
             'is_workflow_task': True,
             'claimed_at': claimed_at,
         }
@@ -354,26 +355,22 @@ async def test_real_claim_path_arms_the_fence(
     generation that claim produced.
     """
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='fence_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='fence_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, enqueue_sha,
-                 is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'fence_test', 'default', 100, '[]', '{}',
-                 'PENDING', :sent_at, NOW(), NOW(), NOW(),
-                 FALSE, 0, 0, :enqueue_sha, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                ) VALUES (
+                    :id, 'fence_test', 'default', 100, '{}', 'PENDING', :sent_at,
+                    NOW(), NOW(), NOW(), 0, 0, TRUE, 'standard_30d', NULL, NULL, FALSE,
+                    'ISOLATED'
+                )
         """),
-        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {'id': task_id, 'sent_at': sent_at, 'command_fingerprint': fingerprint},
     )
     await _link_to_workflow(session, task_id, wf_status='PAUSED')
     await session.commit()

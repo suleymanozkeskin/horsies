@@ -2,10 +2,12 @@
 //! from Rust event targets to them.
 //!
 //! A core event's target is its Rust module path (for example
-//! `horsies_core::broker::postgres`) unless the event names one. The routes
-//! map each target prefix to the logger of the same component in Python
+//! `horsies_core::broker::postgres`) unless the event names one. An event
+//! that names the Python name of a logger of the set (for example
+//! `horsies.db`) goes to that logger. Otherwise the routes map each target
+//! prefix to the logger of the same component in Python
 //! (`horsies.<component>`, `horsies/core/logging.py`). An event whose target
-//! has no route is not forwarded: it comes from another crate.
+//! is neither is not forwarded: it comes from another crate.
 
 /// A Python logger of the `horsies` namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -16,6 +18,7 @@ pub enum LoggerName {
     Cli,
     Codec,
     Core,
+    Db,
     Lifecycle,
     Listener,
     Scheduler,
@@ -29,7 +32,7 @@ pub enum LoggerName {
 
 impl LoggerName {
     /// The number of loggers.
-    pub const COUNT: usize = 15;
+    pub const COUNT: usize = 16;
 
     /// Every logger, in declaration order.
     pub const ALL: [LoggerName; Self::COUNT] = [
@@ -39,6 +42,7 @@ impl LoggerName {
         Self::Cli,
         Self::Codec,
         Self::Core,
+        Self::Db,
         Self::Lifecycle,
         Self::Listener,
         Self::Scheduler,
@@ -59,6 +63,7 @@ impl LoggerName {
             Self::Cli => "horsies.cli",
             Self::Codec => "horsies.codec",
             Self::Core => "horsies.core",
+            Self::Db => "horsies.db",
             Self::Lifecycle => "horsies.lifecycle",
             Self::Listener => "horsies.listener",
             Self::Scheduler => "horsies.scheduler",
@@ -126,12 +131,19 @@ const TARGET_ROUTES: [(&str, LoggerName); 21] = [
     ("horsies_core", LoggerName::Core),
 ];
 
-/// The logger of a target, or `None` for a target of another crate.
+/// The logger of a target, or `None` for a target of another crate. A
+/// target that is the Python name of a logger goes to that logger; any other
+/// target goes through the prefix routes.
 pub fn route(target: &str) -> Option<LoggerName> {
-    TARGET_ROUTES
-        .iter()
-        .find(|(prefix, _)| prefix_matches(prefix, target))
-        .map(|(_, logger)| *logger)
+    LoggerName::ALL
+        .into_iter()
+        .find(|logger| logger.python_name() == target)
+        .or_else(|| {
+            TARGET_ROUTES
+                .iter()
+                .find(|(prefix, _)| prefix_matches(prefix, target))
+                .map(|(_, logger)| *logger)
+        })
 }
 
 fn prefix_matches(prefix: &str, target: &str) -> bool {
@@ -194,6 +206,23 @@ mod tests {
         for (target, logger) in cases {
             assert_eq!(route(target), Some(logger), "{target}");
         }
+    }
+
+    #[test]
+    fn a_target_named_after_a_logger_goes_to_that_logger() {
+        // The statement layer's pool and pooling check (`db/pool.rs`,
+        // `db/pooling_check.rs`) and its listener (`db/listener.rs`).
+        assert_eq!(route("horsies.db"), Some(LoggerName::Db));
+        assert_eq!(route("horsies.listener"), Some(LoggerName::Listener));
+        for logger in LoggerName::ALL {
+            assert_eq!(route(logger.python_name()), Some(logger), "{logger:?}");
+        }
+    }
+
+    #[test]
+    fn a_dotted_target_outside_the_set_is_not_forwarded() {
+        assert_eq!(route("horsies.db.pool"), None);
+        assert_eq!(route("horsies.unknown"), None);
     }
 
     #[test]

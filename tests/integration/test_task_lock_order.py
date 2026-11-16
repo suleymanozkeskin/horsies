@@ -91,7 +91,7 @@ from horsies.core.worker.workflow_success import (
 )
 from horsies.monitoring.task_actions import cancel_task
 from tests.broker_resources_support import listener_of
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
     WORKER_ID as PAUSE_WORKER_ID,
     _node_and_task,
@@ -179,32 +179,33 @@ async def stale_task(
     async def make(*, is_workflow_task: bool = False) -> tuple[str, datetime]:
         task_id = str(uuid.uuid4())
         claimed_at = datetime.now(timezone.utc) - timedelta(hours=1)
-        sent_at, sha = compute_test_enqueue_sha(task_name=TASK_NAME)
+        sent_at, fingerprint = compute_test_command_fingerprint(task_name=TASK_NAME)
         async with AsyncSession(engine) as session:
             await session.execute(
                 text("""
                     INSERT INTO horsies_tasks
-                        (id, task_name, queue_name, priority, args, kwargs,
-                         status, sent_at, created_at, updated_at, claimed,
-                         retry_count, max_retries, started_at, enqueue_sha,
-                         claimed_by_worker_id, claimed_at, is_workflow_task,
-                         retention_class_key, command_fingerprint_version,
-                         command_fingerprint, retain_rerun_input,
-                         prepared_rerun_input_disposition)
-                    VALUES
-                        (:id, :task_name, 'default', 100, '[]', '{}',
-                         'RUNNING', :sent_at, NOW(), NOW(), FALSE,
-                         0, 0, :claimed_at, :sha,
-                         :worker, :claimed_at, :is_workflow_task,
-                         'standard_30d', 1,
-                         sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                         FALSE, 'DECLINED_BY_POLICY')
+                        (
+                            id, task_name, queue_name, priority, input, status,
+                            sent_at, created_at, updated_at, retry_count, max_retries,
+                            started_at, claimed_by_worker_id, claimed_at,
+                            is_workflow_task, retention_class_key,
+                            command_fingerprint_version, command_fingerprint,
+                            retain_rerun_input, execution, enqueued_at, worker_pid,
+                            worker_hostname, worker_process_name
+                        ) VALUES (
+                            :id, :task_name, 'default', 100, '{}', 'RUNNING', :sent_at,
+                            NOW(), NOW(), 0, 0, :claimed_at, :worker, :claimed_at,
+                            :is_workflow_task, 'standard_30d',
+                            CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+                            CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE :command_fingerprint END,
+                            FALSE, 'ISOLATED', NOW(), 4242, 'host-1', 'child-1'
+                        )
                 """),
                 {
                     'id': task_id,
                     'task_name': TASK_NAME,
                     'sent_at': sent_at,
-                    'sha': sha,
+                    'command_fingerprint': fingerprint,
                     'worker': WORKER,
                     'claimed_at': claimed_at,
                     'is_workflow_task': is_workflow_task,
