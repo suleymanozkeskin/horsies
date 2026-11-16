@@ -1630,40 +1630,6 @@ impl PostgresBroker {
         })
     }
 
-    /// Operator cancellation of a plain (non-workflow) task.
-    ///
-    /// Runs through `horsies_cancel_locked_task`: the effective source set is
-    /// `permitted_source_statuses` ∩ {PENDING, CLAIMED, RUNNING} — whether a
-    /// task already running may be cancelled is the operator's explicit
-    /// choice, carried here rather than implied. Terminal rows are never
-    /// overwritten; an applied cancel records `error_code = 'TASK_CANCELLED'`,
-    /// `failed_reason = 'Cancelled via monitoring API'`, and `failed_at`, and
-    /// clears the claim. Returns `true` if the task was cancelled.
-    pub async fn cancel(
-        &self,
-        task_id: Uuid,
-        permitted_source_statuses: &[crate::core::types::status::TaskStatus],
-    ) -> Result<bool, BrokerError> {
-        let outcomes = crate::broker::terminalization::terminalize(
-            &self.pool,
-            &crate::core::lifecycle::TerminalizationCommand::CancelLockedTask {
-                task_id,
-                fence: crate::core::lifecycle::CallerHoldsRowLock,
-                permitted_source_statuses: permitted_source_statuses.to_vec(),
-            },
-        )
-        .await?;
-
-        let cancelled = matches!(
-            outcomes.first(),
-            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
-        );
-        if cancelled {
-            tracing::debug!(%task_id, "task cancelled");
-        }
-        Ok(cancelled)
-    }
-
     /// Requeue a task for retry (transactional variant).
     ///
     /// `retry_count` is incremented from the CAS-locked row itself, so the

@@ -984,7 +984,6 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
         serde_json::json!({
             "outcome": "cancelled",
             "was_status": "PENDING",
-            "next_attempt_number": null,
             "warning": null
         })
     );

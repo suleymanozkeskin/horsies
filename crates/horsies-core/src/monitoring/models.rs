@@ -301,6 +301,5 @@ pub struct CancelTaskBody {
 pub struct ActionResponse {
     pub outcome: String,
     pub was_status: Option<String>,
-    pub next_attempt_number: Option<i32>,
     pub warning: Option<String>,
 }
