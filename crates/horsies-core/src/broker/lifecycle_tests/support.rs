@@ -19,6 +19,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
+use crate::broker::attempt_writes::{
+    finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, FinishFailedAttempt,
+    FinishWorkflowSuccess,
+};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
@@ -28,7 +35,8 @@ use crate::core::history::heartbeats::partitioning::{
 };
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::lifecycle::{
-    BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    BatchSize, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 
 /// The worker that holds the seeded claims.
@@ -592,14 +600,14 @@ pub(super) async fn try_seed_node(
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
             priority, dependencies, args_from, workflow_ctx_from, allow_failed_deps,
             join_type, min_success, task_options, max_retries, execution, good_until,
             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1::text, 'lifecycle.test', '{}', 'default',
@@ -900,6 +908,33 @@ const BACKEND_EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::fro
 const IDLE_POLLS: u32 = 100;
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// The failed-attempt write of a task whose child reported a result
+/// (claimed-row rule `REFUSE`), on a core pool on the test database.
+pub(super) async fn write_failed_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<FailedAttemptOutcome, BrokerError> {
+    finish_failed_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The failed-attempt write of a task whose child ended without a report
+/// (claimed-row rule `RELEASE`), on a core pool on the test database.
+pub(super) async fn write_unreported_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<UnreportedAttemptOutcome, BrokerError> {
+    finish_unreported_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The success write of a workflow task, on a core pool on the test
+/// database.
+pub(super) async fn write_workflow_success(
+    pool: &PgPool,
+    command: &FinishWorkflowSuccess,
+) -> Result<WorkflowSuccessOutcome, BrokerError> {
+    finish_workflow_success(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
 /// A pool of one connection that does not ping a connection at checkout, so
 /// a dead pooled connection shows at its first statement (Python's worker
 /// pre-ping off).
@@ -1158,6 +1193,34 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
         queue_max_concurrency: std::collections::HashMap::new(),
         hard_cap_mode: true,
         processes: 10,
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
+/// The request of one 0004 claim pass of `WORKER` over `queue`, with no
+/// cap: one `ISOLATED` budget of 10 that every class routes to.
+pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
         prefetch_buffer: 0,
         max_claim_per_worker: 0,
         max_claim_batch: 0,

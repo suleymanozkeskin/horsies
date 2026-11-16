@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerInvalidTaskOptions
@@ -178,6 +179,7 @@ class TestSendPaths:
         outcome = await broker.enqueue_async(
             'exec_store_raw',
             task_id=task_id,
+            send_kind=SendKind.FIRST,
             enqueue_sha=sha,
             args_json='[]',
             kwargs_json='{}',

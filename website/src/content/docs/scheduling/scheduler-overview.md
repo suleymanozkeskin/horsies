@@ -137,6 +137,13 @@ This prevents duplicate executions when:
 - Multiple schedulers run (advisory locks serialize)
 - Network issues cause delays
 
+### Clock
+
+The scheduler takes its time from the database, not from the host it runs on. Each tick reads the due rows
+and the database time (`statement_timestamp()`) in one statement; the slots of that tick and `last_run_at`
+come from that time. The start and the self-healing check compute `next_run_at` from the database time too.
+A host clock that is ahead of or behind the database does not make a slot fire early or late.
+
 ### A slot that already has a task
 
 Each slot has a deterministic task id, and the row stores a fingerprint of the enqueue. A scheduler that stops after the enqueue of a slot and before it saves the state fires that slot again at its next start. With the same command, the enqueue returns the existing task. With a different command, the broker returns `PAYLOAD_MISMATCH`. The command is different when the next start runs another horsies version, or when the schedule's kwargs or the task's options changed.
@@ -155,8 +162,8 @@ creation fails there (for example a transient database error during
 recreates the missing row on a later tick** — each tick checks for
 enabled schedules without a state row and re-runs their initialization.
 The same check recovers a row deleted externally. The recreated row's
-`next_run_at` is computed from the current time, so no missed-slot
-backlog is replayed.
+`next_run_at` is computed from the database time of the tick, so no
+missed-slot backlog is replayed.
 
 ## Catch-Up Logic
 

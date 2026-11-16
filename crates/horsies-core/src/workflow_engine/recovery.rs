@@ -1883,11 +1883,11 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'bounded_recovery_watermark_task', 'null', 'default', 100,
+                'NONE', $1, $2, 0, 'root', 'bounded_recovery_watermark_task', 'null', 'default', 100,
                 '{}'::integer[], FALSE, 'all', 'PENDING', FALSE, $3, 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2096,11 +2096,11 @@ mod cap_tests {
         for (task_index, dependencies) in [(0_i32, vec![]), (1_i32, vec![2_i32])] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type, status,
                     is_subworkflow, created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    $1, $2, $3, $4, $5, 'null', 'default', 100, $6, FALSE, 'all', 'PENDING',
+                    'NONE', $1, $2, $3, $4, $5, 'null', 'default', 100, $6, FALSE, 'all', 'PENDING',
                     FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -2116,11 +2116,11 @@ mod cap_tests {
         }
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 2, 'blocker', 'p7_case0_blocker', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 2, 'blocker', 'p7_case0_blocker', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2236,8 +2236,8 @@ mod cap_tests {
             INSERT INTO horsies_workflows(id,name,status,on_error,depth,root_workflow_id,sent_at,created_at,updated_at)
                 SELECT md5('partial-'||n)::uuid,'partial_index','RUNNING','fail',0,md5('partial-'||n)::uuid,NOW(),NOW(),NOW()
                 FROM generate_series(1,200) n;
-            INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,created_at)
-                SELECT gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','null','default',100,'{}',FALSE,'all','COMPLETED',FALSE,0,'ISOLATED','standard_30d',NOW()
+            INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,created_at)
+                SELECT 'NONE', gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','null','default',100,'{}',FALSE,'all','COMPLETED',FALSE,0,'ISOLATED','standard_30d',NOW()
                 FROM generate_series(1,200) n CROSS JOIN LATERAL generate_series(0,CASE WHEN n=200 THEN 1000 ELSE 0 END) i;
             ANALYZE horsies_workflows, horsies_workflow_tasks;
             SET LOCAL plan_cache_mode=force_generic_plan;")
@@ -2362,12 +2362,12 @@ mod cap_tests {
                  FROM generate_series(1, 50000) AS g
              )
              INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps,
                  join_type, status, is_subworkflow, max_retries, execution,
                  retention_class_key, created_at
              )
-             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_stable_task', 'null',
+             SELECT 'NONE', node_id, workflow_id, 0, 'root', 'bounded_recovery_stable_task', 'null',
                     'default', 100, '{}'::integer[], FALSE,
                     'all',
                     CASE WHEN g % 4 = 0 THEN 'PENDING' ELSE 'COMPLETED' END,
@@ -2542,12 +2542,12 @@ mod cap_tests {
                  FROM generate_series(1, 201) AS g
              )
              INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps,
                  join_type, status, is_subworkflow, max_retries, execution,
                  retention_class_key, completed_at, created_at
              )
-             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_cursor_task', 'null',
+             SELECT 'NONE', node_id, workflow_id, 0, 'root', 'bounded_recovery_cursor_task', 'null',
                     'default', 100, '{}'::integer[], FALSE, 'all',
                     CASE WHEN g = 201 THEN 'COMPLETED' ELSE 'PENDING' END,
                     FALSE, 0, 'ISOLATED', 'standard_30d',
@@ -2774,11 +2774,11 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow,
                 completed_at, created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'bounded_recovery_retry_task', 'null', 'default', 100,
+                'NONE', $1, $2, 0, 'root', 'bounded_recovery_retry_task', 'null', 'default', 100,
                 '{}'::integer[], FALSE, 'all', 'COMPLETED', FALSE, NOW(), NOW(), 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2905,11 +2905,11 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow,
                 completed_at, created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'bounded_recovery_fenced_task', 'null', 'default', 100,
+                'NONE', $1, $2, 0, 'root', 'bounded_recovery_fenced_task', 'null', 'default', 100,
                 '{}'::integer[], FALSE, 'all', 'COMPLETED', FALSE, NOW(), NOW(), 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -3022,6 +3022,107 @@ mod cap_tests {
             .unwrap();
     }
 
+    /// Python `tests/integration/test_bounded_recovery.py::test_stale_page_owner_cannot_mutate_after_claim_takeover`:
+    /// the owner of an audit page whose claim expired and was taken over by
+    /// a later audit cannot fail the orphaned workflow of that page, and the
+    /// workflow stays RUNNING. The Python candidate answers `CLAIM_LOST`; the
+    /// core's fenced write answers `false`.
+    #[tokio::test]
+    #[serial]
+    async fn stale_page_owner_cannot_mutate_after_claim_takeover() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        for statement in [
+            "DELETE FROM horsies_workflow_tasks",
+            "DELETE FROM horsies_workflows",
+            "UPDATE horsies_recovery_scan_cursors
+             SET last_created_at = NULL, last_id = NULL,
+                 cycle_upper_created_at = NULL, cycle_upper_id = NULL,
+                 claim_token = NULL, claim_expires_at = NULL,
+                 completed_cycles = 0, last_scan_rows = 0,
+                 last_candidate_rows = 0, last_scan_at = NULL
+             WHERE scan_name = 'running_workflows'",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("reset the running-workflows scan");
+        }
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, output_task_index,
+                 definition_key, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES (
+                 $1, 'stale_owner_orphan', 'RUNNING', 'fail', NULL,
+                 NULL, 0, $1, NOW(), NOW(), NOW(), NOW()
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("seed the orphaned workflow");
+
+        let stale_token = Uuid::new_v4();
+        let first = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+            .bind(200_i64)
+            .bind(stale_token)
+            .bind(60_000_i64)
+            .fetch_one(&pool)
+            .await
+            .expect("first audit page");
+        assert_eq!(first.orphan_ids, vec![workflow_id]);
+        assert_eq!(first.claim_token, Some(stale_token));
+
+        sqlx::query(
+            "UPDATE horsies_recovery_scan_cursors
+             SET claim_expires_at = statement_timestamp() - interval '1 second'
+             WHERE scan_name = 'running_workflows'
+               AND claim_token = $1",
+        )
+        .bind(stale_token)
+        .execute(&pool)
+        .await
+        .expect("expire the first claim");
+        let replacement_token = Uuid::new_v4();
+        let second = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+            .bind(200_i64)
+            .bind(replacement_token)
+            .bind(60_000_i64)
+            .fetch_one(&pool)
+            .await
+            .expect("takeover audit page");
+        assert_eq!(second.orphan_ids, vec![workflow_id]);
+        assert_eq!(second.claim_token, Some(replacement_token));
+
+        let failed = fail_orphaned_workflow_with_claim(
+            &pool,
+            workflow_id,
+            "stale_owner_orphan",
+            stale_token,
+        )
+        .await
+        .expect("the fenced write answers");
+
+        assert!(!failed, "the stale page owner failed the workflow");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the workflow status");
+        assert_eq!(status, "RUNNING");
+
+        release_global_workflow_audit_claim(&pool, replacement_token)
+            .await
+            .expect("release the takeover claim");
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .expect("clean up the workflow");
+    }
+
     #[tokio::test]
     #[serial]
     async fn busy_global_workflow_cursor_refuses_without_waiting() {
@@ -3125,11 +3226,11 @@ mod cap_tests {
         ] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                     dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
                     created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    $1, $2, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[], $7::jsonb,
+                    'NONE', $1, $2, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[], $7::jsonb,
                     FALSE, 'all', $8, FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -3316,11 +3417,11 @@ mod cap_tests {
         .expect("insert recovery workflow");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '1', 'bulk', 17,
+                'NONE', $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '1', 'bulk', 17,
                 '{}', FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )

@@ -51,6 +51,7 @@ from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
 )
+from tests.dispatch_claim_support import claim_at
 from tests.integration.autocommit_support import (
     QUEUE,
     TASK_NAME,
@@ -78,7 +79,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function'
 ONE_STATEMENT: Final = 1
 HELD_FOR_THE_TEST_S: Final = 600.0
 """The idle time of the held connections in a test that measures them held."""
-WORKFLOW_START: Final = ('BEGIN', 'COMMIT')
 
 type Case = tuple[str, datetime]
 
@@ -177,12 +177,13 @@ async def _history_rows(session: AsyncSession, task_id: str) -> int:
     return count
 
 
-def _simple_queries(turns: tuple[Turn, ...]) -> list[str]:
+def _statement_turns(turns: tuple[Turn, ...]) -> list[Turn]:
+    """The turns that send a statement; a new connection's startup turns
+    carry none."""
     return [
-        message.removeprefix('Q:')
+        turn
         for turn in turns
-        for message in turn.messages
-        if message.startswith('Q:')
+        if any(message.startswith(('P:', 'Q:')) for message in turn.messages)
     ]
 
 
@@ -222,7 +223,7 @@ async def test_a_plain_success_finalize_is_one_statement(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
         assert result == Ok(None)
 
@@ -258,7 +259,7 @@ async def test_an_orphan_cancel_is_one_statement(
             queue_name=QUEUE,
             is_workflow_task=True,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
         assert result == Ok(None)
 
@@ -381,15 +382,15 @@ async def test_a_shared_async_finalizing_marker_is_one_statement(
     assert row is not None and row.finalizing_at is not None
 
 
-async def test_a_shared_async_workflow_start_keeps_its_transaction(
+async def test_a_shared_async_workflow_start_is_one_statement(
     proxy: RoundTripProxy,
     async_child_pool: AsyncConnectionPool[AsyncConnection[Any]],
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The RUNNING update of a workflow task and its node start commit
-    together: BEGIN first, COMMIT last."""
+    """The RUNNING write of a workflow task and its node write are one
+    horsies_start_attempt statement on the autocommit pool."""
     claimed_at = datetime.now(timezone.utc)
     task_id = await _seed_claimed_workflow_task(session, claimed_at)
     await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
@@ -407,8 +408,7 @@ async def test_a_shared_async_workflow_start_keeps_its_transaction(
 
     turns = await recorded_turns(proxy, act, (task_id, claimed_at))
 
-    queries = _simple_queries(turns)
-    assert (queries[0], queries[-1]) == WORKFLOW_START, turns
+    assert len(_statement_turns(turns)) == ONE_STATEMENT, turns
     row = await _row(session, task_id)
     assert row is not None and row.status == 'RUNNING'
 
@@ -472,7 +472,7 @@ async def test_a_sync_finalizing_marker_is_one_statement(
     assert row is not None and row.finalizing_at is not None
 
 
-async def test_a_sync_workflow_start_keeps_its_transaction(
+async def test_a_sync_workflow_start_is_one_statement(
     proxy: RoundTripProxy,
     sync_child_pool: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
@@ -490,7 +490,6 @@ async def test_a_sync_workflow_start_keeps_its_transaction(
 
     turns = await recorded_turns(proxy, act, (task_id, claimed_at))
 
-    queries = _simple_queries(turns)
-    assert (queries[0], queries[-1]) == WORKFLOW_START, turns
+    assert len(_statement_turns(turns)) == ONE_STATEMENT, turns
     row = await _row(session, task_id)
     assert row is not None and row.status == 'RUNNING'

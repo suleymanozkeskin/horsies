@@ -15,6 +15,7 @@ use super::pool::Answer;
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel,
     ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
@@ -22,7 +23,7 @@ use crate::worker::executor::protocol::{
     RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskSendPool,
     TaskTimeoutMs,
 };
-use crate::worker::executor::supervisor::{ChildCommand, Spawner};
+use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
 use crate::worker::runner_beats::LiveDispatches;
 
@@ -486,7 +487,6 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
 
 fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
     IsolatedPoolConfig {
-        children: NonZeroUsize::MIN,
         command,
         init: init_frame(),
         worker_id: "worker-1".to_owned(),
@@ -494,14 +494,22 @@ fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
         tasks_per_child: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
+        child_cpus: ChildCpus::Inherited,
+        kill_wait: CHILD_KILL_WAIT,
     }
 }
 
 async fn run_through_pool(after_run: &str, deadline: IsolatedDeadline) -> AttemptEnd {
     let claimed = task(ExecutionClass::Isolated, "{}");
     let spawner = Spawner::start().unwrap();
+    let board = std::sync::Arc::new(PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    }));
     let pool = IsolatedPool::start(
         pool_config(scripted_child(&claimed, after_run)),
+        board,
         spawner.handle(),
         LiveDispatches::default(),
     );
