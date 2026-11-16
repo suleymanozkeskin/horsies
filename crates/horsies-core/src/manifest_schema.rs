@@ -13,7 +13,7 @@
 //! as `_catalog/manifest.py`.
 
 use crate::manifest::{
-    DatabaseManifest, ProducerManifest, SchemaMode, SendManifest, SessionDatabase,
+    DatabaseManifest, PoolRecycle, ProducerManifest, SchemaMode, SendManifest, SessionDatabase,
     PRODUCER_MANIFEST_VERSION,
 };
 
@@ -119,6 +119,7 @@ pub const PRODUCER_MANIFEST: ManifestModule = ManifestModule {
     types: &[
         <SchemaMode as ManifestItem>::ITEM,
         <SessionDatabase as ManifestItem>::ITEM,
+        <PoolRecycle as ManifestItem>::ITEM,
         <DatabaseManifest as ManifestItem>::ITEM,
         <SendManifest as ManifestItem>::ITEM,
         <ProducerManifest as ManifestItem>::ITEM,
@@ -372,8 +373,9 @@ mod tests {
         assert_eq!(
             names,
             [
-                "POOL_CONNECTIONS",
                 "WHOLE_SECONDS",
+                "POOL_SIZE",
+                "POOL_CONNECTIONS",
                 "RESERVATION_WINDOW_SECONDS",
                 "MANIFEST_VERSION"
             ]

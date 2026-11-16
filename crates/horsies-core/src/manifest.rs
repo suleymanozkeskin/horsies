@@ -90,10 +90,17 @@ pub struct DatabaseManifest {
     /// Ping a pooled connection before use (Python's rule: only after it
     /// waited in the pool for more than 1 s).
     pub pool_pre_ping: bool,
-    pub pool_size: PoolConnections,
+    /// Connections the pool keeps. Always a number: the core bounds its
+    /// connections, so SQLAlchemy's `pool_size=0` (no limit) has no form here.
+    pub pool_size: PoolSize,
+    /// Connections past `pool_size`. Always a number: SQLAlchemy's
+    /// `max_overflow=-1` (no limit) has no form here.
     pub max_overflow: PoolConnections,
+    /// The longest a checkout waits for a free connection. 0 means a checkout
+    /// does not wait: it fails at once when no connection is free, as
+    /// SQLAlchemy's `pool_timeout=0`.
     pub pool_timeout: WholeSeconds,
-    pub pool_recycle: WholeSeconds,
+    pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
 }
@@ -131,6 +138,45 @@ impl std::fmt::Debug for DatabaseUrl {
             .field(&mask_database_url(&self.0))
             .finish()
     }
+}
+
+/// The size of a pool: 1 to [`MAX_POOL_CONNECTIONS`] connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct PoolSize(u32);
+
+impl PoolSize {
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for PoolSize {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1..=MAX_POOL_CONNECTIONS => Ok(Self(value)),
+            _ => Err(format!(
+                "a pool size must be from 1 to {MAX_POOL_CONNECTIONS}; the core always bounds its \
+                 connections"
+            )),
+        }
+    }
+}
+
+impl From<PoolSize> for u32 {
+    fn from(size: PoolSize) -> Self {
+        size.0
+    }
+}
+
+impl ManifestValue for PoolSize {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "POOL_SIZE",
+        min: 1,
+        max: MAX_POOL_CONNECTIONS as u64,
+    });
 }
 
 /// A connection count from 0 to [`MAX_POOL_CONNECTIONS`].
@@ -177,8 +223,35 @@ impl ManifestValue for PoolConnections {
 pub struct WholeSeconds(u32);
 
 impl WholeSeconds {
+    /// Every `u32` is a duration in whole seconds.
+    pub const fn from_secs(seconds: u32) -> Self {
+        Self(seconds)
+    }
+
     pub const fn get(self) -> u32 {
         self.0
+    }
+}
+
+/// When the pool replaces a connection by its age (SQLAlchemy's
+/// `pool_recycle`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum PoolRecycle {
+    /// A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`).
+    Never,
+    /// A connection older than `seconds` is replaced at its next checkout; 0
+    /// replaces it at every checkout.
+    AfterSeconds { seconds: WholeSeconds },
+}
+
+impl PoolRecycle {
+    pub const fn after_seconds(seconds: u32) -> Self {
+        Self::AfterSeconds {
+            seconds: WholeSeconds::from_secs(seconds),
+        }
     }
 }
 
@@ -274,7 +347,7 @@ impl DatabaseManifest {
             max_overflow: self.max_overflow.get(),
             retain_rerun_input_default,
             pool_timeout: self.pool_timeout.get(),
-            pool_recycle: self.pool_recycle.get(),
+            pool_recycle: self.pool_recycle,
             echo: self.echo,
         }
     }
@@ -340,7 +413,7 @@ mod tests {
                     "pool_size": 30,
                     "max_overflow": 30,
                     "pool_timeout": 30,
-                    "pool_recycle": 1800,
+                    "pool_recycle": {{"kind": "AFTER_SECONDS", "seconds": 1800}},
                     "echo": false
                 }},
                 "schema": "MIGRATE_AND_VALIDATE",
@@ -393,12 +466,117 @@ mod tests {
     #[test]
     fn a_missing_field_is_refused() {
         let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
-            "\"pool_recycle\": 1800,",
+            "\"pool_recycle\": {\"kind\": \"AFTER_SECONDS\", \"seconds\": 1800},",
             "",
             1,
         );
         let refused = parse_producer_manifest(&text).expect_err("a missing field is refused");
         assert!(refused.field_path.starts_with("database"));
+    }
+
+    /// The manifest text with one database field set to `value`.
+    fn with_database_field(field: &str, value: &str) -> String {
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60);
+        let start = text
+            .find(&format!("\"{field}\": "))
+            .unwrap_or_else(|| panic!("{field} is in the manifest text"));
+        let value_start = start + field.len() + 4;
+        let line_end = value_start
+            + text[value_start..]
+                .find('\n')
+                .expect("each field ends its line");
+        let comma = match text[value_start..line_end].trim_end().ends_with(',') {
+            true => ",",
+            false => "",
+        };
+        format!(
+            "{}{value}{comma}{}",
+            &text[..value_start],
+            &text[line_end..]
+        )
+    }
+
+    fn database_config(field: &str, value: &str) -> PostgresConfig {
+        let text = with_database_field(field, value);
+        parse_producer_manifest(&text)
+            .unwrap_or_else(|refused| panic!("{field} = {value} is accepted: {refused}"))
+            .database
+            .to_postgres_config(false)
+    }
+
+    fn refused_path(field: &str, value: &str) -> String {
+        parse_producer_manifest(&with_database_field(field, value))
+            .expect_err("the value is refused")
+            .field_path
+    }
+
+    #[test]
+    fn a_pool_size_is_a_number_of_connections() {
+        assert_eq!(database_config("pool_size", "1").pool_size, 1);
+        assert_eq!(
+            database_config("pool_size", &MAX_POOL_CONNECTIONS.to_string()).pool_size,
+            MAX_POOL_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn a_pool_size_of_zero_is_refused_because_the_core_bounds_its_connections() {
+        assert_eq!(refused_path("pool_size", "0"), "database.pool_size");
+    }
+
+    #[test]
+    fn a_pool_size_past_its_bound_or_below_zero_is_refused() {
+        let past = (MAX_POOL_CONNECTIONS + 1).to_string();
+        assert_eq!(refused_path("pool_size", &past), "database.pool_size");
+        assert_eq!(refused_path("pool_size", "-1"), "database.pool_size");
+    }
+
+    #[test]
+    fn an_overflow_of_zero_means_no_overflow() {
+        assert_eq!(database_config("max_overflow", "0").max_overflow, 0);
+    }
+
+    #[test]
+    fn an_unlimited_overflow_is_refused() {
+        assert_eq!(refused_path("max_overflow", "-1"), "database.max_overflow");
+    }
+
+    #[test]
+    fn a_pool_timeout_of_zero_means_a_checkout_does_not_wait() {
+        assert_eq!(database_config("pool_timeout", "0").pool_timeout, 0);
+    }
+
+    #[test]
+    fn a_negative_pool_timeout_is_refused() {
+        assert_eq!(refused_path("pool_timeout", "-1"), "database.pool_timeout");
+    }
+
+    #[test]
+    fn a_pool_that_never_recycles_reaches_the_broker_config() {
+        assert_eq!(
+            database_config("pool_recycle", r#"{"kind": "NEVER"}"#).pool_recycle,
+            PoolRecycle::Never
+        );
+    }
+
+    #[test]
+    fn a_recycle_age_of_zero_replaces_a_connection_at_every_checkout() {
+        assert_eq!(
+            database_config("pool_recycle", r#"{"kind": "AFTER_SECONDS", "seconds": 0}"#)
+                .pool_recycle,
+            PoolRecycle::after_seconds(0)
+        );
+    }
+
+    #[test]
+    fn a_recycle_age_without_meaning_is_refused() {
+        assert!(refused_path(
+            "pool_recycle",
+            r#"{"kind": "AFTER_SECONDS", "seconds": -5}"#
+        )
+        .starts_with("database.pool_recycle"));
+        // The bare number of SQLAlchemy is not a manifest form.
+        assert!(refused_path("pool_recycle", "-1").starts_with("database.pool_recycle"));
     }
 
     #[test]

@@ -5,6 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from horsies._catalog.manifest import (
     POOL_CONNECTIONS_MAX,
     POOL_CONNECTIONS_MIN,
+    POOL_SIZE_MAX,
+    POOL_SIZE_MIN,
     WHOLE_SECONDS_MAX,
     WHOLE_SECONDS_MIN,
 )
@@ -15,6 +17,15 @@ from horsies.core.errors import (
     ValidationReport,
     raise_collected,
 )
+
+SQLALCHEMY_UNLIMITED_OVERFLOW: Final = -1
+"""SQLAlchemy's `max_overflow` for no overflow limit."""
+
+SQLALCHEMY_NEVER_RECYCLE: Final = -1
+"""SQLAlchemy's `pool_recycle` for a connection that is never replaced by age."""
+
+SQLALCHEMY_UNLIMITED_POOL_SIZE: Final = 0
+"""SQLAlchemy's `pool_size` for no size limit."""
 
 MOVED_TO_WORKER_PROFILE: Final[Mapping[str, str]] = {
     'worker_child_pool_min_size': 'min_size=N',
@@ -37,6 +48,18 @@ MOVED_TO_PARENT_POOL: Final[Mapping[str, str]] = {
 }
 """The worker pool fields that 0.7.0 removed from ``PostgresConfig``, and the
 note of the refusal of each one. ``WorkerProfile.pool`` replaces both."""
+
+
+def _pool_value_error(
+    field: str, value: int, cause: str, help_text: str,
+) -> ConfigurationError:
+    """The refusal of a pool value of `PostgresConfig`."""
+    return ConfigurationError(
+        message=f'invalid {field}',
+        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        notes=[f'got: {field}={value}', cause],
+        help_text=help_text,
+    )
 
 
 class PostgresConfig(BaseModel):
@@ -104,19 +127,14 @@ class PostgresConfig(BaseModel):
     # at a high rate. A worker process sizes its own pool in its worker
     # profile (WorkerProfile.pool), and task code in a worker child opens
     # the task_send_pool of its child kind.
-    # The bounds are the core's (horsies._catalog.manifest), so a config
-    # that Pydantic accepts is one that the core accepts.
+    # The pool values keep each SQLAlchemy meaning that the core can honor,
+    # with the core's bounds (horsies._catalog.manifest): a config that
+    # Pydantic accepts is one that the core accepts. See the validators below.
     pool_size: int = Field(
-        default=5,
-        ge=POOL_CONNECTIONS_MIN,
-        le=POOL_CONNECTIONS_MAX,
-        description='The size of the database connection pool',
+        default=5, description='The size of the database connection pool'
     )
     max_overflow: int = Field(
-        default=10,
-        ge=POOL_CONNECTIONS_MIN,
-        le=POOL_CONNECTIONS_MAX,
-        description='The maximum number of connections to allow in the pool',
+        default=10, description='The maximum number of connections to allow in the pool'
     )
     retain_rerun_input_default: bool = Field(
         default=False,
@@ -127,15 +145,10 @@ class PostgresConfig(BaseModel):
         ),
     )
     pool_timeout: int = Field(
-        default=30,
-        ge=WHOLE_SECONDS_MIN,
-        le=WHOLE_SECONDS_MAX,
-        description='The timeout for acquiring a connection from the pool',
+        default=30, description='The timeout for acquiring a connection from the pool'
     )
     pool_recycle: int = Field(
         default=DEFAULT_POOL_RECYCLE_S,
-        ge=WHOLE_SECONDS_MIN,
-        le=WHOLE_SECONDS_MAX,
         description='The number of seconds to recycle connections',
     )
     # TCP keepalives keep idle pooled sockets warm so a server-side or
@@ -201,6 +214,78 @@ class PostgresConfig(BaseModel):
                 report.add(_moved_parent_pool_field_error(name, note))
         raise_collected(report)
         return fields
+
+    @field_validator('pool_size')
+    def validate_pool_size(cls, v: int) -> int:
+        match v:
+            case _ if POOL_SIZE_MIN <= v <= POOL_SIZE_MAX:
+                return v
+            case _ if v == SQLALCHEMY_UNLIMITED_POOL_SIZE:
+                raise _pool_value_error(
+                    'pool_size',
+                    v,
+                    'pool_size=0 means no size limit in SQLAlchemy, and the core '
+                    'always bounds its connections',
+                    f'give a pool size from {POOL_SIZE_MIN} to {POOL_SIZE_MAX}',
+                )
+            case _:
+                raise _pool_value_error(
+                    'pool_size',
+                    v,
+                    f'a pool size is from {POOL_SIZE_MIN} to {POOL_SIZE_MAX}',
+                    f'give a pool size from {POOL_SIZE_MIN} to {POOL_SIZE_MAX}',
+                )
+
+    @field_validator('max_overflow')
+    def validate_max_overflow(cls, v: int) -> int:
+        match v:
+            case _ if POOL_CONNECTIONS_MIN <= v <= POOL_CONNECTIONS_MAX:
+                return v
+            case _ if v == SQLALCHEMY_UNLIMITED_OVERFLOW:
+                raise _pool_value_error(
+                    'max_overflow',
+                    v,
+                    'max_overflow=-1 means no overflow limit in SQLAlchemy, and the '
+                    'core always bounds its connections',
+                    f'give a number from {POOL_CONNECTIONS_MIN} to {POOL_CONNECTIONS_MAX}',
+                )
+            case _:
+                raise _pool_value_error(
+                    'max_overflow',
+                    v,
+                    f'max_overflow is from {POOL_CONNECTIONS_MIN} to {POOL_CONNECTIONS_MAX}',
+                    f'give a number from {POOL_CONNECTIONS_MIN} to {POOL_CONNECTIONS_MAX}',
+                )
+
+    @field_validator('pool_timeout')
+    def validate_pool_timeout(cls, v: int) -> int:
+        match v:
+            case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
+                return v
+            case _:
+                raise _pool_value_error(
+                    'pool_timeout',
+                    v,
+                    f'pool_timeout is from {WHOLE_SECONDS_MIN} (a checkout does not wait) '
+                    f'to {WHOLE_SECONDS_MAX} seconds',
+                    f'give a number of seconds from {WHOLE_SECONDS_MIN} to {WHOLE_SECONDS_MAX}',
+                )
+
+    @field_validator('pool_recycle')
+    def validate_pool_recycle(cls, v: int) -> int:
+        match v:
+            case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
+                return v
+            case _ if v == SQLALCHEMY_NEVER_RECYCLE:
+                return v
+            case _:
+                raise _pool_value_error(
+                    'pool_recycle',
+                    v,
+                    'pool_recycle is -1 (never replace a connection by age) or '
+                    f'{WHOLE_SECONDS_MIN} to {WHOLE_SECONDS_MAX} seconds',
+                    'give -1 or a number of seconds',
+                )
 
     @field_validator('database_url')
     def validate_database_url(cls, v: SecretStr) -> SecretStr:

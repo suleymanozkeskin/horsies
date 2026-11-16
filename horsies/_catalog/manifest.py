@@ -18,15 +18,20 @@ __all__ = [
     'SessionDatabaseSameAsDatabaseUrl',
     'SessionDatabaseSeparate',
     'SessionDatabase',
+    'PoolRecycleNever',
+    'PoolRecycleAfterSeconds',
+    'PoolRecycle',
     'DatabaseManifest',
     'SendManifest',
     'ProducerManifest',
     'dump_producer_manifest',
     'MANIFEST_VERSION',
-    'POOL_CONNECTIONS_MIN',
-    'POOL_CONNECTIONS_MAX',
     'WHOLE_SECONDS_MIN',
     'WHOLE_SECONDS_MAX',
+    'POOL_SIZE_MIN',
+    'POOL_SIZE_MAX',
+    'POOL_CONNECTIONS_MIN',
+    'POOL_CONNECTIONS_MAX',
     'RESERVATION_WINDOW_SECONDS_MIN',
     'RESERVATION_WINDOW_SECONDS_MAX',
     'MANIFEST_VERSION_MIN',
@@ -36,11 +41,14 @@ __all__ = [
 MANIFEST_VERSION: Final = 1
 """The manifest version this core reads."""
 
-POOL_CONNECTIONS_MIN: Final = 0
-POOL_CONNECTIONS_MAX: Final = 10000
-
 WHOLE_SECONDS_MIN: Final = 0
 WHOLE_SECONDS_MAX: Final = 4294967295
+
+POOL_SIZE_MIN: Final = 1
+POOL_SIZE_MAX: Final = 10000
+
+POOL_CONNECTIONS_MIN: Final = 0
+POOL_CONNECTIONS_MAX: Final = 10000
 
 RESERVATION_WINDOW_SECONDS_MIN: Final = 1
 RESERVATION_WINDOW_SECONDS_MAX: Final = 2592000
@@ -79,6 +87,30 @@ type SessionDatabase = SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparat
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class PoolRecycleNever:
+    """A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`)."""
+
+    kind: Literal['NEVER'] = 'NEVER'
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PoolRecycleAfterSeconds:
+    """A connection older than `seconds` is replaced at its next checkout; 0
+    replaces it at every checkout.
+    """
+
+    kind: Literal['AFTER_SECONDS'] = 'AFTER_SECONDS'
+
+    seconds: int
+
+
+type PoolRecycle = PoolRecycleNever | PoolRecycleAfterSeconds
+"""When the pool replaces a connection by its age (SQLAlchemy's
+`pool_recycle`).
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DatabaseManifest:
     """Connection settings of the main pool and the session pool."""
 
@@ -95,12 +127,22 @@ class DatabaseManifest:
     """
 
     pool_size: int
+    """Connections the pool keeps. Always a number: the core bounds its
+    connections, so SQLAlchemy's `pool_size=0` (no limit) has no form here.
+    """
 
     max_overflow: int
+    """Connections past `pool_size`. Always a number: SQLAlchemy's
+    `max_overflow=-1` (no limit) has no form here.
+    """
 
     pool_timeout: int
+    """The longest a checkout waits for a free connection. 0 means a checkout
+    does not wait: it fails at once when no connection is free, as
+    SQLAlchemy's `pool_timeout=0`.
+    """
 
-    pool_recycle: int
+    pool_recycle: PoolRecycle
 
     echo: bool
     """Log every statement through the log bridge."""

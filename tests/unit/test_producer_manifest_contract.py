@@ -4,7 +4,9 @@
 from horsies-core (`horsies/_catalog/manifest.py`). These tests pin that
 every config field is mapped or named as outside the producer manifest,
 that every manifest field has a source, that the mapping copies each value,
-and that the Pydantic bounds are the core's bounds.
+and which SQLAlchemy pool values the config keeps: each meaning that the
+core can honor is accepted and reaches the manifest as a typed value; an
+unlimited size and a value without meaning are refused.
 """
 
 from __future__ import annotations
@@ -13,22 +15,23 @@ import json
 from typing import Final, cast
 
 import pytest
-from annotated_types import Ge, Le
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 from horsies._catalog.manifest import (
     MANIFEST_VERSION,
     POOL_CONNECTIONS_MAX,
-    POOL_CONNECTIONS_MIN,
+    POOL_SIZE_MAX,
     WHOLE_SECONDS_MAX,
-    WHOLE_SECONDS_MIN,
     DatabaseManifest,
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
     ProducerManifest,
     SendManifest,
     SessionDatabaseSameAsDatabaseUrl,
     SessionDatabaseSeparate,
     dump_producer_manifest,
 )
+from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.manifest import core_database_url, to_producer_manifest
 from horsies.core.models.broker import PostgresConfig
 
@@ -71,14 +74,6 @@ OUTSIDE_PRODUCER_MANIFEST: Final[frozenset[str]] = frozenset(
 NOT_FROM_CONFIG: Final[frozenset[str]] = frozenset(
     {'manifest_version', 'schema', 'send.idempotency_reservation_window'},
 )
-
-# PostgresConfig field -> (Pydantic lower bound, upper bound) from the core.
-CORE_BOUNDS: Final[dict[str, tuple[int, int]]] = {
-    'pool_size': (POOL_CONNECTIONS_MIN, POOL_CONNECTIONS_MAX),
-    'max_overflow': (POOL_CONNECTIONS_MIN, POOL_CONNECTIONS_MAX),
-    'pool_timeout': (WHOLE_SECONDS_MIN, WHOLE_SECONDS_MAX),
-    'pool_recycle': (WHOLE_SECONDS_MIN, WHOLE_SECONDS_MAX),
-}
 
 # Most nesting levels of a manifest document. The producer manifest has 3.
 MAX_DOCUMENT_DEPTH: Final = 8
@@ -155,7 +150,7 @@ def test_a_config_resolves_field_by_field() -> None:
             pool_size=7,
             max_overflow=3,
             pool_timeout=11,
-            pool_recycle=600,
+            pool_recycle=PoolRecycleAfterSeconds(seconds=600),
             echo=True,
         ),
         schema='OBSERVE_ONLY',
@@ -183,7 +178,7 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
             'pool_size': 5,
             'max_overflow': 10,
             'pool_timeout': 30,
-            'pool_recycle': 1800,
+            'pool_recycle': {'kind': 'AFTER_SECONDS', 'seconds': 1800},
             'echo': False,
         },
         'schema': 'MIGRATE_AND_VALIDATE',
@@ -195,15 +190,79 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
     assert manifest.database.session_database == SessionDatabaseSameAsDatabaseUrl()
 
 
-@pytest.mark.parametrize('field', sorted(CORE_BOUNDS))
-def test_pydantic_bounds_are_the_core_bounds(field: str) -> None:
-    lower, upper = CORE_BOUNDS[field]
-    metadata = PostgresConfig.model_fields[field].metadata
-    assert [item.ge for item in metadata if isinstance(item, Ge)] == [lower]
-    assert [item.le for item in metadata if isinstance(item, Le)] == [upper]
-    for outside in (lower - 1, upper + 1):
-        with pytest.raises(ValidationError):
-            PostgresConfig.model_validate({'database_url': MAIN_URL, field: outside})
+def _database_of(field: str, value: int) -> DatabaseManifest:
+    """The database manifest of a config with `field` set to `value`."""
+    config = PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
+    return to_producer_manifest(
+        config,
+        schema='MIGRATE_AND_VALIDATE',
+        idempotency_reservation_window_seconds=60,
+    ).database
+
+
+def _refusal_of(field: str, value: int) -> ConfigurationError:
+    with pytest.raises(ConfigurationError) as raised:
+        PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
+    error = raised.value
+    assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+    assert f'got: {field}={value}' in error.notes
+    return error
+
+
+@pytest.mark.parametrize('size', [1, POOL_SIZE_MAX])
+def test_a_pool_size_is_a_number_of_connections(size: int) -> None:
+    assert _database_of('pool_size', size).pool_size == size
+
+
+def test_an_unlimited_pool_size_is_refused_with_the_fix() -> None:
+    error = _refusal_of('pool_size', 0)
+    assert any('no size limit' in note for note in error.notes)
+    assert error.help_text == f'give a pool size from 1 to {POOL_SIZE_MAX}'
+
+
+@pytest.mark.parametrize('size', [-1, POOL_SIZE_MAX + 1])
+def test_a_pool_size_without_meaning_is_refused(size: int) -> None:
+    _ = _refusal_of('pool_size', size)
+
+
+def test_an_overflow_of_zero_means_no_overflow() -> None:
+    assert _database_of('max_overflow', 0).max_overflow == 0
+
+
+def test_an_unlimited_overflow_is_refused_with_the_fix() -> None:
+    error = _refusal_of('max_overflow', -1)
+    assert any('no overflow limit' in note for note in error.notes)
+    assert error.help_text == f'give a number from 0 to {POOL_CONNECTIONS_MAX}'
+
+
+@pytest.mark.parametrize('overflow', [-2, POOL_CONNECTIONS_MAX + 1])
+def test_an_overflow_without_meaning_is_refused(overflow: int) -> None:
+    _ = _refusal_of('max_overflow', overflow)
+
+
+def test_a_pool_timeout_of_zero_means_a_checkout_does_not_wait() -> None:
+    assert _database_of('pool_timeout', 0).pool_timeout == 0
+
+
+@pytest.mark.parametrize('timeout', [-1, WHOLE_SECONDS_MAX + 1])
+def test_a_pool_timeout_without_meaning_is_refused(timeout: int) -> None:
+    _ = _refusal_of('pool_timeout', timeout)
+
+
+def test_a_pool_recycle_of_minus_one_is_the_never_variant() -> None:
+    assert _database_of('pool_recycle', -1).pool_recycle == PoolRecycleNever()
+
+
+@pytest.mark.parametrize('seconds', [0, 1800, WHOLE_SECONDS_MAX])
+def test_a_pool_recycle_age_is_a_number_of_seconds(seconds: int) -> None:
+    assert _database_of('pool_recycle', seconds).pool_recycle == (
+        PoolRecycleAfterSeconds(seconds=seconds)
+    )
+
+
+@pytest.mark.parametrize('seconds', [-5, -2, WHOLE_SECONDS_MAX + 1])
+def test_a_pool_recycle_without_meaning_is_refused(seconds: int) -> None:
+    _ = _refusal_of('pool_recycle', seconds)
 
 
 def test_a_url_with_another_scheme_is_a_defect_named_without_its_password() -> None:

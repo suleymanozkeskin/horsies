@@ -2,7 +2,8 @@
 
 `to_producer_manifest` is the one place where the user config (Pydantic)
 meets the core's input (the manifest generated from horsies-core). It maps
-`PostgresConfig` field by field. The two inputs that `PostgresConfig` does
+`PostgresConfig` field by field, and turns SQLAlchemy's `pool_recycle=-1`
+into the typed "never" value. The two inputs that `PostgresConfig` does
 not hold, the schema mode and the idempotency reservation window, are
 parameters: the caller decides them.
 
@@ -17,6 +18,9 @@ from typing import Final
 from horsies._catalog.manifest import (
     MANIFEST_VERSION,
     DatabaseManifest,
+    PoolRecycle,
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
     ProducerManifest,
     SchemaMode,
     SendManifest,
@@ -24,7 +28,7 @@ from horsies._catalog.manifest import (
     SessionDatabaseSameAsDatabaseUrl,
     SessionDatabaseSeparate,
 )
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
 
 PSYCOPG_URL_SCHEME: Final = 'postgresql+psycopg://'
 """The scheme that the `PostgresConfig` validators require."""
@@ -81,9 +85,27 @@ def _database_manifest(config: PostgresConfig) -> DatabaseManifest:
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
         pool_timeout=config.pool_timeout,
-        pool_recycle=config.pool_recycle,
+        pool_recycle=pool_recycle_of(config.pool_recycle),
         echo=config.echo,
     )
+
+
+def pool_recycle_of(value: int) -> PoolRecycle:
+    """The typed form of a validated `pool_recycle`: `-1` is never, any other
+    value a number of seconds.
+
+    The `PostgresConfig` validator admits only these, so another value is a
+    defect and raises `AssertionError`.
+    """
+    match value:
+        case _ if value == SQLALCHEMY_NEVER_RECYCLE:
+            return PoolRecycleNever()
+        case _:
+            assert value >= 0, (
+                f'pool_recycle={value} passed the PostgresConfig validator, which '
+                'admits only -1 and a number of seconds'
+            )
+            return PoolRecycleAfterSeconds(seconds=value)
 
 
 def _session_database(config: PostgresConfig) -> SessionDatabase:

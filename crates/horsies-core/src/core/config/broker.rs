@@ -54,9 +54,10 @@ pub struct PostgresConfig {
     #[serde(default = "default_pool_timeout")]
     pub pool_timeout: u32,
 
-    /// Seconds before a connection is recycled.
+    /// When a connection is replaced by its age (SQLAlchemy's
+    /// `pool_recycle`): never, or after a number of seconds.
     #[serde(default = "default_pool_recycle")]
-    pub pool_recycle: u32,
+    pub pool_recycle: crate::manifest::PoolRecycle,
 
     /// Whether to log SQL statements.
     #[serde(default)]
@@ -116,8 +117,8 @@ fn default_max_overflow() -> u32 {
 fn default_pool_timeout() -> u32 {
     30
 }
-fn default_pool_recycle() -> u32 {
-    1800
+fn default_pool_recycle() -> crate::manifest::PoolRecycle {
+    crate::manifest::PoolRecycle::after_seconds(1800)
 }
 
 /// Validation error for PostgresConfig.
@@ -280,7 +281,7 @@ mod tests {
             max_overflow: 10,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         };
         let rendered = format!("{:?}", config);
@@ -299,7 +300,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         };
         assert!(config.validate().is_ok());
@@ -316,7 +317,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         };
         assert!(config.validate().is_ok());
@@ -333,7 +334,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         };
         assert!(config.validate().is_err());
