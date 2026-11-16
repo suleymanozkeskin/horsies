@@ -4,6 +4,7 @@
 //! Text bounds count characters (Unicode scalar values), as Python's `len`.
 
 use super::values::BoundedCount;
+pub use crate::worker::retry::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
 use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
 
 /// A report of work left on a task loop names at most this many tasks.
@@ -35,11 +36,6 @@ pub const MAX_SEATS_PER_SHARED_THREAD_CHILD: u64 = 256;
 pub const MAX_CHILD_POOL_CONNECTIONS: u64 = 1000;
 /// The most threads of the default executor of a shared async child.
 pub const MAX_EXECUTOR_THREADS: u64 = 256;
-
-/// The smallest stored `cancel_grace_ms` (Python `MIN_CANCEL_GRACE_MS`).
-pub const MIN_CANCEL_GRACE_MS: u64 = 100;
-/// The largest stored `cancel_grace_ms` (Python `MAX_CANCEL_GRACE_MS`).
-pub const MAX_CANCEL_GRACE_MS: u64 = 10_000;
 
 /// The deadline of a task, in milliseconds after the child takes it.
 pub type TaskTimeoutMs = BoundedCount<MIN_TASK_TIMEOUT_MS, MAX_TASK_TIMEOUT_MS>;

@@ -11,7 +11,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -220,6 +220,7 @@ async fn every_declared_api_route_is_view_authorized() {
         "/api/workflows/00000000-0000-4000-8000-000000000002/tasks/0",
         "/api/workers/ping",
         "/api/workers/schedules",
+        "/api/workers/classes",
         "/api/workers",
         "/api/workers/w1/history",
         "/api/events",
@@ -823,6 +824,174 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     );
 }
 
+/// Python `test_web_api.py::TestWorkerReads::test_worker_list_carries_the_slot_health`.
+#[tokio::test]
+#[serial]
+async fn worker_list_carries_the_slot_health() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let worker_id = format!("itest-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now(), 'itest-host', 4242, 2, 0, 2,
+            ARRAY['default'], '{}'::jsonb, '{\"default\": 3}'::jsonb, '{}'::jsonb,
+            0, 0, now(),
+            $2, '{}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .bind(serde_json::json!([{
+        "slot": 1,
+        "cause": {"kind": "resource_shortage", "errno": "EMFILE"},
+        "detail": "OSError: [Errno 24] Too many open files",
+        "down_since": "2026-11-10T12:00:00+00:00",
+        "failed_boots": 2,
+    }]))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let worker = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["worker_id"] == worker_id.as_str())
+        .expect("the worker is listed");
+    assert_eq!(worker["slot_health"], "slots_down");
+    assert_eq!(
+        worker["down_slots"],
+        serde_json::json!([{
+            "slot": 1,
+            "cause": "the OS ran short of a resource (EMFILE)",
+            "detail": "OSError: [Errno 24] Too many open files",
+            "down_since": "2026-11-10T12:00:00Z",
+            "failed_boots": 2,
+        }])
+    );
+    assert_eq!(
+        worker["queue_max_concurrency"],
+        serde_json::json!({"default": 3})
+    );
+}
+
+/// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
+/// The web tests share one database, so the test reads only its own queue
+/// and worker.
+#[tokio::test]
+#[serial]
+async fn class_report_answers_with_streams_and_budgets() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let worker_id = format!("w-async-{suffix}");
+    let queue = format!("q-{}", &suffix[..12]);
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now(), 'itest-host', 4242, 2, 0, 2,
+            ARRAY[$2::text], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, now(), '[]'::jsonb,
+            '{\"SHARED_ASYNC\": {\"capacity\": 8, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let task_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            is_workflow_task, retry_count, max_retries, command_fingerprint_version,
+            command_fingerprint, retention_class_key, retain_rerun_input, created_at,
+            updated_at, execution
+        ) VALUES (
+            $1, 'class_report_task', $2, 100, 'null', 'PENDING', NOW(), NOW() - interval '5 seconds',
+            FALSE, 0, 3, 1, decode(repeat('0d', 32), 'hex'), 'forever', FALSE, NOW(),
+            NOW(), 'ISOLATED'
+        )",
+    )
+    .bind(task_id)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers/classes"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["live_window_s"], 120);
+    assert!(body.get("not_recorded").is_none());
+    let streams: Vec<&serde_json::Value> = body["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|stream| stream["queue_name"] == queue.as_str())
+        .collect();
+    let [stream] = streams.as_slice() else {
+        panic!("one stream of the test queue: {body}");
+    };
+    assert_eq!(stream["execution"], "ISOLATED");
+    assert_eq!(stream["coverage"], serde_json::json!({"kind": "unserved"}));
+    assert_eq!(stream["wait"]["kind"], "waiting");
+    let worker = body["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["worker_id"] == worker_id.as_str())
+        .expect("the live worker is listed");
+    assert_eq!(
+        worker["budgets"],
+        serde_json::json!([{
+            "budget": "SHARED_ASYNC",
+            "capacity": 8,
+            "serves": ["SHARED_ASYNC"],
+            "in_flight": 0,
+            "free": 8,
+        }])
+    );
+}
+
 async fn clean_w4(pool: &PgPool, prefix: &str) {
     let pattern = format!("{prefix}%");
     for statement in [
@@ -942,6 +1111,7 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
         "/api/workflows",
         "/api/workers/ping?timeout_seconds=0.1",
         "/api/workers/schedules",
+        "/api/workers/classes",
         "/api/workers",
         "/api/workers/never/history",
     ];
@@ -1122,7 +1292,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
             .await
             .unwrap();
     assert!(unlocked);
-    let url = options.to_url_lossy().to_string();
+    let url = crate::broker::pools::test_url_of(&options);
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
             .await
