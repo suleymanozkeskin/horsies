@@ -397,7 +397,7 @@ INSERT_WORKER_STATE_SQL = text("""
 """)
 
 # Retention deletes run in bounded batches: each statement deletes at most
-# :batch_size rows selected by an id-subselect, and the reaper commits per
+# :batch_size rows selected by a key subselect, and the reaper commits per
 # batch. An unbounded DELETE turns the first pass over a large eligible
 # backlog (retention newly enabled, or the window lowered) into one
 # multi-minute transaction — WAL burst, task_attempts cascades, and a
@@ -411,8 +411,8 @@ INSERT_WORKER_STATE_SQL = text("""
 
 DELETE_EXPIRED_WORKER_STATES_SQL = text("""
     DELETE FROM horsies_worker_states
-    WHERE id IN (
-        SELECT id FROM horsies_worker_states
+    WHERE (worker_id, snapshot_at) IN (
+        SELECT worker_id, snapshot_at FROM horsies_worker_states
         WHERE snapshot_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
         LIMIT :batch_size
         FOR UPDATE SKIP LOCKED
@@ -488,22 +488,6 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
     )
     DELETE FROM horsies_workflows
     WHERE id IN (SELECT id FROM budgeted)
-""")
-
-# A row of the recovery limit count outlives its workflow: the table has no
-# foreign key, and a parent workflow's delete cascades to its children, so
-# DELETE_EXPIRED_WORKFLOWS_SQL cannot name every workflow that it removes.
-DELETE_ORPHANED_RECOVERY_FAILURES_SQL = text("""
-    DELETE FROM horsies_workflow_recovery_failures
-    WHERE workflow_id IN (
-        SELECT failure.workflow_id
-        FROM horsies_workflow_recovery_failures failure
-        WHERE NOT EXISTS (
-            SELECT 1 FROM horsies_workflows w
-            WHERE w.id = failure.workflow_id
-        )
-        LIMIT :batch_size
-    )
 """)
 
 UPSERT_TASK_ATTEMPT_SQL = text("""

@@ -474,11 +474,12 @@ class Scheduler:
         h = hashlib.sha256(basis).digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
-    def _compute_config_hash(self, schedule: TaskSchedule) -> str:
+    def _compute_config_hash(self, schedule: TaskSchedule) -> bytes:
         """
         Compute hash of schedule configuration for change detection.
 
         Includes pattern and timezone to detect when schedule needs recalculation.
+        Returns the 32-byte SHA-256 digest that the bytea column stores.
 
         Raises:
             RuntimeError: dumps_json rejected model_dump(mode='json') output
@@ -501,7 +502,7 @@ class Scheduler:
             raise RuntimeError(
                 f"Failed to serialize config for schedule '{schedule.name}': {ser_result.err_value}",
             )
-        return hashlib.sha256(ser_result.ok_value.encode('utf-8')).hexdigest()
+        return hashlib.sha256(ser_result.ok_value.encode('utf-8')).digest()
 
     async def _check_schedule(
         self, schedule: TaskSchedule, check_time: datetime
@@ -566,7 +567,7 @@ class Scheduler:
             try:
                 # Calculate missed runs if catch_up_missed is enabled
                 due_runs: list[datetime] = []
-                if schedule.catch_up_missed and state.next_run_at:
+                if schedule.catch_up_missed:
                     due_runs = self._calculate_missed_runs(
                         schedule=schedule,
                         first_due_run=state.next_run_at,
@@ -653,14 +654,9 @@ class Scheduler:
                     # latest due slot. Older missed slots (scheduler downtime)
                     # are dropped, and the schedule resumes strictly in the
                     # future. slot_time stays slot-aligned for deterministic
-                    # task_id. Fallback to check_time only if next_run_at is
-                    # somehow None (should not happen since should_run_now
-                    # already checked it).
-                    first_due = (
-                        state.next_run_at if state.next_run_at is not None else check_time
-                    )
+                    # task_id.
                     slot_time, next_run, skipped = self._advance_to_latest_due_slot(
-                        schedule, first_due, check_time,
+                        schedule, state.next_run_at, check_time,
                     )
                     if skipped:
                         logger.warning(

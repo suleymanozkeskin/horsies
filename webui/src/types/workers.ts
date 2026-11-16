@@ -10,8 +10,7 @@ export interface DownSlot {
   failed_boots: number;
 }
 
-/** `not_recorded`: a worker version that did not record its slot health. */
-export type SlotHealthKind = 'all_serving' | 'slots_down' | 'not_recorded';
+export type SlotHealthKind = 'all_serving' | 'slots_down';
 
 /** Latest state snapshot for one worker. */
 export interface WorkerState {
@@ -25,7 +24,7 @@ export interface WorkerState {
   uptime_s: number | null;
   processes: number;
   queues: string[];
-  queue_max_concurrency: Record<string, number> | null;
+  queue_max_concurrency: Record<string, number>;
   tasks_running: number;
   tasks_claimed: number;
   cluster_wide_cap: number | null;

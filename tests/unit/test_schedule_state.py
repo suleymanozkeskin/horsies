@@ -25,6 +25,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# A 32-byte value: the length that the config_hash column holds.
+CONFIG_HASH = bytes(range(32))
+OTHER_CONFIG_HASH = bytes(range(32, 64))
+# The text form of a uuid: the type of the last_task_id column.
+TASK_ID = '0b0e7e64-6d2c-5a8f-9b1e-3c4d5e6f7a8b'
+
+
 def _make_state(name: str = 'sched-1') -> ScheduleStateModel:
     """Build a minimal ScheduleStateModel for assertions."""
     return ScheduleStateModel(
@@ -33,7 +40,7 @@ def _make_state(name: str = 'sched-1') -> ScheduleStateModel:
         next_run_at=_utc_now(),
         last_task_id=None,
         run_count=0,
-        config_hash=None,
+        config_hash=CONFIG_HASH,
         updated_at=_utc_now(),
     )
 
@@ -150,8 +157,9 @@ class TestGetDueStates:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_query_includes_null_next_run_states(self) -> None:
-        """next_run_at IS NULL rows should be considered due."""
+    async def test_query_selects_rows_whose_next_run_is_at_or_before_now(self) -> None:
+        """A row is due when next_run_at <= now. next_run_at is NOT NULL, so
+        the read has no NULL arm."""
         manager, session = _make_manager()
         mock_result = MagicMock()
         mock_result.scalars.return_value = []
@@ -161,7 +169,8 @@ class TestGetDueStates:
 
         stmt = session.execute.await_args.args[0]
         compiled = str(stmt)
-        assert 'IS NULL' in compiled
+        assert 'horsies_schedule_state.next_run_at <= :next_run_at_1' in compiled
+        assert 'IS NULL' not in compiled
 
 
 # =============================================================================
@@ -212,10 +221,10 @@ class TestInitializeState:
         session.get = AsyncMock(return_value=None)
         next_run = _utc_now()
 
-        result = await manager.initialize_state('new-sched', next_run, config_hash='abc')
+        result = await manager.initialize_state('new-sched', next_run, config_hash=CONFIG_HASH)
 
         assert result.schedule_name == 'new-sched'
-        assert result.config_hash == 'abc'
+        assert result.config_hash == CONFIG_HASH
         session.add.assert_called_once()
         session.commit.assert_awaited_once()
         session.refresh.assert_awaited_once()
@@ -227,7 +236,7 @@ class TestInitializeState:
         existing = _make_state('existing')
         session.get = AsyncMock(return_value=existing)
 
-        result = await manager.initialize_state('existing', _utc_now())
+        result = await manager.initialize_state('existing', _utc_now(), CONFIG_HASH)
 
         assert result is existing
         session.add.assert_not_called()
@@ -253,7 +262,7 @@ class TestUpdateAfterRun:
         now = _utc_now()
         next_run = _utc_now()
 
-        await manager.update_after_run('sched-1', 'task-abc', now, next_run)
+        await manager.update_after_run('sched-1', TASK_ID, now, next_run)
 
         session.execute.assert_awaited_once()
         session.commit.assert_awaited_once()
@@ -270,7 +279,7 @@ class TestUpdateAfterRun:
         session.execute = AsyncMock(return_value=mock_result)
 
         with patch('horsies.core.scheduler.state.logger') as mock_logger:
-            await manager.update_after_run('missing', 'task-1', _utc_now(), _utc_now())
+            await manager.update_after_run('missing', TASK_ID, _utc_now(), _utc_now())
 
             mock_logger.warning.assert_called_once()
             assert 'missing' in mock_logger.warning.call_args[0][0]
@@ -307,12 +316,12 @@ class TestUpdateNextRun:
         mock_result.rowcount = 1
         session.execute = AsyncMock(return_value=mock_result)
 
-        await manager.update_next_run('sched-1', _utc_now(), config_hash='deadbeef')
+        await manager.update_next_run('sched-1', _utc_now(), config_hash=OTHER_CONFIG_HASH)
 
         call_args = session.execute.call_args
         assert call_args[0][0] is UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL
         params = call_args[0][1]
-        assert params['config_hash'] == 'deadbeef'
+        assert params['config_hash'] == OTHER_CONFIG_HASH
 
     @pytest.mark.asyncio
     async def test_no_rows_updated_logs_warning(self) -> None:
@@ -336,7 +345,7 @@ class TestUpdateNextRun:
         session.execute = AsyncMock(return_value=mock_result)
 
         with patch('horsies.core.scheduler.state.logger') as mock_logger:
-            await manager.update_next_run('missing', _utc_now(), config_hash='abc')
+            await manager.update_next_run('missing', _utc_now(), config_hash=CONFIG_HASH)
 
             mock_logger.warning.assert_called_once()
 

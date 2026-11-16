@@ -64,7 +64,6 @@ def make_window() -> HistoryWindow:
 
 ENVELOPE_COLUMNS = (
     'result_payload',
-    'prior_result_payload',
     'attempt_snapshot',
     'rerun_input_inline',
 )
@@ -151,8 +150,8 @@ class TestColumnDiscipline:
             HistoryStatusAggregate(window=make_window())
         )
         for sql in (page_sql, facet_sql, aggregate_sql):
-            assert 'retention_anchor_at >= :window_lower' in sql
-            assert 'retention_anchor_at < :window_upper' in sql
+            assert 'terminal_at >= :window_lower' in sql
+            assert 'terminal_at < :window_upper' in sql
         assert page_params['window_lower'] == LOWER
 
 

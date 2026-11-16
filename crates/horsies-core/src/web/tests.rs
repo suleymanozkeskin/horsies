@@ -35,7 +35,7 @@ use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
 use super::spa::{inject, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig};
-use super::task_stats_cache::TaskStatsCache;
+use super::task_stats_cache::{ReadCache, TaskStatsCache};
 
 fn lazy_pool() -> PgPool {
     PgPoolOptions::new()
@@ -107,6 +107,8 @@ fn test_state(
         auth_policy,
         schema_probe,
         task_stats_cache: Arc::new(TaskStatsCache::new()),
+        task_facets_cache: Arc::new(ReadCache::new()),
+        task_breakdown_cache: Arc::new(ReadCache::new()),
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
@@ -460,6 +462,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             Some(SCHEMA_INCOMPATIBLE),
         ),
         (SchemaState::Absent, None, false, Some(SCHEMA_INCOMPATIBLE)),
+        (SchemaState::ZeroX, None, false, Some(SCHEMA_INCOMPATIBLE)),
         (SchemaState::Unknown, None, false, Some(SCHEMA_UNKNOWN)),
     ];
     for (state, version, compatible, reason) in cases {
@@ -842,6 +845,8 @@ async fn migrated_state() -> WebState {
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
+        task_facets_cache: Arc::new(ReadCache::new()),
+        task_breakdown_cache: Arc::new(ReadCache::new()),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
         auth_policy: Arc::new(AllowAll),
@@ -859,18 +864,14 @@ async fn seed_pending(pool: &PgPool, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, claimed, is_workflow_task,
-             retry_count, max_retries, enqueue_sha,
-             command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES (
-             $1, $2, 'default', 100, '[]', '{}', 'PENDING',
-             NOW(), NOW(), FALSE, FALSE, 0, 3, $1::text,
-             1, decode(repeat('0d', 32), 'hex'), 'forever', FALSE,
-             'DECLINED_BY_POLICY', NOW(), NOW()
-         )",
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            is_workflow_task, retry_count, max_retries, command_fingerprint_version,
+            command_fingerprint, retention_class_key, retain_rerun_input, created_at,
+            updated_at, execution
+        ) VALUES (
+            $1, $2, 'default', 100, 'null', 'PENDING', NOW(), NOW(), FALSE, 0, 3, 1,
+            decode(repeat('0d', 32), 'hex'), 'forever', FALSE, NOW(), NOW(), 'ISOLATED'
+        )",
     )
     .bind(id)
     .bind(format!("{prefix}task_{}", id.simple()))

@@ -27,11 +27,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use rand::Rng;
+use sha2::{Digest, Sha256};
 use sqlx::migrate::{MigrateError, Migration, MigrationType};
+use sqlx::ConnectOptions;
 use sqlx::{Acquire, Executor, PgConnection, PgPool};
 use tokio::time::{sleep, Instant};
 
-use crate::broker::error::BrokerError;
+use crate::broker::error::{BrokerError, InstallLockFailure};
 
 /// Name of the horsies-owned migrations bookkeeping table.
 pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
@@ -117,11 +119,27 @@ pub(crate) async fn successful_schema_version(pool: &PgPool) -> Result<Option<i6
     .map_err(BrokerError::from)
 }
 
-/// Postgres advisory-lock key used to serialise concurrent horsies migrators.
-///
-/// Disjoint from sqlx's own lock id (`0x3d32ad9e * crc32(db_name)`), so it
-/// never blocks or is blocked by an application's `sqlx::migrate!().run()`.
-const ADVISORY_LOCK_KEY: i64 = 0x484F_5253_4945_5300;
+/// The name whose digest is the install lock key (Python
+/// `horsies/core/brokers/postgres.py:1346-1348`).
+const INSTALL_LOCK_NAME: &str = "horsies:schema:v1";
+
+/// The longest an installer waits for another installer's lock, then
+/// refuses with a retryable [`InstallLockFailure::WaitBoundReached`].
+pub const INSTALL_LOCK_WAIT: Duration = Duration::from_secs(300);
+
+/// The pause between two tries of the install lock. Each try is a
+/// `pg_try_advisory_lock`, so a waiting installer holds no snapshot.
+const INSTALL_LOCK_POLL: Duration = Duration::from_millis(25);
+
+/// The session advisory lock key of every installer, Python's and the
+/// core's: the first 8 bytes of SHA-256 of [`INSTALL_LOCK_NAME`], read as a
+/// big-endian signed integer.
+fn install_lock_key() -> i64 {
+    let digest = Sha256::digest(INSTALL_LOCK_NAME.as_bytes());
+    let mut first = [0_u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(first)
+}
 
 const MIGRATION_MAX_ATTEMPTS: usize = 5;
 const DEADLOCK_SQLSTATE: &str = "40P01";
@@ -158,33 +176,76 @@ pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
     }
 }
 
+/// Run the migrations under the install lock.
+///
+/// The lock is a session advisory lock on a dedicated connection opened
+/// outside the pool, so no pool can hand that connection to another caller
+/// while it holds the lock (Python `:1683-1688`). The wait is bounded by
+/// [`INSTALL_LOCK_WAIT`]. The unlock is checked: an unlock that releases
+/// nothing means the session lost the lock, and the install reports
+/// [`InstallLockFailure::OwnershipLost`] (Python `:1508-1525`). The
+/// dedicated connection is closed in every case, which also ends any lock it
+/// still holds.
 async fn run_horsies_migrations_locked(pool: &PgPool) -> Result<(), BrokerError> {
-    let mut conn = pool.acquire().await?;
-
-    // A blocking lock query can keep a snapshot that a concurrent index
-    // build must wait for. End each lock attempt before waiting again.
-    loop {
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-            .bind(ADVISORY_LOCK_KEY)
-            .fetch_one(&mut *conn)
-            .await?;
-        if acquired {
-            break;
+    let mut conn = pool.connect_options().connect().await?;
+    let key = install_lock_key();
+    match acquire_install_lock(&mut conn, key, INSTALL_LOCK_WAIT).await {
+        Ok(()) => {}
+        Err(error) => {
+            close_install_connection(conn).await;
+            return Err(error);
         }
-        sleep(Duration::from_millis(25)).await;
     }
 
     let outcome = run_inner(&mut conn).await;
-
-    // Always release the session-level lock, even on error, so the connection
-    // can return to the pool clean. Swallow unlock errors so we surface the
-    // real failure to the caller.
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(ADVISORY_LOCK_KEY)
-        .execute(&mut *conn)
+    let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .fetch_one(&mut conn)
         .await;
+    close_install_connection(conn).await;
+    match (outcome, unlocked) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Ok(true)) => Ok(()),
+        (Ok(()), Ok(false) | Err(_)) => {
+            Err(BrokerError::InstallLock(InstallLockFailure::OwnershipLost))
+        }
+    }
+}
 
-    outcome
+/// Take the install lock with `pg_try_advisory_lock` every
+/// [`INSTALL_LOCK_POLL`], for at most `wait` ([`INSTALL_LOCK_WAIT`] for an
+/// install).
+async fn acquire_install_lock(
+    conn: &mut PgConnection,
+    key: i64,
+    wait: Duration,
+) -> Result<(), BrokerError> {
+    let started = Instant::now();
+    loop {
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(&mut *conn)
+            .await?;
+        if acquired {
+            return Ok(());
+        }
+        if started.elapsed() >= wait {
+            return Err(BrokerError::InstallLock(
+                InstallLockFailure::WaitBoundReached { waited: wait },
+            ));
+        }
+        sleep(INSTALL_LOCK_POLL).await;
+    }
+}
+
+/// Close the dedicated install connection. A close that fails still drops
+/// the connection, which ends its session and any lock it holds; the
+/// failure is logged and not returned, because the install's own outcome is
+/// the answer.
+async fn close_install_connection(conn: PgConnection) {
+    if let Err(error) = sqlx::Connection::close(conn).await {
+        tracing::warn!(error = %error, "closing the schema install connection failed");
+    }
 }
 
 async fn run_inner(conn: &mut PgConnection) -> Result<(), BrokerError> {
@@ -412,6 +473,57 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// Python's key: the first 8 bytes of SHA-256 of `horsies:schema:v1`,
+    /// big-endian, signed (`horsies/core/brokers/postgres.py:1346-1348`).
+    #[test]
+    fn the_install_lock_key_is_python_s() {
+        assert_eq!(install_lock_key(), 6_194_151_126_714_960_738);
+    }
+
+    #[test]
+    fn a_lost_lock_is_not_retryable_and_a_busy_lock_is() {
+        assert!(!BrokerError::InstallLock(InstallLockFailure::OwnershipLost).is_retryable());
+        assert!(
+            BrokerError::InstallLock(InstallLockFailure::WaitBoundReached {
+                waited: INSTALL_LOCK_WAIT,
+            })
+            .is_retryable()
+        );
+        assert_eq!(INSTALL_LOCK_WAIT, Duration::from_secs(300));
+    }
+
+    /// While another session holds the lock, a waiter gives up at its bound
+    /// with a retryable refusal, and takes the lock once it is free. The
+    /// test uses its own key, so no installer waits on it.
+    #[tokio::test]
+    async fn a_waiter_stops_at_its_bound_and_takes_a_free_lock() {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let key = rand::thread_rng().gen_range(1..i64::MAX);
+        let mut holder = PgConnection::connect(&url).await.unwrap();
+        let mut waiter = PgConnection::connect(&url).await.unwrap();
+        let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(&mut holder)
+            .await
+            .unwrap();
+        assert!(held);
+
+        let refused = acquire_install_lock(&mut waiter, key, Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            BrokerError::InstallLock(InstallLockFailure::WaitBoundReached { .. })
+        ));
+        assert!(refused.is_retryable());
+
+        sqlx::Connection::close(holder).await.unwrap();
+        acquire_install_lock(&mut waiter, key, Duration::from_secs(5))
+            .await
+            .unwrap();
+        sqlx::Connection::close(waiter).await.unwrap();
     }
 
     #[test]
