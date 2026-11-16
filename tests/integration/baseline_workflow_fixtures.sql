@@ -37,6 +37,8 @@ $$;
 -- "name", "on_error", "parent", "parent_index", "depth", "output", "policy"}], the top row first. p_nodes: [{"wf",
 -- "idx", "deps", "args_from", "ctx", "join", "min", "allow", "sub", "params", "input", "node_id", "good_until"}]; "wf"
 -- defaults to the top row's id; "params" is the sub_workflow_params of a sub-workflow node (NOT_GIVEN when absent).
+-- A task node stores the options {"retry":"none"}, with "good_until" added when the node has one, as the clients'
+-- starts merge the deadline into the stored options.
 -- p_failed: [{"wf", "idx", "result"}].
 CREATE FUNCTION wft_tree(p_workflows jsonb, p_nodes jsonb, p_failed jsonb)
 RETURNS TABLE (
@@ -72,6 +74,7 @@ RETURNS TABLE (
                coalesce((x ->> 'sub')::boolean, FALSE) AS sub,
                coalesce(x ->> 'params', 'NOT_GIVEN') AS params,
                (x ->> 'good_until')::timestamptz AS good_until,
+               x -> 'good_until' AS good_until_json,
                o AS position
         FROM jsonb_array_elements(p_nodes) WITH ORDINALITY AS a(x, o)
     ),
@@ -94,7 +97,11 @@ RETURNS TABLE (
         (SELECT array_agg(args_from ORDER BY position) FROM n), (SELECT array_agg(ctx ORDER BY position) FROM n),
         (SELECT array_agg(allow ORDER BY position) FROM n), (SELECT array_agg(join_type ORDER BY position) FROM n),
         (SELECT array_agg(min_success ORDER BY position) FROM n),
-        (SELECT array_agg(CASE WHEN sub THEN NULL ELSE '{"retry":"none"}' END ORDER BY position) FROM n),
+        (SELECT array_agg(CASE
+            WHEN sub THEN NULL
+            WHEN good_until_json IS NULL THEN '{"retry":"none"}'
+            ELSE '{"retry":"none","good_until":' || good_until_json::text || '}'
+        END ORDER BY position) FROM n),
         (SELECT array_agg(CASE WHEN sub THEN NULL ELSE 2 END ORDER BY position) FROM n),
         (SELECT array_agg(CASE WHEN sub THEN NULL ELSE 'SHARED_ASYNC' END ORDER BY position) FROM n),
         (SELECT array_agg(CASE WHEN sub THEN NULL ELSE good_until END ORDER BY position) FROM n),
