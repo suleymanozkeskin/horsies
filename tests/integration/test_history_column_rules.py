@@ -1,19 +1,25 @@
-"""The history parent carries no single-column CHECK.
+"""The CHECKs of the history parent.
 
 The move family copies values that the live table and the enqueue path have
-already checked, so the history parent keeps only its two cross-column
-CHECKs: the result domain and the rerun input shape.
+already checked. The history parent keeps one single-column CHECK, the
+terminalization kind, which every move writes as a literal, and two
+cross-column CHECKs: the result domain and the rerun input shape.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.lifecycle.operations import TerminalizationKind
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+KIND_CHECK = 'horsies_task_history_kind_known'
 
 CROSS_COLUMN_CHECKS = frozenset({
     'horsies_task_history_result_domain',
@@ -44,12 +50,16 @@ async def _checks(connection: AsyncConnection) -> tuple[dict[str, str], set[str]
     return single, cross
 
 
-async def test_an_initialized_database_has_no_single_column_history_check(
+async def test_the_kind_is_the_one_single_column_history_check(
     broker: PostgresBroker,
     engine: AsyncEngine,
 ) -> None:
+    """The one single-column CHECK holds the kinds of TerminalizationKind."""
     _ = broker
     async with engine.connect() as connection:
         single, cross = await _checks(connection)
-    assert single == {}
+    assert set(single) == {KIND_CHECK}
+    assert set(re.findall(r"'(\w+)'::character varying", single[KIND_CHECK])) == {
+        kind.value for kind in TerminalizationKind
+    }
     assert cross == CROSS_COLUMN_CHECKS
