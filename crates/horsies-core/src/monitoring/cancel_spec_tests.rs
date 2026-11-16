@@ -13,9 +13,12 @@ use uuid::Uuid;
 use super::spec_support::{
     seed_live, seed_terminal, set_history_status, Ending, LiveTask, SpecDatabase,
 };
+use crate::broker::claims::{claim_pass, ClaimClasses, ClaimPassRequest};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization::terminalize;
-use crate::broker::{ClaimPassParams, PostgresBroker};
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::task::Execution;
 use crate::monitoring::{cancel_task, TaskActionErrorCode};
 use crate::TaskStatus;
 
@@ -56,17 +59,26 @@ async fn claim_generation(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
         .expect("read the claim generation")
 }
 
-/// One claim pass of `worker_id` on `default` (Python `claim_once`): the ids
-/// it claimed.
-async fn claim_once(broker: &PostgresBroker, worker_id: &str) -> Vec<Uuid> {
+/// One claim pass of `worker_id` on `default` through the baseline
+/// `horsies_claim` (Python `claim_once`): one `ISOLATED` budget of 10 that
+/// every class routes to. Returns the ids it claimed.
+async fn claim_once(pool: &PgPool, worker_id: &str) -> Vec<Uuid> {
     let queues = vec!["default".to_owned()];
-    let params = ClaimPassParams {
+    let request = ClaimPassRequest {
         worker_id: worker_id.to_owned(),
         queue_priority: queues.iter().map(|queue| (queue.clone(), 100)).collect(),
         queues,
         queue_max_concurrency: std::collections::HashMap::new(),
         hard_cap_mode: true,
-        processes: 10,
+        classes: ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
         prefetch_buffer: 0,
         max_claim_per_worker: 0,
         max_claim_batch: 0,
@@ -74,10 +86,10 @@ async fn claim_once(broker: &PostgresBroker, worker_id: &str) -> Vec<Uuid> {
         claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("a positive lease"),
         lock_keys: Vec::new(),
     };
-    broker
-        .claim_batch(&params)
+    claim_pass(&core_pool_for_test_pool(pool), StatementLog::Off, &request)
         .await
         .expect("run one claim pass")
+        .claimed
         .into_iter()
         .map(|row| row.id)
         .collect()
@@ -204,7 +216,7 @@ async fn the_cancel_of_a_row_the_claim_function_just_claimed_wins() {
     let task = LiveTask::pending("alpha_task");
     seed_live(&database.pool, &task).await;
     let broker = database.broker();
-    assert_eq!(claim_once(&broker, WORKER).await, [task.id]);
+    assert_eq!(claim_once(&database.pool, WORKER).await, [task.id]);
 
     let cancelled = cancel_task(&broker, task.id, false)
         .await
@@ -235,7 +247,7 @@ async fn a_concurrent_claim_and_cancel_leave_one_consistent_outcome() {
 
     let (cancelled, claimed) = tokio::join!(
         cancel_task(&broker, task.id, false),
-        claim_once(&broker, OTHER_WORKER),
+        claim_once(&database.pool, OTHER_WORKER),
     );
 
     let history = history_status(&database.pool, task.id).await;

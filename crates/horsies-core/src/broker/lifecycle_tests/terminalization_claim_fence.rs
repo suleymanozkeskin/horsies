@@ -12,6 +12,9 @@ use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
+use crate::broker::claims::claim_pass;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::terminalize;
 use crate::core::lifecycle::TerminalizationCommand;
@@ -102,11 +105,15 @@ async fn real_claim_path_arms_the_fence() {
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "PAUSED").await;
     let broker = PostgresBroker::from_pool(pool.clone());
 
-    let rows = broker
-        .claim_batch(&claim_pass(CLAIM_QUEUE))
-        .await
-        .expect("claim pass");
-    let claimed = rows
+    let pass = claim_pass(
+        &core_pool_for_test_pool(&pool),
+        StatementLog::Off,
+        &claim_request(CLAIM_QUEUE),
+    )
+    .await
+    .expect("claim pass");
+    let claimed = pass
+        .claimed
         .iter()
         .find(|row| row.id == task_id)
         .expect("the claim returned the seeded task");

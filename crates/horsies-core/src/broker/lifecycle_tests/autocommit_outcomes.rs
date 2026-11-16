@@ -10,6 +10,11 @@
 //! writer and repeat the same command, as the retry does.
 //! `test_a_second_statement_is_refused_by_the_server` tests a Python helper
 //! and is not ported (test map: NOT CORE).
+//! `test_a_dead_connection_fails_the_claim_pass_as_retryable` is not ported:
+//! the core claims through the statement layer, whose pool drops a
+//! connection that it saw close at checkout (`db::pool`, `recycle`), and a
+//! statement on a closed connection is a retryable `NotSent`
+//! (`broker::error::tests::a_core_statement_that_may_clear_is_retryable`).
 
 use chrono::Duration;
 use serial_test::serial;
@@ -30,7 +35,6 @@ use crate::worker::execution::{finalize_workflow_phase, FinalizeStage};
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
-const CLAIM_QUEUE: &str = "lifecycle_dead_claim";
 
 fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
     TerminalizationCommand::CompleteTaskFused {
@@ -254,44 +258,4 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
         Ok(()) => panic!("the wake succeeded on a dead connection"),
     }
     unpinged.close().await;
-}
-
-/// Python `test_a_dead_connection_fails_the_claim_pass_as_retryable`: a claim
-/// pass on the dead pooled connection is a retryable error, and the next pass
-/// claims the row.
-#[tokio::test]
-#[serial]
-async fn a_dead_connection_fails_the_claim_pass_as_retryable() {
-    let pool = pool().await;
-    let unpinged = unpinged_single_connection_pool(database_options(&pool)).await;
-    let pid = pooled_backend_pid(&unpinged).await;
-    let task_id = seed_task(
-        &pool,
-        &TaskSeed {
-            queue_name: CLAIM_QUEUE,
-            ..TaskSeed::pending()
-        },
-    )
-    .await;
-    terminate_backend(&pool, pid).await;
-    let broker = PostgresBroker::from_pool(unpinged.clone());
-
-    match broker.claim_batch(&claim_pass(CLAIM_QUEUE)).await {
-        Err(BrokerError::Database(error)) => {
-            assert!(is_retryable_sqlx_error(&error), "not retryable: {error}");
-        }
-        other => panic!("expected a retryable database error, got {other:?}"),
-    }
-    assert_eq!(status_of(&pool, task_id).await, "PENDING");
-
-    let rows = broker
-        .claim_batch(&claim_pass(CLAIM_QUEUE))
-        .await
-        .expect("the next pass");
-    assert_eq!(
-        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
-        vec![task_id]
-    );
-    unpinged.close().await;
-    cleanup_tasks(&pool, &[task_id]).await;
 }

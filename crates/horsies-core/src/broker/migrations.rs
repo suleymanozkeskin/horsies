@@ -15,9 +15,6 @@
 //!   result. It creates [`MIGRATIONS_TABLE`] itself. The Python package
 //!   installs the same files as its migration 1000 with the same checksum
 //!   rule, so both write the same bookkeeping row.
-//! - Version 1001 holds the claim functions of the copied Rust worker, which
-//!   have no counterpart in migration 1000. It goes when the worker claims
-//!   through the functions of migration 1000.
 //!
 //! Each migration runs in one transaction. The runner writes its bookkeeping
 //! row after the migration SQL, in the same transaction, and names every value.
@@ -90,14 +87,8 @@ pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
     include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql");
 
 /// Version, description and SQL of each embedded migration, in apply order.
-const MIGRATION_SOURCES: [(i64, &str, &str); 2] = [
-    (BASELINE_MIGRATION_VERSION, "baseline", BASELINE_SQL),
-    (
-        1001,
-        "interim rust claim functions",
-        include_str!("../../migrations/1001_interim_rust_claim_functions.sql"),
-    ),
-];
+const MIGRATION_SOURCES: [(i64, &str, &str); 1] =
+    [(BASELINE_MIGRATION_VERSION, "baseline", BASELINE_SQL)];
 
 /// The embedded migrations with their SHA-384 checksums.
 fn embedded_migrations() -> &'static [Migration] {
@@ -878,132 +869,6 @@ mod tests {
             .await
             .unwrap();
         assert!(!ledger);
-        database.drop().await;
-    }
-
-    async fn claim_planning_database() -> MigrationTestDatabase {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        sqlx::query("CREATE EXTENSION pg_stat_statements")
-            .execute(pool)
-            .await
-            .unwrap();
-        run_horsies_migrations(pool).await.unwrap();
-        sqlx::query("ALTER TABLE horsies_tasks SET (autovacuum_enabled = false)")
-            .execute(pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, task_options, execution,
-                retention_class_key, sent_at, created_at, command_fingerprint_version,
-                command_fingerprint, status, enqueued_at, retry_count, max_retries,
-                is_workflow_task, updated_at, retain_rerun_input
-             ) SELECT md5(n::text)::uuid, 'plan_test', 'plan_test', n % 5 + 1, 'null', NULL,
-                'ISOLATED', 'forever', NOW() - interval '1 hour', NOW() - interval '1 hour', 1,
-                decode(repeat('00', 32), 'hex'), 'PENDING', NOW() - interval '1 hour', 0, 0,
-                FALSE, NOW() - interval '1 hour', FALSE
-             FROM generate_series(1, 50000) n",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query("VACUUM ANALYZE horsies_tasks")
-            .execute(pool)
-            .await
-            .unwrap();
-        database
-    }
-
-    async fn candidate_planning_counts(connection: &mut PgConnection) -> (i64, i64) {
-        sqlx::query_as(
-            "SELECT COALESCE(sum(plans), 0)::bigint, COALESCE(sum(calls), 0)::bigint
-             FROM pg_stat_statements
-             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-               AND NOT toplevel AND ltrim(query) LIKE 'WITH cand AS (%'",
-        )
-        .fetch_one(connection)
-        .await
-        .unwrap()
-    }
-
-    async fn rolled_back_claim(connection: &mut PgConnection) {
-        let mut transaction = sqlx::Acquire::begin(&mut *connection).await.unwrap();
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM horsies_claim(
-                'plan_worker', '[\"plan_test\"]'::jsonb, '{}'::jsonb, '{}'::jsonb,
-                TRUE, 32, 0, 32, 8, NULL, 60000, '[]'::jsonb
-             )",
-        )
-        .fetch_one(transaction.as_mut())
-        .await
-        .unwrap();
-        assert_eq!(count, 8);
-        transaction.rollback().await.unwrap();
-        let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
-            .fetch_one(connection)
-            .await
-            .unwrap();
-        assert_eq!(mode, "auto");
-    }
-
-    async fn configure_planning_counters(connection: &mut PgConnection) {
-        for statement in [
-            "SET plan_cache_mode = auto",
-            "SET pg_stat_statements.track = 'all'",
-            "SET pg_stat_statements.track_planning = on",
-        ] {
-            sqlx::query(statement)
-                .execute(&mut *connection)
-                .await
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[ignore = "requires preloaded pg_stat_statements; release CI runs this test"]
-    async fn claim_candidate_plan_is_reused_across_calls() {
-        let database = claim_planning_database().await;
-        let mut connection = database.pool.acquire().await.unwrap();
-        configure_planning_counters(&mut connection).await;
-        rolled_back_claim(&mut connection).await;
-        let first = candidate_planning_counts(&mut connection).await;
-        assert_eq!(first, (1, 1));
-        for _ in 0..30 {
-            rolled_back_claim(&mut connection).await;
-        }
-        let repeated = candidate_planning_counts(&mut connection).await;
-        assert_eq!(repeated, (1, 31));
-        drop(connection);
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[ignore = "requires preloaded pg_stat_statements; release CI runs this test"]
-    async fn claim_candidate_plan_rebuilds_once_after_analyze() {
-        let database = claim_planning_database().await;
-        let mut connection = database.pool.acquire().await.unwrap();
-        configure_planning_counters(&mut connection).await;
-        for _ in 0..8 {
-            rolled_back_claim(&mut connection).await;
-        }
-        let before = candidate_planning_counts(&mut connection).await;
-        assert_eq!(before, (1, 8));
-        sqlx::query("ANALYZE horsies_tasks")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        rolled_back_claim(&mut connection).await;
-        let rebuilt = candidate_planning_counts(&mut connection).await;
-        assert_eq!(rebuilt, (before.0 + 1, before.1 + 1));
-        for _ in 0..30 {
-            rolled_back_claim(&mut connection).await;
-        }
-        let repeated = candidate_planning_counts(&mut connection).await;
-        assert_eq!(repeated, (rebuilt.0, rebuilt.1 + 30));
-        drop(connection);
         database.drop().await;
     }
 }

@@ -1184,24 +1184,6 @@ pub(super) fn workflow_task_claimed_at(claimed_at: DateTime<Utc>) -> TaskSeed {
     }
 }
 
-/// The parameters of one claim pass of `WORKER` over `queue`, with no cap.
-pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParams {
-    crate::broker::postgres::ClaimPassParams {
-        worker_id: WORKER.to_owned(),
-        queues: vec![queue.to_owned()],
-        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
-        queue_max_concurrency: std::collections::HashMap::new(),
-        hard_cap_mode: true,
-        processes: 10,
-        prefetch_buffer: 0,
-        max_claim_per_worker: 0,
-        max_claim_batch: 0,
-        cluster_wide_cap: None,
-        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
-        lock_keys: Vec::new(),
-    }
-}
-
 /// The request of one 0004 claim pass of `WORKER` over `queue`, with no
 /// cap: one `ISOLATED` budget of 10 that every class routes to.
 pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
