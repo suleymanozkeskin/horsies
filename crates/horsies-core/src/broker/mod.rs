@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod attempt_writes;
 pub mod bound_handle;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
