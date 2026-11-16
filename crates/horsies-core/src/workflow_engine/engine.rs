@@ -4678,7 +4678,8 @@ mod promotion_batch_tests {
                  SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid
              )
                AND retention_class_key = 'standard_30d'
-               AND octet_length(command_fingerprint) = 32
+               AND command_fingerprint IS NULL
+               AND command_fingerprint_version IS NULL
                AND rerun_of_task_id IS NULL
                AND rerun_root_task_id IS NULL
                AND idempotency_key_digest IS NULL

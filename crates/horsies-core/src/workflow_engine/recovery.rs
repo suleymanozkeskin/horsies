@@ -2894,9 +2894,9 @@ mod cap_tests {
         assert!(enqueue_ready_task(&pool, &row, &retention)
             .await
             .expect("recovery enqueue path"));
-        let facts: (String, i32, bool) = sqlx::query_as(
+        let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
-                    t.retain_rerun_input
+                    t.command_fingerprint_version, t.retain_rerun_input
              FROM horsies_tasks t
              JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
              WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
@@ -2906,8 +2906,9 @@ mod cap_tests {
         .await
         .expect("read recovery enqueue facts");
         assert_eq!(facts.0, "q_bulk_7d");
-        assert_eq!(facts.1, 32);
-        assert!(!facts.2);
+        assert!(facts.1.is_none());
+        assert!(facts.2.is_none());
+        assert!(!facts.3);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (

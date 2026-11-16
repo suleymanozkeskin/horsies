@@ -1077,9 +1077,10 @@ mod tests {
             .await
             .expect("enqueue slow-path workflow root");
 
-        let rows: Vec<(String, String, i32, bool)> = sqlx::query_as(
+        let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sqlx::query_as(
             "SELECT id::text, retention_class_key,
-                    octet_length(command_fingerprint), retain_rerun_input
+                    octet_length(command_fingerprint), command_fingerprint_version,
+                    retain_rerun_input
              FROM horsies_tasks WHERE task_name = $1 ORDER BY id",
         )
         .bind(task_name)
@@ -1090,8 +1091,9 @@ mod tests {
         assert!(rows.iter().any(|row| row.0 == slow_id.to_string()));
         for row in rows {
             assert_eq!(row.1, "q_bulk_7d");
-            assert_eq!(row.2, 32);
-            assert!(!row.3);
+            assert!(row.2.is_none());
+            assert!(row.3.is_none());
+            assert!(!row.4);
             assert_eq!(Uuid::parse_str(&row.0).unwrap().get_version_num(), 7);
         }
     }
