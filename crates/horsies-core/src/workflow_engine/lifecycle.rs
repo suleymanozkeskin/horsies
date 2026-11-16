@@ -476,13 +476,14 @@ pub async fn expire_paused_workflows(
         format_python_timedelta(older_than)?,
     );
     let error_json = serde_json::to_string(&crate::core::TaskError {
-        error_code: Some(crate::core::OutcomeCode::WorkflowExpired.into()),
-        message: Some(error_text),
-        cause: None,
+        exception: None,
+        error_code: crate::core::OutcomeCode::WorkflowExpired.into(),
         data: Some(serde_json::json!({
             "policy": "paused_workflow_auto_cancel_after",
             "older_than_seconds": seconds,
         })),
+        message: Some(error_text),
+        kind: crate::core::TaskErrorKind::Plain,
     })?;
     let mut expired = 0_u64;
     for candidate in candidates {
@@ -1675,7 +1676,7 @@ mod p7_lifecycle_tests {
         assert_eq!(status, "EXPIRED");
         assert_eq!(node_status, "SKIPPED");
         let error: TaskError = serde_json::from_str(&error_json).unwrap();
-        assert_eq!(error.error_code, Some(OutcomeCode::WorkflowExpired.into()));
+        assert_eq!(error.error_code, OutcomeCode::WorkflowExpired.into());
         assert_eq!(
             error.message.as_deref(),
             Some("paused_workflow_auto_cancel_after elapsed: 1:00:00"),
