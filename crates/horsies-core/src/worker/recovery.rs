@@ -1879,7 +1879,7 @@ mod tests {
                     if let Some((key, value)) = line.split_once('=') {
                         if key.trim() == "DB_PASSWORD" {
                             return format!(
-                                "postgresql://postgres:{}@localhost:5432/horsies-rust-port",
+                                "postgresql://postgres:{}@localhost:5432/horsies-core",
                                 value.trim(),
                             );
                         }

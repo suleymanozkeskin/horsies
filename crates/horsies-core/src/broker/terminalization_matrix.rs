@@ -11,8 +11,6 @@
 //! process, global discovery batches (pending expiry, orphan sweep) are
 //! pre-drained before seeding so one serial test cannot affect another.
 
-mod schema;
-
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -25,9 +23,6 @@ use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::maintenance::gate::{
-    begin_archive_maintenance, finish_archive_maintenance,
-};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::outcomes::GuardEvidence;
 use crate::core::lifecycle::{
@@ -147,7 +142,7 @@ fn test_db_url() -> String {
                 .map(|(_, v)| v.trim().to_owned())
         })
         .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    format!("postgresql://postgres:{pw}@localhost:5432/horsies-core")
 }
 
 struct P5TestDatabase {
@@ -162,7 +157,7 @@ struct IsolatedTerminalizationTestDatabase {
     name: String,
 }
 
-const ISOLATED_TERMINALIZATION_DATABASE_PREFIX: &str = "horsies_term_iso_";
+const ISOLATED_TERMINALIZATION_DATABASE_PREFIX: &str = "core_term_iso_";
 
 enum IsolatedTerminalizationDatabaseDrop {
     InactiveOnly,
@@ -306,19 +301,19 @@ pub(crate) async fn migrated_pool() -> PgPool {
             let base_options =
                 PgConnectOptions::from_str(&test_db_url()).expect("invalid P5 database URL");
             let admin_options = base_options.clone().database("postgres");
-            let database_name = format!("horsies_p5_matrix_{}", Uuid::new_v4().simple());
+            let database_name = format!("core_p5_matrix_{}", Uuid::new_v4().simple());
             let mut admin = PgConnection::connect_with(&admin_options)
                 .await
                 .expect("connect to P5 admin database");
-            sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_p5_matrix_setup'))")
+            sqlx::query("SELECT pg_advisory_lock(hashtext('core_p5_matrix_setup'))")
                 .execute(&mut admin)
                 .await
                 .expect("lock P5 database setup");
             let stale_databases: Vec<String> = sqlx::query_scalar(
                 "SELECT d.datname
                  FROM pg_database d
-                 WHERE left(d.datname, length('horsies_p5_matrix_')) =
-                       'horsies_p5_matrix_'
+                 WHERE left(d.datname, length('core_p5_matrix_')) =
+                       'core_p5_matrix_'
                    AND NOT EXISTS (
                        SELECT 1 FROM pg_stat_activity a
                        WHERE a.datname = d.datname
@@ -330,7 +325,7 @@ pub(crate) async fn migrated_pool() -> PgPool {
             .expect("list inactive P5 databases");
             for stale_database in stale_databases {
                 let suffix = stale_database
-                    .strip_prefix("horsies_p5_matrix_")
+                    .strip_prefix("core_p5_matrix_")
                     .expect("query enforces P5 database prefix");
                 assert!(
                     suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -355,12 +350,11 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .connect_with(generated_options)
                 .await
                 .expect("connect P5 database");
-            let unlocked: bool = sqlx::query_scalar(
-                "SELECT pg_advisory_unlock(hashtext('horsies_p5_matrix_setup'))",
-            )
-            .fetch_one(&mut admin)
-            .await
-            .expect("unlock P5 database setup");
+            let unlocked: bool =
+                sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p5_matrix_setup'))")
+                    .fetch_one(&mut admin)
+                    .await
+                    .expect("unlock P5 database setup");
             assert!(unlocked, "P5 database setup lock was held");
             run_horsies_migrations(&anchor)
                 .await
@@ -1001,128 +995,6 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
 
 #[tokio::test]
 #[serial]
-async fn archive_availability_refusal_rolls_back_the_whole_move() {
-    let pool = migrated_pool().await;
-    let task_uuid = Uuid::new_v4();
-    let id = task_uuid.to_string();
-    let workflow_id = Uuid::new_v4().to_string();
-    let key_digest = vec![19_u8; 32];
-    seed_workflow(&pool, &workflow_id, "RUNNING").await;
-    seed_task(
-        &pool,
-        &id,
-        Seed {
-            is_workflow_task: true,
-            idempotency_key_digest: Some(key_digest.clone()),
-            ..Seed::default()
-        },
-    )
-    .await;
-    seed_wf_task(&pool, &workflow_id, &id, "RUNNING").await;
-    sqlx::query(
-        "INSERT INTO horsies_task_attempts (
-             task_id, attempt, outcome, will_retry, started_at, finished_at,
-             error_code, error_message, failed_reason, worker_id
-         ) VALUES ($1, 1, 'FAILED', TRUE, NOW() - interval '2 minutes',
-                   NOW() - interval '1 minute', 'RETRY', 'retry once',
-                   'transient', 'w1')",
-    )
-    .bind(task_uuid)
-    .execute(&pool)
-    .await
-    .expect("seed retained attempt");
-    let mut reservation_connection = pool.acquire().await.expect("reservation connection");
-    let claim = claim_key_reservation(
-        &mut reservation_connection,
-        &key_digest,
-        1,
-        3600,
-        1,
-        &[7_u8; 32],
-        task_uuid,
-    )
-    .await
-    .expect("claim live reservation");
-    assert!(matches!(claim, ReservationClaim::Applied { task_id } if task_id == task_uuid));
-    drop(reservation_connection);
-    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
-        .await
-        .expect("task_done listener");
-    listener
-        .listen("task_done")
-        .await
-        .expect("listen task_done");
-
-    let session_id = Uuid::new_v4();
-    let mut maintenance = pool.begin().await.expect("maintenance transaction");
-    begin_archive_maintenance(&mut maintenance, session_id)
-        .await
-        .expect("begin archive maintenance");
-    maintenance
-        .commit()
-        .await
-        .expect("publish maintenance session");
-
-    let error = terminalize(
-        &pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-        },
-    )
-    .await
-    .expect_err("active archive maintenance refuses terminalization");
-    assert!(error.to_string().contains("archive maintenance"), "{error}");
-
-    let (live, history, attempts, pending, reservation_disposition, reservation_expires_at): (
-        i64,
-        i64,
-        i64,
-        i64,
-        String,
-        Option<DateTime<Utc>>,
-    ) = sqlx::query_as(
-        "SELECT
-             (SELECT count(*) FROM horsies_tasks WHERE id = $1),
-             (SELECT count(*) FROM horsies_task_history WHERE task_id = $1),
-             (SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1),
-             (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1),
-             (SELECT disposition FROM horsies_key_reservations
-              WHERE idempotency_key_digest = $2),
-             (SELECT expires_at FROM horsies_key_reservations
-              WHERE idempotency_key_digest = $2)",
-    )
-    .bind(task_uuid)
-    .bind(&key_digest)
-    .fetch_one(&pool)
-    .await
-    .expect("atomic refusal state");
-    let notification_absent =
-        tokio::time::timeout(std::time::Duration::from_millis(150), listener.recv())
-            .await
-            .is_err();
-
-    let mut finish = pool.begin().await.expect("finish maintenance transaction");
-    finish_archive_maintenance(&mut finish, session_id)
-        .await
-        .expect("finish archive maintenance");
-    finish.commit().await.expect("commit maintenance finish");
-    assert_eq!((live, history, attempts, pending), (1, 0, 1, 0));
-    assert_eq!(reservation_disposition, "LIVE");
-    assert_eq!(reservation_expires_at, None);
-    assert!(
-        notification_absent,
-        "refused move emits no task_done notification"
-    );
-    cleanup(&pool, &[&id]).await;
-    cleanup_workflow(&pool, &workflow_id).await;
-}
-
-#[tokio::test]
-#[serial]
 async fn fused_stale_generation_is_lost_claim() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -1574,115 +1446,6 @@ async fn drain_pending_expiry(pool: &PgPool) {
 async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     let pool = migrated_pool().await;
     assert_pending_expiry_order(&pool).await;
-}
-
-#[tokio::test]
-#[serial]
-async fn pending_expiry_order_survives_upgrade_and_program_installation() {
-    for explicit_install in [false, true] {
-        let database = IsolatedTerminalizationTestDatabase::create_empty().await;
-        let pool = &database.pool;
-        crate::broker::migrations::run_horsies_migrations_through(pool, 52)
-            .await
-            .unwrap();
-        match explicit_install {
-            false => run_horsies_migrations(pool).await.unwrap(),
-            true => {
-                let mut tx = pool.begin().await.unwrap();
-                let installed =
-                    crate::core::history::cutover::program::install_programs(tx.as_mut())
-                        .await
-                        .unwrap();
-                assert!(matches!(
-                    installed,
-                    crate::core::history::cutover::program::ProgramInstallation::Installed { .. }
-                ));
-                tx.commit().await.unwrap();
-            }
-        }
-        let mut tx = pool.begin().await.unwrap();
-        let coverage = ensure_partition_coverage(&mut tx, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .unwrap();
-        assert!(matches!(coverage, CoverageOutcome::Ensured(_)));
-        tx.commit().await.unwrap();
-        assert_pending_expiry_order(pool).await;
-        database.drop().await;
-    }
-}
-
-async fn history_single_column_checks(pool: &PgPool) -> Vec<(String, String)> {
-    sqlx::query_as(
-        "SELECT conname::text, pg_get_constraintdef(oid)
-         FROM pg_constraint
-         WHERE conrelid = 'horsies_task_history'::regclass
-           AND contype = 'c'
-           AND cardinality(conkey) = 1
-         ORDER BY conname",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap()
-}
-
-async fn history_cross_column_check_count(pool: &PgPool) -> i64 {
-    sqlx::query_scalar(
-        "SELECT count(*)
-         FROM pg_constraint
-         WHERE conrelid = 'horsies_task_history'::regclass
-           AND contype = 'c'
-           AND cardinality(conkey) > 1",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-#[tokio::test]
-#[serial]
-async fn history_column_rules_match_the_checks_that_migration_0064_drops() {
-    use crate::core::history::column_rules::HISTORY_COLUMN_RULES;
-
-    let database = IsolatedTerminalizationTestDatabase::create_empty().await;
-    let pool = &database.pool;
-    crate::broker::migrations::run_horsies_migrations_through(pool, 63)
-        .await
-        .unwrap();
-    let expected: Vec<(String, String)> = HISTORY_COLUMN_RULES
-        .iter()
-        .map(|rule| (rule.name.to_owned(), format!("CHECK ({})", rule.predicate)))
-        .collect();
-    assert_eq!(history_single_column_checks(pool).await, expected);
-    let cross_column = history_cross_column_check_count(pool).await;
-    assert_eq!(cross_column, 8);
-
-    run_horsies_migrations(pool).await.unwrap();
-    assert!(history_single_column_checks(pool).await.is_empty());
-    assert_eq!(history_cross_column_check_count(pool).await, cross_column);
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn migration_0064_refuses_a_diverged_single_column_check_set() {
-    let database = IsolatedTerminalizationTestDatabase::create_empty().await;
-    let pool = &database.pool;
-    crate::broker::migrations::run_horsies_migrations_through(pool, 63)
-        .await
-        .unwrap();
-    sqlx::query(
-        "ALTER TABLE horsies_task_history DROP CONSTRAINT horsies_task_history_priority_check",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-    let error = run_horsies_migrations(pool).await.unwrap_err().to_string();
-    assert!(
-        error.contains("single-column CHECK set differs"),
-        "unexpected migration error: {error}"
-    );
-    assert_eq!(history_single_column_checks(pool).await.len(), 23);
-    database.drop().await;
 }
 
 async fn assert_pending_expiry_order(pool: &PgPool) {
@@ -3338,23 +3101,10 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
 #[tokio::test]
 #[serial]
 async fn batch_terminalization_encodes_each_attempt_snapshot_once() {
-    for explicit_install in [false, true] {
-        let database = IsolatedTerminalizationTestDatabase::create().await;
-        let pool = &database.pool;
-        if explicit_install {
-            let mut tx = pool.begin().await.unwrap();
-            let installed = crate::core::history::cutover::program::install_programs(tx.as_mut())
-                .await
-                .unwrap();
-            assert!(matches!(
-                installed,
-                crate::core::history::cutover::program::ProgramInstallation::Installed { .. }
-            ));
-            tx.commit().await.unwrap();
-        }
-        assert_batch_snapshot_encoding(pool).await;
-        database.drop().await;
-    }
+    let database = IsolatedTerminalizationTestDatabase::create().await;
+    let pool = &database.pool;
+    assert_batch_snapshot_encoding(pool).await;
+    database.drop().await;
 }
 
 async fn assert_batch_snapshot_encoding(pool: &PgPool) {

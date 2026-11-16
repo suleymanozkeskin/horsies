@@ -1,28 +1,19 @@
--- Candidate selection reuses a generic plan. Capacity accounting stays in
--- horsies_claim so it can use parameter-specific plans.
-CREATE OR REPLACE FUNCTION horsies_claim_candidates(
-    v_total integer,
-    p_queues jsonb,
-    p_queue_priority jsonb,
-    p_queue_max_concurrency jsonb,
-    v_queue_counts jsonb,
-    p_max_claim_batch integer,
-    p_worker_id text,
-    p_lease_ms bigint
-)
-RETURNS TABLE(
-    id text,
-    task_name varchar,
-    args text,
-    kwargs text,
-    queue_name varchar,
-    is_workflow_task boolean,
-    task_options text,
-    claimed_at timestamptz
-)
-LANGUAGE plpgsql
-SET plan_cache_mode = force_generic_plan
-AS $candidates$
+-- Interim claim functions of the core's worker.
+--
+-- The worker of the copied Rust code claims through these two functions. They take the worker's process count
+-- (p_processes) where the functions of migration 1000 take execution-class budgets and routes, so they are
+-- separate overloads of horsies_claim (12 arguments) and horsies_claim_candidates (8 arguments) next to the
+-- 13- and 10-argument functions of migration 1000. Each body is the copied body with the changes that the
+-- baseline columns need:
+-- - the claimed flag column is gone, so the claim no longer sets it;
+-- - the claimed row returns the one input column in place of args and kwargs.
+-- They are removed when the worker claims through the functions of migration 1000.
+
+CREATE FUNCTION horsies_claim_candidates(v_total integer, p_queues jsonb, p_queue_priority jsonb, p_queue_max_concurrency jsonb, v_queue_counts jsonb, p_max_claim_batch integer, p_worker_id text, p_lease_ms bigint)
+ RETURNS TABLE(id text, task_name character varying, input text, queue_name character varying, is_workflow_task boolean, task_options text, claimed_at timestamp with time zone)
+ LANGUAGE plpgsql
+ SET plan_cache_mode TO 'force_generic_plan'
+AS $function$
 #variable_conflict use_column
 BEGIN
     RETURN QUERY
@@ -126,7 +117,6 @@ BEGIN
     updated AS (
         UPDATE horsies_tasks t
         SET status = 'CLAIMED',
-            claimed = TRUE,
             claimed_at = now(),
             claimed_by_worker_id = p_worker_id,
             claim_expires_at = now() + p_lease_ms * INTERVAL '1 millisecond',
@@ -134,7 +124,7 @@ BEGIN
             finalizing_by_worker_id = NULL,
             updated_at = now()
         WHERE t.id = ANY(ARRAY(SELECT id FROM pick))
-        RETURNING t.id::text, t.task_name, t.args, t.kwargs, t.queue_name,
+        RETURNING t.id::text, t.task_name, t.input, t.queue_name,
                   t.is_workflow_task, t.task_options, t.claimed_at
     ),
     return_order AS (
@@ -146,34 +136,12 @@ BEGIN
     JOIN return_order ON return_order.id = updated.id::uuid
     ORDER BY return_order.rn;
 END;
-$candidates$;
+$function$;
 
-CREATE OR REPLACE FUNCTION horsies_claim(
-    p_worker_id text,
-    p_queues jsonb,
-    p_queue_priority jsonb,
-    p_queue_max_concurrency jsonb,
-    p_hard_cap_mode boolean,
-    p_processes int,
-    p_prefetch_buffer int,
-    p_max_claim_per_worker int,
-    p_max_claim_batch int,
-    p_cluster_wide_cap int,
-    p_lease_ms bigint,
-    p_lock_keys jsonb
-)
-RETURNS TABLE(
-    id text,
-    task_name varchar,
-    args text,
-    kwargs text,
-    queue_name varchar,
-    is_workflow_task boolean,
-    task_options text,
-    claimed_at timestamptz
-)
-LANGUAGE plpgsql
-AS $func$
+CREATE FUNCTION horsies_claim(p_worker_id text, p_queues jsonb, p_queue_priority jsonb, p_queue_max_concurrency jsonb, p_hard_cap_mode boolean, p_processes integer, p_prefetch_buffer integer, p_max_claim_per_worker integer, p_max_claim_batch integer, p_cluster_wide_cap integer, p_lease_ms bigint, p_lock_keys jsonb)
+ RETURNS TABLE(id text, task_name character varying, input text, queue_name character varying, is_workflow_task boolean, task_options text, claimed_at timestamp with time zone)
+ LANGUAGE plpgsql
+AS $function$
 #variable_conflict use_column
 DECLARE
     v_key bigint;
@@ -260,4 +228,4 @@ BEGIN
         v_queue_counts, p_max_claim_batch, p_worker_id, p_lease_ms
     );
 END;
-$func$;
+$function$;

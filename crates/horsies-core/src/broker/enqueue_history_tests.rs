@@ -34,7 +34,7 @@ fn test_db_url() -> String {
                 .map(|(_, value)| value.trim().to_owned())
         })
         .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 struct P6TestDatabase {
@@ -48,19 +48,19 @@ pub(crate) async fn migrated_pool() -> PgPool {
     let database = P6_DATABASE
         .get_or_init(|| async {
             let base = PgConnectOptions::from_str(&test_db_url()).expect("invalid P6 database URL");
-            let database_name = format!("horsies_p6_enqueue_{}", Uuid::new_v4().simple());
+            let database_name = format!("core_p6_enqueue_{}", Uuid::new_v4().simple());
             let mut admin = PgConnection::connect_with(&base.clone().database("postgres"))
                 .await
                 .expect("connect P6 admin database");
-            sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_p6_enqueue_setup'))")
+            sqlx::query("SELECT pg_advisory_lock(hashtext('core_p6_enqueue_setup'))")
                 .execute(&mut admin)
                 .await
                 .expect("lock P6 database setup");
             let stale: Vec<String> = sqlx::query_scalar(
                 "SELECT d.datname
                  FROM pg_database d
-                 WHERE left(d.datname, length('horsies_p6_enqueue_')) =
-                       'horsies_p6_enqueue_'
+                 WHERE left(d.datname, length('core_p6_enqueue_')) =
+                       'core_p6_enqueue_'
                    AND NOT EXISTS (
                        SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
                    )
@@ -71,7 +71,7 @@ pub(crate) async fn migrated_pool() -> PgPool {
             .expect("list inactive P6 databases");
             for stale_database in stale {
                 let suffix = stale_database
-                    .strip_prefix("horsies_p6_enqueue_")
+                    .strip_prefix("core_p6_enqueue_")
                     .expect("query enforces P6 database prefix");
                 assert!(
                     suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -94,12 +94,11 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .connect_with(base.database(&database_name))
                 .await
                 .expect("connect P6 database");
-            let unlocked: bool = sqlx::query_scalar(
-                "SELECT pg_advisory_unlock(hashtext('horsies_p6_enqueue_setup'))",
-            )
-            .fetch_one(&mut admin)
-            .await
-            .expect("unlock P6 database setup");
+            let unlocked: bool =
+                sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p6_enqueue_setup'))")
+                    .fetch_one(&mut admin)
+                    .await
+                    .expect("unlock P6 database setup");
             assert!(unlocked, "P6 database setup lock was held");
             run_horsies_migrations(&anchor)
                 .await

@@ -3,18 +3,30 @@
 //! sqlx's `Migrator::run()` writes its bookkeeping into a fixed
 //! `_sqlx_migrations` table (hardcoded in `sqlx-postgres`). When horsies is
 //! embedded in an application that also uses `sqlx::migrate!()` against the
-//! same database, both writers collide on that table.
+//! same database, both writers collide on that table. This runner tracks
+//! applied versions in a horsies-owned table named [`MIGRATIONS_TABLE`],
+//! leaving `_sqlx_migrations` untouched for the host application.
 //!
-//! This module re-implements the migrator using the same embedded migration
-//! set (`sqlx::migrate!()` at build time) but tracks applied versions in a
-//! horsies-owned table named [`MIGRATIONS_TABLE`], leaving `_sqlx_migrations`
-//! untouched for the host application.
+//! The embedded chain:
+//! - Version 1000 is the baseline schema: the files of `migrations/1000_baseline/`
+//!   in name order (tables, indexes, interim functions), concatenated with no
+//!   separator, with one SHA-384 checksum over the result. It creates
+//!   [`MIGRATIONS_TABLE`] itself. The Python package installs the same three
+//!   files as its migration 1000, so both write the same bookkeeping row.
+//! - Version 1001 holds the claim functions of the copied Rust worker, which
+//!   have no counterpart in migration 1000. It goes when the worker claims
+//!   through the functions of migration 1000.
+//!
+//! Each migration runs in one transaction. The runner writes its bookkeeping
+//! row after the migration SQL, in the same transaction, and names every value.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rand::Rng;
-use sqlx::migrate::{MigrateError, Migration, Migrator};
+use sqlx::migrate::{MigrateError, Migration, MigrationType};
 use sqlx::{Acquire, Executor, PgConnection, PgPool};
 use tokio::time::{sleep, Instant};
 
@@ -23,11 +35,54 @@ use crate::broker::error::BrokerError;
 /// Name of the horsies-owned migrations bookkeeping table.
 pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 
+/// Version of the baseline schema migration.
+pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
+
+/// The baseline schema: the three source files in name order, as one migration.
+///
+/// The files are byte-for-byte copies of `horsies/core/baseline/sql/` on the
+/// `program/python-onto-baseline` branch at commit
+/// f47be8f5cf55db880f5075f9ce7bb8eaf38f7eed. Change them there and copy them
+/// again; never edit the copies here.
+const BASELINE_SQL: &str = concat!(
+    include_str!("../../migrations/1000_baseline/0001_tables.sql"),
+    include_str!("../../migrations/1000_baseline/0002_indexes.sql"),
+    include_str!("../../migrations/1000_baseline/0003_interim_functions.sql"),
+);
+
+/// Version, description and SQL of each embedded migration, in apply order.
+const MIGRATION_SOURCES: [(i64, &str, &str); 2] = [
+    (BASELINE_MIGRATION_VERSION, "baseline", BASELINE_SQL),
+    (
+        1001,
+        "interim rust claim functions",
+        include_str!("../../migrations/1001_interim_rust_claim_functions.sql"),
+    ),
+];
+
+/// The embedded migrations with their SHA-384 checksums.
+fn embedded_migrations() -> &'static [Migration] {
+    static MIGRATIONS: OnceLock<Vec<Migration>> = OnceLock::new();
+    MIGRATIONS.get_or_init(|| {
+        MIGRATION_SOURCES
+            .iter()
+            .map(|(version, description, sql)| {
+                Migration::new(
+                    *version,
+                    Cow::Borrowed(description),
+                    MigrationType::Simple,
+                    Cow::Borrowed(sql),
+                    false,
+                )
+            })
+            .collect()
+    })
+}
+
 /// Highest embedded migration version expected by this binary.
 pub fn expected_schema_version() -> i64 {
-    sqlx::migrate!()
+    embedded_migrations()
         .iter()
-        .filter(|migration| !migration.migration_type.is_down_migration())
         .map(|migration| migration.version)
         .max()
         .expect("the embedded horsies migration chain is non-empty")
@@ -60,72 +115,20 @@ const ADVISORY_LOCK_KEY: i64 = 0x484F_5253_4945_5300;
 const MIGRATION_MAX_ATTEMPTS: usize = 5;
 const DEADLOCK_SQLSTATE: &str = "40P01";
 
-#[derive(Clone, Copy)]
-struct ConcurrentRecoveryIndex {
-    version: i64,
-    name: &'static str,
-    table: &'static str,
-}
-
-const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 4] = [
-    ConcurrentRecoveryIndex {
-        version: 46,
-        name: "idx_horsies_workflows_running_recovery_scan",
-        table: "horsies_workflows",
-    },
-    ConcurrentRecoveryIndex {
-        version: 47,
-        name: "idx_horsies_tasks_orphan_recovery_scan",
-        table: "horsies_tasks",
-    },
-    ConcurrentRecoveryIndex {
-        version: 51,
-        name: "idx_horsies_history_catalog_active",
-        table: "horsies_task_history_leaf_catalog",
-    },
-    ConcurrentRecoveryIndex {
-        version: 60,
-        name: "idx_horsies_workflow_tasks_nonterminal",
-        table: "horsies_workflow_tasks",
-    },
-];
-
-enum RecoveryIndexRelationState {
-    Absent,
-    ExpectedTable,
-    Conflict,
-}
-
-struct RecoveryIndexClaim {
-    name: String,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-struct RecoveryIndexClaimPause {
-    entered: std::sync::Arc<tokio::sync::Notify>,
-    release: std::sync::Arc<tokio::sync::Notify>,
-}
-
-#[cfg(test)]
-static RECOVERY_INDEX_CLAIM_PAUSE: std::sync::OnceLock<
-    std::sync::Mutex<Option<RecoveryIndexClaimPause>>,
-> = std::sync::OnceLock::new();
-
 /// Run all embedded horsies migrations against `pool`.
 ///
-/// Bookkeeps in [`MIGRATIONS_TABLE`] rather than `_sqlx_migrations`.
-/// On first run, copies any matching horsies rows out of an existing
-/// `_sqlx_migrations` table so prior alpha installs upgrade cleanly.
+/// Bookkeeps in [`MIGRATIONS_TABLE`] rather than `_sqlx_migrations`. A
+/// database whose ledger holds a version that this binary does not embed is
+/// refused with `VersionMissing`; a changed migration with `VersionMismatch`;
+/// a failed earlier run with `Dirty`.
 pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
-    let migrator = sqlx::migrate!();
-    if migrations_are_current(pool, &migrator).await? {
+    if migrations_are_current(pool).await? {
         return Ok(());
     }
 
     let mut attempt = 1;
     loop {
-        match run_horsies_migrations_locked(pool, &migrator).await {
+        match run_horsies_migrations_locked(pool).await {
             Ok(()) => return Ok(()),
             Err(err) if is_deadlock_error(&err) && attempt < MIGRATION_MAX_ATTEMPTS => {
                 let scale = 1_u64 << (attempt - 1);
@@ -144,10 +147,7 @@ pub async fn run_horsies_migrations(pool: &PgPool) -> Result<(), BrokerError> {
     }
 }
 
-async fn run_horsies_migrations_locked(
-    pool: &PgPool,
-    migrator: &Migrator,
-) -> Result<(), BrokerError> {
+async fn run_horsies_migrations_locked(pool: &PgPool) -> Result<(), BrokerError> {
     let mut conn = pool.acquire().await?;
 
     // A blocking lock query can keep a snapshot that a concurrent index
@@ -163,7 +163,7 @@ async fn run_horsies_migrations_locked(
         sleep(Duration::from_millis(25)).await;
     }
 
-    let outcome = run_inner(&mut conn, migrator).await;
+    let outcome = run_inner(&mut conn).await;
 
     // Always release the session-level lock, even on error, so the connection
     // can return to the pool clean. Swallow unlock errors so we surface the
@@ -176,22 +176,46 @@ async fn run_horsies_migrations_locked(
     outcome
 }
 
-async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), BrokerError> {
-    if migrations_are_current_on_conn(conn, migrator).await? {
+async fn run_inner(conn: &mut PgConnection) -> Result<(), BrokerError> {
+    if migrations_are_current_on_conn(conn).await? {
         return Ok(());
     }
 
-    run_inner_through(conn, migrator, i64::MAX).await
+    // Migration 1000 creates the ledger. Without it the database has no
+    // horsies schema, and every embedded migration is applied in order.
+    let applied = if ledger_exists(conn).await? {
+        applied_checksums(conn).await?
+    } else {
+        HashMap::new()
+    };
+
+    for migration in embedded_migrations() {
+        match applied.get(&migration.version) {
+            Some(applied_checksum) => {
+                if applied_checksum.as_slice() != migration.checksum.as_ref() {
+                    return Err(BrokerError::Migration(MigrateError::VersionMismatch(
+                        migration.version,
+                    )));
+                }
+            }
+            None => apply_migration(conn, migration).await?,
+        }
+    }
+
+    Ok(())
 }
 
-async fn run_inner_through(
-    conn: &mut PgConnection,
-    migrator: &Migrator,
-    maximum_version: i64,
-) -> Result<(), BrokerError> {
-    ensure_migrations_table(conn).await?;
-    backfill_from_sqlx_migrations(conn, migrator).await?;
+async fn ledger_exists(conn: &mut PgConnection) -> Result<bool, BrokerError> {
+    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(MIGRATIONS_TABLE)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(BrokerError::from)
+}
 
+/// Checksums of the applied versions. Refuses a failed earlier run and a
+/// version that this binary does not embed.
+async fn applied_checksums(conn: &mut PgConnection) -> Result<HashMap<i64, Vec<u8>>, BrokerError> {
     let dirty: Option<(i64,)> = sqlx::query_as(&format!(
         "SELECT version FROM {MIGRATIONS_TABLE} \
          WHERE success = false ORDER BY version LIMIT 1"
@@ -209,75 +233,28 @@ async fn run_inner_through(
     .await?;
     let applied: HashMap<i64, Vec<u8>> = applied_rows.into_iter().collect();
 
-    let embedded_versions: HashSet<i64> = migrator.iter().map(|m| m.version).collect();
-    for &version in applied.keys() {
-        if !embedded_versions.contains(&version) {
-            // Match sqlx migrator rollback behavior: a database with a future
-            // horsies migration should fail hard under an older binary.
-            return Err(BrokerError::Migration(MigrateError::VersionMissing(
-                version,
-            )));
-        }
+    let embedded_versions: HashSet<i64> = embedded_migrations().iter().map(|m| m.version).collect();
+    if let Some(&version) = applied
+        .keys()
+        .filter(|version| !embedded_versions.contains(version))
+        .min()
+    {
+        // A database with a migration that this binary does not know (a
+        // newer horsies, or a 0.x chain) fails hard.
+        return Err(BrokerError::Migration(MigrateError::VersionMissing(
+            version,
+        )));
     }
-
-    for migration in migrator.iter() {
-        if migration.migration_type.is_down_migration() || migration.version > maximum_version {
-            continue;
-        }
-        match applied.get(&migration.version) {
-            Some(applied_checksum) => {
-                if applied_checksum.as_slice() != migration.checksum.as_ref() {
-                    return Err(BrokerError::Migration(MigrateError::VersionMismatch(
-                        migration.version,
-                    )));
-                }
-            }
-            None => apply_migration(conn, migration).await?,
-        }
-    }
-
-    Ok(())
+    Ok(applied)
 }
 
-/// Apply the embedded journal only through `maximum_version`.
-///
-/// This exists solely for the cutover pipeline, which must construct the
-/// exact pre-emission database before seeding legacy rows. Production callers
-/// can only use [`run_horsies_migrations`], which always applies the full
-/// append-only journal.
-#[cfg(test)]
-pub(crate) async fn run_horsies_migrations_through(
-    pool: &PgPool,
-    maximum_version: i64,
-) -> Result<(), BrokerError> {
-    let migrator = sqlx::migrate!();
+async fn migrations_are_current(pool: &PgPool) -> Result<bool, BrokerError> {
     let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(ADVISORY_LOCK_KEY)
-        .execute(&mut *conn)
-        .await?;
-    let outcome = run_inner_through(&mut conn, &migrator, maximum_version).await;
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(ADVISORY_LOCK_KEY)
-        .execute(&mut *conn)
-        .await;
-    outcome
+    migrations_are_current_on_conn(&mut conn).await
 }
 
-async fn migrations_are_current(pool: &PgPool, migrator: &Migrator) -> Result<bool, BrokerError> {
-    let mut conn = pool.acquire().await?;
-    migrations_are_current_on_conn(&mut conn, migrator).await
-}
-
-async fn migrations_are_current_on_conn(
-    conn: &mut PgConnection,
-    migrator: &Migrator,
-) -> Result<bool, BrokerError> {
-    let table_exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(MIGRATIONS_TABLE)
-        .fetch_one(&mut *conn)
-        .await?;
-    if !table_exists {
+async fn migrations_are_current_on_conn(conn: &mut PgConnection) -> Result<bool, BrokerError> {
+    if !ledger_exists(conn).await? {
         return Ok(false);
     }
 
@@ -287,34 +264,29 @@ async fn migrations_are_current_on_conn(
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut applied: HashMap<i64, (bool, Vec<u8>)> = HashMap::new();
+    let mut applied: HashMap<i64, Vec<u8>> = HashMap::new();
     for (version, success, checksum) in applied_rows {
         if !success {
             return Ok(false);
         }
-        applied.insert(version, (success, checksum));
+        applied.insert(version, checksum);
     }
 
-    let embedded_versions: HashSet<i64> = migrator.iter().map(|m| m.version).collect();
-    for &version in applied.keys() {
-        if !embedded_versions.contains(&version) {
-            // Force the locked path, which reports VersionMissing for future
-            // migration rows instead of silently treating the schema as current.
-            return Ok(false);
-        }
+    let embedded_versions: HashSet<i64> = embedded_migrations().iter().map(|m| m.version).collect();
+    if applied
+        .keys()
+        .any(|version| !embedded_versions.contains(version))
+    {
+        // Force the locked path, which reports VersionMissing for unknown
+        // migration rows instead of treating the schema as current.
+        return Ok(false);
     }
 
-    for migration in migrator.iter() {
-        if migration.migration_type.is_down_migration() {
-            continue;
-        }
-        match applied.get(&migration.version) {
-            Some((true, checksum)) if checksum.as_slice() == migration.checksum.as_ref() => {}
-            _ => return Ok(false),
-        }
-    }
-
-    Ok(true)
+    Ok(embedded_migrations().iter().all(|migration| {
+        applied
+            .get(&migration.version)
+            .is_some_and(|checksum| checksum.as_slice() == migration.checksum.as_ref())
+    }))
 }
 
 fn is_deadlock_error(err: &BrokerError) -> bool {
@@ -339,302 +311,34 @@ fn sqlx_error_sqlstate(err: &sqlx::Error) -> Option<String> {
     }
 }
 
-async fn ensure_migrations_table(conn: &mut PgConnection) -> Result<(), BrokerError> {
-    conn.execute(
-        format!(
-            "CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (\n\
-                version BIGINT PRIMARY KEY,\n\
-                description TEXT NOT NULL,\n\
-                installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),\n\
-                success BOOLEAN NOT NULL,\n\
-                checksum BYTEA NOT NULL,\n\
-                execution_time BIGINT NOT NULL\n\
-            )"
-        )
-        .as_str(),
-    )
-    .await?;
-    Ok(())
-}
-
-/// One-time backfill from a pre-existing `_sqlx_migrations` table.
-///
-/// If `horsies_migrations` is empty and `_sqlx_migrations` exists in the
-/// current search path, copies rows whose `(version, checksum)` pair matches
-/// one of our embedded migrations. The checksum gate is essential: a host
-/// application's `sqlx::migrate!()` may have populated `_sqlx_migrations`
-/// with rows at the same version numbers as horsies (1, 2, 3…), and those
-/// rows belong to the application, not to a prior horsies install. Matching
-/// on checksum (SHA-384 of the migration SQL) reliably distinguishes our
-/// rows from anyone else's. Foreign rows are left untouched.
-async fn backfill_from_sqlx_migrations(
-    conn: &mut PgConnection,
-    migrator: &Migrator,
-) -> Result<(), BrokerError> {
-    let (already_has_rows,): (bool,) = sqlx::query_as(&format!(
-        "SELECT EXISTS (SELECT 1 FROM {MIGRATIONS_TABLE} LIMIT 1)"
-    ))
-    .fetch_one(&mut *conn)
-    .await?;
-    if already_has_rows {
-        return Ok(());
-    }
-
-    let (sqlx_table_exists,): (bool,) =
-        sqlx::query_as("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
-            .fetch_one(&mut *conn)
-            .await?;
-    if !sqlx_table_exists {
-        return Ok(());
-    }
-
-    let mut versions: Vec<i64> = Vec::with_capacity(migrator.iter().len());
-    let mut checksums: Vec<Vec<u8>> = Vec::with_capacity(migrator.iter().len());
-    for m in migrator.iter() {
-        if m.migration_type.is_down_migration() {
-            continue;
-        }
-        versions.push(m.version);
-        checksums.push(m.checksum.to_vec());
-    }
-    if versions.is_empty() {
-        return Ok(());
-    }
-
-    sqlx::query(&format!(
-        "INSERT INTO {MIGRATIONS_TABLE} \
-            (version, description, installed_on, success, checksum, execution_time) \
-         SELECT s.version, s.description, s.installed_on, s.success, s.checksum, s.execution_time \
-         FROM _sqlx_migrations s \
-         JOIN unnest($1::BIGINT[], $2::BYTEA[]) AS e(version, checksum) \
-           ON s.version = e.version AND s.checksum = e.checksum \
-         ON CONFLICT (version) DO NOTHING"
-    ))
-    .bind(&versions[..])
-    .bind(&checksums[..])
-    .execute(&mut *conn)
-    .await?;
-
-    Ok(())
-}
-
+/// Apply one migration and write its bookkeeping row in one transaction.
 async fn apply_migration(
     conn: &mut PgConnection,
     migration: &Migration,
 ) -> Result<(), BrokerError> {
     let start = Instant::now();
-
-    if migration.no_tx {
-        let concurrent_index = CONCURRENT_RECOVERY_INDEXES
-            .iter()
-            .find(|index| index.version == migration.version)
-            .copied();
-        let claim = match concurrent_index {
-            Some(index) => prepare_concurrent_recovery_index(conn, migration, index).await?,
-            None => None,
-        };
-        execute_sql(&mut *conn, migration).await?;
-        if let Some(claim) = claim {
-            remove_concurrent_recovery_index_claim(conn, migration, &claim).await?;
-        }
-        if let Some(index) = concurrent_index {
-            remove_abandoned_recovery_index_claims(conn, migration, index).await?;
-        }
-        record_applied(&mut *conn, migration).await?;
-    } else {
-        let mut tx = conn.begin().await?;
-        execute_sql(&mut *tx, migration).await?;
-        record_applied(&mut *tx, migration).await?;
-        tx.commit().await?;
-    }
-
-    // execution_time is best-effort; if the process dies here the row already
-    // exists with execution_time = -1 (matching sqlx's own behaviour).
-    let elapsed_ns: i64 = start.elapsed().as_nanos().try_into().unwrap_or(i64::MAX);
-    sqlx::query(&format!(
-        "UPDATE {MIGRATIONS_TABLE} SET execution_time = $1 WHERE version = $2"
-    ))
-    .bind(elapsed_ns)
-    .bind(migration.version)
-    .execute(&mut *conn)
-    .await?;
-
-    Ok(())
-}
-
-async fn prepare_concurrent_recovery_index(
-    conn: &mut PgConnection,
-    migration: &Migration,
-    index: ConcurrentRecoveryIndex,
-) -> Result<Option<RecoveryIndexClaim>, BrokerError> {
-    let state = recovery_index_relation_state(conn, index.name, index.table).await?;
-    pause_after_recovery_index_inspection().await;
-    match state {
-        RecoveryIndexRelationState::Absent => return Ok(None),
-        RecoveryIndexRelationState::Conflict => {
-            return Err(recovery_index_conflict(migration, index));
-        }
-        RecoveryIndexRelationState::ExpectedTable => {}
-    }
-
-    let claim_name = format!(
-        "horsies_recovery_index_claim_{}",
-        uuid::Uuid::new_v4().simple()
-    );
-    // The first ownership read can become stale. Rename the current canonical
-    // name and recheck its owner in one transaction. Rollback restores a
-    // foreign relation that reused the canonical name.
-    let mut transaction = conn.begin().await?;
-    sqlx::query(&format!(
-        "ALTER INDEX IF EXISTS {} RENAME TO {claim_name}",
-        index.name
-    ))
-    .execute(transaction.as_mut())
-    .await
-    .map_err(|error| {
+    let mut tx = conn.begin().await?;
+    tx.execute(migration.sql.as_ref()).await.map_err(|error| {
         BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
     })?;
-    let claim_state =
-        recovery_index_relation_state(transaction.as_mut(), &claim_name, index.table).await?;
-    match claim_state {
-        RecoveryIndexRelationState::ExpectedTable => {
-            transaction.commit().await?;
-            Ok(Some(RecoveryIndexClaim { name: claim_name }))
-        }
-        RecoveryIndexRelationState::Absent | RecoveryIndexRelationState::Conflict => {
-            transaction.rollback().await?;
-            Err(recovery_index_conflict(migration, index))
-        }
-    }
-}
-
-async fn recovery_index_relation_state(
-    conn: &mut PgConnection,
-    index_name: &str,
-    table_name: &str,
-) -> Result<RecoveryIndexRelationState, BrokerError> {
-    let relation_owner: Option<(Option<bool>,)> = sqlx::query_as(
-        "SELECT i.indrelid = to_regclass($2)
-         FROM pg_class AS c
-         LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
-         WHERE c.oid = to_regclass($1)",
-    )
-    .bind(index_name)
-    .bind(table_name)
-    .fetch_optional(&mut *conn)
-    .await?;
-    Ok(match relation_owner {
-        None => RecoveryIndexRelationState::Absent,
-        Some((Some(true),)) => RecoveryIndexRelationState::ExpectedTable,
-        Some((Some(false) | None,)) => RecoveryIndexRelationState::Conflict,
-    })
-}
-
-async fn remove_concurrent_recovery_index_claim(
-    conn: &mut PgConnection,
-    migration: &Migration,
-    claim: &RecoveryIndexClaim,
-) -> Result<(), BrokerError> {
-    // DROP INDEX CONCURRENTLY cannot run in the claim transaction. The UUID
-    // name prevents canonical-name reuse from changing the drop target.
-    sqlx::query(&format!("DROP INDEX CONCURRENTLY {}", claim.name))
-        .execute(&mut *conn)
-        .await
-        .map_err(|error| {
-            BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
-        })?;
-    Ok(())
-}
-
-async fn remove_abandoned_recovery_index_claims(
-    conn: &mut PgConnection,
-    migration: &Migration,
-    index: ConcurrentRecoveryIndex,
-) -> Result<(), BrokerError> {
-    let claim_names: Vec<String> = sqlx::query_scalar(
-        "SELECT relation.relname
-         FROM pg_class AS relation
-         JOIN pg_index AS index_state ON index_state.indexrelid = relation.oid
-         WHERE index_state.indrelid = to_regclass($1)
-           AND relation.relname LIKE 'horsies_recovery_index_claim\\_%' ESCAPE '\\'",
-    )
-    .bind(index.table)
-    .fetch_all(&mut *conn)
-    .await?;
-    for claim_name in claim_names {
-        if !claim_name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err(recovery_index_conflict(migration, index));
-        }
-        remove_concurrent_recovery_index_claim(
-            conn,
-            migration,
-            &RecoveryIndexClaim { name: claim_name },
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-fn recovery_index_conflict(migration: &Migration, index: ConcurrentRecoveryIndex) -> BrokerError {
-    let error = sqlx::Error::Protocol(format!(
-        "migration {} requires index {} on {}, but that name belongs to another relation",
-        migration.version, index.name, index.table,
-    ));
-    BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
-}
-
-#[cfg(test)]
-async fn pause_after_recovery_index_inspection() {
-    let pause = RECOVERY_INDEX_CLAIM_PAUSE
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .expect("recovery index claim pause lock")
-        .clone();
-    if let Some(pause) = pause {
-        pause.entered.notify_one();
-        pause.release.notified().await;
-    }
-}
-
-#[cfg(not(test))]
-async fn pause_after_recovery_index_inspection() {}
-
-async fn execute_sql<'c, E>(executor: E, migration: &Migration) -> Result<(), BrokerError>
-where
-    E: Executor<'c, Database = sqlx::Postgres>,
-{
-    executor
-        .execute(migration.sql.as_ref())
-        .await
-        .map_err(|error| match sqlx_error_sqlstate(&error).as_deref() {
-            Some("HN001") => BrokerError::InvalidWorkflowNodeStatus,
-            _ => BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version)),
-        })?;
-    Ok(())
-}
-
-async fn record_applied<'c, E>(executor: E, migration: &Migration) -> Result<(), BrokerError>
-where
-    E: Executor<'c, Database = sqlx::Postgres>,
-{
+    let execution_time_ns: i64 = start.elapsed().as_nanos().try_into().unwrap_or(i64::MAX);
     sqlx::query(&format!(
         "INSERT INTO {MIGRATIONS_TABLE} \
-            (version, description, success, checksum, execution_time) \
-         VALUES ($1, $2, TRUE, $3, -1)"
+            (version, description, installed_on, success, checksum, execution_time) \
+         VALUES ($1, $2, statement_timestamp(), TRUE, $3, $4)"
     ))
     .bind(migration.version)
     .bind(migration.description.as_ref())
     .bind(migration.checksum.as_ref())
-    .execute(executor)
+    .bind(execution_time_ns)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
 #[cfg(test)]
-mod recovery_index_migration_tests {
+mod tests {
     use std::str::FromStr;
 
     use serial_test::serial;
@@ -643,38 +347,6 @@ mod recovery_index_migration_tests {
     use uuid::Uuid;
 
     use super::*;
-
-    const WORKFLOW_INDEX: &str =
-        include_str!("../../migrations/0046_running_workflow_recovery_index.sql");
-    const TASK_INDEX: &str = include_str!("../../migrations/0047_orphan_task_recovery_index.sql");
-    const VALIDATION_AND_FUNCTION: &str =
-        include_str!("../../migrations/0048_bounded_recovery_function.sql");
-
-    #[test]
-    fn recovery_indexes_are_concurrent_and_validated_before_function_install() {
-        for migration in [WORKFLOW_INDEX, TASK_INDEX] {
-            assert!(migration.starts_with("-- no-transaction\n"));
-            assert!(migration.contains("CREATE INDEX CONCURRENTLY"));
-            assert!(!migration.contains("IF NOT EXISTS"));
-        }
-        let validation = VALIDATION_AND_FUNCTION
-            .find("DO $migration$")
-            .expect("index validation block");
-        let function = VALIDATION_AND_FUNCTION
-            .find("CREATE OR REPLACE FUNCTION horsies_cancel_orphaned_tasks")
-            .expect("bounded orphan function");
-        assert!(validation < function);
-        for required_shape_check in [
-            "'valid', i.indisvalid",
-            "'ready', i.indisready",
-            "'live', i.indislive",
-            "'operator_classes', to_jsonb(i.indclass::oid[])",
-            "'collations', to_jsonb(i.indcollation::oid[])",
-            "'predicate', pg_get_expr(i.indpred, i.indrelid)",
-        ] {
-            assert!(VALIDATION_AND_FUNCTION.contains(required_shape_check));
-        }
-    }
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -694,7 +366,7 @@ mod recovery_index_migration_tests {
                     .map(|(_, value)| value.trim().to_owned())
             })
             .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+        format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
     }
 
     struct MigrationTestDatabase {
@@ -709,7 +381,7 @@ mod recovery_index_migration_tests {
             let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
                 .await
                 .unwrap();
-            let name = format!("horsies_migration_retry_{}", Uuid::new_v4().simple());
+            let name = format!("core_migration_retry_{}", Uuid::new_v4().simple());
             sqlx::query(&format!("CREATE DATABASE \"{name}\""))
                 .execute(&mut admin)
                 .await
@@ -731,234 +403,171 @@ mod recovery_index_migration_tests {
         }
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn nonterminal_node_index_upgrade_repairs_wrong_shape_and_preserves_rows() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        run_horsies_migrations_through(pool, 59).await.unwrap();
-        let workflow = Uuid::new_v4();
-        sqlx::query("INSERT INTO horsies_workflows (id, name, status) VALUES ($1, 'partial_index', 'RUNNING')")
-            .bind(workflow).execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name, status) SELECT gen_random_uuid(), $1, n, 'partial_index', status FROM unnest(ARRAY['PENDING','READY','ENQUEUED','RUNNING','COMPLETED','FAILED','SKIPPED']) WITH ORDINALITY AS states(status,n)")
-            .bind(workflow).execute(pool).await.unwrap();
-        let row_sql =
-            "SELECT jsonb_agg(to_jsonb(n) ORDER BY task_index) FROM horsies_workflow_tasks n";
-        let before: serde_json::Value = sqlx::query_scalar(row_sql).fetch_one(pool).await.unwrap();
-        sqlx::query(
-            "CREATE INDEX idx_horsies_workflow_tasks_nonterminal ON horsies_workflow_tasks(status)",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        run_horsies_migrations_through(pool, 61).await.unwrap();
-        run_horsies_migrations_through(pool, 61).await.unwrap();
-        let after: serde_json::Value = sqlx::query_scalar(row_sql).fetch_one(pool).await.unwrap();
-        assert_eq!(before, after);
-        let definition: String = sqlx::query_scalar(
-            "SELECT pg_get_indexdef('idx_horsies_workflow_tasks_nonterminal'::regclass)",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert!(definition.contains("(workflow_id)"), "{definition}");
-        for status in ["PENDING", "READY", "ENQUEUED", "RUNNING"] {
-            assert!(definition.contains(status), "{definition}");
-        }
-        let mut transaction = pool.begin().await.unwrap();
-        sqlx::query("DROP INDEX idx_horsies_workflow_tasks_nonterminal")
-            .execute(transaction.as_mut())
-            .await
-            .unwrap();
-        sqlx::query("CREATE INDEX idx_horsies_workflow_tasks_nonterminal ON horsies_workflow_tasks(workflow_id) WHERE status='RUNNING'")
-            .execute(transaction.as_mut()).await.unwrap();
-        let error = sqlx::raw_sql(include_str!(
-            "../../migrations/0061_validate_nonterminal_node_recovery_index.sql"
-        ))
-        .execute(transaction.as_mut())
-        .await
-        .unwrap_err();
-        assert_eq!(sqlx_error_sqlstate(&error).as_deref(), Some("55000"));
-        transaction.rollback().await.unwrap();
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn node_status_upgrade_refuses_invalid_rows_and_preserves_valid_states() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        run_horsies_migrations_through(pool, 58).await.unwrap();
-        let workflow = Uuid::new_v4();
-        let node = Uuid::new_v4();
-        sqlx::query("INSERT INTO horsies_workflows (id, name, status) VALUES ($1, 'node_status_test', 'RUNNING')")
-            .bind(workflow).execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name, status) VALUES ($1, $2, 0, 'node_status_test', 'CANCELLED')")
-            .bind(node).bind(workflow).execute(pool).await.unwrap();
-        let function_sql =
-            "SELECT pg_get_functiondef('horsies_phase2_consume(uuid,text)'::regprocedure)";
-        let before: String = sqlx::query_scalar(function_sql)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-        let error = run_horsies_migrations_through(pool, 59).await.unwrap_err();
-        assert!(matches!(error, BrokerError::InvalidWorkflowNodeStatus));
-        assert!(!error.is_retryable());
-        let version: i64 = sqlx::query_scalar("SELECT max(version) FROM horsies_migrations")
-            .fetch_one(pool)
-            .await
-            .unwrap();
-        assert_eq!(version, 58);
-        let after: String = sqlx::query_scalar(function_sql)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-        assert_eq!(before, after);
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id=$1")
-                .bind(node)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-        assert_eq!(status, "CANCELLED");
-        sqlx::query("UPDATE horsies_workflow_tasks SET status='FAILED' WHERE id=$1")
-            .bind(node)
-            .execute(pool)
-            .await
-            .unwrap();
-        run_horsies_migrations_through(pool, 59).await.unwrap();
-        run_horsies_migrations_through(pool, 59).await.unwrap();
-        for status in [
-            "PENDING",
-            "READY",
-            "ENQUEUED",
-            "RUNNING",
-            "COMPLETED",
-            "FAILED",
-            "SKIPPED",
-        ] {
-            sqlx::query("UPDATE horsies_workflow_tasks SET status=$1 WHERE id=$2")
-                .bind(status)
-                .bind(node)
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-        for status in ["CANCELLED", "EXPIRED", "UNKNOWN", ""] {
-            let error = sqlx::query("UPDATE horsies_workflow_tasks SET status=$1 WHERE id=$2")
-                .bind(status)
-                .bind(node)
-                .execute(pool)
-                .await
-                .unwrap_err();
-            assert_eq!(sqlx_error_sqlstate(&error).as_deref(), Some("23514"));
-        }
-        let validated: bool = sqlx::query_scalar("SELECT convalidated FROM pg_constraint WHERE conrelid='horsies_workflow_tasks'::regclass AND conname='horsies_workflow_tasks_status_check'")
-            .fetch_one(pool).await.unwrap();
-        assert!(validated);
-        for status in [Some("CANCELLED"), Some("SKIPPED"), Some("UNKNOWN"), None] {
-            let error = sqlx::query("SELECT horsies_phase2_consume($1, $2)")
-                .bind(Uuid::new_v4())
-                .bind(status)
-                .execute(pool)
-                .await
-                .unwrap_err();
-            assert_eq!(sqlx_error_sqlstate(&error).as_deref(), Some("22023"));
-        }
-        for status in ["COMPLETED", "FAILED"] {
-            let disposition: String =
-                sqlx::query_scalar("SELECT (horsies_phase2_consume($1, $2)).disposition")
-                    .bind(Uuid::new_v4())
-                    .bind(status)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap();
-            assert_eq!(disposition, "PENDING_ABSENT");
-        }
-        let settings: Vec<String> = sqlx::query_scalar(
-            "SELECT proconfig FROM pg_proc WHERE oid='horsies_phase2_consume(uuid,text)'::regprocedure",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert!(settings
-            .iter()
-            .any(|s| s == "plan_cache_mode=force_generic_plan"));
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn active_catalog_upgrade_repairs_invalid_index_and_preserves_catalog_rows() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        run_horsies_migrations_through(pool, 50).await.unwrap();
-        sqlx::query("INSERT INTO horsies_retention_classes (class_key, duration, partition_interval, finite_parent_name, created_at) VALUES ('standard_30d', interval '30 days', interval '1 day', 'unused_parent', NOW())").execute(pool).await.unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_task_history_leaf_catalog (
-                leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-                index_schema_version, id_index_name, partition_bound,
-                min_birth_verified, created_at, detached_at, dropped_at
-             ) SELECT 'catalog_index_' || g, 'unused_parent', 'standard_30d',
-                      timestamptz '2010-01-01' + g * interval '1 minute',
-                      timestamptz '2010-01-01' + (g + 1) * interval '1 minute',
-                      1, 'unused_index_' || g, 'unused_bound', FALSE, NOW(),
-                      CASE WHEN g <= 6010 THEN NOW() ELSE NULL END,
-                      CASE WHEN g <= 6000 THEN NOW() ELSE NULL END
-               FROM generate_series(1, 6020) AS g",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        let snapshot = "SELECT jsonb_agg(to_jsonb(c) ORDER BY leaf_name) FROM horsies_task_history_leaf_catalog c";
-        let before: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(pool).await.unwrap();
-        let selected = "SELECT leaf_name FROM horsies_task_history_leaf_catalog WHERE class_key='standard_30d' AND dropped_at IS NULL AND upper_anchor <= timestamptz '2020-01-01' ORDER BY upper_anchor";
-        let expected: Vec<String> = sqlx::query_scalar(selected).fetch_all(pool).await.unwrap();
-        assert_eq!(expected.len(), 20);
-        let error = sqlx::query("CREATE UNIQUE INDEX CONCURRENTLY idx_horsies_history_catalog_active ON horsies_task_history_leaf_catalog (class_key)")
-            .execute(pool).await.unwrap_err();
+    #[test]
+    fn baseline_is_one_migration_built_from_its_three_files() {
+        let baseline = &embedded_migrations()[0];
+        assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
+        assert_eq!(baseline.description.as_ref(), "baseline");
+        let tables = include_str!("../../migrations/1000_baseline/0001_tables.sql");
+        let indexes = include_str!("../../migrations/1000_baseline/0002_indexes.sql");
+        let functions = include_str!("../../migrations/1000_baseline/0003_interim_functions.sql");
         assert_eq!(
-            error.as_database_error().and_then(|e| e.code()).as_deref(),
-            Some("23505")
+            baseline.sql.as_ref(),
+            format!("{tables}{indexes}{functions}")
         );
-        run_horsies_migrations_through(pool, 52).await.unwrap();
-        run_horsies_migrations_through(pool, 52).await.unwrap();
-        let after: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(pool).await.unwrap();
-        assert_eq!(before, after);
-        let actual: Vec<String> = sqlx::query_scalar(selected).fetch_all(pool).await.unwrap();
-        assert_eq!(expected, actual);
-        sqlx::query("ANALYZE horsies_task_history_leaf_catalog")
-            .execute(pool)
+        assert!(tables.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
+        let versions: Vec<i64> = embedded_migrations().iter().map(|m| m.version).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(versions, sorted, "apply order is ascending and unique");
+        assert_eq!(expected_schema_version(), *versions.last().unwrap());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn fresh_database_gets_every_migration_with_named_bookkeeping() {
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations(&database.pool).await.unwrap();
+
+        let rows: Vec<(i64, String, bool, Vec<u8>, i64, bool)> = sqlx::query_as(&format!(
+            "SELECT version, description, success, checksum, execution_time, \
+                    installed_on <= statement_timestamp() \
+             FROM {MIGRATIONS_TABLE} ORDER BY version"
+        ))
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+        let expected: Vec<(i64, String, bool, Vec<u8>)> = embedded_migrations()
+            .iter()
+            .map(|m| {
+                (
+                    m.version,
+                    m.description.to_string(),
+                    true,
+                    m.checksum.to_vec(),
+                )
+            })
+            .collect();
+        let observed: Vec<(i64, String, bool, Vec<u8>)> = rows
+            .iter()
+            .map(|(version, description, success, checksum, _, _)| {
+                (*version, description.clone(), *success, checksum.clone())
+            })
+            .collect();
+        assert_eq!(observed, expected);
+        assert!(rows
+            .iter()
+            .all(|(_, _, _, _, execution_time, installed)| *execution_time >= 0 && *installed));
+        assert_eq!(
+            successful_schema_version(&database.pool).await.unwrap(),
+            Some(expected_schema_version())
+        );
+        let guard: i32 = sqlx::query_scalar("SELECT max(version) FROM horsies_schema_version")
+            .fetch_one(&database.pool)
             .await
             .unwrap();
-        let plan: serde_json::Value = sqlx::query_scalar(&format!(
-            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {selected}"
+        assert_eq!(i64::from(guard), BASELINE_MIGRATION_VERSION);
+
+        // A second run is a no-op.
+        run_horsies_migrations(&database.pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {MIGRATIONS_TABLE}"))
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, i64::try_from(embedded_migrations().len()).unwrap());
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn changed_checksum_is_refused_as_version_mismatch() {
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations(&database.pool).await.unwrap();
+        sqlx::query(&format!(
+            "UPDATE {MIGRATIONS_TABLE} SET checksum = '\\x00'::bytea WHERE version = $1"
         ))
-        .fetch_one(pool)
+        .bind(BASELINE_MIGRATION_VERSION)
+        .execute(&database.pool)
         .await
         .unwrap();
-        assert!(
-            plan.to_string()
-                .contains("idx_horsies_history_catalog_active"),
-            "{plan}"
-        );
-        sqlx::query(
-            "UPDATE horsies_task_history_leaf_catalog SET dropped_at=NOW() WHERE leaf_name=$1",
-        )
-        .bind(&expected[0])
-        .execute(pool)
+        match run_horsies_migrations(&database.pool).await {
+            Err(BrokerError::Migration(MigrateError::VersionMismatch(version))) => {
+                assert_eq!(version, BASELINE_MIGRATION_VERSION);
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn unknown_applied_version_is_refused_as_version_missing() {
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations(&database.pool).await.unwrap();
+        let unknown = expected_schema_version() + 1;
+        sqlx::query(&format!(
+            "INSERT INTO {MIGRATIONS_TABLE} \
+                (version, description, installed_on, success, checksum, execution_time) \
+             VALUES ($1, 'from a newer binary', statement_timestamp(), TRUE, '\\x00'::bytea, 0)"
+        ))
+        .bind(unknown)
+        .execute(&database.pool)
         .await
         .unwrap();
-        let after_drop: Vec<String> = sqlx::query_scalar(selected).fetch_all(pool).await.unwrap();
-        assert_eq!(after_drop, expected[1..]);
-        let retained: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM horsies_task_history_leaf_catalog WHERE leaf_name=$1)",
-        )
-        .bind(&expected[0])
-        .fetch_one(pool)
+        match run_horsies_migrations(&database.pool).await {
+            Err(BrokerError::Migration(MigrateError::VersionMissing(version))) => {
+                assert_eq!(version, unknown);
+            }
+            other => panic!("expected VersionMissing, got {other:?}"),
+        }
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_earlier_run_is_refused_as_dirty() {
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations(&database.pool).await.unwrap();
+        let last = expected_schema_version();
+        sqlx::query(&format!(
+            "UPDATE {MIGRATIONS_TABLE} SET success = FALSE WHERE version = $1"
+        ))
+        .bind(last)
+        .execute(&database.pool)
         .await
         .unwrap();
-        assert!(retained);
+        match run_horsies_migrations(&database.pool).await {
+            Err(BrokerError::Migration(MigrateError::Dirty(version))) => {
+                assert_eq!(version, last);
+            }
+            other => panic!("expected Dirty, got {other:?}"),
+        }
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failing_migration_leaves_no_ledger_row() {
+        let database = MigrationTestDatabase::create().await;
+        // An object that the baseline creates already exists: migration 1000
+        // fails and its transaction, ledger included, rolls back.
+        sqlx::query("CREATE TABLE horsies_tasks (id uuid)")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        match run_horsies_migrations(&database.pool).await {
+            Err(BrokerError::Migration(MigrateError::ExecuteMigration(_, version))) => {
+                assert_eq!(version, BASELINE_MIGRATION_VERSION);
+            }
+            other => panic!("expected ExecuteMigration, got {other:?}"),
+        }
+        let ledger: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(MIGRATIONS_TABLE)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert!(!ledger);
         database.drop().await;
     }
 
@@ -969,19 +578,21 @@ mod recovery_index_migration_tests {
             .execute(pool)
             .await
             .unwrap();
-        run_horsies_migrations_through(pool, 62).await.unwrap();
+        run_horsies_migrations(pool).await.unwrap();
         sqlx::query("ALTER TABLE horsies_tasks SET (autovacuum_enabled = false)")
             .execute(pool)
             .await
             .unwrap();
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, status, enqueued_at,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
-             ) SELECT md5(n::text)::uuid, 'plan_test', 'plan_test', n % 5,
-                'PENDING', NOW() - interval '1 hour', n::text, 1,
-                decode(repeat('00', 32), 'hex'), 'forever', FALSE, 'NEVER_ELIGIBLE'
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at, command_fingerprint_version,
+                command_fingerprint, status, enqueued_at, retry_count, max_retries,
+                is_workflow_task, updated_at, retain_rerun_input
+             ) SELECT md5(n::text)::uuid, 'plan_test', 'plan_test', n % 5 + 1, 'null', NULL,
+                'ISOLATED', 'forever', NOW() - interval '1 hour', NOW() - interval '1 hour', 1,
+                decode(repeat('00', 32), 'hex'), 'PENDING', NOW() - interval '1 hour', 0, 0,
+                FALSE, NOW() - interval '1 hour', FALSE
              FROM generate_series(1, 50000) n",
         )
         .execute(pool)
@@ -1083,395 +694,6 @@ mod recovery_index_migration_tests {
         let repeated = candidate_planning_counts(&mut connection).await;
         assert_eq!(repeated, (rebuilt.0, rebuilt.1 + 30));
         drop(connection);
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn ordered_claim_upgrade_preserves_existing_tasks_and_function_shape() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        run_horsies_migrations_through(pool, 48).await.unwrap();
-        let task_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, status, sent_at, enqueued_at,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
-             ) VALUES (
-                $1, 'claim_upgrade', 'claim_upgrade', 10, 'PENDING', NOW(), NOW(),
-                $1::text, 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-             )",
-        )
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .unwrap();
-        let before: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
-                .bind(task_id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-        let signature: String = sqlx::query_scalar(
-            "SELECT oid::regprocedure::text FROM pg_proc WHERE proname = 'horsies_claim'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        let shape: String = sqlx::query_scalar(
-            "SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'horsies_claim'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-
-        run_horsies_migrations_through(pool, 62).await.unwrap();
-        run_horsies_migrations_through(pool, 62).await.unwrap();
-        let after: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
-                .bind(task_id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-        assert_eq!(before, after);
-        let upgraded_shape: String = sqlx::query_scalar(
-            "SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'horsies_claim'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(shape, upgraded_shape);
-        let upgraded_signature: String = sqlx::query_scalar(
-            "SELECT oid::regprocedure::text FROM pg_proc WHERE proname = 'horsies_claim'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(signature, upgraded_signature);
-        let settings: Vec<(String, Option<Vec<String>>)> = sqlx::query_as(
-            "SELECT proname::text, proconfig FROM pg_proc WHERE proname IN ('horsies_claim', 'horsies_claim_candidates') ORDER BY proname",
-        ).fetch_all(pool).await.unwrap();
-        assert_eq!(
-            settings,
-            vec![
-                ("horsies_claim".to_owned(), None),
-                (
-                    "horsies_claim_candidates".to_owned(),
-                    Some(vec!["plan_cache_mode=force_generic_plan".to_owned()])
-                ),
-            ]
-        );
-        let claimed: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM horsies_claim(
-                'upgrade_worker', '[\"claim_upgrade\"]'::jsonb, '{}'::jsonb,
-                '{}'::jsonb, TRUE, 1, 0, 1, 1, NULL, 60000, '[]'::jsonb
-             )",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        assert_eq!(claimed, vec![task_id.to_string()]);
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn terminal_snapshot_upgrade_preserves_existing_tasks_and_function_shapes() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        run_horsies_migrations_through(pool, 49).await.unwrap();
-        let task_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, status, sent_at, enqueued_at,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
-             ) VALUES (
-                $1, 'claim_upgrade', 'claim_upgrade', 10, 'PENDING', NOW(), NOW(),
-                $1::text, 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-             )",
-        )
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .unwrap();
-        let before: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
-                .bind(task_id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-        let shape: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-
-        run_horsies_migrations_through(pool, 50).await.unwrap();
-        run_horsies_migrations_through(pool, 50).await.unwrap();
-        let after: serde_json::Value =
-            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
-                .bind(task_id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-        assert_eq!(before, after);
-        let upgraded_shape: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        assert_eq!(shape, upgraded_shape);
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn waiting_migrator_does_not_block_a_concurrent_index_build() {
-        let database = MigrationTestDatabase::create().await;
-        run_horsies_migrations_through(&database.pool, 45)
-            .await
-            .unwrap();
-        let waiting_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::query("SET deadlock_timeout = '10s'")
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with((*database.pool.connect_options()).clone())
-            .await
-            .unwrap();
-        let waiting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&waiting_pool)
-            .await
-            .unwrap();
-        let mut owner = database.pool.acquire().await.unwrap();
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(ADVISORY_LOCK_KEY)
-            .execute(&mut *owner)
-            .await
-            .unwrap();
-        sqlx::raw_sql("SET deadlock_timeout = '10s'; SET statement_timeout = '2s';")
-            .execute(&mut *owner)
-            .await
-            .unwrap();
-        let waiter = tokio::spawn(async move {
-            let result = run_horsies_migrations(&waiting_pool).await;
-            waiting_pool.close().await;
-            result
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT query LIKE '%advisory_lock%' FROM pg_stat_activity WHERE pid=$1",
-                )
-                .bind(waiting_pid)
-                .fetch_one(&database.pool)
-                .await
-                .unwrap();
-                if waiting {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let built = sqlx::query(
-            "CREATE INDEX CONCURRENTLY test_workflow_name_active ON horsies_workflows(name) WHERE status='RUNNING'",
-        ).execute(&mut *owner).await;
-        sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(ADVISORY_LOCK_KEY)
-            .execute(&mut *owner)
-            .await
-            .unwrap();
-        drop(owner);
-        let migrated = tokio::time::timeout(Duration::from_secs(20), waiter)
-            .await
-            .unwrap()
-            .unwrap();
-        built.expect(
-            "the waiting migrator must leave no active transaction for the index build to wait on",
-        );
-        migrated.unwrap();
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn invalid_concurrent_recovery_index_is_rebuilt_on_migration_retry() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-
-        run_horsies_migrations_through(pool, 45).await.unwrap();
-        let first_id = Uuid::new_v4();
-        let second_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO horsies_workflows (
-                 id, name, status, on_error, definition_key, depth,
-                 root_workflow_id, sent_at, created_at, started_at, updated_at
-             ) VALUES
-                 ($1, 'migration_retry_a', 'RUNNING', 'fail', $3, 0,
-                  $1, NOW(), NOW(), NOW(), NOW()),
-                 ($2, 'migration_retry_b', 'RUNNING', 'fail', $4, 0,
-                  $2, NOW(), NOW(), NOW(), NOW())",
-        )
-        .bind(first_id)
-        .bind(second_id)
-        .bind(format!("test.migration-retry.{first_id}"))
-        .bind(format!("test.migration-retry.{second_id}"))
-        .execute(pool)
-        .await
-        .unwrap();
-
-        let build_error = sqlx::query(
-            "CREATE UNIQUE INDEX CONCURRENTLY
-                 idx_horsies_workflows_running_recovery_scan
-             ON horsies_workflows (status)",
-        )
-        .execute(pool)
-        .await
-        .unwrap_err();
-        assert_eq!(
-            build_error
-                .as_database_error()
-                .and_then(|error| error.code().map(|code| code.into_owned()))
-                .as_deref(),
-            Some("23505"),
-        );
-        let invalid: bool = sqlx::query_scalar(
-            "SELECT NOT i.indisvalid
-             FROM pg_index AS i
-             WHERE i.indexrelid =
-                   'idx_horsies_workflows_running_recovery_scan'::regclass",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert!(
-            invalid,
-            "failed concurrent build must leave an invalid index"
-        );
-
-        run_horsies_migrations_through(pool, 48).await.unwrap();
-        let valid: bool = sqlx::query_scalar(
-            "SELECT i.indisvalid AND i.indisready AND i.indislive
-             FROM pg_index AS i
-             WHERE i.indexrelid =
-                   'idx_horsies_workflows_running_recovery_scan'::regclass
-               AND i.indrelid = 'horsies_workflows'::regclass",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert!(valid, "migration retry must install a valid recovery index");
-        let applied: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM horsies_migrations
-                 WHERE version = 46 AND success
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert!(applied, "repaired index migration must be recorded");
-
-        database.drop().await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn recovery_index_claim_refuses_a_canonical_name_reused_after_inspection() {
-        let database = MigrationTestDatabase::create().await;
-        let pool = &database.pool;
-        run_horsies_migrations_through(pool, 45).await.unwrap();
-        sqlx::query(
-            "CREATE INDEX idx_horsies_workflows_running_recovery_scan
-             ON horsies_workflows (status)",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query("CREATE TABLE migration_recovery_index_foreign (value integer)")
-            .execute(pool)
-            .await
-            .unwrap();
-
-        let pause = RecoveryIndexClaimPause {
-            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
-            release: std::sync::Arc::new(tokio::sync::Notify::new()),
-        };
-        *RECOVERY_INDEX_CLAIM_PAUSE
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .unwrap() = Some(pause.clone());
-        let migration_pool = pool.clone();
-        let migration =
-            tokio::spawn(async move { run_horsies_migrations_through(&migration_pool, 48).await });
-        pause.entered.notified().await;
-
-        sqlx::query(
-            "ALTER INDEX idx_horsies_workflows_running_recovery_scan
-             RENAME TO migration_recovery_index_moved",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE INDEX idx_horsies_workflows_running_recovery_scan
-             ON migration_recovery_index_foreign (value)",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-        pause.release.notify_one();
-
-        let error = migration.await.unwrap().unwrap_err();
-        assert!(
-            error.to_string().contains("belongs to another relation"),
-            "migration must refuse the reused canonical name: {error}",
-        );
-        *RECOVERY_INDEX_CLAIM_PAUSE.get().unwrap().lock().unwrap() = None;
-        let owner: String = sqlx::query_scalar(
-            "SELECT index_state.indrelid::regclass::text
-             FROM pg_index AS index_state
-             WHERE index_state.indexrelid =
-                   'idx_horsies_workflows_running_recovery_scan'::regclass",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(owner, "migration_recovery_index_foreign");
-        let moved_owner: String = sqlx::query_scalar(
-            "SELECT index_state.indrelid::regclass::text
-             FROM pg_index AS index_state
-             WHERE index_state.indexrelid =
-                   'migration_recovery_index_moved'::regclass",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(moved_owner, "horsies_workflows");
-        let recorded: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM horsies_migrations
-                 WHERE version = 46
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert!(!recorded, "refused claim must not record migration 46");
-
         database.drop().await;
     }
 }

@@ -215,7 +215,17 @@ jobs:
       - name: Run tests
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude horsies-core
+
+      # The core installs the baseline schema; the client crate installs its
+      # own migration chain. Each suite gets its own database.
+      - name: Create the core test database
+        run: docker exec ${{ job.services.postgres.id }} createdb -U postgres horsies-core
+
+      - name: Run core tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-core
+        run: cargo test -p horsies-core
 
   rust-showcase:
     runs-on: ubuntu-latest

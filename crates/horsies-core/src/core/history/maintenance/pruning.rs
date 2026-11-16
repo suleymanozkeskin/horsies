@@ -8,14 +8,10 @@ use crate::core::history::commands::{
     FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
     DETACH_STATEMENT_TIMEOUT_MS,
 };
-use crate::core::history::cutover::state::cutover_complete;
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::heartbeats::partitioning::{
     sweep_expired_heartbeat_leaves, HeartbeatLeafSwept,
-};
-use crate::core::history::maintenance::gate::{
-    active_maintenance_session, MaintenanceSessionError,
 };
 use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
 use crate::core::history::outcomes::{LeafDrop, LeafInspection};
@@ -51,21 +47,11 @@ pub struct ForeverLeafSwept {
     pub outcome: ForeverLeafSweepOutcome,
 }
 
-/// Why a pass did not sweep closed daily `forever` leaves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForeverSweepSkipped {
-    /// Cutover relocation can still insert legacy rows into closed leaves.
-    CutoverNotComplete,
-    /// Transcode can still write replacement partitions.
-    ArchiveMaintenanceActive,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ForeverSweepPass {
     pub swept: Vec<ForeverLeafSwept>,
     /// Closed leaves that hold rows. Never detached; not an action.
     pub kept_non_empty: Vec<String>,
-    pub skipped: Option<ForeverSweepSkipped>,
     pub errors: Vec<String>,
 }
 
@@ -323,20 +309,6 @@ async fn closed_forever_candidates(pool: &PgPool) -> Result<Vec<LeafRef>, Histor
         .collect()
 }
 
-async fn forever_sweep_skipped(pool: &PgPool) -> Result<Option<ForeverSweepSkipped>, HistoryError> {
-    let mut connection = pool.acquire().await?;
-    if !cutover_complete(&mut connection).await? {
-        return Ok(Some(ForeverSweepSkipped::CutoverNotComplete));
-    }
-    match active_maintenance_session(&mut connection).await {
-        Ok(None) => Ok(None),
-        Ok(Some(_)) | Err(MaintenanceSessionError::MultipleActive) => {
-            Ok(Some(ForeverSweepSkipped::ArchiveMaintenanceActive))
-        }
-        Err(error) => Err(HistoryError::contract(error.to_string())),
-    }
-}
-
 /// Inspects every candidate on one connection; empty eligible leaves become
 /// detaches, interrupted detaches become finalizations, detached leaves drops.
 async fn plan_forever_sweep(
@@ -438,8 +410,7 @@ async fn act_on_forever_leaf<P: LoaderPublication>(
 
 /// Detaches and drops closed daily `forever` leaves that hold no rows, and
 /// finishes interrupted detaches of such leaves. At most
-/// `MAX_FOREVER_DETACHES_PER_PASS` new detaches per pass. Skipped while the
-/// cutover is not complete or archive maintenance is active.
+/// `MAX_FOREVER_DETACHES_PER_PASS` new detaches per pass.
 ///
 /// `pool` must preserve PostgreSQL session affinity.
 pub async fn sweep_empty_forever_leaves<P: LoaderPublication>(
@@ -447,17 +418,6 @@ pub async fn sweep_empty_forever_leaves<P: LoaderPublication>(
     publisher: &P,
 ) -> ForeverSweepPass {
     let mut pass = ForeverSweepPass::default();
-    match forever_sweep_skipped(pool).await {
-        Ok(None) => {}
-        Ok(Some(skipped)) => {
-            pass.skipped = Some(skipped);
-            return pass;
-        }
-        Err(error) => {
-            pass.errors.push(format!("forever sweep gate: {error}"));
-            return pass;
-        }
-    }
     let actions = match plan_forever_sweep(pool, &mut pass).await {
         Ok(actions) => actions,
         Err(error) => {

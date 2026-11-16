@@ -253,7 +253,7 @@ mod tests {
                     .map(|(_, v)| v.trim().to_owned())
             })
             .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-core")
     }
 
     /// C4: the runner heartbeat loop must keep retrying after

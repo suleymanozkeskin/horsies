@@ -873,24 +873,6 @@ impl PostgresBroker {
                 if actual != Some(expected) {
                     return Err(BrokerError::SchemaVersionMismatch { expected, actual });
                 }
-                let cutover_table_exists: bool =
-                    sqlx::query_scalar("SELECT to_regclass('horsies_cutover_state') IS NOT NULL")
-                        .fetch_one(&self.session_pool)
-                        .await?;
-                if !cutover_table_exists {
-                    return Err(BrokerError::IncompleteTaskHistoryCutover);
-                }
-                let cutover_complete: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (\
-                         SELECT 1 FROM horsies_cutover_state \
-                         WHERE cutover_name = 'task_history_v1_validated_v1'\
-                     )",
-                )
-                .fetch_one(&self.session_pool)
-                .await?;
-                if !cutover_complete {
-                    return Err(BrokerError::IncompleteTaskHistoryCutover);
-                }
                 Ok::<(), BrokerError>(())
             })
             .await?;

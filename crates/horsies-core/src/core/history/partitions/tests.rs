@@ -19,15 +19,11 @@ use crate::core::history::commands::{
     DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf,
     LeafBounds, LeafRef,
 };
-use crate::core::history::cutover::relocation::{
-    relocate_terminal_batch, RelocationError, RelocationOutcome, RELOCATION_LEDGER,
-};
 use crate::core::history::ddl::classes::{
     finite_class_parent_name, register_finite_retention_class, ClassRegistration, FOREVER_CLASS_KEY,
 };
 use crate::core::history::ddl::runtime_names::{
-    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, open_ended_leaf_name,
-    render_daily_leaf_ddl,
+    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
 };
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, ensure_heartbeat_coverage, heartbeat_horizon, hourly_leaf_name,
@@ -39,13 +35,9 @@ use crate::core::history::maintenance::coverage::{
     ensure_startup_coverage_in_pool, CoverageOutcome, DeclaredRetentionClass,
     StartupCoverageOutcome,
 };
-use crate::core::history::maintenance::gate::{
-    active_maintenance_session, begin_archive_maintenance, finish_archive_maintenance,
-    MaintenanceSessionError, ARCHIVE_AVAILABILITY_FUNCTION,
-};
 use crate::core::history::maintenance::pruning::{
     prune_expired_partitions, sweep_empty_forever_leaves, ForeverLeafSweepOutcome,
-    ForeverLeafSwept, ForeverSweepSkipped, MAX_FOREVER_DETACHES_PER_PASS,
+    ForeverLeafSwept, MAX_FOREVER_DETACHES_PER_PASS,
 };
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
@@ -61,7 +53,7 @@ use super::catalog::{
     read_leaf_physical_state, read_manifest_leaf_rows, LeafIndexKind,
     LeafPartitionBoundExpectation,
 };
-use super::forever::{ensure_forever_range_partitioning, FOREVER_LEGACY_LEAF};
+use super::forever::ensure_forever_range_partitioning;
 use super::health::collect_partition_health;
 use super::manager::{
     create_daily_leaf, detach_empty_forever_leaf, detach_expired_leaf, drop_detached_leaf,
@@ -272,7 +264,7 @@ impl TestDatabase {
         let base = database_url();
         let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
         let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("horsies_p3_{}", Uuid::new_v4().simple());
+        let database_name = format!("core_p3_{}", Uuid::new_v4().simple());
         let mut admin = PgConnection::connect_with(&admin_options)
             .await
             .expect("connect to postgres admin database");
@@ -333,7 +325,7 @@ fn database_url() -> String {
         .filter_map(|line| line.split_once('='))
         .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
         .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 #[derive(Clone)]
@@ -2324,70 +2316,6 @@ async fn coverage_savepoint_contains_database_failure_and_still_serves_other_cla
 
 #[tokio::test]
 #[serial]
-async fn maintenance_session_exclusively_gates_archive_transitions_until_finished() {
-    let database = TestDatabase::create().await;
-    let session_id = Uuid::new_v4();
-    let mut transaction = database
-        .pool
-        .begin()
-        .await
-        .expect("begin maintenance session");
-    let session = begin_archive_maintenance(&mut transaction, session_id)
-        .await
-        .expect("open maintenance session");
-    assert_eq!(session.session_id, session_id);
-    assert_eq!(
-        active_maintenance_session(&mut transaction)
-            .await
-            .expect("read active maintenance session"),
-        Some(session_id)
-    );
-    assert!(matches!(
-        begin_archive_maintenance(&mut transaction, Uuid::new_v4()).await,
-        Err(MaintenanceSessionError::AlreadyActive)
-    ));
-    transaction
-        .commit()
-        .await
-        .expect("commit maintenance session");
-
-    let unavailable = sqlx::query(&format!("SELECT {ARCHIVE_AVAILABILITY_FUNCTION}()"))
-        .execute(&database.pool)
-        .await
-        .expect_err("archive transition must fail while maintenance is active");
-    let sqlstate = match unavailable {
-        sqlx::Error::Database(error) => error.code().map(|code| code.into_owned()),
-        other => panic!("availability gate returned a non-database error: {other}"),
-    };
-    assert_eq!(sqlstate.as_deref(), Some("55006"));
-
-    let mut transaction = database
-        .pool
-        .begin()
-        .await
-        .expect("begin maintenance finish");
-    finish_archive_maintenance(&mut transaction, session_id)
-        .await
-        .expect("finish maintenance session");
-    assert_eq!(
-        active_maintenance_session(&mut transaction)
-            .await
-            .expect("read closed maintenance session"),
-        None
-    );
-    transaction
-        .commit()
-        .await
-        .expect("commit maintenance finish");
-    sqlx::query(&format!("SELECT {ARCHIVE_AVAILABILITY_FUNCTION}()"))
-        .execute(&database.pool)
-        .await
-        .expect("archive transition resumes after maintenance");
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
 async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "p3_finalize_1d";
@@ -2528,244 +2456,6 @@ async fn forever_conversion_is_idempotent_and_reports_coverage_health() {
     database.drop().await;
 }
 
-#[tokio::test]
-#[serial]
-async fn populated_v34_forever_leaf_converts_without_rewriting_old_rows() {
-    let database = TestDatabase::create().await;
-    let mut transaction = database.pool.begin().await.expect("begin v34 restoration");
-    sqlx::query(&format!(
-        "DELETE FROM {LEAF_CATALOG} WHERE class_key = 'forever'"
-    ))
-    .execute(&mut *transaction)
-    .await
-    .expect("remove v35 forever catalog rows");
-    sqlx::query(&format!(
-        "ALTER TABLE {TASK_HISTORY_PARENT} DETACH PARTITION {TASK_HISTORY_FOREVER}"
-    ))
-    .execute(&mut *transaction)
-    .await
-    .expect("detach v35 forever range parent");
-    sqlx::query(&format!("DROP TABLE {TASK_HISTORY_FOREVER} CASCADE"))
-        .execute(&mut *transaction)
-        .await
-        .expect("drop v35 forever range parent");
-    sqlx::query(&format!(
-        "CREATE TABLE {TASK_HISTORY_FOREVER}
-         PARTITION OF {TASK_HISTORY_PARENT} FOR VALUES IN ('forever')"
-    ))
-    .execute(&mut *transaction)
-    .await
-    .expect("restore v34 unbounded forever leaf");
-    sqlx::query(&format!(
-        "CREATE INDEX {TASK_HISTORY_FOREVER}_task_idx
-         ON {TASK_HISTORY_FOREVER} (task_id)"
-    ))
-    .execute(&mut *transaction)
-    .await
-    .expect("restore v34 forever task index");
-    sqlx::query(&format!(
-        "CREATE INDEX {TASK_HISTORY_FOREVER}_enqueued_idx
-         ON {TASK_HISTORY_FOREVER} (enqueued_at)"
-    ))
-    .execute(&mut *transaction)
-    .await
-    .expect("restore v34 forever ordering index");
-
-    let now = database_now(&mut transaction).await.expect("database now");
-    let today = now
-        .with_hour(0)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .expect("truncate UTC day");
-    let old_anchor = today - Duration::days(30);
-    let current_anchor = today + Duration::hours(1);
-    let old_id = Uuid::new_v4();
-    let current_id = Uuid::new_v4();
-    let insert = format!(
-        "INSERT INTO {TASK_HISTORY_PARENT} (
-             task_id, task_name, queue_name, priority,
-             command_fingerprint_version, command_fingerprint,
-             status, terminalization_kind, terminal_at,
-             retention_anchor_at, retention_class_key,
-             enqueued_at, created_at, retry_count, max_retries,
-             result_envelope_version, result_codec, result_content_type,
-             is_workflow_task, history_schema_version,
-             attempt_archive_version, attempt_snapshot_codec,
-             attempt_snapshot_content_type, attempt_snapshot,
-             attempt_snapshot_digest, rerun_input_disposition
-         ) VALUES (
-             $1, 'p3 v34 forever', 'default', 100,
-             1, $2, 'COMPLETED', 'LEGACY_TERMINAL', $3,
-             $3, 'forever', $3, $3, 0, 0,
-             1, 'json-utf8', 'application/json', FALSE, 1,
-             1, 'json-utf8', 'application/json', $4, $5,
-             'NEVER_ELIGIBLE'
-         )"
-    );
-    for (task_id, anchor) in [(old_id, old_anchor), (current_id, current_anchor)] {
-        sqlx::query(&insert)
-            .bind(task_id)
-            .bind(vec![3_u8; 32])
-            .bind(anchor)
-            .bind(b"[]".as_slice())
-            .bind(vec![5_u8; 32])
-            .execute(&mut *transaction)
-            .await
-            .expect("seed populated v34 forever row");
-    }
-    let old_relation_oid: i64 = sqlx::query_scalar(&format!(
-        "SELECT tableoid::oid::bigint FROM {TASK_HISTORY_PARENT} WHERE task_id = $1"
-    ))
-    .bind(old_id)
-    .fetch_one(&mut *transaction)
-    .await
-    .expect("capture pre-conversion old-row relation");
-
-    assert_eq!(
-        ensure_forever_range_partitioning(&mut transaction)
-            .await
-            .expect("convert populated v34 forever leaf"),
-        1
-    );
-    let relkind: String =
-        sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)")
-            .bind(TASK_HISTORY_FOREVER)
-            .fetch_one(&mut *transaction)
-            .await
-            .expect("read converted forever relkind");
-    assert_eq!(relkind, "p");
-    let current_leaf = open_ended_leaf_name(TASK_HISTORY_FOREVER, today)
-        .expect("current open-ended forever leaf name");
-    let locations: Vec<(Uuid, String)> = sqlx::query_as(&format!(
-        "SELECT task_id, tableoid::regclass::text
-         FROM {TASK_HISTORY_PARENT} WHERE task_id = ANY($1) ORDER BY task_id"
-    ))
-    .bind(vec![old_id, current_id])
-    .fetch_all(&mut *transaction)
-    .await
-    .expect("read converted row locations");
-    assert_eq!(locations.len(), 2);
-    for (task_id, relation) in locations {
-        if task_id == old_id {
-            assert_eq!(relation, FOREVER_LEGACY_LEAF);
-        } else if task_id == current_id {
-            assert_eq!(relation, current_leaf);
-        } else {
-            panic!("unexpected converted task ID {task_id}");
-        }
-    }
-    let legacy_oid: i64 = sqlx::query_scalar("SELECT to_regclass($1)::oid::bigint")
-        .bind(FOREVER_LEGACY_LEAF)
-        .fetch_one(&mut *transaction)
-        .await
-        .expect("read legacy forever OID");
-    assert_eq!(legacy_oid, old_relation_oid);
-    let legacy = read_leaf_catalog_row(&mut transaction, FOREVER_LEGACY_LEAF)
-        .await
-        .expect("read legacy forever catalog row")
-        .expect("legacy forever catalog row exists");
-    assert_eq!(legacy.parent_name, TASK_HISTORY_FOREVER);
-    assert_eq!(legacy.class_key, "forever");
-    assert_eq!(
-        legacy.lower_anchor,
-        chrono::DateTime::from_timestamp(0, 0).unwrap()
-    );
-    assert_eq!(legacy.upper_anchor, today);
-    assert!(!legacy.min_birth_verified);
-    assert_eq!(
-        legacy.id_index_name,
-        leaf_id_index_name(FOREVER_LEGACY_LEAF)
-    );
-    assert!(
-        read_leaf_physical_state(
-            &mut transaction,
-            FOREVER_LEGACY_LEAF,
-            TASK_HISTORY_FOREVER,
-            &legacy.id_index_name,
-            LeafPartitionBoundExpectation::CatalogOnly,
-            LeafIndexKind::History,
-        )
-        .await
-        .expect("read legacy physical state")
-        .id_index_conformant
-    );
-    assert_eq!(
-        capture_partition_bound_utc(&mut transaction, FOREVER_LEGACY_LEAF)
-            .await
-            .expect("capture legacy bound")
-            .as_deref(),
-        Some(legacy.partition_bound.as_str())
-    );
-    assert!(
-        super::catalog::read_leaf_ordering_index_exists(&mut transaction, FOREVER_LEGACY_LEAF,)
-            .await
-            .expect("read legacy ordering-index property")
-    );
-    assert_eq!(
-        ensure_forever_range_partitioning(&mut transaction)
-            .await
-            .expect("rerun forever conversion"),
-        0
-    );
-    sqlx::query("ALTER TABLE horsies_tasks DROP CONSTRAINT horsies_tasks_live_status_only")
-        .execute(&mut *transaction)
-        .await
-        .expect("restore pre-cutover terminal live-row posture");
-    let relocation_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, completed_at, result, terminal_at,
-             terminalization_kind, retry_count, max_retries, enqueue_sha,
-             is_workflow_task, command_fingerprint_version,
-             command_fingerprint, retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES (
-             $1, 'p3 legacy forever relocation', 'default', 100, '[]', '{}',
-             'COMPLETED', $2, $2, $2, NULL, $2, 'COMPLETE_LOCKED', 0, 0,
-             $1::text, FALSE, 1, $3, 'forever', FALSE, 'NEVER_ELIGIBLE',
-             $2, $2
-         )",
-    )
-    .bind(relocation_id)
-    .bind(old_anchor)
-    .bind(vec![7_u8; 32])
-    .execute(&mut *transaction)
-    .await
-    .expect("seed pre-today forever relocation task");
-    assert!(matches!(
-        relocate_terminal_batch(&mut transaction, 1)
-            .await
-            .expect("relocate into the MINVALUE legacy forever leaf"),
-        RelocationOutcome::Batch {
-            rows_relocated: 1,
-            ..
-        }
-    ));
-    let relocation_relation: String = sqlx::query_scalar(&format!(
-        "SELECT tableoid::regclass::text
-         FROM {TASK_HISTORY_PARENT} WHERE task_id = $1"
-    ))
-    .bind(relocation_id)
-    .fetch_one(&mut *transaction)
-    .await
-    .expect("read relocated legacy forever row");
-    assert_eq!(relocation_relation, FOREVER_LEGACY_LEAF);
-    let row_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM {TASK_HISTORY_PARENT} WHERE task_id = ANY($1)"
-    ))
-    .bind(vec![old_id, current_id])
-    .fetch_one(&mut *transaction)
-    .await
-    .expect("verify rows survive idempotent rerun");
-    assert_eq!(row_count, 2);
-    transaction
-        .commit()
-        .await
-        .expect("commit v34 conversion test");
-    database.drop().await;
-}
 #[derive(Debug, Default)]
 struct CountingStagedPublisher {
     calls: AtomicUsize,
@@ -3049,89 +2739,6 @@ async fn finalization_retries_publication_after_detach_committed() {
     database.drop().await;
 }
 
-#[tokio::test]
-#[serial]
-async fn relocation_refuses_a_row_outside_the_history_column_rules_without_writing() {
-    let database = TestDatabase::create().await;
-    let mut transaction = database
-        .pool
-        .begin()
-        .await
-        .expect("begin rule violation test");
-    sqlx::query("ALTER TABLE horsies_tasks DROP CONSTRAINT horsies_tasks_live_status_only")
-        .execute(&mut *transaction)
-        .await
-        .expect("restore pre-cutover terminal live-row posture");
-    let anchor = database_now(&mut transaction).await.expect("database now");
-    let task_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, completed_at, result, terminal_at,
-             terminalization_kind, retry_count, max_retries, enqueue_sha,
-             is_workflow_task, command_fingerprint_version,
-             command_fingerprint, retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES (
-             $1, 'legacy priority outside the rule', 'default', 0, '[]', '{}',
-             'COMPLETED', $2, $2, $2, NULL, $2, 'COMPLETE_LOCKED', 0, 0,
-             $1::text, FALSE, 1, $3, 'standard_30d', FALSE, 'NEVER_ELIGIBLE',
-             $2, $2
-         )",
-    )
-    .bind(task_id)
-    .bind(anchor)
-    .bind(vec![7_u8; 32])
-    .execute(&mut *transaction)
-    .await
-    .expect("seed legacy terminal row with priority 0");
-    let leaves_before: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {LEAF_CATALOG}"))
-        .fetch_one(&mut *transaction)
-        .await
-        .expect("count leaves before relocation");
-
-    let error = relocate_terminal_batch(&mut transaction, 10)
-        .await
-        .expect_err("relocation must refuse the legacy row");
-    match error {
-        RelocationError::ColumnRuleViolation {
-            task_id: found,
-            rule,
-        } => {
-            assert_eq!(found, task_id.to_string());
-            assert_eq!(rule, "horsies_task_history_priority_check");
-        }
-        other => panic!("unexpected relocation error: {other:?}"),
-    }
-
-    let history_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
-            .bind(task_id)
-            .fetch_one(&mut *transaction)
-            .await
-            .expect("count history rows");
-    let live_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
-        .bind(task_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .expect("count live rows");
-    let ledger_rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {RELOCATION_LEDGER}"))
-        .fetch_one(&mut *transaction)
-        .await
-        .expect("count ledger rows");
-    let leaves_after: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {LEAF_CATALOG}"))
-        .fetch_one(&mut *transaction)
-        .await
-        .expect("count leaves after relocation");
-    assert_eq!((history_rows, live_rows, ledger_rows), (0, 1, 0));
-    assert_eq!(leaves_after, leaves_before);
-    transaction
-        .rollback()
-        .await
-        .expect("roll back rule violation test");
-    database.drop().await;
-}
-
 async fn forever_leaves(
     connection: &mut PgConnection,
 ) -> Vec<(String, chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
@@ -3341,73 +2948,6 @@ async fn existing_daily_forever_leaves_keep_the_probe_healthy_before_the_open_le
     database.drop().await;
 }
 
-#[tokio::test]
-#[serial]
-async fn relocation_places_a_forever_row_in_the_open_ended_leaf_without_a_new_leaf() {
-    let database = TestDatabase::create().await;
-    let mut transaction = database.pool.begin().await.unwrap();
-    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-        .await
-        .unwrap();
-    assert!(
-        matches!(coverage, CoverageOutcome::Ensured(_)),
-        "{coverage:?}"
-    );
-    let before = forever_leaves(transaction.as_mut()).await;
-    let open = before
-        .iter()
-        .find(|(_, _, upper)| *upper == open_end_anchor())
-        .expect("open-ended leaf")
-        .clone();
-    sqlx::query("ALTER TABLE horsies_tasks DROP CONSTRAINT horsies_tasks_live_status_only")
-        .execute(&mut *transaction)
-        .await
-        .unwrap();
-    let task_id = Uuid::new_v4();
-    let terminal_at = open.1 + Duration::days(2) + Duration::hours(3);
-    sqlx::query(
-        "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, completed_at, result, terminal_at,
-             terminalization_kind, retry_count, max_retries, enqueue_sha,
-             is_workflow_task, command_fingerprint_version,
-             command_fingerprint, retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES (
-             $1, 'open-ended relocation', 'default', 100, '[]', '{}',
-             'COMPLETED', $2, $2, $2, NULL, $2, 'COMPLETE_LOCKED', 0, 0,
-             $1::text, FALSE, 1, $3, 'forever', FALSE, 'NEVER_ELIGIBLE',
-             $2, $2
-         )",
-    )
-    .bind(task_id)
-    .bind(terminal_at)
-    .bind(vec![7_u8; 32])
-    .execute(&mut *transaction)
-    .await
-    .unwrap();
-
-    let outcome = relocate_terminal_batch(&mut transaction, 10).await.unwrap();
-    assert!(matches!(
-        outcome,
-        RelocationOutcome::Batch {
-            rows_relocated: 1,
-            ..
-        }
-    ));
-    assert_eq!(forever_leaves(transaction.as_mut()).await, before);
-    let relation: String = sqlx::query_scalar(&format!(
-        "SELECT tableoid::regclass::text FROM {TASK_HISTORY_PARENT} WHERE task_id = $1"
-    ))
-    .bind(task_id)
-    .fetch_one(&mut *transaction)
-    .await
-    .unwrap();
-    assert_eq!(relation, open.0);
-    transaction.rollback().await.unwrap();
-    database.drop().await;
-}
-
 async fn forever_floor_faults(connection: &mut PgConnection) -> Vec<HealthFault> {
     collect_partition_health(
         connection,
@@ -3570,7 +3110,6 @@ async fn forever_sweep_drops_closed_empty_leaves_and_keeps_the_rest() {
 
     let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
     assert_eq!(pass.errors, Vec::<String>::new());
-    assert_eq!(pass.skipped, None);
     assert_eq!(
         pass.swept,
         vec![ForeverLeafSwept {
@@ -3697,27 +3236,6 @@ async fn forever_sweep_stops_at_its_detach_bound() {
     for leaf in &leaves {
         assert!(leaf_dropped(&database.pool, leaf.leaf_name()).await);
     }
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_sweep_is_skipped_while_archive_maintenance_is_active() {
-    let database = TestDatabase::create_with_connections(4).await;
-    let today = database_today(&database.pool).await;
-    let leaf = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
-    let mut transaction = database.pool.begin().await.unwrap();
-    begin_archive_maintenance(&mut transaction, Uuid::new_v4())
-        .await
-        .unwrap();
-    transaction.commit().await.unwrap();
-    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
-    assert_eq!(
-        pass.skipped,
-        Some(ForeverSweepSkipped::ArchiveMaintenanceActive)
-    );
-    assert!(pass.swept.is_empty() && pass.kept_non_empty.is_empty());
-    assert!(!leaf_dropped(&database.pool, leaf.leaf_name()).await);
     database.drop().await;
 }
 

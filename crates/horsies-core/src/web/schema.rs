@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::broker::{expected_schema_version, PostgresBroker, MIGRATIONS_TABLE};
-use crate::core::history::cutover::state::{CUTOVER_NAME, CUTOVER_STATE_TABLE};
 
 pub const SCHEMA_TTL: Duration = Duration::from_secs(60);
 pub const SCHEMA_INCOMPATIBLE: &str = "SCHEMA_INCOMPATIBLE";
@@ -19,7 +18,6 @@ pub const SCHEMA_UNKNOWN: &str = "SCHEMA_UNKNOWN";
 pub enum SchemaState {
     Match,
     Mismatch,
-    CutoverRequired,
     Absent,
     Unknown,
 }
@@ -56,13 +54,6 @@ impl SchemaIncompatible {
                 SCHEMA_INCOMPATIBLE,
                 "This database has no horsies schema, so actions are unavailable. Start a horsies app or worker to initialize it; the monitoring tool never modifies the database schema."
                     .to_owned(),
-            ),
-            SchemaState::CutoverRequired => (
-                SCHEMA_INCOMPATIBLE,
-                format!(
-                    "Database schema is v{}, but the offline task-history cutover is incomplete. Run the documented cutover stages through tighten and validation before enabling actions.",
-                    status.version.unwrap_or_default(),
-                ),
             ),
             SchemaState::Mismatch => (
                 SCHEMA_INCOMPATIBLE,
@@ -125,27 +116,8 @@ impl SchemaReader for BrokerSchemaReader {
                 expected_version,
             });
         }
-
-        let cutover_table_present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-            .bind(CUTOVER_STATE_TABLE)
-            .fetch_one(self.broker.pool())
-            .await?;
-        let cutover_complete = if cutover_table_present {
-            sqlx::query_scalar::<_, bool>(&format!(
-                "SELECT EXISTS (SELECT 1 FROM {CUTOVER_STATE_TABLE} WHERE cutover_name = $1)"
-            ))
-            .bind(CUTOVER_NAME)
-            .fetch_one(self.broker.pool())
-            .await?
-        } else {
-            false
-        };
         Ok(SchemaStatus {
-            state: if cutover_complete {
-                SchemaState::Match
-            } else {
-                SchemaState::CutoverRequired
-            },
+            state: SchemaState::Match,
             version: Some(stored),
             expected_version,
         })
