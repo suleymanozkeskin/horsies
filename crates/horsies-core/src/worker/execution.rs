@@ -17,7 +17,6 @@
 use chrono::Utc;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::broker::listener::notify_task_queue;
@@ -38,7 +37,6 @@ use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 
-use crate::worker::heartbeat::spawn_runner_heartbeat;
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RetryRule, RunPermit, StoredOptions,
 };
@@ -1715,17 +1713,9 @@ pub(crate) async fn execute_and_finalize(
         OwnershipOutcome::Aborted => return None,
     };
 
-    // Start runner heartbeat.
-    let hb_cancel = CancellationToken::new();
-    let hb_handle = spawn_runner_heartbeat(
-        broker.pool().clone(),
-        task_id,
-        worker_id.clone(),
-        hostname.clone(),
-        pid,
-        Duration::from_millis(recovery.runner_heartbeat_interval_ms),
-        hb_cancel.clone(),
-    );
+    // Runner heartbeats: the worker's runner-beat writer beats this row while
+    // the dispatch holds it (`runner_beats::LiveDispatches`); the first beat
+    // is written with the RUNNING transition above.
 
     // Phase 1: Build envelope + execute task. The deadline (if any) is measured
     // around user-code execution; on expiry the result is TASK_TIMEOUT and the
@@ -1748,10 +1738,6 @@ pub(crate) async fn execute_and_finalize(
         Ok((envelope, timeout)) => execute_task(task_fn, envelope, timeout).await,
         Err(err) => TaskResult::Err(err),
     };
-
-    // Stop heartbeat.
-    hb_cancel.cancel();
-    let _ = hb_handle.await;
 
     // Stamp finalization handoff so the stale-RUNNING reaper skips this row
     // while finalize runs (the runner heartbeat has now stopped). Best-effort:
