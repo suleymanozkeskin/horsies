@@ -24,12 +24,13 @@ use super::pool::{
 use super::route::IsolatedDeadline;
 use super::shared::{SharedPool, SharedPoolConfig};
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, AsyncSeats, ChildFrame, ChildKind, ChildLogLevel,
-    ChildPool, ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads, InitFrame,
-    IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
-    ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, RunRef, SeatEnd,
+    encode_child_frame, encode_parent_frame, AsyncSeats, BootDetail, BootErrorName,
+    BootFailedFrame, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    DispatchNumber, ExecutorThreads, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
+    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ReportedBootCause,
+    ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, RunRef, SeatEnd,
     SharedAsyncChild, SharedResultFrame, SharedRunFrame, SharedThreadChild, SharedWork,
-    TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats,
+    ShortageErrno, TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner};
 use crate::worker::retry::read_stored_options;
@@ -232,6 +233,87 @@ pub(super) fn boot(init: &InitFrame) -> String {
 /// Read the stop frame and exit 0.
 pub(super) fn exit_at_stop() -> String {
     format!("{}exit 0", take(&ParentFrame::Stop))
+}
+
+/// Read the next parent frame of any kind: its header, then its metadata
+/// into `$meta`, then its body. Exit 0 when it is the stop frame.
+pub(super) fn read_frame() -> String {
+    let stop_meta = encode_parent_frame(&ParentFrame::Stop)
+        .unwrap()
+        .head()
+        .len()
+        - HEADER_BYTES;
+    format!(
+        r#"set -- $(head -c 12 <&"$0" | od -An -tu1); m=$(( $1 * 16777216 + $2 * 65536 + $3 * 256 + $4 )); b=$(( $9 * 16777216 + ${{10}} * 65536 + ${{11}} * 256 + ${{12}} )); meta=$(head -c "$m" <&"$0"); if [ "$b" -gt 0 ]; then head -c "$b" <&"$0" >/dev/null; fi; if [ "$m" -eq {stop_meta} ] && [ "$b" -eq 0 ]; then exit 0; fi; "#
+    )
+}
+
+/// Answer `runs` run frames, each with the frames given for the task that
+/// it names, then exit at the stop frame. A frame of another task, or a run
+/// frame after the last, ends the child with exit code 3.
+pub(super) fn answer_runs(answers: &[(&ClaimedTask, Vec<ChildFrame>)], runs: usize) -> String {
+    let cases: String = answers
+        .iter()
+        .map(|(task, frames)| format!("*{}*) {};; ", task.task_id, send(frames)))
+        .collect();
+    let one_run = format!("{}case $meta in {cases}*) exit 3;; esac; ", read_frame());
+    format!("{}{}exit 3", one_run.repeat(runs), read_frame())
+}
+
+/// Boot, then serve nothing: exit at the stop frame.
+pub(super) fn idle_child(init: &InitFrame) -> String {
+    format!("{}{}exit 3", boot(init), read_frame())
+}
+
+/// Take a unique number from 1 up in `dir` as `$n`: the boot count of the
+/// children of a test.
+pub(super) fn ticket(dir: &TestDir) -> String {
+    format!(
+        r#"n=1; while ! mkdir "{}/ticket-$n" 2>/dev/null; do n=$((n + 1)); done; "#,
+        dir.path().display()
+    )
+}
+
+/// The children that took a ticket.
+pub(super) fn tickets(dir: &TestDir) -> usize {
+    std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("ticket-")
+        })
+        .count()
+}
+
+/// The boot failure frame of a child short of descriptors.
+pub(super) fn short_of_descriptors() -> ChildFrame {
+    boot_failed(
+        ReportedBootCause::ResourceShortage(ShortageErrno::Emfile),
+        "OSError",
+        "[Errno 24] Too many open files",
+    )
+}
+
+pub(super) fn boot_failed(cause: ReportedBootCause, error_name: &str, detail: &str) -> ChildFrame {
+    ChildFrame::BootFailed(BootFailedFrame {
+        cause,
+        error_name: BootErrorName::cut(error_name),
+        detail: BootDetail::cut(detail),
+    })
+}
+
+/// Read the init frame, report `failure` in place of the ready frame, and
+/// exit with the boot-failed code.
+pub(super) fn fail_boot(init: &InitFrame, failure: &ChildFrame) -> String {
+    format!(
+        "{}{}exit 75",
+        take(&ParentFrame::Init(init.clone())),
+        send(std::slice::from_ref(failure))
+    )
 }
 
 pub(super) fn shell(script: &str) -> ChildCommand {

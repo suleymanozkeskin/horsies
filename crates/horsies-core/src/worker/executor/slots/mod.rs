@@ -28,6 +28,8 @@ mod shared_slot;
 pub mod shared_stop;
 
 #[cfg(test)]
+mod boot_tests;
+#[cfg(test)]
 mod scripted;
 #[cfg(test)]
 mod shared_pool_tests;

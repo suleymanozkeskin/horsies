@@ -21,6 +21,8 @@ pub mod socket;
 pub mod spawner;
 
 #[cfg(test)]
+mod child_io_tests;
+#[cfg(test)]
 mod tests;
 
 pub use boot::{
