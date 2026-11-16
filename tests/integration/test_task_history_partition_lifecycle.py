@@ -26,6 +26,7 @@ from horsies.core.history.commands import (
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     EnsureLeafCoverage,
+    FinalizeInterruptedLeafDetach,
     InspectHistoryLeaf,
     LeafBounds,
     LeafLifecycle,
@@ -36,6 +37,7 @@ from horsies.core.history.ddl.classes import (
     ClassConflict,
     register_finite_retention_class,
 )
+from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.names import LEAF_CATALOG
 from horsies.core.history.outcomes import (
     CoverageBelowFloor,
@@ -48,6 +50,7 @@ from horsies.core.history.outcomes import (
     LeafDropped,
     LeafIndexRepaired,
     LeafMaintenanceBusy,
+    LeafMissing,
     LeafNonconformant,
     LeafNotExpired,
     LeafPendingBlocked,
@@ -61,8 +64,10 @@ from horsies.core.history.partitions.manager import (
     detach_expired_leaf,
     drop_detached_leaf,
     ensure_leaf_coverage,
+    finalize_interrupted_detach,
     inspect_leaf,
 )
+from horsies.core.history.partitions.retirement import DetachRecord, DetachRecorded
 from horsies.core.history.partitions.publication import UnpublishedLoader
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
 
@@ -359,6 +364,223 @@ class TestDetachAndDrop:
         assert isinstance(detached, LeafDetached)
 
 
+class TestRetentionFunctionsPath:
+    """The detach, finalize and drop of a PERIOD leaf call the 0006 functions."""
+
+    @staticmethod
+    def _database(schema: HistorySchema) -> PartitionMaintenanceDatabase:
+        return PartitionMaintenanceDatabase(schema.engine, connection_capacity=2)
+
+    @staticmethod
+    async def _lock_is_free(schema: HistorySchema, ref: LeafRef) -> bool:
+        async with schema.engine.begin() as connection:
+            return bool(
+                (
+                    await connection.execute(
+                        text(
+                            'SELECT pg_try_advisory_xact_lock('
+                            'horsies_task_history_leaf_lock_key(:class_key, :anchor))'
+                        ),
+                        {'class_key': ref.class_key, 'anchor': ref.bounds.lower},
+                    )
+                ).scalar_one()
+            )
+
+    @staticmethod
+    async def _detached_at_is_set(schema: HistorySchema, ref: LeafRef) -> bool:
+        async with schema.engine.connect() as connection:
+            return bool(
+                (
+                    await connection.execute(
+                        text(
+                            f'SELECT detached_at IS NOT NULL FROM {LEAF_CATALOG} '
+                            'WHERE leaf_name = :leaf_name'
+                        ),
+                        {'leaf_name': ref.leaf_name},
+                    )
+                ).scalar_one()
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_ref_that_differs_from_the_catalog_raises_and_releases_the_lock(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        shifted = LeafRef(
+            leaf_name=ref.leaf_name,
+            class_key=CLASS_KEY,
+            bounds=LeafBounds(
+                lower=ref.bounds.lower - timedelta(days=1),
+                upper=ref.bounds.upper - timedelta(days=1),
+            ),
+        )
+
+        with pytest.raises(HistoryContractError, match='catalog row has class'):
+            await detach_expired_leaf(
+                self._database(history_schema),
+                DetachExpiredHistoryLeaf(leaf=shifted, statement_timeout_ms=None),
+                UnpublishedLoader(),
+            )
+
+        assert await self._lock_is_free(history_schema, ref)
+        async with history_schema.engine.connect() as connection:
+            inspection = await inspect_leaf(
+                connection, InspectHistoryLeaf(leaf=ref, lifecycle=LeafLifecycle.RETENTION)
+            )
+        assert isinstance(inspection, LeafDetachable)
+
+    @pytest.mark.asyncio
+    async def test_a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        detached = await detach_expired_leaf(
+            self._database(history_schema),
+            DetachExpiredHistoryLeaf(leaf=ref, statement_timeout_ms=None),
+            UnpublishedLoader(),
+        )
+        assert isinstance(detached, LeafDetached)
+        stale = LeafRef(leaf_name=ref.leaf_name, class_key='standard_7d', bounds=ref.bounds)
+
+        with pytest.raises(HistoryContractError, match='catalog row has class'):
+            async with history_schema.engine.begin() as connection:
+                await drop_detached_leaf(
+                    connection,
+                    DropDetachedHistoryLeaf(leaf=stale, lifecycle=LeafLifecycle.RETENTION),
+                    UnpublishedLoader(),
+                )
+
+        async with history_schema.engine.connect() as connection:
+            exists = (
+                await connection.execute(
+                    text('SELECT to_regclass(:name) IS NOT NULL'), {'name': ref.leaf_name}
+                )
+            ).scalar_one()
+        assert exists
+
+    @pytest.mark.asyncio
+    async def test_finalize_records_a_detach_made_out_of_band(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        async with history_schema.engine.begin() as connection:
+            await connection.execute(
+                text(f'ALTER TABLE {parent} DETACH PARTITION {ref.leaf_name}')
+            )
+        assert not await self._detached_at_is_set(history_schema, ref)
+
+        finalized = await finalize_interrupted_detach(
+            self._database(history_schema),
+            FinalizeInterruptedLeafDetach(
+                leaf=ref, statement_timeout_ms=None, lifecycle=LeafLifecycle.RETENTION
+            ),
+            UnpublishedLoader(),
+        )
+
+        assert isinstance(finalized, LeafDetached)
+        assert await self._detached_at_is_set(history_schema, ref)
+
+    @pytest.mark.asyncio
+    async def test_a_relation_gone_before_the_record_is_missing(
+        self,
+        history_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+
+        async def record_missing(connection: AsyncConnection, leaf_name: str) -> DetachRecorded:
+            return DetachRecorded(record=DetachRecord.MISSING, manifest_names_leaf=False)
+
+        monkeypatch.setattr(partition_manager, 'record_leaf_detached', record_missing)
+
+        outcome = await detach_expired_leaf(
+            self._database(history_schema),
+            DetachExpiredHistoryLeaf(leaf=ref, statement_timeout_ms=None),
+            UnpublishedLoader(),
+        )
+
+        assert isinstance(outcome, LeafMissing)
+        assert outcome.cataloged
+        assert await self._lock_is_free(history_schema, ref)
+
+    @pytest.mark.asyncio
+    async def test_a_parent_after_the_detach_raises_and_releases_the_lock(
+        self,
+        history_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+
+        async def record_still_attached(
+            connection: AsyncConnection, leaf_name: str
+        ) -> DetachRecorded:
+            return DetachRecorded(record=DetachRecord.STILL_ATTACHED, manifest_names_leaf=False)
+
+        monkeypatch.setattr(partition_manager, 'record_leaf_detached', record_still_attached)
+
+        with pytest.raises(HistoryContractError, match='STILL_ATTACHED'):
+            await detach_expired_leaf(
+                self._database(history_schema),
+                DetachExpiredHistoryLeaf(leaf=ref, statement_timeout_ms=None),
+                UnpublishedLoader(),
+            )
+
+        assert await self._lock_is_free(history_schema, ref)
+
+    @pytest.mark.asyncio
+    async def test_a_held_leaf_lock_makes_the_detach_and_the_drop_busy(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        other = await make_expired_leaf(history_schema, parent, days_ago=41)
+        detached = await detach_expired_leaf(
+            self._database(history_schema),
+            DetachExpiredHistoryLeaf(leaf=other, statement_timeout_ms=None),
+            UnpublishedLoader(),
+        )
+        assert isinstance(detached, LeafDetached)
+        holder = await history_schema.engine.connect()
+        transaction = await holder.begin()
+        try:
+            for held in (ref, other):
+                await holder.execute(
+                    text(
+                        'SELECT pg_advisory_xact_lock('
+                        'horsies_task_history_leaf_lock_key(:class_key, :anchor))'
+                    ),
+                    {'class_key': held.class_key, 'anchor': held.bounds.lower},
+                )
+            busy_detach = await detach_expired_leaf(
+                self._database(history_schema),
+                DetachExpiredHistoryLeaf(leaf=ref, statement_timeout_ms=None),
+                UnpublishedLoader(),
+            )
+            async with history_schema.engine.begin() as connection:
+                busy_drop = await drop_detached_leaf(
+                    connection,
+                    DropDetachedHistoryLeaf(leaf=other, lifecycle=LeafLifecycle.RETENTION),
+                    UnpublishedLoader(),
+                )
+        finally:
+            await transaction.rollback()
+            await holder.close()
+
+        assert busy_detach == LeafMaintenanceBusy(leaf_name=ref.leaf_name)
+        assert busy_drop == LeafMaintenanceBusy(leaf_name=other.leaf_name)
+
+
 class TestLockContention:
     @pytest.mark.asyncio
     async def test_conformant_leaf_skips_busy_advisory_lock(
@@ -388,12 +610,12 @@ class TestLockContention:
             statements: list[str] = []
 
             def record_statement(
-                _connection,
-                _cursor,
+                _connection: object,
+                _cursor: object,
                 statement: str,
-                _parameters,
-                _context,
-                _executemany,
+                _parameters: object,
+                _context: object,
+                _executemany: bool,
             ) -> None:
                 statements.append(statement)
 
@@ -653,24 +875,20 @@ class TestLockContention:
         database = PartitionMaintenanceDatabase(
             direct_engine, connection_capacity=2
         )
-        original = partition_manager.try_lock_leaf_for_session
+        original = partition_manager.begin_leaf_detach
 
         async def acquire_then_cancel(
             connection: AsyncConnection,
-            *,
-            class_key: str,
-            anchor: datetime,
+            leaf: LeafRef,
         ) -> None:
-            await original(
-                connection,
-                class_key=class_key,
-                anchor=anchor,
-            )
+            # horsies_begin_leaf_detach takes the session lock inside the
+            # call; a cancel after it leaves the lock state unknown.
+            await original(connection, leaf)
             raise asyncio.CancelledError
 
         monkeypatch.setattr(
             partition_manager,
-            'try_lock_leaf_for_session',
+            'begin_leaf_detach',
             acquire_then_cancel,
         )
         try:
