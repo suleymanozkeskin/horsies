@@ -645,7 +645,6 @@ async fn a_failure_in_the_advancement_is_a_phase_two_error_that_is_not_retryable
 /// connection error) is a phase-2 error that is not retryable.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1002"]
 async fn a_database_error_in_the_advancement_that_is_not_a_connection_error_is_not_retryable() {
     let db = IsolatedDatabase::create().await;
     let (_workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;
