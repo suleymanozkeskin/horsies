@@ -1,0 +1,60 @@
+//! The bounds of frame fields (Python `core/worker/child_protocol.py`,
+//! `core/models/worker_profile.py`, `core/models/tasks.py`).
+//!
+//! Text bounds count characters (Unicode scalar values), as Python's `len`.
+
+use super::values::BoundedCount;
+use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+
+/// A report of work left on a task loop names at most this many tasks.
+pub const MAX_LEFTOVER_TASK_NAMES: usize = 10;
+/// Each name in such a report has at most this many characters.
+pub const MAX_LEFTOVER_NAME_CHARS: usize = 200;
+/// The exception type name of a boot failure.
+pub const MAX_BOOT_ERROR_NAME_CHARS: usize = 200;
+/// The exception text of a boot failure.
+pub const MAX_BOOT_DETAIL_CHARS: usize = 2000;
+/// The source line that a blocked loop ran.
+pub const MAX_BLOCKED_WHERE_CHARS: usize = 500;
+/// The detail of a worker-level failure in a child (Python
+/// `MAX_FAILED_REASON_CHARS`). One character takes at most 12 bytes as JSON
+/// text, so the detail stays well under the metadata bound.
+pub const MAX_FAILURE_DETAIL_CHARS: usize = 64 * 1024;
+/// The reason of a fork failure or a preload refusal (Python
+/// `core/worker/preload_main.py`, the refusal bound).
+pub const MAX_PRELOAD_REASON_CHARS: usize = 4096;
+/// The reason of a refusal of stored options. The parent builds it from the
+/// stored text and cuts it to this bound.
+pub const MAX_REFUSAL_REASON_CHARS: usize = 4096;
+
+/// The most seats of one shared async child.
+pub const MAX_SEATS_PER_SHARED_ASYNC_CHILD: u64 = 1000;
+/// The most seats of one shared thread child.
+pub const MAX_SEATS_PER_SHARED_THREAD_CHILD: u64 = 256;
+/// The most connections of one pool of a child.
+pub const MAX_CHILD_POOL_CONNECTIONS: u64 = 1000;
+/// The most threads of the default executor of a shared async child.
+pub const MAX_EXECUTOR_THREADS: u64 = 256;
+
+/// The smallest stored `cancel_grace_ms` (Python `MIN_CANCEL_GRACE_MS`).
+pub const MIN_CANCEL_GRACE_MS: u64 = 100;
+/// The largest stored `cancel_grace_ms` (Python `MAX_CANCEL_GRACE_MS`).
+pub const MAX_CANCEL_GRACE_MS: u64 = 10_000;
+
+/// The deadline of a task, in milliseconds after the child takes it.
+pub type TaskTimeoutMs = BoundedCount<MIN_TASK_TIMEOUT_MS, MAX_TASK_TIMEOUT_MS>;
+/// The time an async task gets to stop after its first cancel, in
+/// milliseconds.
+pub type CancelGraceMs = BoundedCount<MIN_CANCEL_GRACE_MS, MAX_CANCEL_GRACE_MS>;
+/// The seats of a shared async child.
+pub type AsyncSeats = BoundedCount<1, MAX_SEATS_PER_SHARED_ASYNC_CHILD>;
+/// The seats of a shared thread child.
+pub type ThreadSeats = BoundedCount<1, MAX_SEATS_PER_SHARED_THREAD_CHILD>;
+/// The default executor threads of a shared async child.
+pub type ExecutorThreads = BoundedCount<1, MAX_EXECUTOR_THREADS>;
+/// The connections a child pool keeps open when idle.
+pub type PoolMinSize = BoundedCount<0, MAX_CHILD_POOL_CONNECTIONS>;
+/// The most connections of a child pool.
+pub type PoolMaxSize = BoundedCount<1, MAX_CHILD_POOL_CONNECTIONS>;
+/// The connections of the pool that task code opens when it sends.
+pub type TaskSendPool = BoundedCount<1, MAX_CHILD_POOL_CONNECTIONS>;

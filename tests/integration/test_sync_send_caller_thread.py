@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Final
 
 import psycopg
@@ -216,23 +217,36 @@ def test_a_taken_task_id_is_compared_on_the_loop_runner(
     echo_app: EchoApp,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The INSERT on the calling thread finds the id taken; the payload is
-    compared on the loop runner: the same SHA is the same send, another
-    SHA is a mismatch. Neither writes a second row."""
+    """The INSERT on the calling thread finds the id taken; the send is
+    compared on the loop runner: the same command and ``sent_at`` is the
+    same send, another command is a mismatch. Neither writes a second row."""
     task_id = mint_task_id()
+    sent_at = datetime.now(timezone.utc)
     sha = hashlib.sha256(b'first payload').hexdigest()
     other_sha = hashlib.sha256(b'other payload').hexdigest()
     first = echo_app.broker.enqueue(
-        TASK_NAME, task_id=task_id, enqueue_sha=sha, kwargs_json='{"value": 4}',
+        TASK_NAME,
+        task_id=task_id,
+        enqueue_sha=sha,
+        kwargs_json='{"value": 4}',
+        sent_at=sent_at,
     )
     assert _task_id_of(first) == task_id
     bridged = _bridged(echo_app.broker, monkeypatch)
 
     replay = echo_app.broker.enqueue(
-        TASK_NAME, task_id=task_id, enqueue_sha=sha, kwargs_json='{"value": 4}',
+        TASK_NAME,
+        task_id=task_id,
+        enqueue_sha=sha,
+        kwargs_json='{"value": 4}',
+        sent_at=sent_at,
     )
     other = echo_app.broker.enqueue(
-        TASK_NAME, task_id=task_id, enqueue_sha=other_sha, kwargs_json='{"value": 5}',
+        TASK_NAME,
+        task_id=task_id,
+        enqueue_sha=other_sha,
+        kwargs_json='{"value": 5}',
+        sent_at=sent_at,
     )
 
     assert _task_id_of(replay) == task_id
