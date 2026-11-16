@@ -4,13 +4,13 @@
 //!
 //! | End | Statement |
 //! |---|---|
-//! | `NotDispatched` | release of the claim; the row goes back to the queue |
+//! | `NotDispatched` | `horsies_release_claims` with placement `SAME_CLASS`; the row goes back to the queue |
 //! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
 //! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2 |
 //! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
-//! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end; a row that is still CLAIMED is released |
+//! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
 //!
 //! A database error never decides between a retry and a failure: the write
@@ -25,12 +25,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::value::RawValue;
+use uuid::Uuid;
 
 use super::dispatch::{AttemptEnd, ClaimedTask, Settlement};
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
-use crate::broker::PostgresBroker;
+use crate::broker::claims::{
+    release_claims, ReleaseBatch, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
+};
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::OwnedClaim;
@@ -40,9 +44,9 @@ use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCod
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::db::Transience;
 use crate::worker::execution::{
-    persist_failed_attempt, persist_ok_result, persist_undecodable_result, phase_retry_delay,
-    run_phase2, unclaim_task_with_retry, FinalizeError, FinalizeOutcome, FinalizeStage, Phase2Work,
-    PHASE1_MAX_RETRIES,
+    persist_failed_attempt, persist_ok_result, persist_undecodable_result,
+    persist_unreported_attempt, phase_retry_delay, run_phase2, FinalizeError, FinalizeOutcome,
+    FinalizeStage, Phase2Work, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
 };
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -57,6 +61,8 @@ const WORKER_FAILURE_FALLBACK: &str = "Worker failure";
 pub const TIMEOUT_WRITE_MAX_RETRIES: u32 = 3;
 /// Retries of a crash-recovery write (Python `_FINALIZE_FUTURE_MAX_RETRIES`).
 pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
+/// Sends of the release of a claim that no child took, the first included.
+pub const RELEASE_SENDS: u32 = 3;
 
 /// The stage of an outcome write. Each stage has its own retry bound
 /// (Python `_max_retries_of`).
@@ -83,6 +89,15 @@ impl WriteStage {
     }
 }
 
+/// What one write of phase 1 did.
+enum PhaseOneOutcome {
+    /// The write applied or was refused; what it owes follows.
+    Finalize(FinalizeOutcome),
+    /// The row was still CLAIMED by this claim generation: the statement put
+    /// it back in the queue with no attempt row.
+    ClaimReleased,
+}
+
 /// One write of phase 1, sent again on a retryable database error.
 enum PhaseOneWrite {
     Success { value: Vec<u8> },
@@ -90,13 +105,16 @@ enum PhaseOneWrite {
     Failure(FinishFailedAttempt),
 }
 
-/// Whether a write that found the row CLAIMED releases the claim: the
-/// child was killed before it set the row RUNNING.
+/// What the failed-attempt statement does with a row that is still CLAIMED
+/// by this claim generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimedRowRule {
-    /// The child reported a result, so the row must be RUNNING.
+    /// The child reported a result, so the row must be RUNNING; a CLAIMED
+    /// row is not held (`horsies_finish_failed_attempt` with `REFUSE`).
     Refuse,
-    /// A killed child: a CLAIMED row goes back to the queue with no attempt.
+    /// A killed child, which may have died before it set the row RUNNING: a
+    /// CLAIMED row goes back to the queue with no attempt, in the same
+    /// statement (`RELEASE`).
     Release,
 }
 
@@ -281,6 +299,54 @@ pub(super) fn test_successes(
     )
 }
 
+/// The settlement of one release, from its one outcome. The release answers
+/// each input row once, so another count is a defect.
+fn released(task: &ClaimedTask, reason: &str, outcomes: &[(Uuid, ReleaseOutcome)]) -> Settlement {
+    match outcomes {
+        [(_, ReleaseOutcome::Released)] => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                "Requeued worker-owned in-flight task {}: {reason}",
+                task.task_id,
+            );
+            Settlement::Written
+        }
+        [(_, ReleaseOutcome::NotHeld)] => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                "Failed to requeue task {} (not owned or not requeueable): {reason}",
+                task.task_id,
+            );
+            Settlement::NotHeld
+        }
+        other => unreachable!(
+            "the release of one claim answered {} rows for task {}",
+            other.len(),
+            task.task_id
+        ),
+    }
+}
+
+/// The settlement of a release that failed: the claim lease returns the
+/// row.
+fn release_failed(
+    task: &ClaimedTask,
+    reason: &str,
+    error: &BrokerError,
+    retryable: bool,
+) -> Settlement {
+    tracing::error!(
+        task_id = %task.task_id,
+        error = %error,
+        "DB error while requeueing task {} ({reason}); its claim lease returns the row",
+        task.task_id,
+    );
+    match retryable {
+        true => Settlement::RetriesExhausted,
+        false => Settlement::WriteFailed,
+    }
+}
+
 /// Writes the end of each attempt with the existing statements.
 ///
 /// The plain successes go to the finalize batcher of the worker, which
@@ -451,10 +517,11 @@ impl OutcomeWriter {
         &self,
         task: &ClaimedTask,
         write: &PhaseOneWrite,
-    ) -> Result<FinalizeOutcome, FinalizeError> {
+        claimed_row: ClaimedRowRule,
+    ) -> Result<PhaseOneOutcome, FinalizeError> {
         let workflow = task.kind.is_workflow_task();
-        match write {
-            PhaseOneWrite::Success { value } => match task.kind.is_workflow_task() {
+        let written = match (write, claimed_row) {
+            (PhaseOneWrite::Success { value }, _) => match task.kind.is_workflow_task() {
                 true => {
                     persist_ok_result(
                         &self.broker,
@@ -468,7 +535,7 @@ impl OutcomeWriter {
                 }
                 false => self.complete_plain_success(task, value).await,
             },
-            PhaseOneWrite::Undecodable { diagnosis } => {
+            (PhaseOneWrite::Undecodable { diagnosis }, _) => {
                 persist_undecodable_result(
                     &self.broker,
                     task.task_id,
@@ -478,10 +545,21 @@ impl OutcomeWriter {
                 )
                 .await
             }
-            PhaseOneWrite::Failure(command) => {
+            (PhaseOneWrite::Failure(command), ClaimedRowRule::Refuse) => {
                 persist_failed_attempt(&self.broker, command, workflow).await
             }
-        }
+            (PhaseOneWrite::Failure(command), ClaimedRowRule::Release) => {
+                return persist_unreported_attempt(&self.broker, command, workflow)
+                    .await
+                    .map(|written| match written {
+                        UnreportedAttemptWrite::ClaimReleased => PhaseOneOutcome::ClaimReleased,
+                        UnreportedAttemptWrite::Written(outcome) => {
+                            PhaseOneOutcome::Finalize(outcome)
+                        }
+                    });
+            }
+        };
+        written.map(PhaseOneOutcome::Finalize)
     }
 
     /// The success of a plain task: its row joins the next batch of the
@@ -558,7 +636,7 @@ impl OutcomeWriter {
         let max_retries = stage.max_retries();
         let mut retries_done: u32 = 0;
         let outcome = loop {
-            let error = match self.write_once(task, &write).await {
+            let error = match self.write_once(task, &write, claimed_row).await {
                 Ok(outcome) => break outcome,
                 Err(error) => error,
             };
@@ -598,22 +676,24 @@ impl OutcomeWriter {
                 }
             }
         };
-        match (outcome, claimed_row) {
-            (
-                FinalizeOutcome::Terminal {
-                    is_success,
-                    capacity_notified,
-                },
-                _,
-            ) => {
+        match outcome {
+            PhaseOneOutcome::Finalize(FinalizeOutcome::Terminal {
+                is_success,
+                capacity_notified,
+            }) => {
                 self.phase_two(task, is_success, capacity_notified).await;
                 Settlement::Written
             }
-            (FinalizeOutcome::Retried | FinalizeOutcome::Finalized, _) => Settlement::Written,
-            (FinalizeOutcome::Refused, ClaimedRowRule::Refuse) => Settlement::NotHeld,
-            (FinalizeOutcome::Refused, ClaimedRowRule::Release) => {
-                self.release(task, "the child was killed before the task ran")
-                    .await
+            PhaseOneOutcome::Finalize(FinalizeOutcome::Retried | FinalizeOutcome::Finalized) => {
+                Settlement::Written
+            }
+            PhaseOneOutcome::Finalize(FinalizeOutcome::Refused) => Settlement::NotHeld,
+            PhaseOneOutcome::ClaimReleased => {
+                tracing::warn!(
+                    task_id = %task.task_id,
+                    "the child was killed before the task ran; the claim went back to the queue",
+                );
+                Settlement::Written
             }
         }
     }
@@ -635,27 +715,48 @@ impl OutcomeWriter {
         .await;
     }
 
-    /// Release a claim that is still this worker's, at this generation: the
-    /// row goes back to the queue. A row in any other state is left alone.
+    /// Release a claim that no child took (Python `_requeue_claimed_task`,
+    /// `horsies/core/worker/dispatch.py:254-295`): `horsies_release_claims`
+    /// with placement `SAME_CLASS`, fenced to this worker and this claim
+    /// generation. The row goes back to the queue in its class; a row in any
+    /// other state is left alone. A database error that may clear sends the
+    /// release again, at most [`RELEASE_SENDS`] sends in all. After an
+    /// unknown outcome a released row answers `NotHeld` to the next send.
     async fn release(&self, task: &ClaimedTask, reason: &str) -> Settlement {
-        match unclaim_task_with_retry(
-            &self.broker,
-            task.task_id,
-            &self.worker_id,
-            task.claimed_at,
-            reason,
-        )
-        .await
-        {
-            Ok(true) => Settlement::Written,
-            Ok(false) => Settlement::NotHeld,
-            Err(error) => {
-                tracing::error!(
-                    task_id = %task.task_id,
-                    error = %error,
-                    "the claim could not be released; its lease returns the row",
-                );
-                Settlement::RetriesExhausted
+        let batch = match ReleaseBatch::new(&[(task.task_id, task.claimed_at)]) {
+            Ok(batch) => batch,
+            Err(refused) => unreachable!("one claim is a valid release batch: {refused}"),
+        };
+        let command = ReleaseClaims {
+            worker_id: self.worker_id.clone(),
+            batch,
+            placement: ReleasePlacement::SameClass,
+        };
+        let mut sends: u32 = 1;
+        loop {
+            let sent = match self.broker.core_pools_for_write() {
+                Ok((open, _write)) => {
+                    release_claims(open.main(), self.broker.statement_log(), &command).await
+                }
+                Err(error) => Err(error),
+            };
+            let error = match sent {
+                Ok(outcomes) => return released(task, reason, &outcomes),
+                Err(error) => error,
+            };
+            match (error.is_retryable(), sends < RELEASE_SENDS) {
+                (true, true) => {
+                    tracing::warn!(
+                        task_id = %task.task_id,
+                        send = sends,
+                        max = RELEASE_SENDS,
+                        error = %error,
+                        "the release of the claim failed; sending it again",
+                    );
+                    tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(sends))).await;
+                    sends += 1;
+                }
+                (retryable, _) => return release_failed(task, reason, &error, retryable),
             }
         }
     }
