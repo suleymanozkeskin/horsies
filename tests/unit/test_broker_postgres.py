@@ -826,6 +826,33 @@ class TestEnqueueAsync:
         session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_kwargs_that_repeat_a_key_are_refused_as_invalid_input(self) -> None:
+        """The stored input would differ from the text the caller sent."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
+            kwargs_json='{"x":1,"x":2}',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert message == (
+                    'kwargs JSON corrupt for my_task: '
+                    'JSON parse failed: JSON object repeats a key'
+                )
+                assert isinstance(cause, SerializationError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_lone_surrogate_in_kwargs_is_refused_as_invalid_input(self) -> None:
         """A lone surrogate never reaches the UTF-8 encode of the input envelope."""
         broker = _make_broker()
