@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::pools::PoolSettingsError;
-use crate::db::{StatementFailure, Transience};
+use crate::db::{MaskedUrl, StatementFailure, Transience};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
@@ -125,6 +125,19 @@ pub enum BrokerError {
     /// requires. Not retryable.
     #[error("{0}")]
     RowDecode(#[from] RowDecodeError),
+
+    /// The worker boot check: a LISTEN on the session URL received no NOTIFY
+    /// within `waited`, so the URL does not keep session state (PgBouncer
+    /// transaction or statement pooling). Not retryable: the same URL fails
+    /// again.
+    #[error(
+        "{masked_url} delivered no NOTIFY to a LISTEN within {waited:?}; session_database_url \
+         must be a direct URL or a PgBouncer session-pooled URL"
+    )]
+    SessionNotCapable {
+        masked_url: MaskedUrl,
+        waited: std::time::Duration,
+    },
 }
 
 impl BrokerError {
@@ -170,7 +183,8 @@ impl BrokerError {
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_)
             | Self::PoolSettings(_)
-            | Self::RowDecode(_) => false,
+            | Self::RowDecode(_)
+            | Self::SessionNotCapable { .. } => false,
         }
     }
 }
@@ -407,6 +421,20 @@ mod tests {
             }
         ))
         .is_retryable());
+    }
+
+    #[test]
+    fn a_session_url_that_does_not_deliver_is_not_retryable() {
+        let error = BrokerError::SessionNotCapable {
+            masked_url: crate::db::MaskedUrl::for_tests(
+                "postgresql://horsies:***@pgbouncer:6432/app",
+            ),
+            waited: std::time::Duration::from_secs(2),
+        };
+        assert!(!error.is_retryable());
+        assert!(error
+            .to_string()
+            .contains("postgresql://horsies:***@pgbouncer:6432/app"));
     }
 
     #[test]
