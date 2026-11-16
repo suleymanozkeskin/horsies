@@ -23,7 +23,7 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
-use crate::worker::recovery::{new_reaper_health, spawn_reaper};
+use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
 use crate::worker::runner_beats::{
     launch_runner_beats, runner_beat_pool, BeatSender, LiveDispatches, StaleRunningRecovery,
 };
@@ -397,6 +397,21 @@ impl Worker {
         }
     }
 
+    /// The reaper of this worker: the recovery steps and the cluster gate on
+    /// the runtime pool, partition maintenance on the session pool.
+    fn spawn_reaper_loop(&self, health: ReaperHealth) -> tokio::task::JoinHandle<()> {
+        spawn_reaper(
+            self.broker.pool().clone(),
+            self.broker.session_pool().clone(),
+            Arc::clone(&self.workflow_registry),
+            self.app_config.recovery.clone(),
+            self.app_config.payload.clone(),
+            self.app_config.retention.clone(),
+            health,
+            self.cancel.clone(),
+        )
+    }
+
     /// Run the worker until cancelled or a fatal error occurs.
     pub async fn run(&self) -> Result<(), WorkerError> {
         // Fleet authorization and partition coverage precede every runtime
@@ -505,16 +520,7 @@ impl Worker {
         // Start the unified reaper (stale recovery, phase 2, retention,
         // paused expiry, and partition maintenance share one cluster gate).
         let reaper_health = new_reaper_health();
-        let reaper = spawn_reaper(
-            self.broker.pool().clone(),
-            self.broker.session_pool().clone(),
-            Arc::clone(&self.workflow_registry),
-            self.app_config.recovery.clone(),
-            self.app_config.payload.clone(),
-            self.app_config.retention.clone(),
-            Arc::clone(&reaper_health),
-            self.cancel.clone(),
-        );
+        let reaper = self.spawn_reaper_loop(Arc::clone(&reaper_health));
 
         // Start worker state snapshot loop.
         let worker_started_at = Utc::now();
@@ -1652,27 +1658,6 @@ mod tests {
 
         app_config.claim_lease_ms = Some(90_000);
         assert_eq!(effective_claim_lease_ms(&app_config), 90_000);
-    }
-
-    /// Every claim and every claimer beat use the effective lease: the claim
-    /// pass never sends `None`, and the heartbeat always renews.
-    #[test]
-    fn claims_and_renewals_always_carry_a_lease() {
-        let source = include_str!("worker.rs");
-        // Production code only: the test module quotes the searched text.
-        let production = &source[..source
-            .find(&["#[cfg(test)]", "\nmod tests {"].concat())
-            .expect("test module marker")];
-        let run = &production[production
-            .find("pub async fn run(&self)")
-            .expect("Worker::run source")..];
-        let heartbeat = &run[run
-            .find("spawn_claimer_heartbeat(")
-            .expect("claimer heartbeat startup")..];
-        let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
-        assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
-        assert!(production.contains("claim_lease_ms: claim_lease(&self.app_config),"));
-        assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
     }
 
     #[test]
@@ -2893,9 +2878,26 @@ mod tests {
 
     /// A worker on `broker` that retries a failed start at most once.
     fn start_test_worker(broker: PostgresBroker, config_url: String) -> Worker {
+        worker_with_config(broker, test_app_config(config_url))
+    }
+
+    fn worker_with_config(broker: PostgresBroker, app_config: AppConfig) -> Worker {
+        Worker::new(
+            Arc::new(broker),
+            Arc::new(TaskRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new()),
+            app_config,
+            WorkerConfig::default(),
+        )
+        .expect("worker")
+    }
+
+    /// The app config of the start tests: no `claim_lease_ms`, one start
+    /// attempt.
+    fn test_app_config(config_url: String) -> AppConfig {
         use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
 
-        let app_config = AppConfig {
+        AppConfig {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
@@ -2925,15 +2927,7 @@ mod tests {
             },
             schedule: None,
             resend_on_transient_err: false,
-        };
-        Worker::new(
-            Arc::new(broker),
-            Arc::new(TaskRegistry::new()),
-            Arc::new(WorkflowSpecRegistry::new()),
-            app_config,
-            WorkerConfig::default(),
-        )
-        .expect("worker")
+        }
     }
 
     /// One PENDING task on the default queue; a claim loop would take it.
@@ -3164,6 +3158,230 @@ mod tests {
             .start_database()
             .await
             .expect("the database start uses only the session pool");
+    }
+
+    /// The URL of database `database` on the server of `url`.
+    fn database_url_for(url: &str, database: &str) -> String {
+        let (address, query) = match url.split_once('?') {
+            Some((address, query)) => (address, Some(query)),
+            None => (url, None),
+        };
+        let (server, _) = address
+            .rsplit_once('/')
+            .expect("a test database URL names its database after the last slash");
+        match query {
+            Some(query) => format!("{server}/{database}?{query}"),
+            None => format!("{server}/{database}"),
+        }
+    }
+
+    /// `url` with `application_name` set, so a trigger can tell its sessions.
+    fn with_application_name(url: &str, name: &str) -> String {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{separator}application_name={name}")
+    }
+
+    /// A CLAIMED task of `worker_id` on the default queue, claimed now, whose
+    /// lease ends in ten seconds.
+    async fn insert_task_claimed_by(pool: &PgPool, worker_id: &str) -> Uuid {
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'start_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'CLAIMED', NOW(), NOW(), $2, NOW() + interval '10 seconds',
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NULL, FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(pool)
+        .await
+        .expect("insert a claimed task");
+        task_id
+    }
+
+    /// With `claim_lease_ms` not set, the claim of a PENDING task and the
+    /// claimer's renewal of a held claim both write the default lease. A
+    /// trigger logs every lease written on a CLAIMED row.
+    #[tokio::test]
+    #[serial]
+    async fn claims_and_renewals_write_the_default_lease() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        sqlx::raw_sql(
+            "CREATE TABLE test_claim_lease_log (task_id uuid NOT NULL, lease interval NOT NULL);
+             CREATE FUNCTION test_log_claim_lease() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF NEW.status = 'CLAIMED' AND NEW.claim_expires_at IS NOT NULL THEN
+                     INSERT INTO test_claim_lease_log
+                     VALUES (NEW.id, NEW.claim_expires_at - now());
+                 END IF;
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_log_claim_lease AFTER UPDATE ON horsies_tasks
+                 FOR EACH ROW EXECUTE FUNCTION test_log_claim_lease();",
+        )
+        .execute(&database.pool)
+        .await
+        .expect("install the lease log");
+        let worker = start_test_worker(
+            PostgresBroker::from_pool(database.pool.clone()),
+            database.config_url.clone(),
+        );
+        let pending = insert_pending_task(&database.pool).await;
+        let held = insert_task_claimed_by(&database.pool, worker.worker_id()).await;
+        let cancel = worker.cancel_token();
+        let run = tokio::spawn(async move { worker.run().await });
+
+        let lease_seconds = |task_id: Uuid| {
+            let pool = database.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, f64>(
+                    "SELECT EXTRACT(EPOCH FROM lease)::float8 FROM test_claim_lease_log
+                     WHERE task_id = $1",
+                )
+                .bind(task_id)
+                .fetch_all(&pool)
+                .await
+                .expect("read the lease log")
+            }
+        };
+        let (claimed, renewed) = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let claimed = lease_seconds(pending).await;
+                let renewed = lease_seconds(held).await;
+                if !claimed.is_empty() && !renewed.is_empty() {
+                    break (claimed, renewed);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the worker claims the pending task and renews the held claim");
+        cancel.cancel();
+        let _stopped = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the worker stops after cancel")
+            .expect("run task join");
+
+        let default_seconds = f64::from(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS) / 1000.0;
+        for lease in claimed.iter().chain(renewed.iter()) {
+            assert!(
+                (default_seconds - 5.0..=default_seconds + 1.0).contains(lease),
+                "lease {lease}s is not the default {default_seconds}s"
+            );
+        }
+        database.drop().await;
+    }
+
+    /// The reaper's recovery statements run on the runtime pool and its
+    /// partition maintenance on the session pool. Each pool has its own
+    /// `application_name`; statement triggers log which session wrote.
+    #[tokio::test]
+    #[serial]
+    async fn the_reaper_recovers_on_the_runtime_pool_and_maintains_on_the_session_pool() {
+        use crate::core::config::PostgresConfig;
+        use crate::core::history::names::LEAF_CATALOG;
+
+        let database = FreshDatabase::create().await;
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE test_pool_writes (relation_name text NOT NULL, application_name text NOT NULL);
+             CREATE FUNCTION test_record_pool_write() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 INSERT INTO test_pool_writes
+                 VALUES (TG_TABLE_NAME, current_setting('application_name'));
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_task_writes AFTER UPDATE ON horsies_tasks
+                 FOR EACH STATEMENT EXECUTE FUNCTION test_record_pool_write();
+             CREATE TRIGGER test_catalog_writes AFTER INSERT ON {LEAF_CATALOG}
+                 FOR EACH STATEMENT EXECUTE FUNCTION test_record_pool_write();"
+        ))
+        .execute(&database.pool)
+        .await
+        .expect("install the pool write log");
+        let database_url = database_url_for(&database.config_url, &database.name);
+        let broker = PostgresBroker::connect_with(&PostgresConfig {
+            database_url: with_application_name(&database_url, "reaper_runtime"),
+            session_database_url: Some(with_application_name(&database_url, "reaper_session")),
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            pool_size: 30,
+            max_overflow: 30,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        })
+        .await
+        .expect("connect a broker with two pools");
+        let mut app_config = test_app_config(database.config_url.clone());
+        app_config.recovery.auto_requeue_stale_claimed = true;
+        let worker = worker_with_config(broker, app_config);
+        let health = new_reaper_health();
+
+        let reaper = worker.spawn_reaper_loop(Arc::clone(&health));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while health.read().await.partition_coverage.is_none() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the reaper completes a pass with partition maintenance");
+        worker.cancel_token().cancel();
+        tokio::time::timeout(Duration::from_secs(30), reaper)
+            .await
+            .expect("the reaper stops after cancel")
+            .expect("reaper join");
+
+        let writes: Vec<(String, String)> =
+            sqlx::query_as("SELECT relation_name, application_name FROM test_pool_writes")
+                .fetch_all(&database.pool)
+                .await
+                .expect("read the pool write log");
+        let sessions_of = |relation: &str| -> Vec<&str> {
+            writes
+                .iter()
+                .filter(|(name, _)| name == relation)
+                .map(|(_, application)| application.as_str())
+                .collect()
+        };
+        let task_writers = sessions_of("horsies_tasks");
+        let catalog_writers = sessions_of(LEAF_CATALOG);
+        assert!(
+            !task_writers.is_empty(),
+            "the requeue step updates horsies_tasks"
+        );
+        assert!(
+            task_writers.iter().all(|name| *name == "reaper_runtime"),
+            "{writes:?}"
+        );
+        assert!(
+            !catalog_writers.is_empty(),
+            "partition maintenance creates leaves"
+        );
+        assert!(
+            catalog_writers.iter().all(|name| *name == "reaper_session"),
+            "{writes:?}"
+        );
+        drop(worker);
+        database.drop().await;
     }
 
     #[tokio::test]
