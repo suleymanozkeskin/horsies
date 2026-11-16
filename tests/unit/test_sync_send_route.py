@@ -1,17 +1,12 @@
-"""Where a sync ``enqueue`` writes its row (``PostgresBroker.send_route``),
-and the driver form of the enqueue INSERT."""
+"""Where a sync ``enqueue`` writes its row (``PostgresBroker.send_route``)."""
 
 from __future__ import annotations
-
-import re
 
 import pytest
 from pydantic import SecretStr
 
 from horsies.core.brokers import postgres as postgres_module
 from horsies.core.brokers.postgres import (
-    ENQUEUE_INSERT_DRIVER_SQL,
-    ENQUEUE_INSERT_SQL,
     PostgresBroker,
     SyncSendRoute,
 )
@@ -47,12 +42,3 @@ def test_send_route(
     )
 
     assert broker.send_route(idempotency_key) is route
-
-
-def test_the_driver_insert_binds_the_same_parameters() -> None:
-    """The psycopg form keeps every bind of the SQLAlchemy statement, as
-    ``%(name)s``, and nothing else that psycopg would read as a bind."""
-    driver_binds = re.findall(r'%\((\w+)\)s', ENQUEUE_INSERT_DRIVER_SQL)
-
-    assert set(driver_binds) == set(ENQUEUE_INSERT_SQL.compile().params)
-    assert ENQUEUE_INSERT_DRIVER_SQL.count('%') == len(driver_binds)

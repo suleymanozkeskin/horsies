@@ -1,16 +1,15 @@
 //! The read of a phase-1 replay (`replay_of_committed_write`) on the
-//! baseline phase-2 record, which stores `terminalization_kind` and no
-//! status. Python reference: `core/worker/finalize.py`, `_phase2_of_a_replay`
-//! (a replay of a committed workflow write owes the phase 2 of its committed
-//! outcome; a plain task owes nothing), and
-//! `core/workflows/phase2_recovery.py`, `terminal_status_of_pending_kind`
-//! (the status of each kind of the record).
+//! baseline phase-2 record. The replay reads only whether the record exists:
+//! the node finish takes the node status from the record's kind. Python
+//! reference: `core/worker/finalize.py`, `_phase2_of_a_replay` (a replay of a
+//! committed workflow write owes the phase 2 of its committed outcome; a
+//! plain task owes nothing).
 
 use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome};
+use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome, PhaseTwoForm};
 
 /// The ids of one seeded workflow node and its task.
 struct SeededRecord {
@@ -39,10 +38,10 @@ async fn seed_record(pool: &PgPool, kind: &str) -> SeededRecord {
     .expect("seed workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, task_id, is_subworkflow, created_at, started_at
-         ) VALUES ($1, $2, 0, 'only', 'replay_read_task', '{}', 'default', 100,
+         ) VALUES ('NONE', $1, $2, 0, 'only', 'replay_read_task', '{}', 'default', 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    'forever', 'RUNNING', $3, FALSE, NOW(), NOW())",
     )
@@ -90,10 +89,10 @@ async fn cleanup(pool: &PgPool, seeded: &SeededRecord) {
 fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match outcome {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -102,10 +101,10 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
     }
 }
 
-/// A replay of a committed workflow success owes a successful phase 2.
+/// A replay of a committed workflow success owes phase 2.
 #[tokio::test]
 #[serial]
-async fn a_complete_locked_record_owes_a_successful_phase_two() {
+async fn a_complete_locked_record_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let seeded = seed_record(&pool, "COMPLETE_LOCKED").await;
 
@@ -116,8 +115,8 @@ async fn a_complete_locked_record_owes_a_successful_phase_two() {
         matches!(
             outcome,
             Ok(FinalizeOutcome::Terminal {
-                is_success: true,
                 capacity_notified: false,
+                phase_two: PhaseTwoForm::NotKnown,
             })
         ),
         "{}",
@@ -125,11 +124,10 @@ async fn a_complete_locked_record_owes_a_successful_phase_two() {
     );
 }
 
-/// A replay of a committed failure or expiry owes a failed phase 2: the
-/// node takes FAILED for a FAILED and for an EXPIRED task.
+/// A replay of a committed failure or expiry owes phase 2.
 #[tokio::test]
 #[serial]
-async fn failure_and_expiry_records_owe_a_failed_phase_two() {
+async fn failure_and_expiry_records_owe_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     for kind in [
         "FAIL_RUNNING",
@@ -146,8 +144,8 @@ async fn failure_and_expiry_records_owe_a_failed_phase_two() {
             matches!(
                 outcome,
                 Ok(FinalizeOutcome::Terminal {
-                    is_success: false,
                     capacity_notified: false,
+                    phase_two: PhaseTwoForm::NotKnown,
                 })
             ),
             "{kind}: {}",

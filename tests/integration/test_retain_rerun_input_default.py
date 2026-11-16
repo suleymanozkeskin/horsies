@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err
@@ -49,6 +50,7 @@ async def _enqueue(
     outcome = await broker.enqueue_async(
         'policy.task',
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha='b' * 64,
         sent_at=datetime.now(timezone.utc),
         args_json='[]',

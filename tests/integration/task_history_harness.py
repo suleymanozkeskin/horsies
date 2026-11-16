@@ -300,7 +300,7 @@ async def insert_live_task(
     """
     from horsies.core.history.identity.uuid7 import mint_task_id
 
-    task_id = task_id if task_id is not None else mint_task_id()
+    task_id = task_id if task_id is not None else str(mint_task_id())
     now = datetime.now(timezone.utc)
     await connection.execute(
         text(
@@ -405,7 +405,7 @@ async def link_workflow_node(
     await connection.execute(
         text(
             """
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, args_from,
                 workflow_ctx_from, allow_failed_deps, join_type, min_success,
@@ -414,7 +414,7 @@ async def link_workflow_node(
                 sub_workflow_id, sub_workflow_name, sub_definition_key,
                 sub_workflow_params, sub_workflow_summary, result, error,
                 created_at, started_at, completed_at
-            ) VALUES (
+            ) VALUES ('NONE',
                 CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), :task_index,
                 :node_key, 'it.move', '{}',
                 'default', 50, '{}', NULL,

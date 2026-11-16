@@ -439,6 +439,19 @@ TaskResult(err=TaskError(
 
 This applies to both `args_from` kwargs and `workflow_ctx_from` context data.
 
+### A dependency with no stored result
+
+A COMPLETED or FAILED dependency always stores its result. If its stored result is missing (for example a row changed by hand), the dependent task receives this entry in `args_from` kwargs and in `workflow_ctx_from` context data, in place of no entry:
+
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
+```python
+TaskResult(err=TaskError(
+    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+    message="Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result",
+    data={"dependency_index": <index>},
+))
+```
+
 ### args_from with join='any' / 'quorum'
 
 With a non-`all` join, the node becomes ready while some dependencies may
@@ -615,6 +628,7 @@ workflow = app.workflow(
 3. **SKIPPED counts as not satisfied**: A SKIPPED task does not satisfy a required condition.
 4. **`optional` is declarative**: It records which nodes may fail, and it has no runtime effect. A node that no case requires does not change the result, with or without `optional`. Spec validation checks that each node in `optional` is in the workflow.
 5. **Default behavior**: If `success_policy` is None, any task failure → FAILED (unchanged).
+6. **Stored policy that does not parse**: The start stores the policy as node indices. If the stored value is not that form (for example a row written by hand), the completion step raises `StoredSuccessPolicyError` and does not fall back to the default rule. The [recovery limit](#recovery-limit) then fails the workflow closed with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
 
 ### Example: Shipping Workflow
 

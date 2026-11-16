@@ -23,6 +23,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import event
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers import postgres as postgres_module
 from horsies.core.brokers.postgres import PostgresBroker, SyncSendRoute
@@ -123,7 +124,7 @@ def _bridged(broker: PostgresBroker, monkeypatch: pytest.MonkeyPatch) -> list[st
     return calls
 
 
-def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> str:
+def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> uuid.UUID:
     match sent:
         case Ok(handle):
             return handle.task_id
@@ -131,7 +132,7 @@ def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> str:
             raise AssertionError(f'expected a sent task, got {sent!r}')
 
 
-def _rows(task_ids: list[str]) -> int:
+def _rows(task_ids: list[uuid.UUID]) -> int:
     with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
         row = connection.execute(
             'SELECT count(*) FROM horsies_tasks WHERE id = ANY(%s::uuid[])',
@@ -213,13 +214,14 @@ def test_task_code_in_a_worker_child_stays_on_the_loop_runner(
     assert _rows([task_id]) == 1
 
 
-def test_a_taken_task_id_is_compared_on_the_loop_runner(
+def test_a_taken_task_id_is_answered_on_the_calling_thread(
     echo_app: EchoApp,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The INSERT on the calling thread finds the id taken; the send is
-    compared on the loop runner: the same command and ``sent_at`` is the
-    same send, another command is a mismatch. Neither writes a second row."""
+    """The statement on the calling thread finds the id taken and compares
+    the send: the same command and ``sent_at`` is the same send, another
+    command is a mismatch. Neither writes a second row, and neither goes to
+    the loop runner."""
     task_id = mint_task_id()
     sent_at = datetime.now(timezone.utc)
     sha = hashlib.sha256(b'first payload').hexdigest()
@@ -227,6 +229,7 @@ def test_a_taken_task_id_is_compared_on_the_loop_runner(
     first = echo_app.broker.enqueue(
         TASK_NAME,
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=sha,
         kwargs_json='{"value": 4}',
         sent_at=sent_at,
@@ -237,6 +240,7 @@ def test_a_taken_task_id_is_compared_on_the_loop_runner(
     replay = echo_app.broker.enqueue(
         TASK_NAME,
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=sha,
         kwargs_json='{"value": 4}',
         sent_at=sent_at,
@@ -244,6 +248,7 @@ def test_a_taken_task_id_is_compared_on_the_loop_runner(
     other = echo_app.broker.enqueue(
         TASK_NAME,
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=other_sha,
         kwargs_json='{"value": 5}',
         sent_at=sent_at,
@@ -255,13 +260,13 @@ def test_a_taken_task_id_is_compared_on_the_loop_runner(
             pass
         case _:
             raise AssertionError(f'expected a payload mismatch, got {other!r}')
-    assert bridged == ['_verify_taken_task_id', '_verify_taken_task_id']
+    assert bridged == []
     assert _rows([task_id]) == 1
 
 
-def _task_id_of(enqueued: object) -> str:
+def _task_id_of(enqueued: object) -> uuid.UUID:
     match enqueued:
-        case Ok(str() as task_id):
+        case Ok(uuid.UUID() as task_id):
             return task_id
         case _:
             raise AssertionError(f'expected an enqueued id, got {enqueued!r}')

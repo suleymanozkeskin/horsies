@@ -14,7 +14,7 @@ use super::support::{
     code, end_workflows, err, finish_node, node, ok, shared_pool, spec, start, stored_error,
     task_node, workflow, workflow_error_code,
 };
-use crate::core::config::payload::PayloadPolicy;
+use crate::broker::PostgresBroker;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::{OnError, WorkflowSpecRegistry};
 use crate::workflow_engine::engine::on_workflow_task_complete;
@@ -25,11 +25,16 @@ async fn start_chain(pool: &PgPool, name: &str, on_error: OnError) -> Uuid {
     dependent.dependencies = vec![0];
     let mut chain = spec(name, vec![task_node(0, &format!("{name}_root")), dependent]);
     chain.on_error = on_error;
-    start(pool, &chain, &WorkflowSpecRegistry::new()).await
+    start(
+        pool,
+        &chain,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await
 }
 
-/// `test_terminal_cas_is_idempotent`: a second phase 2 of the same task, with
-/// another result, does not write the node again.
+/// `test_terminal_cas_is_idempotent`: a second phase 2 of the same task does
+/// not write the node again.
 #[tokio::test]
 #[serial]
 async fn a_second_completion_of_a_node_keeps_the_first_result() {
@@ -40,21 +45,16 @@ async fn a_second_completion_of_a_node_keeps_the_first_result() {
         workflow_id,
         0,
         &ok(serde_json::json!(1)),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
     let first = node(&pool, workflow_id, 0).await;
     assert_eq!(first.status, "COMPLETED");
 
-    let other_result =
-        serde_json::to_string(&ok(serde_json::json!(999))).expect("encode the other result");
     on_workflow_task_complete(
-        &pool,
+        &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &other_result,
-        true,
-        &WorkflowSpecRegistry::new(),
-        &PayloadPolicy::default(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .await
@@ -83,7 +83,7 @@ async fn a_failure_under_on_error_fail_stores_the_error_and_resolves_the_workflo
         workflow_id,
         0,
         &err("BENCH_FAIL", "forced"),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -109,7 +109,7 @@ async fn a_failure_under_on_error_pause_pauses_and_leaves_the_dependent_pending(
         workflow_id,
         0,
         &err("BENCH_FAIL", "forced"),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -140,7 +140,7 @@ async fn a_node_of_a_paused_workflow_stores_its_result_and_promotes_nothing() {
         workflow_id,
         0,
         &ok(serde_json::json!(1)),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -162,15 +162,11 @@ async fn a_node_of_a_paused_workflow_stores_its_result_and_promotes_nothing() {
 async fn phase_two_of_a_task_with_no_node_changes_nothing() {
     let pool = shared_pool().await;
     let task_id = Uuid::new_v4();
-    let result_json = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode");
 
     on_workflow_task_complete(
-        &pool,
+        &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &result_json,
-        true,
-        &WorkflowSpecRegistry::new(),
-        &PayloadPolicy::default(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .await

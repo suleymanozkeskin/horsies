@@ -16,6 +16,7 @@ import pytest
 from pydantic import BaseModel, field_validator
 from pydantic_core import PydanticCustomError
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
 from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.codec.validation_errors import ValueValidationError
@@ -2160,6 +2161,22 @@ class TestSendPayloadGuardrail:
         assert err.limit_bytes == 256
         broker.enqueue.assert_not_called()
 
+    def test_send_counts_utf8_bytes_of_the_kwargs(self) -> None:
+        """Kwargs of fewer characters than reject_bytes but more UTF-8 bytes
+        are refused."""
+        wrapper, broker = self._wrapper_with_policy(
+            PayloadPolicy(warn_bytes=None, reject_bytes=256),
+        )
+
+        # 200 characters, 400 bytes of UTF-8 text in the blob alone.
+        result = wrapper.send(blob='\u00e9' * 200)
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, TaskSendPayloadTooLarge)
+        assert err.size_bytes > 400
+        broker.enqueue.assert_not_called()
+
     def test_send_over_warn_bytes_warns_once_and_succeeds(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -2388,6 +2405,7 @@ class TestCreateTaskWrapperSchedule:
         # Verify enqueue was called with sent_at and enqueue_delay_seconds
         call_kwargs = broker.enqueue.call_args
         assert call_kwargs.kwargs.get('sent_at') is not None
+        assert call_kwargs.kwargs['send_kind'] is SendKind.FIRST
         assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
 
     def test_with_options_schedule_sets_good_until(self) -> None:
@@ -2629,6 +2647,7 @@ class TestRetrySend:
         assert call_kwargs['enqueue_sha'] == 'abc123'
         assert call_kwargs['args_json'] == '[1]'
         assert call_kwargs['kwargs_json'] is None
+        assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     @pytest.mark.asyncio
     async def test_retry_send_async_reuses_task_id_and_payload(self) -> None:
@@ -2649,6 +2668,7 @@ class TestRetrySend:
         call_kwargs = broker.enqueue_async.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
         assert call_kwargs['enqueue_sha'] == 'abc123'
+        assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     def test_retry_send_cross_task_returns_validation_error(self) -> None:
         """retry_send rejects errors from a different task."""
@@ -2683,6 +2703,7 @@ class TestRetrySend:
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
         assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     def test_retry_schedule_without_delay_returns_validation_error(self) -> None:
         """retry_schedule rejects errors with no enqueue_delay_seconds."""
@@ -2761,6 +2782,12 @@ class TestAutoRetry:
         assert is_ok(result)
         assert result.ok_value.task_id == 'task-ok'
         assert broker.enqueue.call_count == 3  # 1 initial + 2 retries
+        # A resend sends the same task id and sent_at again: a repeat.
+        assert [call.kwargs['send_kind'] for call in broker.enqueue.call_args_list] == [
+            SendKind.FIRST,
+            SendKind.REPEAT,
+            SendKind.REPEAT,
+        ]
 
     def test_send_with_resend_on_transient_err_gives_up_after_max_retries(self) -> None:
         """Broker always returns retryable Err — gives up after 4 total calls."""

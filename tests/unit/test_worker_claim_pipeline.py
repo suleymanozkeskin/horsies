@@ -24,10 +24,6 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.schemas.terminalization import (
-    CREATE_ABANDON_OWNED_NODES_SQL,
-    CREATE_CANCEL_OWNED_NODES_SQL,
-)
 from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
@@ -40,9 +36,8 @@ from horsies.core.worker.sql import (
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-    READ_IN_FLIGHT_ATTEMPT_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
 )
+from tests.baseline_sql import baseline_function
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
@@ -287,14 +282,15 @@ class TestOwnershipGateBehavioral:
     """Behavioral tests for _confirm_ownership_and_set_running.
 
     Exercises three code paths by mocking _get_worker_pool:
-    1. Ownership confirmed (UPDATE returns a row)
-    2. Ownership lost (UPDATE returns None, no workflow status)
+    1. Ownership confirmed (horsies_start_attempt answers STARTED)
+    2. Ownership lost (it answers MISSED with NOT_HELD)
     3. Exception path (pool raises)
     """
 
     def test_ownership_confirmed_returns_none_and_commits(self) -> None:
-        """When UPDATE RETURNING returns a row, ownership is confirmed."""
-        cursor = _FakeCursor(fetchone_return=('task-1',))
+        """When the start answers STARTED, ownership is confirmed; the
+        statement committed alone in autocommit."""
+        cursor = _FakeCursor(fetchone_return=('STARTED', None))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -314,22 +310,13 @@ class TestOwnershipGateBehavioral:
             )
 
         assert result is None, 'Ownership confirmed should return None'
-        assert conn.commits == 1, 'Should commit on ownership confirmation'
-        assert conn.rollbacks == 0, 'No rollback on success'
+        assert len(cursor.queries) == 1
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_ownership_lost_returns_claim_lost_and_rollbacks(self) -> None:
-        """When UPDATE RETURNING returns None and no workflow status, returns CLAIM_LOST."""
-        # First fetchone (UPDATE RETURNING) → None (ownership lost)
-        # Second fetchone (workflow status check) → None (not a workflow task)
-        call_count = 0
-
-        class _MultiReturnCursor(_FakeCursor):
-            def fetchone(self) -> Any:
-                nonlocal call_count
-                call_count += 1
-                return None  # Both UPDATE and workflow check return None
-
-        cursor = _MultiReturnCursor()
+        """When the start answers NOT_HELD, returns CLAIM_LOST with no other
+        statement."""
+        cursor = _FakeCursor(fetchone_return=('MISSED', 'NOT_HELD'))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -354,9 +341,8 @@ class TestOwnershipGateBehavioral:
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'CLAIM_LOST'
-        assert conn.rollbacks == 2, 'The start that missed, then the miss path'
-        assert conn.commits == 0, 'No commit on ownership loss'
-        assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
+        assert len(cursor.queries) == 1
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_exception_returns_ownership_unconfirmed(self) -> None:
         """When pool raises an exception, returns OWNERSHIP_UNCONFIRMED."""
@@ -410,7 +396,7 @@ class TestOwnershipGateBehavioral:
         assert conn.commits == 0
 
     def test_an_allowed_start_runs_the_update(self) -> None:
-        cursor = _FakeCursor(fetchone_return=('task-1',))
+        cursor = _FakeCursor(fetchone_return=('STARTED', None))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -428,7 +414,7 @@ class TestOwnershipGateBehavioral:
 
         assert result is None
         assert len(cursor.queries) == 1
-        assert conn.commits == 1
+        assert conn.commits == 0
 
 
 # ---------------------------------------------------------------------------
@@ -479,70 +465,37 @@ class TestLeaseRenewalSql:
 
 @pytest.mark.unit
 class TestUnclaimSqlClearsLeaseExpiry:
-    """Both unclaim SQL variants must clear claim_expires_at to prevent
-    stale lease timestamps from persisting on re-queued tasks.
+    """The paused-task cleanup must clear claim_expires_at, so no stale
+    lease timestamp persists on a re-queued task.
     """
 
-    def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
-        """Paused-task cleanup must SET claim_expires_at = NULL."""
-        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-        assert "status = 'CANCELLED'" in normalised
-        assert "error_code = 'TASK_CANCELLED'" in normalised
-
-    def test_unclaim_claimed_task_clears_claim_expires_at(self) -> None:
-        """UNCLAIM_CLAIMED_TASK_SQL must SET claim_expires_at = NULL."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-
-    @pytest.mark.parametrize(
-        'statement',
-        [
-            UNCLAIM_CLAIMED_TASK_SQL,
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-        ],
-        ids=['release', 'in-flight read'],
-    )
-    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
-        """Each statement fences on the claim time of the dispatch. A NULL
-        claim time matches no row: nothing can turn the check off."""
-        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
-
-        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
-        assert 'IS NULL' not in where
-        assert 'COALESCE' not in where
-
-    def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
-        """Pre-execution unclaim must not reset potentially executed RUNNING rows."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "status = 'CLAIMED'" in normalised
-        assert "status IN ('CLAIMED', 'RUNNING')" not in normalised
-        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+    def test_paused_task_cleanup_ends_the_claim(self) -> None:
+        """Paused-task cleanup moves the claimed row to history as CANCELLED
+        with TASK_CANCELLED and deletes the live row with its lease."""
+        normalised = ' '.join(
+            baseline_function('horsies_abandon_owned_nodes').split()
+        )
+        assert "t.command_fingerprint, 'CANCELLED'," in normalised
+        assert "'TASK_CANCELLED'," in normalised
+        assert 'DELETE FROM horsies_tasks WHERE id = ANY(v_applied_ids)' in normalised
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "ctx.status = 'CLAIMED'" in normalised
+        normalised = ' '.join(baseline_function('horsies_abandon_owned_nodes').split())
+        assert "t.status = 'CLAIMED'" in normalised
         assert (
-            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
             in normalised
         )
-        assert 'RETURNING t.id' in normalised
 
     def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
         """Cancelled workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CREATE_CANCEL_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "ctx.status = 'CLAIMED'" in normalised
+        normalised = ' '.join(baseline_function('horsies_cancel_owned_nodes').split())
+        assert "t.status = 'CLAIMED'" in normalised
         assert (
-            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
             in normalised
         )
-        assert 'RETURNING t.id' in normalised
 
     def test_post_claim_guards_fence_on_the_claim_generation(self) -> None:
         """Both post-claim guards carry a pairwise claim-generation fence.
@@ -550,27 +503,19 @@ class TestUnclaimSqlClearsLeaseExpiry:
         The guard runs in its own transaction after the claim committed, so a
         lapsed-and-re-claimed row is CLAIMED by this worker again and the
         (status, worker) pair alone cannot reject it. Generations travel
-        alongside ids because one batch can span claim transactions.
+        alongside ids because one batch can span claim transactions. A NULL
+        generation is refused before any row is read, so the fence has no
+        NULL arm.
         """
-        for statement in (
-            CREATE_ABANDON_OWNED_NODES_SQL,
-            CREATE_CANCEL_OWNED_NODES_SQL,
-        ):
-            normalised = ' '.join(statement.text.split())
+        for name in ('horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'):
+            normalised = ' '.join(baseline_function(name).split())
             assert 'unnest(' in normalised
-            assert 'unnest(p_ids, p_claimed_ats) WITH ORDINALITY' in normalised
-            assert 'AS g(task_id, claimed_at, ordinality)' in normalised
             assert (
-                'ctx.expected_claimed_at IS NULL '
-                'OR ctx.claimed_at = ctx.expected_claimed_at'
-                in normalised
+                'FROM unnest(p_ids, p_claimed_ats) '
+                'AS input(task_id, expected_claimed_at)' in normalised
             )
-
-    def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
-        """RUNNING task requeue must clear stale runtime metadata."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'started_at = NULL' in normalised
-        assert 'worker_pid = NULL' in normalised
-        assert 'worker_hostname = NULL' in normalised
-        assert 'worker_process_name = NULL' in normalised
+            assert 'AND t.claimed_at = input.expected_claimed_at' in normalised
+            assert 'expected_claimed_at IS NULL' not in normalised
+            assert normalised.index('batch claim generations must be non-NULL') < (
+                normalised.index('FOR UPDATE')
+            )

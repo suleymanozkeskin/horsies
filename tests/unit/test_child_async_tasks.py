@@ -18,6 +18,7 @@ from enum import Enum
 from contextlib import ExitStack
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 from pydantic import SecretStr
@@ -457,9 +458,9 @@ class TestResultWaitsInsideAnAsyncTask:
             AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
-        enqueued: list[str] = []
+        enqueued: list[UUID] = []
 
-        async def enqueue_async(*_args: object, task_id: str, **_kwargs: object) -> Ok[str]:
+        async def enqueue_async(*_args: object, task_id: UUID, **_kwargs: object) -> Ok[UUID]:
             enqueued.append(task_id)
             return Ok(task_id)
 
@@ -533,9 +534,9 @@ class TestTheSendPathLeavesNoLoopTask:
             AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
         )
         broker = app.get_broker()
-        enqueued: list[str] = []
+        enqueued: list[UUID] = []
 
-        async def enqueue_async(*_args: object, task_id: str, **_kwargs: object) -> Ok[str]:
+        async def enqueue_async(*_args: object, task_id: UUID, **_kwargs: object) -> Ok[UUID]:
             enqueued.append(task_id)
             return Ok(task_id)
 
@@ -547,7 +548,7 @@ class TestTheSendPathLeavesNoLoopTask:
         async def sends() -> TaskResult[str, TaskError]:
             match await sent.send_async():
                 case Ok(handle):
-                    return TaskResult(ok=handle.task_id)
+                    return TaskResult(ok=str(handle.task_id))
                 case Err(send_err):
                     return TaskResult(
                         err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
@@ -559,7 +560,7 @@ class TestTheSendPathLeavesNoLoopTask:
         finally:
             broker._loop_runner.stop()
 
-        assert _result(wire, str).ok_value == enqueued[0]
+        assert _result(wire, str).ok_value == str(enqueued[0])
         assert task_loop.report() == LoopHoldsNoTask()
 
 

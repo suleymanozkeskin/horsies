@@ -398,6 +398,8 @@ _COLUMNS = [
     'is_workflow_task',
     'task_options',
     'claimed_at',
+    'retry_count',
+    'max_retries',
     'execution',
     'short_by',
 ]
@@ -461,6 +463,8 @@ def _row(task_id: str, task_name: str, execution: str) -> tuple[object, ...]:
         False,
         None,
         _claim_time(task_id),
+        0,
+        0,
         execution,
         None,
     )

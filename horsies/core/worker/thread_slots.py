@@ -13,10 +13,10 @@ This module is pure. The slot pool (``slots``) holds the states and acts.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import assert_never
 
 from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SharedRunFrame,
@@ -56,7 +56,7 @@ class ThreadRunRequest:
     kwargs_json: str | None
     worker_id: str
     is_workflow_task: bool
-    claimed_at: datetime
+    claim: DispatchClaim
     work: ThreadSeatWork
 
     def __post_init__(self) -> None:
@@ -80,6 +80,6 @@ class ThreadRunRequest:
             kwargs_json=self.kwargs_json,
             worker_id=self.worker_id,
             is_workflow_task=self.is_workflow_task,
-            claimed_at=self.claimed_at,
+            claimed_at=self.claim.claimed_at,
             work=self.work,
         )

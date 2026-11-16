@@ -29,6 +29,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.worker.child_protocol import SeatFinished, SeatTask
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
@@ -135,7 +136,29 @@ async def _insert_shared_task(
     return task_id
 
 
+async def _claim_of(worker: Worker, task_id: str) -> DispatchClaim:
+    """The claim of the seeded row, with the retry facts that ``horsies_claim``
+    returns for it."""
+    async with worker.sf() as session:
+        row = (
+            await session.execute(
+                text(
+                    'SELECT claimed_at, retry_count, max_retries, task_options '
+                    'FROM horsies_tasks WHERE id = CAST(:id AS uuid)'
+                ),
+                {'id': task_id},
+            )
+        ).one()
+    return DispatchClaim(
+        claimed_at=row.claimed_at,
+        retry_count=row.retry_count,
+        max_retries=row.max_retries,
+        task_options=row.task_options,
+    )
+
+
 async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> None:
+    claim = await _claim_of(worker, task_id)
     request = SharedRunRequest(
         task_id=task_id,
         task_name='shared_kill',
@@ -143,7 +166,7 @@ async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> Non
         kwargs_json=None,
         worker_id=WORKER_ID,
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim,
         work=WORK,
     )
     handle = SharedHandle(request.frame_for(1), asyncio.get_running_loop())
@@ -155,7 +178,7 @@ async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> Non
         False,
         WORK,
         task_name='shared_kill',
-        claimed_at=CLAIMED_AT,
+        claim=claim,
     )
 
 

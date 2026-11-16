@@ -99,7 +99,7 @@ from horsies import Ok, Err
 async def refresh_price(*, symbol: str) -> TaskResult[str, TaskError]:
     match await fetch_price.send_async(symbol=symbol):
         case Ok(handle):
-            return TaskResult(ok=handle.task_id)
+            return TaskResult(ok=str(handle.task_id))
         case Err(send_err):
             return TaskResult(err=TaskError(error_code="SEND_FAILED", message=send_err.message))
 ```

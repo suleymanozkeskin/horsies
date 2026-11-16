@@ -34,6 +34,11 @@ class TestRetryPolicyValidation:
         with pytest.raises(ValueError, match='auto_retry_for'):
             RetryPolicy.fixed([5], auto_retry_for=['TimeoutError'])
 
+    def test_reserved_code_rejected_in_auto_retry_for(self) -> None:
+        """No task error carries WORKFLOW_STOPPED, so no retry can name it."""
+        with pytest.raises(ValueError, match='reserved error code name'):
+            RetryPolicy.fixed([5], auto_retry_for=['WORKFLOW_STOPPED'])
+
     def test_empty_auto_retry_for_rejected(self) -> None:
         """RetryPolicy rejects empty auto_retry_for list."""
         with pytest.raises(ValueError, match='at least 1 item'):

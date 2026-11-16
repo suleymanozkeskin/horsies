@@ -337,7 +337,8 @@ async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> 
 async fn a_root_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.root_nesting.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(root_nesting(key))
         .expect("register the nesting definition");
@@ -387,7 +388,8 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
 async fn a_dependent_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.dependent_nesting.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(dependent_nesting(key))
         .expect("register the nesting definition");
@@ -431,11 +433,11 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
 /// row is kept.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #909"]
 async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no_child() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.later_node_prep_failure_child_workflow.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(RegisteredWorkflowDefinition {
             name: "later_node_prep_failure_child_workflow".to_owned(),
@@ -739,7 +741,8 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
 async fn a_child_node_with_two_args_from_keys_starts() {
     let pool = shared_pool().await;
     let key = "tests.port.multi_param_child.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(RegisteredWorkflowDefinition {
             name: "multi_param_child_workflow".to_owned(),

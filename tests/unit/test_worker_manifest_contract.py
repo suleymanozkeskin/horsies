@@ -1,0 +1,598 @@
+"""Contract between the Pydantic app config and the core's worker manifest.
+
+`to_worker_manifest` maps `AppConfig` into the manifest generated from
+horsies-core (`horsies/_catalog/worker_manifest.py`). These tests pin that
+the bounds of the profile models are the bounds of the manifest, that every
+profile field is mapped with each Pydantic default as a value, that the
+drain timeout becomes whole milliseconds, which claim values the manifest
+cannot hold, and the form of the dumped document.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from datetime import timedelta
+from typing import Any, Final, cast
+
+import pytest
+from annotated_types import Ge, Le
+from pydantic import SecretStr
+
+from horsies._catalog import worker_manifest as wire
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.child_sizing import (
+    DEFAULT_ISOLATED_POOL_CONNECTIONS,
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+)
+from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.tasks import Execution
+from horsies.core.models.worker_profile import (
+    DEFAULT_DRAIN_TIMEOUT,
+    DEFAULT_RECYCLE_AFTER_TASKS,
+    DEFAULT_RECYCLE_AFTER_TASKS_PER_SEAT,
+    MAX_CHILD_POOL_CONNECTIONS,
+    MAX_DRAIN_TIMEOUT,
+    MAX_EXECUTOR_THREADS,
+    MAX_ISOLATED_CHILDREN,
+    MAX_MEMORY_LIMIT_MB,
+    MAX_SEATS_PER_SHARED_ASYNC_CHILD,
+    MAX_SEATS_PER_SHARED_THREAD_CHILD,
+    MAX_SHARED_ASYNC_CHILDREN,
+    MAX_SHARED_THREAD_CHILDREN,
+    MAX_TASK_LIMIT,
+    ClaimLimits,
+    ExecutorThreads,
+    IsolatedChildren,
+    IsolatedPool,
+    IsolatedRecycle,
+    MemoryLimit,
+    NoMemoryLimit,
+    NoTaskLimit,
+    ParentPool,
+    PoolSize,
+    SharedAsyncChildren,
+    SharedPool,
+    SharedRecycle,
+    SharedThreadChildren,
+    TaskLimit,
+    WorkerProfile,
+)
+from horsies.core.types.result import Err, Ok
+from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.cpu_placement import ParentCpu
+from horsies.core.worker_manifest import (
+    CHILD_MAIN_MODULE,
+    ValueAboveManifestBound,
+    drain_timeout_ms,
+    execution_of,
+    log_level_of,
+    profile_request,
+    python_child_launch,
+    to_worker_manifest,
+    worker_claim_manifest,
+    worker_database_manifest,
+    worker_profile_manifest,
+)
+
+pytestmark = [pytest.mark.unit]
+
+MAIN_URL: Final = 'postgresql://user:secret@pooler:6432/app'
+SESSION_URL: Final = 'postgresql://user:secret@direct:5432/app'
+
+# WorkerProfile field -> the WorkerProfileManifest field it fills.
+PROFILE_FIELDS: Final[dict[str, str]] = {
+    'isolated': 'isolated',
+    'shared_async': 'shared_async',
+    'shared_thread': 'shared_thread',
+    'pool': 'pool',
+    'claim': 'claim',
+    'drain_timeout': 'drain_timeout_ms',
+    'preload': 'preload',
+    'parent_cpu': 'parent_cpu',
+}
+
+WINDOW: Final = timedelta(hours=24)
+
+
+def _app_config(**overrides: Any) -> AppConfig:
+    return AppConfig(
+        broker=PostgresConfig(database_url=SecretStr(MAIN_URL)),
+        **overrides,
+    )
+
+
+def _launch() -> wire.ChildLaunchManifest:
+    return python_child_launch(
+        executable='/usr/bin/python3',
+        app_locator='app.main:app',
+        imports=['app.tasks'],
+        sys_path_roots=['/srv/app'],
+        parent_sys_path=['/srv/app', '/usr/lib/python3.13'],
+        parent_argv=['horsies', 'worker', 'app.main:app'],
+        log_level='INFO',
+    )
+
+
+def _full_profile() -> WorkerProfile:
+    return WorkerProfile(
+        isolated=IsolatedChildren(
+            count=2,
+            recycle=IsolatedRecycle(
+                after=TaskLimit(tasks=50), above=MemoryLimit(mb=512)
+            ),
+            pool=IsolatedPool(min_size=1, max_size=PoolSize(connections=3), check=True),
+            task_send_pool=PoolSize(connections=4),
+        ),
+        shared_async=SharedAsyncChildren(
+            count=1,
+            seats=20,
+            recycle=SharedRecycle(after_per_seat=NoTaskLimit(), above=NoMemoryLimit()),
+            pool=SharedPool(min_size=0, max_size=PoolSize(connections=5), check=False),
+            executor=ExecutorThreads(threads=6),
+            task_send_pool=PoolSize(connections=2),
+        ),
+        shared_thread=SharedThreadChildren(count=1, seats=8),
+        pool=ParentPool(max_size=PoolSize(connections=9)),
+        claim=ClaimLimits(
+            per_queue_per_pass=TaskLimit(tasks=5), claimed_per_worker=NoTaskLimit()
+        ),
+        drain_timeout=timedelta(seconds=90),
+        preload=ChildPreload.APP,
+        parent_cpu=ParentCpu.OWN_CORE,
+    )
+
+
+class TestBounds:
+    def test_the_profile_bounds_are_the_manifest_bounds(self) -> None:
+        assert (wire.TASK_LIMIT_MIN, wire.TASK_LIMIT_MAX) == (1, MAX_TASK_LIMIT)
+        assert (wire.MEMORY_LIMIT_MB_MIN, wire.MEMORY_LIMIT_MB_MAX) == (
+            1,
+            MAX_MEMORY_LIMIT_MB,
+        )
+        assert wire.ISOLATED_CHILDREN_MAX == MAX_ISOLATED_CHILDREN
+        assert wire.SHARED_ASYNC_CHILDREN_MAX == MAX_SHARED_ASYNC_CHILDREN
+        assert wire.SHARED_ASYNC_SEATS_MAX == MAX_SEATS_PER_SHARED_ASYNC_CHILD
+        assert wire.SHARED_THREAD_CHILDREN_MAX == MAX_SHARED_THREAD_CHILDREN
+        assert wire.SHARED_THREAD_SEATS_MAX == MAX_SEATS_PER_SHARED_THREAD_CHILD
+        assert (wire.CHILD_POOL_CONNECTIONS_MIN, wire.CHILD_POOL_CONNECTIONS_MAX) == (
+            1,
+            MAX_CHILD_POOL_CONNECTIONS,
+        )
+        assert (wire.CHILD_POOL_MIN_SIZE_MIN, wire.CHILD_POOL_MIN_SIZE_MAX) == (
+            0,
+            MAX_CHILD_POOL_CONNECTIONS,
+        )
+        assert wire.DEFAULT_EXECUTOR_THREADS_MAX == MAX_EXECUTOR_THREADS
+        assert wire.DRAIN_TIMEOUT_MS_MAX == MAX_DRAIN_TIMEOUT // timedelta(
+            milliseconds=1
+        )
+
+    def test_the_queue_priority_bounds_are_the_config_bounds(self) -> None:
+        metadata = CustomQueueConfig.model_fields['priority'].metadata
+        lower = [item.ge for item in metadata if isinstance(item, Ge)]
+        upper = [item.le for item in metadata if isinstance(item, Le)]
+        assert (lower, upper) == ([wire.QUEUE_PRIORITY_MIN], [wire.QUEUE_PRIORITY_MAX])
+
+
+class TestProfile:
+    def test_every_profile_field_has_a_manifest_field(self) -> None:
+        assert set(WorkerProfile.model_fields) == set(PROFILE_FIELDS)
+        manifest_fields = {
+            field.name for field in dataclasses.fields(wire.WorkerProfileManifest)
+        }
+        assert manifest_fields == set(PROFILE_FIELDS.values())
+
+    def test_a_profile_with_every_setting_maps_field_by_field(self) -> None:
+        assert worker_profile_manifest(_full_profile()) == wire.WorkerProfileManifest(
+            isolated=wire.IsolatedChildren(
+                count=2,
+                recycle=wire.IsolatedRecycleManifest(
+                    after=wire.TaskLimitTasks(tasks=50),
+                    above=wire.MemoryLimitMegabytes(mb=512),
+                ),
+                pool=wire.IsolatedPoolManifest(min_size=1, max_size=3, check=True),
+                task_send_pool=4,
+            ),
+            shared_async=wire.SharedAsyncChildren(
+                count=1,
+                seats=20,
+                recycle=wire.SharedRecycleManifest(
+                    after_per_seat=wire.TaskLimitNoLimit(),
+                    above=wire.MemoryLimitNoLimit(),
+                ),
+                pool=wire.SharedPoolManifest(
+                    min_size=0,
+                    max_size=wire.PoolMaxSizeConnections(connections=5),
+                    check=False,
+                ),
+                executor=wire.DefaultExecutorThreads(threads=6),
+                task_send_pool=2,
+            ),
+            shared_thread=wire.SharedThreadChildren(
+                count=1,
+                seats=8,
+                recycle=wire.SharedRecycleManifest(
+                    after_per_seat=wire.TaskLimitTasks(
+                        tasks=DEFAULT_RECYCLE_AFTER_TASKS_PER_SEAT
+                    ),
+                    above=wire.MemoryLimitNoLimit(),
+                ),
+                pool=wire.SharedPoolManifest(
+                    min_size=0,
+                    max_size=wire.PoolMaxSizeFromSeats(),
+                    check=False,
+                ),
+                task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+            ),
+            pool=wire.ParentPoolManifest(
+                max_size=wire.PoolMaxSizeConnections(connections=9)
+            ),
+            claim=wire.ClaimLimitsManifest(
+                per_queue_per_pass=wire.TaskLimitTasks(tasks=5),
+                claimed_per_worker=wire.TaskLimitNoLimit(),
+            ),
+            drain_timeout_ms=90_000,
+            preload='APP',
+            parent_cpu='OWN_CORE',
+        )
+
+    def test_each_default_of_the_model_is_a_value_of_the_manifest(self) -> None:
+        manifest = worker_profile_manifest(
+            WorkerProfile(isolated=IsolatedChildren(count=3))
+        )
+        assert manifest == wire.WorkerProfileManifest(
+            isolated=wire.IsolatedChildren(
+                count=3,
+                recycle=wire.IsolatedRecycleManifest(
+                    after=wire.TaskLimitTasks(tasks=DEFAULT_RECYCLE_AFTER_TASKS),
+                    above=wire.MemoryLimitNoLimit(),
+                ),
+                pool=wire.IsolatedPoolManifest(
+                    min_size=0,
+                    max_size=DEFAULT_ISOLATED_POOL_CONNECTIONS,
+                    check=False,
+                ),
+                task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+            ),
+            shared_async=wire.SharedAsyncNoChildren(),
+            shared_thread=wire.SharedThreadNoChildren(),
+            pool=wire.ParentPoolManifest(max_size=wire.PoolMaxSizeFromSeats()),
+            claim=wire.ClaimLimitsManifest(
+                per_queue_per_pass=wire.TaskLimitNoLimit(),
+                claimed_per_worker=wire.TaskLimitNoLimit(),
+            ),
+            drain_timeout_ms=DEFAULT_DRAIN_TIMEOUT // timedelta(milliseconds=1),
+            preload='LIBRARY',
+            parent_cpu='SHARED',
+        )
+
+    def test_every_preload_and_parent_cpu_has_its_manifest_value(self) -> None:
+        values = {
+            preload: worker_profile_manifest(
+                WorkerProfile(isolated=IsolatedChildren(count=1), preload=preload),
+            ).preload
+            for preload in ChildPreload
+        }
+        assert values == {
+            ChildPreload.LIBRARY: 'LIBRARY',
+            ChildPreload.APP: 'APP',
+            ChildPreload.NONE: 'NO_PRELOAD',
+        }
+        cpus = {
+            cpu: worker_profile_manifest(
+                WorkerProfile(isolated=IsolatedChildren(count=1), parent_cpu=cpu),
+            ).parent_cpu
+            for cpu in ParentCpu
+        }
+        assert cpus == {ParentCpu.SHARED: 'SHARED', ParentCpu.OWN_CORE: 'OWN_CORE'}
+
+    def test_a_derived_pool_size_and_executor_stay_derived(self) -> None:
+        manifest = worker_profile_manifest(
+            WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=4)),
+        )
+        match manifest.shared_async:
+            case wire.SharedAsyncChildren(pool=pool, executor=executor):
+                assert pool.max_size == wire.PoolMaxSizeFromSeats()
+                assert executor == wire.DefaultExecutorFromSeats()
+            case wire.SharedAsyncNoChildren():
+                pytest.fail('the profile has shared async children')
+
+
+class TestDrainTimeout:
+    @pytest.mark.parametrize(
+        ('drain_timeout', 'milliseconds'),
+        [
+            (timedelta(microseconds=1), 1),
+            (timedelta(microseconds=1_500), 2),
+            (timedelta(milliseconds=1), 1),
+            (timedelta(seconds=300), 300_000),
+            (MAX_DRAIN_TIMEOUT, wire.DRAIN_TIMEOUT_MS_MAX),
+            (MAX_DRAIN_TIMEOUT - timedelta(microseconds=1), wire.DRAIN_TIMEOUT_MS_MAX),
+        ],
+    )
+    def test_a_drain_timeout_is_rounded_up_to_whole_milliseconds(
+        self,
+        drain_timeout: timedelta,
+        milliseconds: int,
+    ) -> None:
+        assert drain_timeout_ms(drain_timeout) == milliseconds
+
+    def test_a_drain_timeout_outside_the_model_bounds_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError, match='a validated drain timeout'):
+            drain_timeout_ms(timedelta(0))
+        with pytest.raises(AssertionError, match='a validated drain timeout'):
+            drain_timeout_ms(MAX_DRAIN_TIMEOUT + timedelta(milliseconds=1))
+
+
+class TestClaim:
+    def test_the_default_queue_mode_has_no_queue_list(self) -> None:
+        match worker_claim_manifest(_app_config()):
+            case Ok(claim):
+                assert claim == wire.WorkerClaimManifest(
+                    queues=wire.QueuesDefault(),
+                    prefetch_buffer=0,
+                    claim_lease=wire.ClaimLeaseWorkerDefault(),
+                    max_claim_renew_age_ms=180_000,
+                    cluster_wide_cap=wire.ClusterWideCapNoLimit(),
+                )
+            case Err(above):
+                pytest.fail(f'refused: {above}')
+
+    def test_custom_queues_keep_their_order_priority_and_limit(self) -> None:
+        config = _app_config(
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[
+                CustomQueueConfig(name='high', priority=1, max_concurrency=0),
+                CustomQueueConfig(name='low', priority=100, max_concurrency=None),
+            ],
+            claim_lease_ms=90_000,
+            cluster_wide_cap=20,
+        )
+        match worker_claim_manifest(config):
+            case Ok(claim):
+                assert claim == wire.WorkerClaimManifest(
+                    queues=wire.QueuesCustom(
+                        queues=(
+                            wire.CustomQueueManifest(
+                                name='high',
+                                priority=1,
+                                max_concurrency=wire.QueueConcurrencyTasks(tasks=0),
+                            ),
+                            wire.CustomQueueManifest(
+                                name='low',
+                                priority=100,
+                                max_concurrency=wire.QueueConcurrencyNoLimit(),
+                            ),
+                        ),
+                    ),
+                    prefetch_buffer=0,
+                    claim_lease=wire.ClaimLeaseMilliseconds(ms=90_000),
+                    max_claim_renew_age_ms=180_000,
+                    cluster_wide_cap=wire.ClusterWideCapTasks(tasks=20),
+                )
+            case Err(above):
+                pytest.fail(f'refused: {above}')
+
+    @pytest.mark.parametrize(
+        ('overrides', 'path', 'maximum'),
+        [
+            (
+                {'prefetch_buffer': wire.CLAIM_COUNT_MAX + 1, 'claim_lease_ms': 60_000},
+                'prefetch_buffer',
+                wire.CLAIM_COUNT_MAX,
+            ),
+            (
+                {'max_claim_renew_age_ms': wire.MILLISECONDS_MAX + 1},
+                'max_claim_renew_age_ms',
+                wire.MILLISECONDS_MAX,
+            ),
+            (
+                # AppConfig keeps the renew age at or above the lease.
+                {
+                    'claim_lease_ms': wire.MILLISECONDS_MAX + 1,
+                    'max_claim_renew_age_ms': wire.MILLISECONDS_MAX + 1,
+                },
+                'claim_lease_ms',
+                wire.MILLISECONDS_MAX,
+            ),
+            (
+                {'cluster_wide_cap': wire.TASK_LIMIT_MAX + 1},
+                'cluster_wide_cap',
+                wire.TASK_LIMIT_MAX,
+            ),
+            (
+                {
+                    'queue_mode': QueueMode.CUSTOM,
+                    'custom_queues': [
+                        CustomQueueConfig(name='a', max_concurrency=1),
+                        CustomQueueConfig(
+                            name='b', max_concurrency=wire.QUEUE_CONCURRENCY_MAX + 1
+                        ),
+                    ],
+                },
+                'custom_queues[1].max_concurrency',
+                wire.QUEUE_CONCURRENCY_MAX,
+            ),
+        ],
+    )
+    def test_a_value_above_its_manifest_bound_is_refused_with_its_path(
+        self,
+        overrides: dict[str, Any],
+        path: str,
+        maximum: int,
+    ) -> None:
+        config = _app_config(**overrides)
+        assert worker_claim_manifest(config) == Err(
+            ValueAboveManifestBound(path=path, value=maximum + 1, maximum=maximum),
+        )
+
+    def test_the_largest_values_that_fit_are_kept(self) -> None:
+        # cluster_wide_cap needs the hard cap mode (prefetch_buffer=0).
+        soft_cap = _app_config(
+            prefetch_buffer=wire.CLAIM_COUNT_MAX,
+            claim_lease_ms=wire.MILLISECONDS_MAX,
+            max_claim_renew_age_ms=wire.MILLISECONDS_MAX,
+        )
+        match worker_claim_manifest(soft_cap):
+            case Ok(claim):
+                assert claim.prefetch_buffer == wire.CLAIM_COUNT_MAX
+                assert claim.claim_lease == wire.ClaimLeaseMilliseconds(
+                    ms=wire.MILLISECONDS_MAX
+                )
+                assert claim.max_claim_renew_age_ms == wire.MILLISECONDS_MAX
+            case Err(above):
+                pytest.fail(f'refused: {above}')
+        match worker_claim_manifest(_app_config(cluster_wide_cap=wire.TASK_LIMIT_MAX)):
+            case Ok(claim):
+                assert claim.cluster_wide_cap == wire.ClusterWideCapTasks(
+                    tasks=wire.TASK_LIMIT_MAX
+                )
+            case Err(above):
+                pytest.fail(f'refused: {above}')
+
+
+class TestDatabase:
+    def test_the_worker_database_keeps_both_pre_ping_settings(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            session_database_url=SecretStr(SESSION_URL),
+            pgbouncer_transaction_mode=True,
+            pool_pre_ping=False,
+            worker_pool_pre_ping=True,
+            pool_timeout=11,
+            pool_recycle=-1,
+            echo=True,
+        )
+        assert worker_database_manifest(config) == wire.WorkerDatabaseManifest(
+            database_url='postgresql://user:secret@pooler:6432/app',
+            session_database=wire.SessionDatabaseSeparate(
+                url='postgresql://user:secret@direct:5432/app',
+            ),
+            pgbouncer_transaction_mode=True,
+            pool_pre_ping=False,
+            worker_pool_pre_ping=True,
+            pool_timeout=11,
+            pool_recycle=wire.PoolRecycleNever(),
+            echo=True,
+        )
+
+    def test_the_pool_size_and_overflow_of_the_app_do_not_reach_a_worker(self) -> None:
+        names = {
+            field.name for field in dataclasses.fields(wire.WorkerDatabaseManifest)
+        }
+        assert 'pool_size' not in names
+        assert 'max_overflow' not in names
+
+
+class TestValues:
+    def test_the_profile_request_is_the_profile_option(self) -> None:
+        assert profile_request(None) == wire.ProfileRequestNotGiven()
+        assert profile_request('batch') == wire.ProfileRequestNamed(name='batch')
+
+    def test_every_execution_class_has_its_manifest_value(self) -> None:
+        assert {execution: execution_of(execution) for execution in Execution} == {
+            Execution.ISOLATED: 'ISOLATED',
+            Execution.SHARED_ASYNC: 'SHARED_ASYNC',
+            Execution.SHARED_THREAD: 'SHARED_THREAD',
+        }
+
+    def test_every_log_level_choice_has_its_manifest_value(self) -> None:
+        for level in ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'):
+            assert log_level_of(level) == level
+            assert log_level_of(level.lower()) == level
+        with pytest.raises(AssertionError, match='five levels'):
+            log_level_of('TRACE')
+
+    def test_a_python_child_runs_the_child_module(self) -> None:
+        launch = _launch()
+        assert launch.command == wire.ChildCommandManifest(
+            program='/usr/bin/python3',
+            args=('-m', CHILD_MAIN_MODULE),
+        )
+        assert launch.program == wire.ChildProgramPython(
+            app_locator='app.main:app',
+            imports=('app.tasks',),
+            sys_path_roots=('/srv/app',),
+            parent_sys_path=('/srv/app', '/usr/lib/python3.13'),
+            parent_argv=('horsies', 'worker', 'app.main:app'),
+        )
+
+
+class TestDocument:
+    def _document(self) -> dict[str, Any]:
+        config = _app_config(worker_profiles={'batch': _full_profile()})
+        match to_worker_manifest(
+            config,
+            profile='batch',
+            tasks={
+                'app.tasks.add': Execution.ISOLATED,
+                'app.tasks.fetch': Execution.SHARED_ASYNC,
+            },
+            child_launch=_launch(),
+            idempotency_reservation_window=WINDOW,
+        ):
+            case Ok(manifest):
+                return cast(
+                    'dict[str, Any]', json.loads(wire.dump_worker_manifest(manifest))
+                )
+            case Err(above):
+                pytest.fail(f'refused: {above}')
+
+    def test_the_document_holds_every_section(self) -> None:
+        document = self._document()
+        assert set(document) == {
+            field.name for field in dataclasses.fields(wire.WorkerManifest)
+        }
+        assert document['manifest_version'] == wire.MANIFEST_VERSION
+        assert document['profile'] == {'kind': 'NAMED', 'name': 'batch'}
+        assert document['tasks'] == {
+            'app.tasks.add': 'ISOLATED',
+            'app.tasks.fetch': 'SHARED_ASYNC',
+        }
+        assert document['send'] == {
+            'retain_rerun_input_default': False,
+            'idempotency_reservation_window': WINDOW // timedelta(microseconds=1),
+        }
+
+    def test_a_profile_is_written_with_its_kinds_and_milliseconds(self) -> None:
+        profile = self._document()['profiles']['batch']
+        assert profile['drain_timeout_ms'] == 90_000
+        assert profile['isolated']['kind'] == 'CHILDREN'
+        assert profile['isolated']['recycle']['above'] == {
+            'kind': 'MEGABYTES',
+            'mb': 512,
+        }
+        assert profile['shared_async']['executor'] == {'kind': 'THREADS', 'threads': 6}
+        assert profile['pool'] == {
+            'max_size': {'kind': 'CONNECTIONS', 'connections': 9}
+        }
+        assert profile['parent_cpu'] == 'OWN_CORE'
+
+    def test_the_child_launch_is_written_as_lists(self) -> None:
+        launch = self._document()['child_launch']
+        assert launch['command'] == {
+            'program': '/usr/bin/python3',
+            'args': ['-m', CHILD_MAIN_MODULE],
+        }
+        assert launch['program']['kind'] == 'PYTHON'
+        assert launch['program']['imports'] == ['app.tasks']
+        assert launch['log_level'] == 'INFO'
+
+    def test_a_claim_value_above_its_bound_stops_the_manifest(self) -> None:
+        config = _app_config(cluster_wide_cap=wire.TASK_LIMIT_MAX + 1)
+        result = to_worker_manifest(
+            config,
+            profile=None,
+            tasks={},
+            child_launch=_launch(),
+            idempotency_reservation_window=WINDOW,
+        )
+        assert result == Err(
+            ValueAboveManifestBound(
+                path='cluster_wide_cap',
+                value=wire.TASK_LIMIT_MAX + 1,
+                maximum=wire.TASK_LIMIT_MAX,
+            ),
+        )

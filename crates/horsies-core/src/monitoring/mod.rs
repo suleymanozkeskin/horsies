@@ -7,6 +7,7 @@
 mod actions;
 mod errors;
 mod execution_classes;
+mod function_rows;
 mod history_window;
 mod models;
 mod queries;
@@ -49,4 +50,14 @@ pub use task_actions::{
 #[cfg(test)]
 mod action_tests;
 #[cfg(test)]
+mod aggregate_spec_tests;
+#[cfg(test)]
+mod cancel_spec_tests;
+#[cfg(test)]
+mod list_detail_spec_tests;
+#[cfg(test)]
+mod spec_support;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workflow_schedule_spec_tests;
