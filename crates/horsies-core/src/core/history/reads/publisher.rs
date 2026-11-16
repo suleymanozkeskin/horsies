@@ -6,9 +6,8 @@ use sqlx::PgConnection;
 
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RENDERED_GUARD_MARKER, TASK_DETAIL_FUNCTION,
-    TASK_DUPLICATE_GUARD_FUNCTION, TASK_LOOKUP_MANIFEST, TASK_PROVENANCE_FUNCTION,
-    TASK_RESULT_FUNCTION,
+    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_DETAIL_FUNCTION, TASK_DUPLICATE_GUARD_FUNCTION,
+    TASK_LOOKUP_FUNCTION, TASK_LOOKUP_MANIFEST, TASK_PROVENANCE_FUNCTION, TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::catalog::read_manifest_leaf_rows;
 use crate::core::history::partitions::publication::{LoaderPublication, LoaderRepublished};
@@ -18,6 +17,88 @@ use super::lookup_generation::{
     render_staged_lookup_function, render_staged_provenance_function,
     render_staged_result_function, LookupManifest,
 };
+
+/// The signature of every function that `republish` renders from the
+/// manifest.
+pub(crate) fn rendered_reader_signatures() -> [String; 5] {
+    [
+        format!("{TASK_LOOKUP_FUNCTION}(uuid)"),
+        format!("{TASK_PROVENANCE_FUNCTION}(uuid, boolean)"),
+        format!("{TASK_DETAIL_FUNCTION}(uuid)"),
+        format!("{TASK_RESULT_FUNCTION}(uuid)"),
+        format!("{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)"),
+    ]
+}
+
+fn signature_array_sql() -> String {
+    let signatures = rendered_reader_signatures()
+        .iter()
+        .map(|signature| format!("'{signature}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("CAST(ARRAY[{signatures}] AS text[])")
+}
+
+/// The stamp of the published manifest table: a SHA-256 over the probe facts
+/// of every row, in probe order. The anchors enter as epoch seconds, so the
+/// stamp does not depend on the session time zone. An empty manifest has a
+/// stamp too. The same expression as Python's `MANIFEST_STAMP_SQL`, so either
+/// client reads the other's stamp.
+pub(crate) fn manifest_stamp_sql() -> String {
+    format!(
+        "(
+    SELECT 'horsies:manifest:' || encode(sha256(convert_to(COALESCE(
+        string_agg(
+            concat_ws(
+                '|',
+                manifest.leaf_name,
+                manifest.probe_position,
+                manifest.lower_bound_kind,
+                COALESCE(extract(epoch FROM manifest.lower_anchor)::text, '-'),
+                extract(epoch FROM manifest.upper_anchor)
+            ),
+            ',' ORDER BY manifest.probe_position
+        ),
+        ''
+    ), 'UTF8')), 'hex')
+    FROM {TASK_LOOKUP_MANIFEST} AS manifest
+)"
+    )
+}
+
+/// True when every rendered function exists and carries the stamp of the
+/// published manifest. A missing function has no comment, so it fails too.
+fn readers_stamped_sql() -> String {
+    format!(
+        "NOT EXISTS (
+    SELECT 1
+    FROM unnest({}) AS reader(signature)
+    WHERE obj_description(to_regprocedure(reader.signature), 'pg_proc')
+        IS DISTINCT FROM {}
+)",
+        signature_array_sql(),
+        manifest_stamp_sql()
+    )
+}
+
+/// Writes the stamp of the published manifest on every rendered function. Run
+/// after the manifest table is rewritten, in the same transaction.
+fn stamp_rendered_readers_ddl() -> String {
+    format!(
+        "DO $stamp$
+DECLARE
+    manifest_stamp text := {};
+    signature text;
+BEGIN
+    FOREACH signature IN ARRAY {} LOOP
+        EXECUTE format('COMMENT ON FUNCTION %s IS %L', signature, manifest_stamp);
+    END LOOP;
+END
+$stamp$",
+        manifest_stamp_sql(),
+        signature_array_sql()
+    )
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StagedLoaderPublisher;
@@ -50,12 +131,10 @@ impl LoaderPublication for StagedLoaderPublisher {
         sqlx::query(&render_staged_duplicate_guard_function(&manifest))
             .execute(&mut *connection)
             .await?;
-        sqlx::query(&format!(
-            "COMMENT ON FUNCTION {TASK_DUPLICATE_GUARD_FUNCTION}(uuid) IS '{RENDERED_GUARD_MARKER}'"
-        ))
-        .execute(&mut *connection)
-        .await?;
         rewrite_manifest_table(connection, &manifest).await?;
+        sqlx::raw_sql(&stamp_rendered_readers_ddl())
+            .execute(&mut *connection)
+            .await?;
 
         let mut absent_leaves = selection.absent_relations;
         absent_leaves.sort();
@@ -89,21 +168,15 @@ impl LoaderPublication for StagedLoaderPublisher {
     }
 }
 
-/// The detail and result readers are installed and the duplicate guard is
-/// the rendered version (it carries the marker; the migration's first version
-/// does not). One statement: healthy coverage has a fixed statement budget.
+/// Every rendered reader exists and carries the stamp of the published
+/// manifest; the migration's first guard carries none. One statement: healthy
+/// coverage has a fixed statement budget.
 async fn staged_readers_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
-    Ok(sqlx::query_scalar(
-        "SELECT to_regprocedure($1) IS NOT NULL
-            AND to_regprocedure($2) IS NOT NULL
-            AND obj_description(to_regprocedure($3), 'pg_proc') IS NOT DISTINCT FROM $4",
+    Ok(
+        sqlx::query_scalar(&format!("SELECT {}", readers_stamped_sql()))
+            .fetch_one(connection)
+            .await?,
     )
-    .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
-    .bind(format!("{TASK_RESULT_FUNCTION}(uuid)"))
-    .bind(format!("{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)"))
-    .bind(RENDERED_GUARD_MARKER)
-    .fetch_one(connection)
-    .await?)
 }
 
 async fn published_manifest_matches_catalog(
@@ -113,11 +186,11 @@ async fn published_manifest_matches_catalog(
         "WITH expected AS (
              SELECT
                  leaf_name,
-                 row_number() OVER (ORDER BY lower_anchor, leaf_name) - 1
+                 row_number() OVER (ORDER BY lower_anchor NULLS FIRST, leaf_name) - 1
                      AS probe_position,
+                 lower_bound_kind,
                  lower_anchor,
-                 upper_anchor,
-                 min_birth_at
+                 upper_anchor
              FROM {LEAF_CATALOG}
              WHERE detached_at IS NULL
                AND dropped_at IS NULL
@@ -126,18 +199,20 @@ async fn published_manifest_matches_catalog(
          ),
          difference AS (
              (
-                 SELECT leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor
                  FROM expected
                  EXCEPT
-                 SELECT leaf_name, probe_position::bigint, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position::bigint, lower_bound_kind, lower_anchor,
+                        upper_anchor
                  FROM {TASK_LOOKUP_MANIFEST}
              )
              UNION ALL
              (
-                 SELECT leaf_name, probe_position::bigint, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position::bigint, lower_bound_kind, lower_anchor,
+                        upper_anchor
                  FROM {TASK_LOOKUP_MANIFEST}
                  EXCEPT
-                 SELECT leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor
                  FROM expected
              )
          )
@@ -165,36 +240,35 @@ async fn rewrite_manifest_table(
 ) -> Result<(), HistoryError> {
     let mut names = Vec::with_capacity(manifest.leaves().len());
     let mut positions = Vec::with_capacity(manifest.leaves().len());
+    let mut kinds = Vec::with_capacity(manifest.leaves().len());
     let mut lowers = Vec::with_capacity(manifest.leaves().len());
     let mut uppers = Vec::with_capacity(manifest.leaves().len());
-    let mut births = Vec::with_capacity(manifest.leaves().len());
     for (position, leaf) in manifest.leaves().iter().enumerate() {
         let position = i32::try_from(position)
             .map_err(|_| HistoryError::contract("lookup manifest exceeds integer positions"))?;
         names.push(leaf.relation_name());
         positions.push(position);
-        lowers.push(leaf.lower_anchor());
+        kinds.push(leaf.lower_anchor().kind());
+        lowers.push(leaf.lower_anchor().at());
         uppers.push(leaf.upper_anchor());
-        births.push(leaf.min_birth_at());
     }
     sqlx::query(&format!("DELETE FROM {TASK_LOOKUP_MANIFEST}"))
         .execute(&mut *connection)
         .await?;
     sqlx::query(&format!(
         "INSERT INTO {TASK_LOOKUP_MANIFEST} (
-             leaf_name, probe_position, lower_anchor, upper_anchor,
-             min_birth_at, published_at
-         ) SELECT leaf_name, probe_position, lower_anchor, upper_anchor,
-                  min_birth_at, statement_timestamp()
-           FROM UNNEST($1::text[], $2::int[], $3::timestamptz[],
-                       $4::timestamptz[], $5::timestamptz[])
-             AS leaves(leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at)"
+             leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor,
+             published_at
+         ) SELECT leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor,
+                  statement_timestamp()
+           FROM UNNEST($1::text[], $2::int[], $3::text[], $4::timestamptz[], $5::timestamptz[])
+             AS leaves(leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor)"
     ))
     .bind(names)
     .bind(positions)
+    .bind(kinds)
     .bind(lowers)
     .bind(uppers)
-    .bind(births)
     .execute(connection)
     .await?;
     Ok(())
@@ -202,6 +276,7 @@ async fn rewrite_manifest_table(
 #[cfg(test)]
 mod publication_contract_tests {
     use super::*;
+    use crate::core::history::partitions::catalog::LeafLowerBound;
     use crate::core::history::reads::lookup_generation::LookupLeaf;
     use chrono::{Duration, Utc};
     use serial_test::serial;
@@ -217,22 +292,18 @@ mod publication_contract_tests {
                 .map(|i| {
                     LookupLeaf::new(
                         format!("manifest_contract_{i}"),
-                        anchor + Duration::days(i),
+                        LeafLowerBound::At(anchor + Duration::days(i)),
                         anchor + Duration::days(i + 1),
-                        match i % 2 {
-                            0 => None,
-                            _ => Some(anchor - Duration::days(i + 1)),
-                        },
                     )
                     .unwrap()
                 })
                 .collect();
-            let manifest = LookupManifest::new(leaves, None).unwrap();
+            let manifest = LookupManifest::new(leaves).unwrap();
             rewrite_manifest_table(tx.as_mut(), &manifest)
                 .await
                 .unwrap();
-            let rows: Vec<(String, i32, chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
-                "SELECT leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at FROM horsies_task_lookup_manifest ORDER BY probe_position",
+            let rows: Vec<(String, i32, String, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)> = sqlx::query_as(
+                "SELECT leaf_name, probe_position, lower_bound_kind::text, lower_anchor, upper_anchor FROM horsies_task_lookup_manifest ORDER BY probe_position",
             ).fetch_all(tx.as_mut()).await.unwrap();
             assert_eq!(rows.len(), count as usize);
             for (position, (row, leaf)) in rows.iter().zip(manifest.leaves()).enumerate() {
@@ -241,9 +312,9 @@ mod publication_contract_tests {
                     &(
                         leaf.relation_name().to_owned(),
                         position as i32,
-                        leaf.lower_anchor(),
+                        leaf.lower_anchor().kind().to_owned(),
+                        leaf.lower_anchor().at(),
                         leaf.upper_anchor(),
-                        leaf.min_birth_at()
                     )
                 );
             }

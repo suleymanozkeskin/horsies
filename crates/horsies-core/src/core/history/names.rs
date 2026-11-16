@@ -7,9 +7,15 @@ pub const WORKFLOW_PHASE2_PENDING: &str = "horsies_workflow_phase2_pending";
 pub const WORKFLOW_PHASE2_QUARANTINE: &str = "horsies_workflow_phase2_quarantine";
 pub const TASK_HISTORY_PARENT: &str = "horsies_task_history";
 pub const TASK_HISTORY_FOREVER: &str = "horsies_task_history_forever";
+/// The one static `forever` leaf. The first migration creates it with an
+/// `OPEN` lower bound (`MINVALUE`), its two indexes and its catalog row.
+pub const TASK_HISTORY_FOREVER_LEAF: &str = "horsies_task_history_forever_open";
 pub const LEAF_CATALOG: &str = "horsies_task_history_leaf_catalog";
 pub const LEAF_LOCK_KEY_FUNCTION: &str = "horsies_task_history_leaf_lock_key";
 pub const KEY_RESERVATIONS: &str = "horsies_key_reservations";
+/// Moved UUIDv7 ids whose birth, minus the clock bound, is later than their
+/// terminal time: rows a fast client clock placed in an earlier leaf.
+pub const CLOCK_EXCEPTIONS: &str = "horsies_task_history_clock_exceptions";
 pub const HEARTBEAT_CLASS_KEY: &str = "heartbeats";
 pub const HEARTBEATS_TABLE: &str = "horsies_heartbeats";
 pub const TASK_LOOKUP_FUNCTION: &str = "horsies_task_lookup_staged";
@@ -20,9 +26,6 @@ pub const TASK_PROVENANCE_TYPE: &str = "horsies_task_provenance";
 pub const TASK_DETAIL_FUNCTION: &str = "horsies_task_detail_staged";
 pub const TASK_RESULT_FUNCTION: &str = "horsies_task_result_staged";
 pub const TASK_DUPLICATE_GUARD_FUNCTION: &str = "horsies_task_history_duplicate_staged";
-/// Comment the publisher sets on the rendered duplicate guard. The migration's
-/// first version of the guard carries no comment.
-pub const RENDERED_GUARD_MARKER: &str = "horsies:rendered";
 
 /// PostgreSQL `NAMEDATALEN - 1`. Longer names are silently truncated.
 pub const POSTGRES_IDENTIFIER_LIMIT: usize = 63;

@@ -7,28 +7,26 @@ use chrono::{DateTime, Timelike, Utc};
 use crate::core::history::commands::{is_safe_identifier, open_end_anchor};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_DUPLICATE_GUARD_FUNCTION,
-    TASK_HISTORY_PARENT, TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE, TASK_PROVENANCE_FUNCTION,
-    TASK_PROVENANCE_TYPE, TASK_RESULT_FUNCTION,
+    CLOCK_EXCEPTIONS, HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION,
+    TASK_DUPLICATE_GUARD_FUNCTION, TASK_HISTORY_PARENT, TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE,
+    TASK_PROVENANCE_FUNCTION, TASK_PROVENANCE_TYPE, TASK_RESULT_FUNCTION,
 };
-use crate::core::history::partitions::catalog::LeafCatalogRow;
+use crate::core::history::partitions::catalog::{LeafCatalogRow, LeafLowerBound};
 
 pub const CLOCK_BOUND_SECONDS: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupLeaf {
     relation_name: String,
-    lower_anchor: DateTime<Utc>,
+    lower_anchor: LeafLowerBound,
     upper_anchor: DateTime<Utc>,
-    min_birth_at: Option<DateTime<Utc>>,
 }
 
 impl LookupLeaf {
     pub fn new(
         relation_name: impl Into<String>,
-        lower_anchor: DateTime<Utc>,
+        lower_anchor: LeafLowerBound,
         upper_anchor: DateTime<Utc>,
-        min_birth_at: Option<DateTime<Utc>>,
     ) -> Result<Self, HistoryError> {
         let relation_name = relation_name.into();
         if !is_safe_identifier(&relation_name) {
@@ -36,7 +34,7 @@ impl LookupLeaf {
                 "lookup leaf name is not a safe identifier: {relation_name:?}"
             )));
         }
-        if lower_anchor >= upper_anchor {
+        if lower_anchor >= LeafLowerBound::At(upper_anchor) {
             return Err(HistoryError::contract(
                 "lookup leaf bounds must be increasing",
             ));
@@ -45,7 +43,6 @@ impl LookupLeaf {
             relation_name,
             lower_anchor,
             upper_anchor,
-            min_birth_at,
         })
     }
 
@@ -53,30 +50,22 @@ impl LookupLeaf {
         &self.relation_name
     }
 
-    pub fn lower_anchor(&self) -> DateTime<Utc> {
+    pub fn lower_anchor(&self) -> LeafLowerBound {
         self.lower_anchor
     }
 
     pub fn upper_anchor(&self) -> DateTime<Utc> {
         self.upper_anchor
     }
-
-    pub fn min_birth_at(&self) -> Option<DateTime<Utc>> {
-        self.min_birth_at
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupManifest {
     leaves: Vec<LookupLeaf>,
-    birth_floor: Option<DateTime<Utc>>,
 }
 
 impl LookupManifest {
-    pub fn new(
-        leaves: Vec<LookupLeaf>,
-        birth_floor: Option<DateTime<Utc>>,
-    ) -> Result<Self, HistoryError> {
+    pub fn new(leaves: Vec<LookupLeaf>) -> Result<Self, HistoryError> {
         let mut names = HashSet::with_capacity(leaves.len());
         if leaves
             .iter()
@@ -86,18 +75,11 @@ impl LookupManifest {
                 "lookup manifest relation names must be distinct",
             ));
         }
-        Ok(Self {
-            leaves,
-            birth_floor,
-        })
+        Ok(Self { leaves })
     }
 
     pub fn leaves(&self) -> &[LookupLeaf] {
         &self.leaves
-    }
-
-    pub fn birth_floor(&self) -> Option<DateTime<Utc>> {
-        self.birth_floor
     }
 }
 
@@ -123,24 +105,12 @@ pub fn manifest_from_catalog(
             "lookup manifest relation names must be distinct",
         ));
     }
-    let birth_floor = if !ordered.is_empty() && ordered.iter().all(|row| row.min_birth_verified) {
-        ordered.iter().filter_map(|row| row.min_birth_at).min()
-    } else {
-        None
-    };
     let leaves = ordered
         .into_iter()
         .filter(|row| !absent_relations.contains(&row.leaf_name))
-        .map(|row| {
-            LookupLeaf::new(
-                row.leaf_name.clone(),
-                row.lower_anchor,
-                row.upper_anchor,
-                row.min_birth_at,
-            )
-        })
+        .map(|row| LookupLeaf::new(row.leaf_name.clone(), row.lower_anchor, row.upper_anchor))
         .collect::<Result<Vec<_>, _>>()?;
-    LookupManifest::new(leaves, birth_floor)
+    LookupManifest::new(leaves)
 }
 
 pub fn render_staged_lookup_function(manifest: &LookupManifest) -> String {
@@ -207,22 +177,24 @@ pub fn render_staged_detail_function(manifest: &LookupManifest) -> String {
 
 /// Terminal-result reader: the result columns only, as flat output columns.
 /// Every column reference is qualified: the output column names are
-/// PL/pgSQL variables inside the body.
+/// PL/pgSQL variables inside the body. A live row holds no result: terminal
+/// results live in history only. Both locations carry the task name, which a
+/// caller needs to decode a typed result.
 pub fn render_staged_result_function(manifest: &LookupManifest) -> String {
     let live_probe = format!(
-        "\n        RETURN QUERY SELECT\n            'LIVE'::text, t.status::text, t.result::text, t.failed_reason::text,\n            NULL::smallint, NULL::text, NULL::text, NULL::bytea, NULL::bytea\n        FROM {LIVE_TASKS} t WHERE t.id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
+        "\n        RETURN QUERY SELECT\n            'LIVE'::text, t.status::text, NULL::text, NULL::text,\n            NULL::smallint, NULL::bytea, NULL::bytea, t.task_name::text\n        FROM {LIVE_TASKS} t WHERE t.id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
     );
     staged_function(
         TASK_RESULT_FUNCTION,
         "TABLE (location text, status text, live_result text, failed_reason text, \
-         result_envelope_version smallint, result_codec text, result_content_type text, \
-         result_payload bytea, result_digest bytea)",
+         result_envelope_version smallint, result_payload bytea, result_digest bytea, \
+         task_name text)",
         "",
         &[],
         &live_probe,
         |relation| {
             format!(
-                "\n        RETURN QUERY SELECT\n            'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason::text,\n            h.result_envelope_version, h.result_codec::text, h.result_content_type::text,\n            h.result_payload, h.result_digest\n        FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
+                "\n        RETURN QUERY SELECT\n            'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason::text,\n            h.result_envelope_version, h.result_payload, h.result_digest, h.task_name::text\n        FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
             )
         },
         manifest,
@@ -232,12 +204,15 @@ pub fn render_staged_result_function(manifest: &LookupManifest) -> String {
 }
 
 /// Duplicate-identity guard of the move family: TRUE when the id is in a
-/// history leaf that can hold it. UUIDv7 ids probe only the leaves whose upper
-/// anchor is after the id's birth (minus the clock bound); the fallback probes
-/// of the readers are omitted, so a row placed in an older leaf by a wrong
-/// client clock is not found. Other ids probe every leaf. The live table is
-/// not probed.
+/// history leaf that can hold it or is a recorded clock exception. UUIDv7 ids
+/// probe only the leaves whose upper anchor is after the id's birth (minus the
+/// clock bound); the fallback probes of the readers are omitted, and a row
+/// that a wrong client clock placed in an older leaf is found through the
+/// clock exception table, which the move writes. Other ids probe every leaf.
+/// The live table is not probed.
 pub fn render_staged_duplicate_guard_function(manifest: &LookupManifest) -> String {
+    let absence =
+        format!("RETURN EXISTS (SELECT 1 FROM {CLOCK_EXCEPTIONS} WHERE task_id = p_task_id);");
     staged_function(
         TASK_DUPLICATE_GUARD_FUNCTION,
         "boolean",
@@ -251,7 +226,7 @@ pub fn render_staged_duplicate_guard_function(manifest: &LookupManifest) -> Stri
         },
         manifest,
         FallbackProbes::Omitted,
-        Absence::Statement("RETURN FALSE;"),
+        Absence::Statement(&absence),
     )
 }
 
@@ -288,13 +263,6 @@ fn staged_function(
     let finite_section = if manifest.leaves.is_empty() {
         String::new()
     } else {
-        let floor_check = manifest.birth_floor.map_or_else(String::new, |floor| {
-            format!(
-                "\n            IF v_birth_at < {} THEN\n                {}\n            END IF;\n",
-                timestamp_literal(floor),
-                absence
-            )
-        });
         let pruned = manifest
             .leaves
             .iter()
@@ -325,7 +293,7 @@ fn staged_function(
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n        v_uuid_bytes := uuid_send(p_task_id);\n        IF (get_byte(v_uuid_bytes, 6) >> 4) = 7\n           AND (get_byte(v_uuid_bytes, 8) & 192) = 128\n        THEN\n            v_birth_milliseconds :=\n                (get_byte(v_uuid_bytes, 0)::bigint << 40)\n                | (get_byte(v_uuid_bytes, 1)::bigint << 32)\n                | (get_byte(v_uuid_bytes, 2)::bigint << 24)\n                | (get_byte(v_uuid_bytes, 3)::bigint << 16)\n                | (get_byte(v_uuid_bytes, 4)::bigint << 8)\n                | get_byte(v_uuid_bytes, 5)::bigint;\n            v_birth_at := to_timestamp(\n                v_birth_milliseconds::double precision / 1000.0\n            );\n{floor_check}\n            v_effective_birth :=\n                v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';\n{pruned}\n{fallback}\n        ELSE\n{legacy}\n        END IF;\n"
+            "\n        v_uuid_bytes := uuid_send(p_task_id);\n        IF (get_byte(v_uuid_bytes, 6) >> 4) = 7\n           AND (get_byte(v_uuid_bytes, 8) & 192) = 128\n        THEN\n            v_birth_milliseconds :=\n                (get_byte(v_uuid_bytes, 0)::bigint << 40)\n                | (get_byte(v_uuid_bytes, 1)::bigint << 32)\n                | (get_byte(v_uuid_bytes, 2)::bigint << 24)\n                | (get_byte(v_uuid_bytes, 3)::bigint << 16)\n                | (get_byte(v_uuid_bytes, 4)::bigint << 8)\n                | get_byte(v_uuid_bytes, 5)::bigint;\n            v_birth_at := to_timestamp(\n                v_birth_milliseconds::double precision / 1000.0\n            );\n\n            v_effective_birth :=\n                v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';\n{pruned}\n{fallback}\n        ELSE\n{legacy}\n        END IF;\n"
         )
     };
     let declare_block = declares

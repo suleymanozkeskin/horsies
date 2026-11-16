@@ -9,7 +9,6 @@ silently skipped row.
 
 Codecs operate on values, not tables. Nothing in this package executes SQL.
 The SQL terminalization functions write the stored bytes and the read surfaces
-decode them here, which keeps one decoder authoritative for both drivers and
-for the offline transcode inventory. The stored rerun input decodes in
-``history/rerun/input_envelope.py``.
+decode them here, which keeps one decoder authoritative for both drivers.
+The stored rerun input decodes in ``history/rerun/input_envelope.py``.
 """

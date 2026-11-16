@@ -284,8 +284,8 @@ impl AppConfig {
             self.retention.heartbeat_leaf_horizon_hours,
         ));
         lines.push(format!(
-            "    retention_classes: {}",
-            self.retention.retention_classes.len(),
+            "    retention_periods: {}",
+            self.retention.retention_periods.len(),
         ));
         lines.push(format!(
             "    queue_retention: {}",

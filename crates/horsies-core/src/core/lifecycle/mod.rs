@@ -9,11 +9,16 @@
 //! projection of this vocabulary; the catalog-conformance test pins the two
 //! against each other.
 
+pub mod attempt_outcomes;
 pub mod commands;
 pub mod fences;
 pub mod operations;
 pub mod outcomes;
 
+pub use attempt_outcomes::{
+    decode_failed_attempt_row, decode_workflow_success_row, AfterFailure, AttemptWriteRefusal,
+    FailedAttemptOutcome, PhaseTwoOwed, RetryRefusal, WorkflowSuccessOutcome,
+};
 pub use commands::{BatchSize, TerminalizationCommand};
 pub use fences::{
     CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead, TerminalFence, WorkerOwned,
@@ -271,26 +276,24 @@ mod tests {
     fn already_applied_requires_same_class_kind() {
         assert!(is_already_applied(
             TerminalizationKind::CompleteFused,
-            Some(TerminalizationKind::CompleteLocked),
+            TerminalizationKind::CompleteLocked,
         ));
         assert!(is_already_applied(
             TerminalizationKind::PauseAbandonClaim,
-            Some(TerminalizationKind::PauseAbandonWorkflow),
+            TerminalizationKind::PauseAbandonWorkflow,
         ));
         assert!(!is_already_applied(
             TerminalizationKind::CancelOrphan,
-            Some(TerminalizationKind::WorkflowCancelClaim),
+            TerminalizationKind::WorkflowCancelClaim,
         ));
     }
 
+    /// The clean-slate vocabulary has the fifteen wire kinds and no kind
+    /// that only a relocated 0.x row carried.
     #[test]
-    fn null_committed_kind_is_never_already_applied() {
-        for kind in TerminalizationKind::ALL {
-            assert!(
-                !is_already_applied(kind, None),
-                "{kind:?}: unknown provenance must not satisfy a replay"
-            );
-        }
+    fn the_vocabulary_has_no_relocation_only_kind() {
+        assert_eq!(TerminalizationKind::ALL.len(), 15);
+        assert_eq!(TerminalizationKind::parse("LEGACY_TERMINAL"), None);
     }
 
     #[test]

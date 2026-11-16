@@ -31,9 +31,6 @@ from tests.task_history_prototypes.qualification_io import (
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
 )
-from tests.task_history_prototypes.migration_ladder_evidence import (
-    collect_migration_ladder_evidence,
-)
 from tests.task_history_prototypes.registry_evidence import (
     collect_key_registry_evidence,
 )
@@ -80,7 +77,6 @@ def main(argv: list[str] | None = None) -> int:
             'key-registry',
             'operational-maintenance',
             'rerun-input-terminalization',
-            'migration-ladder',
         ),
     )
     parser.add_argument('--rows', type=int, default=100)
@@ -93,7 +89,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--repetitions', type=int, default=1)
     parser.add_argument('--producers', type=int, default=64)
     parser.add_argument('--observation-seconds', type=int, default=120)
-    parser.add_argument('--next-rung-rows', type=int, default=10_000_000)
     parser.add_argument(
         '--archive-component',
         type=ArchiveComponent,
@@ -149,7 +144,6 @@ def main(argv: list[str] | None = None) -> int:
         'replacement-archive-transcode',
         'operational-maintenance',
         'rerun-input-terminalization',
-        'migration-ladder',
     } and (
         arguments.partial_evidence_path is not None
         or arguments.progress_fd is not None
@@ -157,8 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             '--partial-evidence-path and --progress-fd currently require '
             '--scenario identity-lookup, replacement-archive-transcode, '
-            'operational-maintenance, rerun-input-terminalization, or '
-            'migration-ladder'
+            'operational-maintenance, or rerun-input-terminalization'
         )
     if (
         arguments.scenario == 'replacement-archive-transcode'
@@ -320,22 +313,6 @@ async def _run(
                         data_path=arguments.data_path,
                         checkpoint_path=arguments.partial_evidence_path,
                         progress=progress,
-                    )
-                case 'migration-ladder':
-                    return await collect_migration_ladder_evidence(
-                        engine,
-                        commit=arguments.commit,
-                        run_kind=arguments.run_kind,
-                        server_image=arguments.server_image,
-                        host_description=arguments.host_description,
-                        storage_description=arguments.storage_description,
-                        demo_quiesced=arguments.demo_quiesced,
-                        rows=arguments.rows,
-                        attempts_per_task=arguments.attempts_per_task,
-                        batch_size=arguments.batch_size,
-                        next_rung_rows=arguments.next_rung_rows,
-                        data_path=arguments.data_path,
-                        checkpoint_path=arguments.partial_evidence_path,
                     )
                 case 'operational-maintenance':
                     return await collect_operational_maintenance_evidence(
