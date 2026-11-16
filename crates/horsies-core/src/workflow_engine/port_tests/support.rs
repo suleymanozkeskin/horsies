@@ -944,7 +944,7 @@ pub(super) fn error_of(result: &TaskResult<serde_json::Value>) -> &TaskError {
 
 /// The error code of a task error, as text.
 pub(super) fn code(error: &TaskError) -> Option<String> {
-    error.error_code.as_ref().map(ToString::to_string)
+    Some(error.error_code.to_string())
 }
 
 /// A stored workflow error (`horsies_workflows.error`).
