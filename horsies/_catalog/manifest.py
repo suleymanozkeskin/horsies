@@ -32,8 +32,8 @@ __all__ = [
     'POOL_SIZE_MAX',
     'POOL_CONNECTIONS_MIN',
     'POOL_CONNECTIONS_MAX',
-    'RESERVATION_WINDOW_SECONDS_MIN',
-    'RESERVATION_WINDOW_SECONDS_MAX',
+    'RESERVATION_WINDOW_MICROS_MIN',
+    'RESERVATION_WINDOW_MICROS_MAX',
     'MANIFEST_VERSION_MIN',
     'MANIFEST_VERSION_MAX',
 ]
@@ -50,19 +50,26 @@ POOL_SIZE_MAX: Final = 10000
 POOL_CONNECTIONS_MIN: Final = 0
 POOL_CONNECTIONS_MAX: Final = 10000
 
-RESERVATION_WINDOW_SECONDS_MIN: Final = 1
-RESERVATION_WINDOW_SECONDS_MAX: Final = 2592000
+RESERVATION_WINDOW_MICROS_MIN: Final = 1
+RESERVATION_WINDOW_MICROS_MAX: Final = 2592000000000
 
 MANIFEST_VERSION_MIN: Final = 1
 MANIFEST_VERSION_MAX: Final = 1
 
 
-type SchemaMode = Literal['MIGRATE_AND_VALIDATE', 'OBSERVE_ONLY']
+type SchemaMode = Literal['MIGRATE_AND_VALIDATE', 'OBSERVE_ONLY', 'ASSUME_INITIALIZED']
 """Schema behaviour of a handle.
+
+The Python broker flags map to it: `assume_initialized=True` is
+`ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
+`run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
+`OBSERVE_ONLY`.
 
 `MIGRATE_AND_VALIDATE`: The first operation applies the migrations and checks the schema version.
 
 `OBSERVE_ONLY`: The handle never runs schema DDL (monitoring reads).
+
+`ASSUME_INITIALIZED`: The handle never runs schema DDL and uses no listener: an operation that needs the listener answers `LISTENER_DISABLED`.
 """
 
 

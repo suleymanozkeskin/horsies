@@ -376,7 +376,7 @@ mod tests {
                 "WHOLE_SECONDS",
                 "POOL_SIZE",
                 "POOL_CONNECTIONS",
-                "RESERVATION_WINDOW_SECONDS",
+                "RESERVATION_WINDOW_MICROS",
                 "MANIFEST_VERSION"
             ]
         );

@@ -21,9 +21,11 @@ pub const PRODUCER_MANIFEST_VERSION: u32 = 1;
 /// Largest connection count of one pool (`pool_size` and `max_overflow`).
 pub const MAX_POOL_CONNECTIONS: u32 = 10_000;
 
-/// Largest idempotency key reservation window: 30 days, in seconds
+/// Largest idempotency key reservation window: 30 days, in microseconds
 /// (Python `core/history/identity/keys.py`, "greater than 0, at most 30 days").
-pub const MAX_RESERVATION_WINDOW_SECONDS: u32 = 30 * 24 * 60 * 60;
+/// A microsecond is the resolution of Python's `timedelta` and of
+/// PostgreSQL's `interval`, so every window that Python accepts has a form.
+pub const MAX_RESERVATION_WINDOW_MICROS: u64 = 30 * 24 * 60 * 60 * 1_000_000;
 
 /// The manifest of a process that sends tasks and reads their state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
@@ -264,6 +266,11 @@ impl ManifestValue for WholeSeconds {
 }
 
 /// Schema behaviour of a handle.
+///
+/// The Python broker flags map to it: `assume_initialized=True` is
+/// `ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
+/// `run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
+/// `OBSERVE_ONLY`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
 )]
@@ -274,6 +281,9 @@ pub enum SchemaMode {
     MigrateAndValidate,
     /// The handle never runs schema DDL (monitoring reads).
     ObserveOnly,
+    /// The handle never runs schema DDL and uses no listener: an operation
+    /// that needs the listener answers `LISTENER_DISABLED`.
+    AssumeInitialized,
 }
 
 /// Send policy of a handle.
@@ -284,49 +294,54 @@ pub enum SchemaMode {
 pub struct SendManifest {
     /// Keep the rerun input at enqueue when the task does not choose.
     pub retain_rerun_input_default: bool,
-    pub idempotency_reservation_window: ReservationWindowSeconds,
+    pub idempotency_reservation_window: ReservationWindowMicros,
 }
 
-/// The idempotency key reservation window, 1 s to 30 days.
+/// The idempotency key reservation window, 1 microsecond to 30 days, in
+/// microseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "u32", into = "u32")]
-pub struct ReservationWindowSeconds(u32);
+#[serde(try_from = "u64", into = "u64")]
+pub struct ReservationWindowMicros(u64);
 
-impl ReservationWindowSeconds {
-    pub const fn get(self) -> u32 {
+impl ReservationWindowMicros {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
-    /// The window as the duration type of the broker.
+    /// The window as the duration type of the broker, exact to the
+    /// microsecond.
     pub fn as_duration(self) -> chrono::Duration {
-        chrono::Duration::seconds(i64::from(self.0))
+        let micros = i64::try_from(self.0)
+            .expect("a window of at most 30 days fits an i64 count of microseconds");
+        chrono::Duration::microseconds(micros)
     }
 }
 
-impl TryFrom<u32> for ReservationWindowSeconds {
+impl TryFrom<u64> for ReservationWindowMicros {
     type Error = String;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            1..=MAX_RESERVATION_WINDOW_SECONDS => Ok(Self(value)),
+            1..=MAX_RESERVATION_WINDOW_MICROS => Ok(Self(value)),
             _ => Err(format!(
-                "the reservation window must be from 1 to {MAX_RESERVATION_WINDOW_SECONDS} seconds"
+                "the reservation window must be from 1 to {MAX_RESERVATION_WINDOW_MICROS} \
+                 microseconds"
             )),
         }
     }
 }
 
-impl From<ReservationWindowSeconds> for u32 {
-    fn from(window: ReservationWindowSeconds) -> Self {
+impl From<ReservationWindowMicros> for u64 {
+    fn from(window: ReservationWindowMicros) -> Self {
         window.0
     }
 }
 
-impl ManifestValue for ReservationWindowSeconds {
+impl ManifestValue for ReservationWindowMicros {
     const PYTHON: PythonValue = PythonValue::Int(IntBound {
-        name: "RESERVATION_WINDOW_SECONDS",
+        name: "RESERVATION_WINDOW_MICROS",
         min: 1,
-        max: MAX_RESERVATION_WINDOW_SECONDS as u64,
+        max: MAX_RESERVATION_WINDOW_MICROS,
     });
 }
 
@@ -401,7 +416,11 @@ fn refusal_cause(error: &serde_json::Error) -> String {
 mod tests {
     use super::*;
 
-    fn manifest_text(session: &str, window: u32) -> String {
+    /// One day and one minute, in microseconds.
+    const DAY_MICROS: u64 = 86_400_000_000;
+    const MINUTE_MICROS: u64 = 60_000_000;
+
+    fn manifest_text(session: &str, window: u64) -> String {
         format!(
             r#"{{
                 "manifest_version": 1,
@@ -427,11 +446,14 @@ mod tests {
 
     #[test]
     fn a_complete_manifest_parses() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 86_400);
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, DAY_MICROS);
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         assert_eq!(manifest.manifest_version, ManifestVersion::CURRENT);
         assert_eq!(manifest.schema, SchemaMode::MigrateAndValidate);
-        assert_eq!(manifest.send.idempotency_reservation_window.get(), 86_400);
+        assert_eq!(
+            manifest.send.idempotency_reservation_window.get(),
+            DAY_MICROS
+        );
         let config = manifest.database.to_postgres_config(false);
         assert_eq!(config.session_database_url, None);
         assert_eq!(config.pool_size, 30);
@@ -441,7 +463,7 @@ mod tests {
     fn a_separate_session_url_reaches_the_broker_config() {
         let text = manifest_text(
             r#"{"kind": "SEPARATE", "url": "postgresql://user:secret@direct:5432/db"}"#,
-            60,
+            MINUTE_MICROS,
         );
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         let config = manifest.database.to_postgres_config(true);
@@ -454,7 +476,7 @@ mod tests {
 
     #[test]
     fn an_unknown_field_is_refused_with_its_path() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"echo\": false",
             "\"echo\": false, \"extra\": 1",
             1,
@@ -465,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_missing_field_is_refused() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"pool_recycle\": {\"kind\": \"AFTER_SECONDS\", \"seconds\": 1800},",
             "",
             1,
@@ -476,7 +498,7 @@ mod tests {
 
     /// The manifest text with one database field set to `value`.
     fn with_database_field(field: &str, value: &str) -> String {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60);
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS);
         let start = text
             .find(&format!("\"{field}\": "))
             .unwrap_or_else(|| panic!("{field} is in the manifest text"));
@@ -581,7 +603,7 @@ mod tests {
 
     #[test]
     fn another_manifest_version_is_refused() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"manifest_version\": 1",
             "\"manifest_version\": 2",
             1,
@@ -592,7 +614,7 @@ mod tests {
 
     #[test]
     fn a_window_outside_its_bound_is_refused() {
-        for window in [0, MAX_RESERVATION_WINDOW_SECONDS + 1] {
+        for window in [0, MAX_RESERVATION_WINDOW_MICROS + 1] {
             let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, window);
             let refused = parse_producer_manifest(&text).expect_err("a window outside 1..=30 days");
             assert_eq!(refused.field_path, "send.idempotency_reservation_window");
@@ -600,8 +622,45 @@ mod tests {
     }
 
     #[test]
+    fn a_window_keeps_its_microseconds() {
+        // Python's window is a `timedelta`; 1.5 s and 1 microsecond are valid
+        // windows (`validate_reservation_window`).
+        for (window, duration) in [
+            (1, chrono::Duration::microseconds(1)),
+            (1_500_000, chrono::Duration::milliseconds(1_500)),
+            (MAX_RESERVATION_WINDOW_MICROS, chrono::Duration::days(30)),
+        ] {
+            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, window);
+            let manifest = parse_producer_manifest(&text).expect("a window inside its bound");
+            assert_eq!(manifest.send.idempotency_reservation_window.get(), window);
+            assert_eq!(
+                manifest.send.idempotency_reservation_window.as_duration(),
+                duration
+            );
+        }
+    }
+
+    #[test]
+    fn every_schema_mode_parses_from_its_wire_name() {
+        for (wire, mode) in [
+            ("MIGRATE_AND_VALIDATE", SchemaMode::MigrateAndValidate),
+            ("OBSERVE_ONLY", SchemaMode::ObserveOnly),
+            ("ASSUME_INITIALIZED", SchemaMode::AssumeInitialized),
+        ] {
+            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS)
+                .replacen(
+                    "\"schema\": \"MIGRATE_AND_VALIDATE\"",
+                    &format!("\"schema\": \"{wire}\""),
+                    1,
+                );
+            let manifest = parse_producer_manifest(&text).expect("a known schema mode");
+            assert_eq!(manifest.schema, mode);
+        }
+    }
+
+    #[test]
     fn a_refusal_never_holds_the_url_password() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"pool_size\": 30",
             "\"pool_size\": \"postgresql://u:secret@h/d\"",
             1,
@@ -615,7 +674,7 @@ mod tests {
     fn trailing_text_after_the_manifest_is_refused() {
         let text = format!(
             "{} []",
-            manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60)
+            manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS)
         );
         let refused = parse_producer_manifest(&text).expect_err("trailing text is refused");
         assert_eq!(refused.field_path, ".");
@@ -623,7 +682,7 @@ mod tests {
 
     #[test]
     fn the_debug_form_masks_the_password() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60);
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS);
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         assert!(!format!("{manifest:?}").contains("secret"));
     }
