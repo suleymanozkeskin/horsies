@@ -139,7 +139,7 @@ async fn tasks_run_in_submit_order_on_one_slot() {
 /// The envelope of a value that is one JSON string of `bytes` bytes.
 fn large_envelope(bytes: usize) -> ResultEnvelopeText {
     ResultEnvelopeText::new(format!(
-        r#"{{"__type":"ok","value":"{}"}}"#,
+        r#"{{"__h_task_result__":true,"ok":"{}","err":null}}"#,
         "é".repeat(bytes / 2)
     ))
 }

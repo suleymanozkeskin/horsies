@@ -177,8 +177,12 @@ pub(super) fn run_ref(task: &ClaimedTask, dispatch: u64) -> RunRef {
     }
 }
 
+/// The result envelope of a task that returned `value`, in the stored form
+/// of a task result (`core/task/result.rs`).
 pub(super) fn ok_envelope(value: u32) -> ResultEnvelopeText {
-    ResultEnvelopeText::new(format!(r#"{{"__type":"ok","value":{value}}}"#))
+    ResultEnvelopeText::new(format!(
+        r#"{{"__h_task_result__":true,"ok":{value},"err":null}}"#
+    ))
 }
 
 /// The result frame of an isolated `task` that left no work.
@@ -610,5 +614,17 @@ impl Drop for TestDir {
         // A file that a killed child still writes may refuse the removal;
         // the temporary directory of the OS then keeps it.
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_scripted_envelope_reads_as_a_task_result() {
+    use crate::core::task::result::{read_task_result_text, TaskResultText};
+
+    let envelope = ok_envelope(3);
+
+    match read_task_result_text(envelope.as_str()) {
+        Ok(TaskResultText::Ok(value)) => assert_eq!(value.get(), "3"),
+        other => panic!("expected the value 3, got {other:?}"),
     }
 }
