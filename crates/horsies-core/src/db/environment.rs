@@ -1,6 +1,11 @@
 //! What the connection layer takes from outside the URL: `PGPASSWORD`, the
-//! home directory for `~/.pgpass`, and the list of other libpq environment
-//! variables that are set (the parser refuses each one by name).
+//! home directory (for `~/.pgpass` and the default TLS files under
+//! `~/.postgresql/`), and which other libpq environment variables are set.
+//!
+//! libpq applies most `PG*` variables only as defaults for a parameter that
+//! the connection string does not set. The parser follows that rule: a set
+//! variable whose parameter the URL sets is ignored, as libpq ignores it; a
+//! set variable that would apply is refused by name ([`VariableRule`]).
 //!
 //! Password order, as libpq: the URL, then `PGPASSWORD`, then `~/.pgpass`.
 
@@ -12,52 +17,90 @@ use super::url::DatabasePassword;
 /// The one libpq environment variable the core reads.
 pub const PASSWORD_VARIABLE: &str = "PGPASSWORD";
 
-/// libpq environment variables that the core refuses when they are set. A
-/// set variable would change the connection under libpq, so ignoring it would
-/// change behaviour without a signal.
-pub const REFUSED_VARIABLES: &[&str] = &[
-    "PGHOST",
-    "PGHOSTADDR",
-    "PGPORT",
-    "PGDATABASE",
-    "PGUSER",
-    "PGPASSFILE",
-    "PGREQUIREAUTH",
-    "PGCHANNELBINDING",
-    "PGSERVICE",
-    "PGSERVICEFILE",
-    "PGOPTIONS",
-    "PGAPPNAME",
-    "PGSSLMODE",
-    "PGREQUIRESSL",
-    "PGSSLNEGOTIATION",
-    "PGSSLCOMPRESSION",
-    "PGSSLCERT",
-    "PGSSLKEY",
-    "PGSSLCERTMODE",
-    "PGSSLROOTCERT",
-    "PGSSLCRL",
-    "PGSSLCRLDIR",
-    "PGSSLSNI",
-    "PGREQUIREPEER",
-    "PGSSLMINPROTOCOLVERSION",
-    "PGSSLMAXPROTOCOLVERSION",
-    "PGGSSENCMODE",
-    "PGKRBSRVNAME",
-    "PGGSSLIB",
-    "PGGSSDELEGATION",
-    "PGCONNECT_TIMEOUT",
-    "PGCLIENTENCODING",
-    "PGTARGETSESSIONATTRS",
-    "PGLOADBALANCEHOSTS",
-    "PGMINPROTOCOLVERSION",
-    "PGMAXPROTOCOLVERSION",
-    "PGDATESTYLE",
-    "PGTZ",
-    "PGGEQO",
-    "PGSYSCONFDIR",
-    "PGLOCALEDIR",
+/// What a set libpq environment variable does under libpq.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariableRule {
+    /// The default of this URL parameter: it applies only when the URL does
+    /// not set the parameter.
+    DefaultFor(&'static str),
+    /// It applies whenever it is set, and horsies does not support it.
+    AlwaysApplies,
+    /// `PGPASSFILE`: it applies when the password comes from the password
+    /// file, that is when neither the URL nor `PGPASSWORD` gives one.
+    PasswordFileLocation,
+    /// It changes nothing about the connection: the service-file location
+    /// without a service, and the message translations of libpq.
+    NoConnectionEffect,
+}
+
+/// Every libpq environment variable other than `PGPASSWORD`, with its rule.
+pub const LIBPQ_VARIABLES: &[(&str, VariableRule)] = &[
+    ("PGHOST", VariableRule::DefaultFor("host")),
+    ("PGHOSTADDR", VariableRule::AlwaysApplies),
+    ("PGPORT", VariableRule::DefaultFor("port")),
+    ("PGDATABASE", VariableRule::DefaultFor("dbname")),
+    ("PGUSER", VariableRule::DefaultFor("user")),
+    ("PGPASSFILE", VariableRule::PasswordFileLocation),
+    ("PGREQUIREAUTH", VariableRule::AlwaysApplies),
+    (
+        "PGCHANNELBINDING",
+        VariableRule::DefaultFor("channel_binding"),
+    ),
+    ("PGSERVICE", VariableRule::AlwaysApplies),
+    ("PGSERVICEFILE", VariableRule::NoConnectionEffect),
+    ("PGOPTIONS", VariableRule::DefaultFor("options")),
+    ("PGAPPNAME", VariableRule::DefaultFor("application_name")),
+    ("PGSSLMODE", VariableRule::DefaultFor("sslmode")),
+    ("PGREQUIRESSL", VariableRule::DefaultFor("sslmode")),
+    (
+        "PGSSLNEGOTIATION",
+        VariableRule::DefaultFor("sslnegotiation"),
+    ),
+    ("PGSSLCOMPRESSION", VariableRule::AlwaysApplies),
+    ("PGSSLCERT", VariableRule::DefaultFor("sslcert")),
+    ("PGSSLKEY", VariableRule::DefaultFor("sslkey")),
+    ("PGSSLCERTMODE", VariableRule::AlwaysApplies),
+    ("PGSSLROOTCERT", VariableRule::DefaultFor("sslrootcert")),
+    ("PGSSLCRL", VariableRule::AlwaysApplies),
+    ("PGSSLCRLDIR", VariableRule::AlwaysApplies),
+    ("PGSSLSNI", VariableRule::AlwaysApplies),
+    ("PGREQUIREPEER", VariableRule::AlwaysApplies),
+    ("PGSSLMINPROTOCOLVERSION", VariableRule::AlwaysApplies),
+    ("PGSSLMAXPROTOCOLVERSION", VariableRule::AlwaysApplies),
+    ("PGGSSENCMODE", VariableRule::AlwaysApplies),
+    ("PGKRBSRVNAME", VariableRule::AlwaysApplies),
+    ("PGGSSLIB", VariableRule::AlwaysApplies),
+    ("PGGSSDELEGATION", VariableRule::AlwaysApplies),
+    (
+        "PGCONNECT_TIMEOUT",
+        VariableRule::DefaultFor("connect_timeout"),
+    ),
+    ("PGCLIENTENCODING", VariableRule::AlwaysApplies),
+    (
+        "PGTARGETSESSIONATTRS",
+        VariableRule::DefaultFor("target_session_attrs"),
+    ),
+    (
+        "PGLOADBALANCEHOSTS",
+        VariableRule::DefaultFor("load_balance_hosts"),
+    ),
+    ("PGMINPROTOCOLVERSION", VariableRule::AlwaysApplies),
+    ("PGMAXPROTOCOLVERSION", VariableRule::AlwaysApplies),
+    ("PGDATESTYLE", VariableRule::AlwaysApplies),
+    ("PGTZ", VariableRule::AlwaysApplies),
+    ("PGGEQO", VariableRule::AlwaysApplies),
+    ("PGSYSCONFDIR", VariableRule::NoConnectionEffect),
+    ("PGLOCALEDIR", VariableRule::NoConnectionEffect),
 ];
+
+/// The rule of a libpq variable. A name outside [`LIBPQ_VARIABLES`] is
+/// treated as a variable that always applies.
+pub fn variable_rule(name: &str) -> VariableRule {
+    LIBPQ_VARIABLES
+        .iter()
+        .find(|(listed, _)| *listed == name)
+        .map_or(VariableRule::AlwaysApplies, |(_, rule)| *rule)
+}
 
 /// The password file name under the home directory.
 pub const PASSWORD_FILE_NAME: &str = ".pgpass";
@@ -76,11 +119,11 @@ pub enum EnvironmentPassword {
     NotSet,
 }
 
-/// The home directory, where `.pgpass` lives.
+/// The home directory, where `.pgpass` and `.postgresql/` live.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HomeDirectory {
     Known(PathBuf),
-    /// `HOME` is unset: no password file is read.
+    /// `HOME` is unset or empty: no file under the home directory is read.
     Unknown,
 }
 
@@ -100,7 +143,7 @@ pub enum EnvironmentError {
 }
 
 impl ConnectionEnvironment {
-    /// Reads `PGPASSWORD`, `HOME` and which of [`REFUSED_VARIABLES`] are set.
+    /// Reads `PGPASSWORD`, `HOME` and which of [`LIBPQ_VARIABLES`] are set.
     pub fn capture() -> Result<ConnectionEnvironment, EnvironmentError> {
         let password = match std::env::var(PASSWORD_VARIABLE) {
             Ok(text) if text.is_empty() => EnvironmentPassword::NotSet,
@@ -112,14 +155,14 @@ impl ConnectionEnvironment {
                 })
             }
         };
-        let set_libpq_variables = REFUSED_VARIABLES
+        let set_libpq_variables = LIBPQ_VARIABLES
             .iter()
-            .copied()
+            .map(|(name, _)| *name)
             .filter(|name| std::env::var_os(name).is_some())
             .collect();
         let home = match std::env::var_os("HOME") {
-            Some(path) => HomeDirectory::Known(PathBuf::from(path)),
-            None => HomeDirectory::Unknown,
+            Some(path) if !path.is_empty() => HomeDirectory::Known(PathBuf::from(path)),
+            Some(_) | None => HomeDirectory::Unknown,
         };
         Ok(ConnectionEnvironment {
             password,
@@ -160,9 +203,9 @@ impl ConnectionEnvironment {
         &self.home
     }
 
-    /// The first set libpq variable other than `PGPASSWORD`, if any.
-    pub(crate) fn first_libpq_variable(&self) -> Option<&'static str> {
-        self.set_libpq_variables.first().copied()
+    /// The set libpq variables other than `PGPASSWORD`, in table order.
+    pub fn set_libpq_variables(&self) -> &[&'static str] {
+        &self.set_libpq_variables
     }
 }
 
@@ -558,6 +601,29 @@ mod tests {
         let environment = ConnectionEnvironment::isolated();
         assert_eq!(environment.password(), &EnvironmentPassword::NotSet);
         assert_eq!(environment.home(), &HomeDirectory::Unknown);
-        assert_eq!(environment.first_libpq_variable(), None);
+        assert!(environment.set_libpq_variables().is_empty());
+    }
+
+    #[test]
+    fn each_variable_has_its_libpq_rule() {
+        assert_eq!(variable_rule("PGUSER"), VariableRule::DefaultFor("user"));
+        assert_eq!(
+            variable_rule("PGREQUIRESSL"),
+            VariableRule::DefaultFor("sslmode")
+        );
+        assert_eq!(
+            variable_rule("PGPASSFILE"),
+            VariableRule::PasswordFileLocation
+        );
+        assert_eq!(variable_rule("PGSERVICE"), VariableRule::AlwaysApplies);
+        assert_eq!(variable_rule("PGTZ"), VariableRule::AlwaysApplies);
+        assert_eq!(
+            variable_rule("PGSERVICEFILE"),
+            VariableRule::NoConnectionEffect
+        );
+        assert_eq!(variable_rule("PGNOTAVARIABLE"), VariableRule::AlwaysApplies);
+        assert!(LIBPQ_VARIABLES
+            .iter()
+            .all(|(name, _)| *name != PASSWORD_VARIABLE));
     }
 }
