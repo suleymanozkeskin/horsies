@@ -834,9 +834,11 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     after.queue_name = "recovery";
     seed_node(&db.pool, &after).await;
 
-    let failed = crate::worker::recovery::mark_stale_running_as_failed(&db.pool, 10.0, 10.0, 100)
-        .await
-        .expect("the stale pass");
+    let failed = crate::worker::recovery::on_test_pool::mark_stale_running_as_failed(
+        &db.pool, 10.0, 10.0, 100,
+    )
+    .await
+    .expect("the stale pass");
     assert_eq!(failed, 2);
     let _summary = drive_phase2_recovery(
         &db.pool,

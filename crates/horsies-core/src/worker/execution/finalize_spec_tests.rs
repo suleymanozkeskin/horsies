@@ -28,7 +28,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
 const WORKER: &str = "finalize-spec-worker";

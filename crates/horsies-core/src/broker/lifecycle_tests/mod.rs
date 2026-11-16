@@ -12,6 +12,7 @@ mod failed_attempt_round_trips;
 mod finalize_status_guard;
 mod fresh_schema_rules;
 mod lifecycle_regressions;
+mod stale_recovery_functions;
 mod status_events;
 mod success_batch_write;
 pub(crate) mod support;

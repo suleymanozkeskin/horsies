@@ -41,6 +41,9 @@ pub struct OutcomeDecodeError(pub String);
 pub enum GuardKind {
     Deadline,
     Staleness,
+    /// The stale RUNNING recovery of a retry: the row's retry count is not
+    /// the count the retry was computed from (`horsies_finish_stale_attempt`).
+    RetryCount,
     WorkflowStatus,
     WorkflowLinkAbsent,
     WorkflowLinkState,
@@ -52,6 +55,7 @@ impl GuardKind {
         match self {
             Self::Deadline => "DEADLINE",
             Self::Staleness => "STALENESS",
+            Self::RetryCount => "RETRY_COUNT",
             Self::WorkflowStatus => "WORKFLOW_STATUS",
             Self::WorkflowLinkAbsent => "WORKFLOW_LINK_ABSENT",
             Self::WorkflowLinkState => "WORKFLOW_LINK_STATE",
@@ -63,6 +67,7 @@ impl GuardKind {
         match raw {
             "DEADLINE" => Some(Self::Deadline),
             "STALENESS" => Some(Self::Staleness),
+            "RETRY_COUNT" => Some(Self::RetryCount),
             "WORKFLOW_STATUS" => Some(Self::WorkflowStatus),
             "WORKFLOW_LINK_ABSENT" => Some(Self::WorkflowLinkAbsent),
             "WORKFLOW_LINK_STATE" => Some(Self::WorkflowLinkState),
@@ -117,6 +122,14 @@ pub struct ObservedStaleness {
     pub evaluated_at: DateTime<Utc>,
 }
 
+/// A retry-count guard's evidence: the count a retry request was computed
+/// from, and the count the locked row holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedRetryCount {
+    pub expected_retry_count: i64,
+    pub retry_count: i64,
+}
+
 /// A workflow-status guard's evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedWorkflowState {
@@ -148,6 +161,7 @@ pub enum GuardEvidence {
     Claim(ObservedClaim),
     Deadline(ObservedDeadline),
     Staleness(ObservedStaleness),
+    RetryCount(ObservedRetryCount),
     WorkflowState(ObservedWorkflowState),
     WorkflowLink(ObservedWorkflowLink),
     ForeignTerminalization(ObservedForeignTerminalization),
@@ -444,6 +458,14 @@ fn decode_evidence(
                 stale_after_ms: require_integer(&payload, "stale_after_ms")?,
                 finalizing_stale_after_ms: require_integer(&payload, "finalizing_stale_after_ms")?,
                 evaluated_at: require_timestamp(&payload, "evaluated_at")?,
+            }))
+        }
+        GuardKind::RetryCount => {
+            let payload =
+                require_payload(raw, guard_kind, &["expected_retry_count", "retry_count"])?;
+            Ok(GuardEvidence::RetryCount(ObservedRetryCount {
+                expected_retry_count: require_integer(&payload, "expected_retry_count")?,
+                retry_count: require_integer(&payload, "retry_count")?,
             }))
         }
         GuardKind::WorkflowStatus => {
@@ -846,6 +868,36 @@ mod tests {
         assert_eq!(staleness.stale_after_ms, 30000);
         assert!(staleness.last_heartbeat_at.is_some());
         assert!(staleness.started_at.is_none());
+    }
+
+    #[test]
+    fn retry_count_payload_decodes_and_fails_closed_on_its_keys() {
+        let mut raw = base_raw("SOURCE_STATE_CONFLICT");
+        raw.observed_status = Some("RUNNING".to_owned());
+        raw.guard_kind = Some("RETRY_COUNT".to_owned());
+        raw.observed_guard = Some(serde_json::json!({
+            "expected_retry_count": 0,
+            "retry_count": 1
+        }));
+        let decoded = decode_raw(raw.clone()).expect("a retry-count conflict");
+        let TerminalizationOutcome::SourceStateConflict {
+            evidence: GuardEvidence::RetryCount(observed),
+            ..
+        } = decoded
+        else {
+            panic!("expected a retry-count conflict, got {decoded:?}");
+        };
+        assert_eq!(
+            observed,
+            ObservedRetryCount {
+                expected_retry_count: 0,
+                retry_count: 1,
+            }
+        );
+
+        raw.observed_guard = Some(serde_json::json!({"retry_count": 1}));
+        let err = decode_raw(raw).expect_err("a payload without the expected count");
+        assert!(err.to_string().contains("documented keys"), "{err}");
     }
 
     #[test]
