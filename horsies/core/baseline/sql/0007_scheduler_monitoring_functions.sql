@@ -998,3 +998,663 @@ BEGIN
            horsies_task_absence_reason(p_task_id);
 END;
 $$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Monitoring: status counts and breakdown
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_monitoring_task_stats: the task count of each status, for the status cards.
+--
+-- Guarantee: one count per status over the live table and the history window [p_window_lower, p_window_upper) on
+-- terminal_at, read in one statement and so in one snapshot: a task that moves to history during the read counts
+-- once. Every filter of the task list except status scopes the counts, with the rules of the task list: values in
+-- one dimension OR together; dimensions AND together; an empty array is no filter; an error category selects the
+-- codes of its built-in family, and DOMAIN every non-empty code outside the built-in taxonomy; a live row has no
+-- error code, so an error-code or category filter drops the live side; p_retried_only keeps rows with
+-- retry_count > 0. It changes nothing.
+-- - Fails closed on a broken history contract: a history row in the scope whose status is none of the seven (the
+--   history table has no status CHECK) raises data_corrupted (XX001) and returns no count. The caller reports it as
+--   a broken history contract.
+-- Lock order: none (a plain read).
+-- Returns: rows 1..7 for PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, CANCELLED and EXPIRED in this order, with
+-- task_count 0 for a status that no task has.
+-- Raises 22004 for a NULL argument, 22023 for a broken scope precondition (horsies_monitoring_check_scope), and
+-- XX001 for a stored status that is not a task status (the message names it).
+-- Replaces: horsies/monitoring/queries.py:935-1005 (task_stats) and horsies/core/history/reads/aggregates.py:63-76
+-- (history_scoped_status_counts_statement): a session of 4 round trips with two statements, so two snapshots, and
+-- the sum and the zero fill in client code.
+CREATE FUNCTION horsies_monitoring_task_stats(
+    p_window_lower timestamp with time zone,
+    p_window_upper timestamp with time zone,
+    p_task_names text[],
+    p_queue_names text[],
+    p_worker_ids text[],
+    p_error_codes text[],
+    p_error_categories text[],
+    p_retried_only boolean,
+    p_builtin_codes text[],
+    p_builtin_categories text[]
+) RETURNS TABLE (
+    row_position integer,
+    status text,
+    task_count bigint
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_category_codes text[];
+    v_position integer;
+    v_status text;
+    v_count bigint;
+BEGIN
+    PERFORM horsies_monitoring_check_scope(
+        p_window_lower, p_window_upper, ARRAY[]::text[], p_error_categories, p_builtin_codes, p_builtin_categories
+    );
+    IF num_nulls(p_task_names, p_queue_names, p_worker_ids, p_error_codes, p_retried_only) <> 0 THEN
+        RAISE EXCEPTION 'horsies_monitoring_task_stats: every argument is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    v_category_codes := ARRAY(
+        SELECT m.code
+        FROM unnest(p_builtin_codes, p_builtin_categories) AS m(code, category)
+        WHERE m.category = ANY(p_error_categories)
+    );
+    -- EXECUTE plans the statement with the argument values, so an empty filter folds away. A stored status that is
+    -- none of the seven comes first, with no position, so the refusal comes before any row.
+    FOR v_position, v_status, v_count IN EXECUTE $q$
+        WITH side_counts AS (
+            SELECT t.status::text AS status, count(*) AS task_count
+            FROM horsies_tasks AS t
+            WHERE cardinality($6) = 0 AND cardinality($7) = 0
+              AND (cardinality($3) = 0 OR t.task_name = ANY($3))
+              AND (cardinality($4) = 0 OR t.queue_name = ANY($4))
+              AND (cardinality($5) = 0 OR t.claimed_by_worker_id = ANY($5))
+              AND (NOT $8 OR t.retry_count > 0)
+            GROUP BY t.status
+            UNION ALL
+            SELECT h.status::text, count(*)
+            FROM horsies_task_history AS h
+            WHERE h.terminal_at >= $1 AND h.terminal_at < $2
+              AND (cardinality($3) = 0 OR h.task_name = ANY($3))
+              AND (cardinality($4) = 0 OR h.queue_name = ANY($4))
+              AND (cardinality($5) = 0 OR h.last_claimed_worker_id = ANY($5))
+              AND (cardinality($6) = 0 OR h.error_code = ANY($6))
+              AND (
+                  cardinality($7) = 0
+                  OR h.error_code = ANY($9)
+                  OR ('DOMAIN' = ANY($7) AND h.error_code <> '' AND h.error_code <> ALL($10))
+              )
+              AND (NOT $8 OR h.retry_count > 0)
+            GROUP BY h.status
+        ), merged AS (
+            SELECT c.status, sum(c.task_count)::bigint AS task_count
+            FROM side_counts AS c
+            GROUP BY c.status
+        ), fixed AS (
+            SELECT f.status, f.position::integer AS position
+            FROM unnest(ARRAY['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'])
+                WITH ORDINALITY AS f(status, position)
+        )
+        SELECT f.position, f.status, COALESCE(m.task_count, 0)::bigint
+        FROM fixed AS f
+        LEFT JOIN merged AS m ON m.status = f.status
+        UNION ALL
+        SELECT NULL::integer, m.status, m.task_count
+        FROM merged AS m
+        WHERE NOT EXISTS (SELECT 1 FROM fixed AS f WHERE f.status = m.status)
+        ORDER BY 1 NULLS FIRST
+    $q$
+    USING p_window_lower, p_window_upper, p_task_names, p_queue_names, p_worker_ids, p_error_codes,
+          p_error_categories, p_retried_only, v_category_codes, p_builtin_codes
+    LOOP
+        IF v_position IS NULL THEN
+            RAISE EXCEPTION 'horsies_monitoring_task_stats: % history row(s) in the window hold status %, which is '
+                'not a task status', v_count, v_status
+                USING ERRCODE = 'data_corrupted';
+        END IF;
+        row_position := v_position;
+        status := v_status;
+        task_count := v_count;
+        RETURN NEXT;
+    END LOOP;
+END;
+$$;
+
+-- horsies_monitoring_task_breakdown: the task counts per worker, task name or queue, with a total.
+--
+-- Guarantee: one group per value of the group column, over the live table and the history window
+-- [p_window_lower, p_window_upper) on terminal_at, read in one statement and so in one snapshot. The group column
+-- is the current claim (claimed_by_worker_id) on the live side and the last claim (last_claimed_worker_id) in
+-- history for 'worker', task_name for 'task_name', queue_name for 'queue'. Every filter of the task list scopes the
+-- rows, with the rules of the task list (see horsies_monitoring_task_stats; here the status filter applies too).
+-- - A group is a stored value (group_kind 'VALUE', group_value the worker id, task name or queue name) or, for
+--   'worker' only, the rows with no claim on either side (group_kind 'UNCLAIMED', group_value NULL). A worker whose
+--   id is the text 'unknown' is a VALUE group of its own, apart from the UNCLAIMED group. Task and queue names are
+--   never NULL, so the other two columns give VALUE groups only.
+-- - Each group has total, a count per status (a row whose stored status is none of the seven counts only in total)
+--   and retried (rows with retry_count > 0).
+-- - The TOTAL row sums every group, also the groups past the limit; group_count is the number of groups.
+-- - Groups come by total, highest first, then by the group text in byte order (UTF-8 byte order is code-point
+--   order). The UNCLAIMED group takes the place of its label 'unknown' in that order; a VALUE group 'unknown' with
+--   the same total comes before it. At most p_limit (1..500) groups. An empty scope gives no group and a TOTAL row
+--   of zeros.
+-- It changes nothing.
+-- Lock order: none (a plain read).
+-- Returns: first the row_kind 'TOTAL' row (row_position 0, group_kind and group_value NULL, group_count set), then
+-- one row_kind 'GROUP' row per group (row_position 1..n, group_kind set, group_count NULL).
+-- Raises 22004 for a NULL argument and 22023 for an unknown group column, a limit outside 1..500 or a broken scope
+-- precondition (horsies_monitoring_check_scope).
+-- Replaces: horsies/monitoring/queries.py:1076-1253 (task_breakdown) and
+-- horsies/core/history/reads/aggregates.py:85-105 (history_breakdown_statement): a session of 4 round trips with two
+-- statements, so two snapshots, every group of both sides read into the client, and the merge, the order, the cap
+-- and the total in client code. Python labels the unclaimed rows 'unknown' and so merges them with a worker of that
+-- name.
+CREATE FUNCTION horsies_monitoring_task_breakdown(
+    p_window_lower timestamp with time zone,
+    p_window_upper timestamp with time zone,
+    p_group_by text,
+    p_statuses text[],
+    p_task_names text[],
+    p_queue_names text[],
+    p_worker_ids text[],
+    p_error_codes text[],
+    p_error_categories text[],
+    p_retried_only boolean,
+    p_builtin_codes text[],
+    p_builtin_categories text[],
+    p_limit integer
+) RETURNS TABLE (
+    row_kind text,
+    row_position integer,
+    group_kind text,
+    group_value text,
+    group_count bigint,
+    total bigint,
+    pending bigint,
+    claimed bigint,
+    running bigint,
+    completed bigint,
+    failed bigint,
+    cancelled bigint,
+    expired bigint,
+    retried bigint
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_max_limit CONSTANT integer := 500;
+    v_live_column text;
+    v_history_column text;
+    v_category_codes text[];
+BEGIN
+    PERFORM horsies_monitoring_check_scope(
+        p_window_lower, p_window_upper, p_statuses, p_error_categories, p_builtin_codes, p_builtin_categories
+    );
+    IF num_nulls(p_group_by, p_task_names, p_queue_names, p_worker_ids, p_error_codes, p_retried_only, p_limit) <> 0
+    THEN
+        RAISE EXCEPTION 'horsies_monitoring_task_breakdown: every argument is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    IF p_limit < 1 OR p_limit > c_max_limit THEN
+        RAISE EXCEPTION 'horsies_monitoring_task_breakdown: limit % is outside 1..%', p_limit, c_max_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- Only these fixed texts reach the statement.
+    CASE p_group_by
+        WHEN 'worker' THEN
+            v_live_column := 't.claimed_by_worker_id'; v_history_column := 'h.last_claimed_worker_id';
+        WHEN 'task_name' THEN
+            v_live_column := 't.task_name'; v_history_column := 'h.task_name';
+        WHEN 'queue' THEN
+            v_live_column := 't.queue_name'; v_history_column := 'h.queue_name';
+        ELSE
+            RAISE EXCEPTION 'horsies_monitoring_task_breakdown: % is not a group column', p_group_by
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
+    v_category_codes := ARRAY(
+        SELECT m.code
+        FROM unnest(p_builtin_codes, p_builtin_categories) AS m(code, category)
+        WHERE m.category = ANY(p_error_categories)
+    );
+    RETURN QUERY EXECUTE format(
+        $q$
+        WITH side_groups AS (
+            SELECT CASE WHEN %1$s IS NULL THEN 'UNCLAIMED' ELSE 'VALUE' END AS group_kind,
+                   %1$s::text AS group_value, t.status::text AS status,
+                   count(*) AS status_count, count(*) FILTER (WHERE t.retry_count > 0) AS retried_count
+            FROM horsies_tasks AS t
+            WHERE cardinality($7) = 0 AND cardinality($8) = 0
+              AND (cardinality($3) = 0 OR t.status = ANY($3))
+              AND (cardinality($4) = 0 OR t.task_name = ANY($4))
+              AND (cardinality($5) = 0 OR t.queue_name = ANY($5))
+              AND (cardinality($6) = 0 OR t.claimed_by_worker_id = ANY($6))
+              AND (NOT $9 OR t.retry_count > 0)
+            GROUP BY 1, 2, 3
+            UNION ALL
+            SELECT CASE WHEN %2$s IS NULL THEN 'UNCLAIMED' ELSE 'VALUE' END,
+                   %2$s::text, h.status::text,
+                   count(*), count(*) FILTER (WHERE h.retry_count > 0)
+            FROM horsies_task_history AS h
+            WHERE h.terminal_at >= $1 AND h.terminal_at < $2
+              AND (cardinality($3) = 0 OR h.status = ANY($3))
+              AND (cardinality($4) = 0 OR h.task_name = ANY($4))
+              AND (cardinality($5) = 0 OR h.queue_name = ANY($5))
+              AND (cardinality($6) = 0 OR h.last_claimed_worker_id = ANY($6))
+              AND (cardinality($7) = 0 OR h.error_code = ANY($7))
+              AND (
+                  cardinality($8) = 0
+                  OR h.error_code = ANY($10)
+                  OR ('DOMAIN' = ANY($8) AND h.error_code <> '' AND h.error_code <> ALL($11))
+              )
+              AND (NOT $9 OR h.retry_count > 0)
+            GROUP BY 1, 2, 3
+        ), groups AS MATERIALIZED (
+            SELECT s.group_kind, s.group_value,
+                   COALESCE(s.group_value, 'unknown') AS sort_text,
+                   sum(s.status_count)::bigint AS total,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'PENDING'), 0)::bigint AS pending,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'CLAIMED'), 0)::bigint AS claimed,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'RUNNING'), 0)::bigint AS running,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'COMPLETED'), 0)::bigint AS completed,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'FAILED'), 0)::bigint AS failed,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'CANCELLED'), 0)::bigint AS cancelled,
+                   COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'EXPIRED'), 0)::bigint AS expired,
+                   sum(s.retried_count)::bigint AS retried
+            FROM side_groups AS s
+            GROUP BY s.group_kind, s.group_value
+        ), top_groups AS (
+            SELECT g.*
+            FROM groups AS g
+            ORDER BY g.total DESC, g.sort_text COLLATE "C", g.group_kind = 'UNCLAIMED'
+            LIMIT $12
+        )
+        SELECT 'TOTAL'::text, 0, NULL::text, NULL::text, count(*)::bigint,
+               COALESCE(sum(g.total), 0)::bigint, COALESCE(sum(g.pending), 0)::bigint,
+               COALESCE(sum(g.claimed), 0)::bigint, COALESCE(sum(g.running), 0)::bigint,
+               COALESCE(sum(g.completed), 0)::bigint, COALESCE(sum(g.failed), 0)::bigint,
+               COALESCE(sum(g.cancelled), 0)::bigint, COALESCE(sum(g.expired), 0)::bigint,
+               COALESCE(sum(g.retried), 0)::bigint
+        FROM groups AS g
+        UNION ALL
+        SELECT 'GROUP'::text,
+               (row_number() OVER (
+                   ORDER BY tg.total DESC, tg.sort_text COLLATE "C", tg.group_kind = 'UNCLAIMED'
+               ))::integer,
+               tg.group_kind, tg.group_value, NULL::bigint, tg.total, tg.pending, tg.claimed, tg.running,
+               tg.completed, tg.failed, tg.cancelled, tg.expired, tg.retried
+        FROM top_groups AS tg
+        ORDER BY 2
+        $q$,
+        v_live_column, v_history_column
+    )
+    USING p_window_lower, p_window_upper, p_statuses, p_task_names, p_queue_names, p_worker_ids, p_error_codes,
+          p_error_categories, p_retried_only, v_category_codes, p_builtin_codes, p_limit;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Monitoring: workflows
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_monitoring_workflow_names: the names of the root workflow runs, for the run filter.
+--
+-- Guarantee: the distinct names of the runs with no parent (child runs are left out), in the database collation.
+-- No run gives only the LIST_END row. It changes nothing.
+-- The list is bounded at 10,000 names (c_row_bound); the statement reads one name more to know whether it cut.
+-- Lock order: none (a plain read).
+-- Returns: one row per name (row_kind 'NAME', row_position 1..n), then one row_kind 'LIST_END' row whose list_state
+-- is 'COMPLETE' or 'TRUNCATED' and whose row_bound is the bound.
+-- Replaces: horsies/monitoring/queries.py:1644-1667 (list_workflow_names): the same statement in a session (BEGIN,
+-- SELECT, ROLLBACK), with no row bound.
+CREATE FUNCTION horsies_monitoring_workflow_names()
+RETURNS TABLE (
+    row_kind text,
+    row_position integer,
+    workflow_name character varying,
+    list_state text,
+    row_bound integer
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_row_bound CONSTANT integer := 10000;
+BEGIN
+    RETURN QUERY
+    WITH page AS MATERIALIZED (
+        SELECT DISTINCT w.name
+        FROM horsies_workflows AS w
+        WHERE w.parent_workflow_id IS NULL
+        ORDER BY w.name
+        LIMIT c_row_bound + 1
+    ), numbered AS (
+        SELECT p.name, (row_number() OVER (ORDER BY p.name))::integer AS list_position
+        FROM page AS p
+    )
+    SELECT 'NAME'::text, n.list_position, n.name, NULL::text, NULL::integer
+    FROM numbered AS n
+    WHERE n.list_position <= c_row_bound
+    UNION ALL
+    SELECT 'LIST_END'::text, NULL::integer, NULL::character varying,
+           CASE WHEN (SELECT count(*) FROM page) > c_row_bound THEN 'TRUNCATED' ELSE 'COMPLETE' END,
+           c_row_bound
+    ORDER BY 2 NULLS LAST;
+END;
+$$;
+
+-- horsies_monitoring_workflow_runs: the newest root workflow runs.
+--
+-- Guarantee: the runs with no parent, newest created_at first, then by id (highest first), so runs created in one
+-- microsecond keep one order between polls. p_name and p_status are exact filters that AND together; NULL is no
+-- filter. A status that no run has gives no row; the status is not checked against the workflow statuses. At most
+-- p_limit (1..200) runs. The read rides idx_horsies_workflows_root_runs backwards; a filter reads more entries
+-- until p_limit runs match. It changes nothing.
+-- Lock order: none (a plain read).
+-- Returns: one row per run, row_position 1..n in that order. No result or error column is read.
+-- Raises 22004 for a NULL limit and 22023 for a limit outside 1..200.
+-- Replaces: horsies/monitoring/queries.py:1670-1706 (list_workflow_runs): the same read in a session (BEGIN, SELECT,
+-- ROLLBACK) that loaded every column of each run, with no order between runs of one created_at.
+CREATE FUNCTION horsies_monitoring_workflow_runs(
+    p_name text,
+    p_status text,
+    p_limit integer
+) RETURNS TABLE (
+    row_position integer,
+    workflow_id uuid,
+    workflow_name character varying,
+    definition_key character varying,
+    status text,
+    created_at timestamp with time zone,
+    completed_at timestamp with time zone
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_max_limit CONSTANT integer := 200;
+BEGIN
+    IF p_limit IS NULL THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_runs: the limit is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    IF p_limit < 1 OR p_limit > c_max_limit THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_runs: limit % is outside 1..%', p_limit, c_max_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    RETURN QUERY
+    SELECT (row_number() OVER (ORDER BY r.created_at DESC, r.id DESC))::integer, r.id, r.name, r.definition_key,
+           r.status, r.created_at, r.completed_at
+    FROM (
+        SELECT w.id, w.name, w.definition_key, w.status::text AS status, w.created_at, w.completed_at
+        FROM horsies_workflows AS w
+        WHERE w.parent_workflow_id IS NULL
+          AND (p_name IS NULL OR w.name = p_name)
+          AND (p_status IS NULL OR w.status = p_status)
+        ORDER BY w.created_at DESC, w.id DESC
+        LIMIT p_limit
+    ) AS r
+    ORDER BY 1;
+END;
+$$;
+
+-- horsies_monitoring_workflow_run: one workflow run with its nodes.
+--
+-- Guarantee: for any run id, root or child, the run and its nodes in task_index order, read in one snapshot (the
+-- function is STABLE, so both statements read the snapshot of the calling statement). For each sub-workflow node,
+-- child_total and child_failed count the nodes of its child run and the FAILED ones among them; both are NULL for
+-- a task node, for a sub-workflow node with no child run yet, and for a child run with no node. The caller builds
+-- the edges from dependencies (a dependency on an index that the run does not have makes no edge) and the failed
+-- indices from the node statuses. A run holds at most 10,000 nodes (the bound of the workflow start); more nodes
+-- break that invariant and raise data_corrupted (XX001). It changes nothing.
+-- Lock order: none (a plain read).
+-- Returns: a run: one row_kind 'RUN' row (row_position 0: workflow_id, workflow_name, definition_key, status,
+-- created_at, completed_at), then one row_kind 'NODE' row per node (row_position 1..n: status, started_at,
+-- completed_at, task_index, node_id, task_name, dependencies, allow_failed_deps, is_subworkflow, sub_workflow_id,
+-- child_total, child_failed). No run: one row_kind 'ABSENT' row with workflow_id. No result or error column is read.
+-- Raises 22004 for a NULL id.
+-- Replaces: horsies/monitoring/queries.py:1709-1810 (get_workflow_run): a session of 4 or 5 round trips (the run,
+-- the nodes, the child counts when the run has sub-workflow nodes) that loaded every column of the run.
+CREATE FUNCTION horsies_monitoring_workflow_run(p_workflow_id uuid)
+RETURNS TABLE (
+    row_kind text,
+    row_position integer,
+    workflow_id uuid,
+    workflow_name character varying,
+    definition_key character varying,
+    status text,
+    created_at timestamp with time zone,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    task_index integer,
+    node_id character varying,
+    task_name character varying,
+    dependencies integer[],
+    allow_failed_deps boolean,
+    is_subworkflow boolean,
+    sub_workflow_id uuid,
+    child_total bigint,
+    child_failed bigint
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_max_nodes CONSTANT integer := 10000;
+    v_node_rows bigint;
+BEGIN
+    IF p_workflow_id IS NULL THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_run: the workflow id is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    RETURN QUERY
+    SELECT 'RUN'::text, 0, w.id, w.name, w.definition_key, w.status::text, w.created_at, NULL::timestamptz,
+           w.completed_at, NULL::integer, NULL::character varying, NULL::character varying, NULL::integer[],
+           NULL::boolean, NULL::boolean, NULL::uuid, NULL::bigint, NULL::bigint
+    FROM horsies_workflows AS w
+    WHERE w.id = p_workflow_id;
+    IF NOT FOUND THEN
+        RETURN QUERY
+        SELECT 'ABSENT'::text, NULL::integer, p_workflow_id, NULL::character varying, NULL::character varying,
+               NULL::text, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz, NULL::integer,
+               NULL::character varying, NULL::character varying, NULL::integer[], NULL::boolean, NULL::boolean,
+               NULL::uuid, NULL::bigint, NULL::bigint;
+        RETURN;
+    END IF;
+    RETURN QUERY
+    SELECT 'NODE'::text, (row_number() OVER (ORDER BY n.task_index))::integer, NULL::uuid,
+           NULL::character varying, NULL::character varying, n.status::text, NULL::timestamptz, n.started_at,
+           n.completed_at, n.task_index, n.node_id, n.task_name, n.dependencies, n.allow_failed_deps,
+           n.is_subworkflow, n.sub_workflow_id, child.node_total, child.failed_total
+    FROM horsies_workflow_tasks AS n
+    LEFT JOIN LATERAL (
+        SELECT count(*) AS node_total, count(*) FILTER (WHERE c.status = 'FAILED') AS failed_total
+        FROM horsies_workflow_tasks AS c
+        WHERE n.is_subworkflow AND c.workflow_id = n.sub_workflow_id
+        HAVING count(*) > 0
+    ) AS child ON TRUE
+    WHERE n.workflow_id = p_workflow_id
+    ORDER BY n.task_index
+    LIMIT c_max_nodes + 1;
+    GET DIAGNOSTICS v_node_rows = ROW_COUNT;
+    IF v_node_rows > c_max_nodes THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_run: run % has more than % nodes', p_workflow_id, c_max_nodes
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+END;
+$$;
+
+-- horsies_monitoring_workflow_node: one workflow node with its backing task and that task's attempts.
+--
+-- Guarantee: the node at (p_workflow_id, p_task_index) and, for a task node, the task through
+-- horsies_monitoring_task_detail(task_id, FALSE, TRUE), read in one snapshot: this function and the detail function
+-- are STABLE, so every statement reads the snapshot of the calling statement. A task that moves to history during
+-- the read is LIVE with all its attempts or HISTORY with its snapshot, never both and never absent.
+-- - A sub-workflow node has no backing task: every task column is NULL (location too).
+-- - A task node whose task is in neither place resolves with location 'ABSENT' and its absence_reason; the caller
+--   reads it as "no task". The live attempt rows of a task leave with its live row (foreign key), so such a node has
+--   no attempt.
+-- - node_result is the stored node result text: the node error is read from it (the node error column has no
+--   writer). The caller decodes it, the status texts and the attempt snapshot.
+-- It changes nothing.
+-- Lock order: none (a plain read).
+-- Returns: a node: one row_kind 'NODE' row with the node columns (node_*) and the columns of
+-- horsies_monitoring_task_detail under the same names, in the same order. No node: one row_kind 'ABSENT' row with
+-- every other column NULL.
+-- Raises 22004 for a NULL argument, and what horsies_monitoring_task_detail raises.
+-- Replaces: horsies/monitoring/queries.py:1813-1894 (get_workflow_node): a REPEATABLE READ session of 3 (sub-workflow
+-- node) to 8 round trips: the node, the live task, the reader probe and the history read on a live miss, the
+-- attempts.
+CREATE FUNCTION horsies_monitoring_workflow_node(
+    p_workflow_id uuid,
+    p_task_index integer
+) RETURNS TABLE (
+    row_kind text,
+    node_task_index integer,
+    node_id character varying,
+    node_task_name character varying,
+    node_status text,
+    node_is_subworkflow boolean,
+    node_task_id uuid,
+    node_result text,
+    location text,
+    task_id uuid,
+    task_name character varying,
+    queue_name character varying,
+    priority integer,
+    status text,
+    is_workflow_task boolean,
+    retry_count integer,
+    max_retries integer,
+    sent_at timestamp with time zone,
+    enqueued_at timestamp with time zone,
+    claimed_at timestamp with time zone,
+    started_at timestamp with time zone,
+    good_until timestamp with time zone,
+    worker_id character varying,
+    worker_hostname character varying,
+    worker_pid integer,
+    worker_process_name character varying,
+    next_retry_at timestamp with time zone,
+    execution text,
+    terminal_at timestamp with time zone,
+    terminalization_kind text,
+    error_code text,
+    final_failed_reason text,
+    result_envelope_version smallint,
+    result_payload bytea,
+    result_digest bytea,
+    attempt_archive_version smallint,
+    attempt_snapshot bytea,
+    attempt_snapshot_digest bytea,
+    workflow_id uuid,
+    workflow_task_index integer,
+    absence_reason text
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_node record;
+BEGIN
+    IF p_workflow_id IS NULL OR p_task_index IS NULL THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_node: the workflow id and the task index are required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    SELECT n.task_index, n.node_id, n.task_name, n.status::text AS status, n.is_subworkflow, n.task_id, n.result
+    INTO v_node
+    FROM horsies_workflow_tasks AS n
+    WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
+    IF NOT FOUND THEN
+        RETURN QUERY
+        SELECT 'ABSENT'::text, NULL::integer, NULL::character varying, NULL::character varying, NULL::text,
+               NULL::boolean, NULL::uuid, NULL::text,
+               NULL::text, NULL::uuid, NULL::character varying, NULL::character varying, NULL::integer, NULL::text,
+               NULL::boolean, NULL::integer, NULL::integer, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz,
+               NULL::timestamptz, NULL::timestamptz, NULL::character varying, NULL::character varying,
+               NULL::integer, NULL::character varying, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::text,
+               NULL::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea, NULL::smallint, NULL::bytea,
+               NULL::bytea, NULL::uuid, NULL::integer, NULL::text;
+        RETURN;
+    END IF;
+    IF v_node.task_id IS NULL THEN
+        RETURN QUERY
+        SELECT 'NODE'::text, v_node.task_index, v_node.node_id, v_node.task_name, v_node.status,
+               v_node.is_subworkflow, v_node.task_id, v_node.result,
+               NULL::text, NULL::uuid, NULL::character varying, NULL::character varying, NULL::integer, NULL::text,
+               NULL::boolean, NULL::integer, NULL::integer, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz,
+               NULL::timestamptz, NULL::timestamptz, NULL::character varying, NULL::character varying,
+               NULL::integer, NULL::character varying, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::text,
+               NULL::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea, NULL::smallint, NULL::bytea,
+               NULL::bytea, NULL::uuid, NULL::integer, NULL::text;
+        RETURN;
+    END IF;
+    RETURN QUERY
+    SELECT 'NODE'::text, v_node.task_index, v_node.node_id, v_node.task_name, v_node.status,
+           v_node.is_subworkflow, v_node.task_id, v_node.result,
+           d.location, d.task_id, d.task_name, d.queue_name, d.priority, d.status, d.is_workflow_task,
+           d.retry_count, d.max_retries, d.sent_at, d.enqueued_at, d.claimed_at, d.started_at, d.good_until,
+           d.worker_id, d.worker_hostname, d.worker_pid, d.worker_process_name, d.next_retry_at, d.execution,
+           d.terminal_at, d.terminalization_kind, d.error_code, d.final_failed_reason, d.result_envelope_version,
+           d.result_payload, d.result_digest, d.attempt_archive_version, d.attempt_snapshot,
+           d.attempt_snapshot_digest, d.workflow_id, d.workflow_task_index, d.absence_reason
+    FROM horsies_monitoring_task_detail(v_node.task_id, FALSE, TRUE) AS d;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Monitoring: schedules
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_monitoring_schedules: the state of every schedule.
+--
+-- Guarantee: every schedule state row, soonest next_run_at first, then by name, so schedules due at one time keep
+-- one order between polls. No row gives only the LIST_END row. It changes nothing.
+-- The list is bounded at 10,000 rows (c_row_bound); the statement reads one row more to know whether it cut.
+-- Lock order: none (a plain read).
+-- Returns: one row per schedule (row_kind 'SCHEDULE', row_position 1..n), then one row_kind 'LIST_END' row whose
+-- list_state is 'COMPLETE' or 'TRUNCATED' and whose row_bound is the bound.
+-- Replaces: horsies/monitoring/queries.py:1900-1932 (list_schedules): a session (BEGIN, SELECT, ROLLBACK) ordered
+-- by next_run_at only, with no row bound.
+CREATE FUNCTION horsies_monitoring_schedules()
+RETURNS TABLE (
+    row_kind text,
+    row_position integer,
+    schedule_name character varying,
+    last_run_at timestamp with time zone,
+    next_run_at timestamp with time zone,
+    last_task_id uuid,
+    run_count integer,
+    updated_at timestamp with time zone,
+    list_state text,
+    row_bound integer
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_row_bound CONSTANT integer := 10000;
+BEGIN
+    RETURN QUERY
+    WITH page AS MATERIALIZED (
+        SELECT s.schedule_name, s.last_run_at, s.next_run_at, s.last_task_id, s.run_count, s.updated_at
+        FROM horsies_schedule_state AS s
+        ORDER BY s.next_run_at, s.schedule_name
+        LIMIT c_row_bound + 1
+    ), numbered AS (
+        SELECT p.*, (row_number() OVER (ORDER BY p.next_run_at, p.schedule_name))::integer AS list_position
+        FROM page AS p
+    )
+    SELECT 'SCHEDULE'::text, n.list_position, n.schedule_name, n.last_run_at, n.next_run_at, n.last_task_id,
+           n.run_count, n.updated_at, NULL::text, NULL::integer
+    FROM numbered AS n
+    WHERE n.list_position <= c_row_bound
+    UNION ALL
+    SELECT 'LIST_END'::text, NULL::integer, NULL::character varying, NULL::timestamptz, NULL::timestamptz,
+           NULL::uuid, NULL::integer, NULL::timestamptz,
+           CASE WHEN (SELECT count(*) FROM page) > c_row_bound THEN 'TRUNCATED' ELSE 'COMPLETE' END,
+           c_row_bound
+    ORDER BY 2 NULLS LAST;
+END;
+$$;
