@@ -57,7 +57,7 @@ impl std::fmt::Display for RecordedFamily {
     }
 }
 
-const READ_FAMILY_SQL: &str = "SELECT family FROM horsies_client_family";
+pub(crate) const READ_FAMILY_SQL: &str = "SELECT family FROM horsies_client_family";
 
 const INSERT_FAMILY_SQL: &str = "INSERT INTO horsies_client_family (only_row, family, recorded_at)
      VALUES (TRUE, $1, NOW())
@@ -74,10 +74,19 @@ pub(crate) async fn read_recorded_family(pool: &PgPool) -> Result<RecordedFamily
     let stored: Option<String> = sqlx::query_scalar(READ_FAMILY_SQL)
         .fetch_optional(pool)
         .await?;
+    Ok(recorded_family_from(stored))
+}
+
+/// The recorded family of the stored `family` value (none: no row).
+///
+/// # Panics
+///
+/// A stored value outside the two names, as [`read_recorded_family`].
+pub(crate) fn recorded_family_from(stored: Option<String>) -> RecordedFamily {
     match stored {
-        None => Ok(RecordedFamily::NotRecorded),
+        None => RecordedFamily::NotRecorded,
         Some(text) => match ClientFamily::parse(&text) {
-            Some(family) => Ok(RecordedFamily::Recorded(family)),
+            Some(family) => RecordedFamily::Recorded(family),
             None => panic!("horsies_client_family.family holds {text:?}, which its CHECK refuses"),
         },
     }
