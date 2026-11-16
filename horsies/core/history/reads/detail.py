@@ -44,9 +44,7 @@ from ...types.status import TaskStatus
 from ..archive.attempts import AttemptRecord, decode_attempt_snapshot
 from ..archive.versions import DecodedArchiveValue
 from ..errors import HistoryContractError
-from ..identity.uuid7 import uuid7_birth_at
-from ..names import HEARTBEAT_CLASS_KEY, TASK_DETAIL_FUNCTION
-from ..partitions.catalog import read_attached_birth_floor
+from ..names import TASK_DETAIL_FUNCTION
 
 _STATUS_BY_VALUE: dict[str, TaskStatus] = {
     status.value: status for status in TaskStatus
@@ -354,30 +352,14 @@ async def _classify_absence(
     connection: AsyncConnection,
     task_id: str,
 ) -> TaskAbsenceReason:
-    """Whether a v7 birth predates all retained history.
+    """The absence reason of a task id with no row anywhere.
 
-    The floor is read live from the attached leaf catalog rather than
-    from the published probe manifest, so a leaf whose relation was
-    dropped out of band still counts as retained history — see the
-    module docstring for why the two sources stopped agreeing.
-
-    A catalog carrying attached leaves before any reader is published
-    now yields a real answer where the manifest-sourced floor yielded
-    NOT_CLASSIFIED. That is intended: the leaves say where history begins whether
-    or not a function has been generated over them, and answering from
-    what is known beats declaring the question unclassifiable.
+    The leaf catalog records no birth floor, so no birth can be placed
+    before or within retained history: every absence is NOT_CLASSIFIED.
+    Reads nothing.
     """
-    birth = uuid7_birth_at(task_id)
-    if birth is None:
-        return TaskAbsenceReason.NOT_CLASSIFIED
-    floor = await read_attached_birth_floor(
-        connection, excluded_class_key=HEARTBEAT_CLASS_KEY
-    )
-    if floor is None:
-        return TaskAbsenceReason.NOT_CLASSIFIED
-    if birth < floor:
-        return TaskAbsenceReason.PREDATES_RETAINED_HISTORY
-    return TaskAbsenceReason.WITHIN_RETAINED_HISTORY
+    del connection, task_id
+    return TaskAbsenceReason.NOT_CLASSIFIED
 
 
 async def staged_detail_published(connection: AsyncConnection) -> bool:

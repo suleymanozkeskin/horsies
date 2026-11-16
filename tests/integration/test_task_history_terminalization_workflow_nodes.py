@@ -33,7 +33,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration]
 
-CLASS_KEY = 'it_wfnode'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-node-1'
 
 terminalization_schema = terminalization_schema_fixture(

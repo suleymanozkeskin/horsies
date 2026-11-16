@@ -22,6 +22,10 @@ WORKFLOW_PHASE2_PENDING: Final = 'horsies_workflow_phase2_pending'
 WORKFLOW_PHASE2_QUARANTINE: Final = 'horsies_workflow_phase2_quarantine'
 TASK_HISTORY_PARENT: Final = 'horsies_task_history'
 TASK_HISTORY_FOREVER: Final = 'horsies_task_history_forever'
+FOREVER_LEAF: Final = 'horsies_task_history_forever_open'
+"""The one static leaf of the forever class: from MINVALUE to the open end.
+The baseline schema creates it with its catalog row; maintenance never
+creates or drops it."""
 
 # PostgreSQL's identifier limit, NAMEDATALEN - 1. Over-long names are not
 # rejected by the server; they are silently TRUNCATED to this many bytes.

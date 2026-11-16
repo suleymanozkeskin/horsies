@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -32,8 +32,8 @@ from ..maintenance.database import PartitionMaintenanceDatabase
 
 from ..commands import (
     OPEN_END_ANCHOR,
+    AnchoredLowerBound,
     CreateDailyHistoryLeaf,
-    CreateOpenEndedHistoryLeaf,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     EnsureLeafCoverage,
@@ -43,11 +43,13 @@ from ..commands import (
     LeafLifecycle,
     LeafBounds,
     LeafRef,
+    OpenLowerBound,
 )
 from ..ddl.tables import FOREVER_CLASS_KEY
-from ..errors import HistoryParentAbsent
+from ..errors import HistoryContractError, HistoryParentAbsent
 from ..names import (
     CLOCK_SKEW_EXCEPTIONS,
+    FOREVER_LEAF,
     HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
     TASK_HISTORY_FOREVER,
@@ -81,6 +83,7 @@ from ..outcomes import (
 )
 from .catalog import (
     INDEX_SCHEMA_VERSION,
+    CatalogPartitionBound,
     LeafIndexKind,
     LeafCatalogRow,
     LeafPhysicalState,
@@ -91,13 +94,11 @@ from .catalog import (
     database_now,
     leaf_enqueued_index_name,
     leaf_id_index_name,
-    open_ended_leaf_name,
-    read_attached_open_ended_leaf,
-    read_largest_attached_forever_upper,
     read_leaf_catalog_row,
     read_leaf_ordering_index_exists,
     read_leaf_physical_state,
     read_retention_class,
+    render_partition_bound,
 )
 from .locks import (
     IndexRelationState,
@@ -195,7 +196,7 @@ async def inspect_leaf(
     if (
         catalog.parent_name != parent_name
         or catalog.class_key != leaf.class_key
-        or catalog.lower_anchor != leaf.bounds.lower
+        or catalog.lower_bound != AnchoredLowerBound(leaf.bounds.lower)
         or catalog.upper_anchor != leaf.bounds.upper
     ):
         return LeafCatalogConflict(
@@ -353,71 +354,86 @@ async def create_daily_leaf(
     if parent_name is None:
         return ForeverClassLeaf(class_key=leaf.class_key)
     if leaf.class_key == FOREVER_CLASS_KEY:
-        open_leaf = await read_attached_open_ended_leaf(connection)
-        if open_leaf is not None and (
-            leaf.bounds.lower.astimezone(timezone.utc)
-            >= open_leaf.lower_anchor.astimezone(timezone.utc)
-        ):
-            return CoveredByOpenEndedLeaf(
-                leaf_name=leaf.leaf_name,
-                open_ended_leaf_name=open_leaf.leaf_name,
-            )
+        match await verify_forever_leaf(connection):
+            case LeafAlreadyConformant():
+                return CoveredByOpenEndedLeaf(
+                    leaf_name=leaf.leaf_name,
+                    open_ended_leaf_name=FOREVER_LEAF,
+                )
+            case refusal:
+                return refusal
     return await _create_or_verify_history_leaf(
         connection, leaf=leaf, parent_name=parent_name, publisher=publisher,
     )
 
 
-async def open_ended_leaf_lower(
+async def verify_forever_leaf(
     connection: AsyncConnection,
-    today_lower: datetime,
-) -> datetime:
-    """The lower anchor of the open-ended `forever` leaf.
+) -> LeafAlreadyConformant | LeafCatalogConflict:
+    """Verify the static forever leaf. Reads only; never creates or repairs it.
 
-    The attached leaf keeps its stored lower anchor. A new leaf starts at
-    the later of today and the largest upper anchor of the attached
-    `forever` leaves, so it never overlaps the daily leaves already made.
+    The baseline schema creates the leaf, its two indexes and its catalog
+    row (an OPEN lower bound and the open end). Any difference is a
+    conflict for an operator.
     """
-    attached = await read_attached_open_ended_leaf(connection)
-    if attached is not None:
-        return attached.lower_anchor.astimezone(timezone.utc)
-    largest_upper = await read_largest_attached_forever_upper(connection)
-    if largest_upper is None:
-        return today_lower
-    return max(today_lower, largest_upper.astimezone(timezone.utc))
-
-
-async def create_open_ended_leaf(
-    connection: AsyncConnection,
-    command: CreateOpenEndedHistoryLeaf,
-    publisher: LoaderPublication,
-) -> LeafCreation:
-    """Create or verify the open-ended `forever` leaf in the caller's
-    transaction, with the same creation, repair and publication as a daily
-    leaf."""
-    retention_class = await read_retention_class(connection, FOREVER_CLASS_KEY)
-    match retention_class:
+    catalog = await read_leaf_catalog_row(connection, FOREVER_LEAF)
+    match catalog:
         case None:
-            return RetentionClassAbsent(class_key=FOREVER_CLASS_KEY)
-        case RetentionClassRow(duration=None, partition_interval=None):
+            return LeafCatalogConflict(
+                leaf_name=FOREVER_LEAF,
+                kind=CatalogConflictKind.RELATION_WITHOUT_CATALOG,
+                detail='the static forever leaf has no catalog row',
+            )
+        case LeafCatalogRow(
+            class_key=class_key,
+            lower_bound=OpenLowerBound(),
+            upper_anchor=upper,
+            index_schema_version=version,
+            detached_at=None,
+            dropped_at=None,
+        ) if (
+            class_key == FOREVER_CLASS_KEY
+            and upper == OPEN_END_ANCHOR
+            and version == INDEX_SCHEMA_VERSION
+        ):
             pass
-        case RetentionClassRow(partition_interval=interval):
-            return ClassIntervalMismatch(
-                class_key=FOREVER_CLASS_KEY,
-                partition_interval_days=(
-                    interval.days if interval is not None else None
+        case LeafCatalogRow():
+            return LeafCatalogConflict(
+                leaf_name=FOREVER_LEAF,
+                kind=CatalogConflictKind.METADATA_MISMATCH,
+                detail='the static forever leaf catalog row is not the baseline row',
+            )
+    physical = await read_leaf_physical_state(
+        connection,
+        leaf_name=FOREVER_LEAF,
+        parent_name=TASK_HISTORY_FOREVER,
+        id_index_name=catalog.id_index_name,
+        bound_expectation=CatalogPartitionBound(),
+        index_kind=LeafIndexKind.HISTORY,
+    )
+    if not physical.parent_exists:
+        raise HistoryParentAbsent(
+            f'forever parent {TASK_HISTORY_FOREVER!r} does not exist'
+        )
+    conformant = (
+        physical.relation_exists
+        and physical.detach_pending is False
+        and physical.partition_bound == catalog.partition_bound
+        and physical.id_index_conformant
+        and await read_leaf_ordering_index_exists(connection, FOREVER_LEAF)
+    )
+    match conformant:
+        case True:
+            return LeafAlreadyConformant(leaf_name=FOREVER_LEAF)
+        case False:
+            return LeafCatalogConflict(
+                leaf_name=FOREVER_LEAF,
+                kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
+                detail=(
+                    'the static forever leaf relation, bound or indexes differ '
+                    'from the baseline'
                 ),
             )
-    leaf = LeafRef(
-        leaf_name=open_ended_leaf_name(TASK_HISTORY_FOREVER, command.lower),
-        class_key=FOREVER_CLASS_KEY,
-        bounds=LeafBounds(lower=command.lower, upper=OPEN_END_ANCHOR),
-    )
-    return await _create_or_verify_history_leaf(
-        connection,
-        leaf=leaf,
-        parent_name=TASK_HISTORY_FOREVER,
-        publisher=publisher,
-    )
 
 
 async def _create_or_verify_history_leaf(
@@ -554,34 +570,36 @@ async def _create_or_verify_history_leaf(
             """
         )
     )
-    # Captured under the UTC rendering convention; every later
-    # comparison captures the live bound the same way.
+    # The bound the leaf was created with, under the UTC rendering
+    # convention; the catalog derives the same text from the anchors.
     recorded_bound = await capture_partition_bound_utc(connection, leaf.leaf_name)
+    if recorded_bound != render_partition_bound(
+        AnchoredLowerBound(leaf.bounds.lower), leaf.bounds.upper
+    ):
+        raise HistoryContractError(
+            f'history leaf {leaf.leaf_name!r} was created with bound '
+            f'{recorded_bound!r}, not its requested bounds'
+        )
     await connection.execute(
         text(
             f"""
             INSERT INTO {LEAF_CATALOG} (
-                leaf_name, parent_name, class_key,
-                lower_anchor, upper_anchor,
-                index_schema_version, id_index_name, partition_bound,
-                min_birth_at, min_birth_verified, created_at
+                leaf_name, class_key,
+                lower_bound_kind, lower_anchor, upper_anchor,
+                index_schema_version, created_at, detached_at, dropped_at
             ) VALUES (
-                :leaf_name, :parent_name, :class_key,
-                :lower, :upper,
-                :index_schema_version, :id_index_name, :partition_bound,
-                NULL, TRUE, statement_timestamp()
+                :leaf_name, :class_key,
+                'AT', :lower, :upper,
+                :index_schema_version, statement_timestamp(), NULL, NULL
             )
             """
         ),
         {
             'leaf_name': leaf.leaf_name,
-            'parent_name': parent_name,
             'class_key': leaf.class_key,
             'lower': leaf.bounds.lower,
             'upper': leaf.bounds.upper,
             'index_schema_version': INDEX_SCHEMA_VERSION,
-            'id_index_name': id_index_name,
-            'partition_bound': recorded_bound,
         },
     )
     await connection.execute(
@@ -644,7 +662,7 @@ async def _read_daily_leaf_creation_state(
     if (
         catalog.parent_name != parent_name
         or catalog.class_key != leaf.class_key
-        or catalog.lower_anchor != leaf.bounds.lower
+        or catalog.lower_bound != AnchoredLowerBound(leaf.bounds.lower)
         or catalog.upper_anchor != leaf.bounds.upper
         or catalog.index_schema_version != INDEX_SCHEMA_VERSION
         or catalog.detached_at is not None
@@ -729,16 +747,8 @@ async def ensure_leaf_coverage(
     now = await database_now(connection)
     today_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if command.class_key == FOREVER_CLASS_KEY:
-        # One open-ended leaf covers every future day of `forever`.
-        return (
-            await create_open_ended_leaf(
-                connection,
-                CreateOpenEndedHistoryLeaf(
-                    lower=await open_ended_leaf_lower(connection, today_lower),
-                ),
-                publisher,
-            ),
-        )
+        # The static forever leaf covers every time of `forever`.
+        return (await verify_forever_leaf(connection),)
     outcomes: list[LeafCreation] = []
     for day_offset in range(command.horizon_days + 1):
         lower = today_lower + timedelta(days=day_offset)

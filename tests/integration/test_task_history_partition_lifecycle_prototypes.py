@@ -43,7 +43,7 @@ from tests.task_history_prototypes.workflow_schema import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-_CLASS_KEY = 'finite_30d_v1'
+_CLASS_KEY = 'standard_30d'
 _OLD_LEAF = 'history_aggregate_finite_2026_06_01'
 _OLD_LOWER = datetime(2026, 6, 1, tzinfo=timezone.utc)
 _OLD_UPPER = datetime(2026, 6, 2, tzinfo=timezone.utc)

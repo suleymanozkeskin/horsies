@@ -6,10 +6,9 @@ which class, or carrying which index version. The leaf catalog records that,
 and every maintenance decision cross-checks catalog against `pg_catalog`
 before acting — a decision made from either source alone can be stale.
 
-The catalog also carries each leaf's minimum UUIDv7 birth time. The staged
-lookup loader prunes finite probes with it, and constant-time purged
-detection depends on the retained global birth floor being recomputed at
-retirement; both are catalog facts, not derivable from `pg_catalog`.
+The catalog stores no value that it can derive: the parent relation, the
+task index name and the rendered partition bound are derived from the class
+key, the leaf name and the bounds when a row is read.
 
 Reads decode fail-closed: a column of an unexpected type means this code and
 the installed schema disagree, and that raises `HistoryContractError` rather
@@ -27,14 +26,23 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import OPEN_END_ANCHOR, LeafBounds, is_safe_identifier
+from ..commands import (
+    AnchoredLowerBound,
+    LeafBounds,
+    LowerBound,
+    OpenLowerBound,
+    is_safe_identifier,
+)
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError, HistoryParentAbsent
 from ..names import (
     HEARTBEAT_CLASS_KEY,
+    HEARTBEATS_TABLE,
     LEAF_CATALOG,
     LEAF_LOCK_KEY_FUNCTION,
     RETENTION_CLASSES,
+    TASK_HISTORY_FOREVER,
+    TASK_HISTORY_PARENT,
 )
 
 INDEX_SCHEMA_VERSION = 1
@@ -83,11 +91,14 @@ $function$
 
 @dataclass(frozen=True, slots=True)
 class RetentionClassRow:
-    """One retention class as the frozen DDL module stores it.
+    """One retention class, with the facts its kind implies.
 
-    `duration` None means forever; forever classes have no finite parent and
-    no partition interval. The column shape is owned by the frozen-DDL
-    module; this reader is part of that frozen contract.
+    The table stores ``class_kind`` with ``retention_days`` (``PERIOD``) or
+    ``heartbeat_horizon_hours`` (``HEARTBEAT``). The reader derives the rest:
+    ``FOREVER`` has no duration, interval or finite parent; ``PERIOD`` has
+    its days, a daily interval and the parent ``horsies_task_history_<key>``;
+    ``HEARTBEAT`` has its horizon, an hourly interval and the heartbeat
+    table as parent.
     """
 
     class_key: str
@@ -98,18 +109,21 @@ class RetentionClassRow:
 
 @dataclass(frozen=True, slots=True)
 class LeafCatalogRow:
-    """One leaf as the catalog remembers it."""
+    """One leaf as the catalog remembers it.
+
+    ``parent_name``, ``id_index_name`` and ``partition_bound`` are derived
+    by the reader (``leaf_parent_name``, ``leaf_task_index_name``,
+    ``render_partition_bound``); the table does not store them.
+    """
 
     leaf_name: str
     parent_name: str
     class_key: str
-    lower_anchor: datetime
+    lower_bound: LowerBound
     upper_anchor: datetime
     index_schema_version: int
     id_index_name: str
     partition_bound: str
-    min_birth_at: datetime | None
-    min_birth_verified: bool
     created_at: datetime
     detached_at: datetime | None
     dropped_at: datetime | None
@@ -177,6 +191,95 @@ def open_ended_leaf_name(parent_name: str, lower: datetime) -> str:
 def leaf_id_index_name(leaf_name: str) -> str:
     """The canonical per-leaf task-ID index name."""
     return f'{leaf_name}_task_idx'
+
+
+def heartbeat_probe_index_name(leaf_name: str) -> str:
+    """The per-leaf stale-probe index name of an hourly heartbeat leaf."""
+    name = f'{leaf_name}_probe_idx'
+    if not is_safe_identifier(name):
+        raise ValueError(f'{name!r} is not a safe identifier')
+    return name
+
+
+def history_class_parent_name(class_key: str) -> str:
+    """The parent relation of one history class: ``horsies_task_history_<key>``."""
+    name = f'{TASK_HISTORY_PARENT}_{class_key}'
+    if not is_safe_identifier(name):
+        raise ValueError(
+            f'class key {class_key!r} does not form a safe relation name'
+        )
+    return name
+
+
+def leaf_parent_name(class_key: str) -> str:
+    """The parent relation of a leaf of ``class_key``."""
+    match class_key:
+        case str() as key if key == HEARTBEAT_CLASS_KEY:
+            return HEARTBEATS_TABLE
+        case str() as key if key == FOREVER_CLASS_KEY:
+            return TASK_HISTORY_FOREVER
+        case _:
+            return history_class_parent_name(class_key)
+
+
+def leaf_task_index_name(class_key: str, leaf_name: str) -> str:
+    """The task index of a leaf: the stale probe on heartbeats, the id index on history."""
+    match class_key:
+        case str() as key if key == HEARTBEAT_CLASS_KEY:
+            return heartbeat_probe_index_name(leaf_name)
+        case _:
+            return leaf_id_index_name(leaf_name)
+
+
+def _bound_literal(instant: datetime) -> str:
+    """``instant`` as PostgreSQL renders a timestamptz literal under TimeZone UTC."""
+    utc = instant.astimezone(timezone.utc)
+    rendered = f'{utc:%Y-%m-%d %H:%M:%S}'
+    if utc.microsecond:
+        rendered += f'.{utc.microsecond:06d}'.rstrip('0')
+    return f"'{rendered}+00'"
+
+
+def render_partition_bound(lower: LowerBound, upper: datetime) -> str:
+    """The partition bound of a leaf as ``pg_get_expr`` renders it under TimeZone UTC."""
+    match lower:
+        case OpenLowerBound():
+            lower_text = 'MINVALUE'
+        case AnchoredLowerBound(anchor=anchor):
+            lower_text = _bound_literal(anchor)
+    return f'FOR VALUES FROM ({lower_text}) TO ({_bound_literal(upper)})'
+
+
+def decode_lower_bound(kind: Any, anchor: Any) -> LowerBound:
+    """The typed lower bound of a ``(lower_bound_kind, lower_anchor)`` pair.
+
+    The pair CHECK of the table holds the anchor to the kind; another pair
+    means this code and the schema disagree.
+    """
+    match kind, anchor:
+        case 'OPEN', None:
+            return OpenLowerBound()
+        case 'AT', datetime():
+            return AnchoredLowerBound(required_utc_timestamp(anchor, 'lower_anchor'))
+        case _:
+            raise HistoryContractError(
+                f'lower bound pair is not OPEN/NULL or AT/timestamp: {kind!r}, {anchor!r}'
+            )
+
+
+def anchored_lower(bound: LowerBound, leaf_name: str) -> datetime:
+    """The lower anchor of a leaf that maintenance addresses by bounds.
+
+    Only the static forever leaf has an open lower bound, and no
+    maintenance command targets it by bounds.
+    """
+    match bound:
+        case AnchoredLowerBound(anchor=anchor):
+            return anchor
+        case OpenLowerBound():
+            raise HistoryContractError(
+                f'leaf {leaf_name!r} has an open lower bound where an anchored one is required'
+            )
 
 
 def leaf_enqueued_index_name(leaf_name: str) -> str:
@@ -264,8 +367,7 @@ async def read_retention_class(
         await connection.execute(
             text(
                 f"""
-                SELECT class_key, duration, partition_interval,
-                       finite_parent_name
+                SELECT class_key, class_kind, retention_days, heartbeat_horizon_hours
                 FROM {RETENTION_CLASSES}
                 WHERE class_key = :class_key
                 """
@@ -275,70 +377,34 @@ async def read_retention_class(
     ).one_or_none()
     if row is None:
         return None
-    duration = _optional_timedelta(row.duration, 'duration')
-    partition_interval = _optional_timedelta(
-        row.partition_interval, 'partition_interval'
-    )
-    finite_parent_name = _optional_str(row.finite_parent_name, 'finite_parent_name')
-    if duration is not None and finite_parent_name is None:
-        raise HistoryContractError(
-            f'finite retention class {class_key!r} has no finite parent relation'
-        )
-    if finite_parent_name is not None and not is_safe_identifier(finite_parent_name):
-        raise HistoryContractError(
-            f'retention class {class_key!r} names an unsafe parent relation'
-        )
-    return RetentionClassRow(
-        class_key=_required_str(row.class_key, 'class_key'),
-        duration=duration,
-        partition_interval=partition_interval,
-        finite_parent_name=finite_parent_name,
-    )
-
-
-async def read_attached_open_ended_leaf(
-    connection: AsyncConnection,
-) -> LeafCatalogRow | None:
-    """The attached open-ended `forever` leaf, or None when there is none."""
-    leaf_name = (
-        await connection.execute(
-            text(
-                f"""
-                SELECT leaf_name FROM {LEAF_CATALOG}
-                WHERE class_key = :forever_class
-                  AND upper_anchor = :open_end
-                  AND detached_at IS NULL
-                  AND dropped_at IS NULL
-                ORDER BY lower_anchor
-                LIMIT 1
-                """
-            ),
-            {'forever_class': FOREVER_CLASS_KEY, 'open_end': OPEN_END_ANCHOR},
-        )
-    ).scalar_one_or_none()
-    if leaf_name is None:
-        return None
-    return await read_leaf_catalog_row(connection, str(leaf_name))
-
-
-async def read_largest_attached_forever_upper(
-    connection: AsyncConnection,
-) -> datetime | None:
-    """The largest upper anchor of the attached `forever` leaves."""
-    value = (
-        await connection.execute(
-            text(
-                f"""
-                SELECT max(upper_anchor) FROM {LEAF_CATALOG}
-                WHERE class_key = :forever_class
-                  AND detached_at IS NULL
-                  AND dropped_at IS NULL
-                """
-            ),
-            {'forever_class': FOREVER_CLASS_KEY},
-        )
-    ).scalar_one()
-    return optional_utc_timestamp(value, 'upper_anchor')
+    stored_key = _required_str(row.class_key, 'class_key')
+    match row.class_kind, row.retention_days, row.heartbeat_horizon_hours:
+        case 'FOREVER', None, None:
+            return RetentionClassRow(
+                class_key=stored_key,
+                duration=None,
+                partition_interval=None,
+                finite_parent_name=None,
+            )
+        case 'PERIOD', int() as days, None:
+            return RetentionClassRow(
+                class_key=stored_key,
+                duration=timedelta(days=days),
+                partition_interval=timedelta(days=1),
+                finite_parent_name=history_class_parent_name(stored_key),
+            )
+        case 'HEARTBEAT', None, int() as hours:
+            return RetentionClassRow(
+                class_key=stored_key,
+                duration=timedelta(hours=hours),
+                partition_interval=timedelta(hours=1),
+                finite_parent_name=HEARTBEATS_TABLE,
+            )
+        case kind, days, hours:
+            raise HistoryContractError(
+                f'retention class {class_key!r} has no known shape: '
+                f'kind={kind!r} days={days!r} horizon_hours={hours!r}'
+            )
 
 
 async def read_leaf_catalog_row(
@@ -349,10 +415,9 @@ async def read_leaf_catalog_row(
         await connection.execute(
             text(
                 f"""
-                SELECT leaf_name, parent_name, class_key,
-                       lower_anchor, upper_anchor,
-                       index_schema_version, id_index_name, partition_bound,
-                       min_birth_at, min_birth_verified,
+                SELECT leaf_name, class_key,
+                       lower_bound_kind, lower_anchor, upper_anchor,
+                       index_schema_version,
                        created_at, detached_at, dropped_at
                 FROM {LEAF_CATALOG}
                 WHERE leaf_name = :leaf_name
@@ -363,24 +428,25 @@ async def read_leaf_catalog_row(
     ).one_or_none()
     if row is None:
         return None
-    id_index_name = _required_str(row.id_index_name, 'id_index_name')
-    if not is_safe_identifier(id_index_name):
+    stored_name = _required_str(row.leaf_name, 'leaf_name')
+    if not is_safe_identifier(stored_name):
         raise HistoryContractError(
-            f'cataloged index name is not a safe identifier: {id_index_name!r}'
+            f'cataloged leaf name is not a safe identifier: {stored_name!r}'
         )
+    class_key = _required_str(row.class_key, 'class_key')
+    lower_bound = decode_lower_bound(row.lower_bound_kind, row.lower_anchor)
+    upper_anchor = required_utc_timestamp(row.upper_anchor, 'upper_anchor')
     return LeafCatalogRow(
-        leaf_name=_required_str(row.leaf_name, 'leaf_name'),
-        parent_name=_required_str(row.parent_name, 'parent_name'),
-        class_key=_required_str(row.class_key, 'class_key'),
-        lower_anchor=required_utc_timestamp(row.lower_anchor, 'lower_anchor'),
-        upper_anchor=required_utc_timestamp(row.upper_anchor, 'upper_anchor'),
+        leaf_name=stored_name,
+        parent_name=leaf_parent_name(class_key),
+        class_key=class_key,
+        lower_bound=lower_bound,
+        upper_anchor=upper_anchor,
         index_schema_version=_required_int(
             row.index_schema_version, 'index_schema_version'
         ),
-        id_index_name=id_index_name,
-        partition_bound=_required_str(row.partition_bound, 'partition_bound'),
-        min_birth_at=optional_utc_timestamp(row.min_birth_at, 'min_birth_at'),
-        min_birth_verified=_required_bool(row.min_birth_verified, 'min_birth_verified'),
+        id_index_name=leaf_task_index_name(class_key, stored_name),
+        partition_bound=render_partition_bound(lower_bound, upper_anchor),
         created_at=required_utc_timestamp(row.created_at, 'created_at'),
         detached_at=optional_utc_timestamp(row.detached_at, 'detached_at'),
         dropped_at=optional_utc_timestamp(row.dropped_at, 'dropped_at'),
@@ -433,15 +499,23 @@ class ManifestLeafSelection:
     absent_relations: frozenset[str]
 
 
+# The parent is derived from the class key as `leaf_parent_name` derives it.
 _MANIFEST_SELECTION_SQL = f"""
 SELECT leaf_name,
        to_regclass(leaf_name) IS NOT NULL AS relation_exists,
-       to_regclass(parent_name) IS NOT NULL AS parent_exists
+       to_regclass(
+           CASE class_key
+               WHEN :forever_class THEN :forever_parent
+               WHEN :heartbeat_class THEN :heartbeat_parent
+               ELSE :history_parent || '_' || class_key
+           END
+       ) IS NOT NULL AS parent_exists
 FROM {LEAF_CATALOG}
 WHERE detached_at IS NULL
   AND dropped_at IS NULL
-ORDER BY lower_anchor, leaf_name
+ORDER BY lower_anchor NULLS FIRST, leaf_name
 """
+
 
 
 async def read_manifest_leaf_rows(
@@ -475,7 +549,18 @@ async def read_manifest_leaf_rows(
     here would let a tolerated state raise, and a deployment holding only
     such rows would satisfy any threshold phrased over the whole catalog.
     """
-    rows = (await connection.execute(text(_MANIFEST_SELECTION_SQL))).all()
+    rows = (
+        await connection.execute(
+            text(_MANIFEST_SELECTION_SQL),
+            {
+                'forever_class': FOREVER_CLASS_KEY,
+                'forever_parent': TASK_HISTORY_FOREVER,
+                'heartbeat_class': HEARTBEAT_CLASS_KEY,
+                'heartbeat_parent': HEARTBEATS_TABLE,
+                'history_parent': TASK_HISTORY_PARENT,
+            },
+        )
+    ).all()
     attached: list[LeafCatalogRow] = []
     absent: list[str] = []
     history_rows = 0
@@ -507,47 +592,6 @@ async def read_manifest_leaf_rows(
     )
 
 
-async def read_attached_birth_floor(
-    connection: AsyncConnection,
-    *,
-    excluded_class_key: str,
-) -> datetime | None:
-    """The minimum birth time across every attached leaf of a real class.
-
-    Unfiltered by relation existence, deliberately. The floor answers
-    "does this identifier predate all RETAINED history", and a leaf
-    destroyed out of band was retained — its rows were real and then
-    someone removed them. Dropping it from the floor would raise the floor
-    and reclassify those tasks as too old to have been kept, which is a
-    false explanation of a true absence.
-
-    Two independent things currently keep heartbeat leaves out of the
-    floor, and neither should be mistaken for the other. `min()` skips
-    NULLs and heartbeat rows are created with `min_birth_at` NULL, so
-    they cannot reach the floor today whatever this predicate says. The
-    class filter is the one that states the INTENT: heartbeats are not
-    task history and their birth times are not where history begins.
-    Remove the filter and nothing breaks until someone gives heartbeat
-    leaves a birth time, at which point the floor silently starts
-    tracking liveness rows.
-    """
-    value = (
-        await connection.execute(
-            text(
-                f"""
-                SELECT min(min_birth_at)
-                FROM {LEAF_CATALOG}
-                WHERE detached_at IS NULL
-                  AND dropped_at IS NULL
-                  AND class_key <> :excluded_class_key
-                """
-            ),
-            {'excluded_class_key': excluded_class_key},
-        )
-    ).scalar_one_or_none()
-    return optional_utc_timestamp(value, 'min_birth_at')
-
-
 async def _read_attached(
     connection: AsyncConnection,
     *,
@@ -564,7 +608,7 @@ async def _read_attached(
                 WHERE detached_at IS NULL
                   AND dropped_at IS NULL
                   {class_filter}
-                ORDER BY lower_anchor, leaf_name
+                ORDER BY lower_anchor NULLS FIRST, leaf_name
                 """
             ),
             parameters,
@@ -907,16 +951,12 @@ def optional_utc_timestamp(value: Any, column: str) -> datetime | None:
 
 
 def decode_leaf_bounds(lower: Any, upper: Any) -> LeafBounds:
-    """The UTC `LeafBounds` of decoded catalog anchor values."""
+    """The UTC `LeafBounds` of decoded catalog anchor values.
+
+    Only for rows of an anchored lower bound; the reads that call it select
+    ``lower_bound_kind = 'AT'``.
+    """
     return LeafBounds(
         lower=required_utc_timestamp(lower, 'lower_anchor'),
         upper=required_utc_timestamp(upper, 'upper_anchor'),
     )
-
-
-def _optional_timedelta(value: Any, column: str) -> timedelta | None:
-    if value is None:
-        return None
-    if not isinstance(value, timedelta):
-        raise HistoryContractError(f'{column} did not decode as an interval')
-    return value

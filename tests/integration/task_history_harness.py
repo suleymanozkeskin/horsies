@@ -1,12 +1,10 @@
 """Disposable-schema harness for task-history integration tests.
 
-Each test module gets its own PostgreSQL schema with the frozen fragment
-list installed and `search_path` baked into every connection the engine
-hands out — including the autocommit connections the detach path creates
-for itself. Unqualified relation names in the production DDL therefore
-resolve into the disposable schema, and a minimal stand-in for the live
-table (which gains its fingerprint columns only at cutover) shadows the
-real one for the generated lookup function.
+Each test gets its own PostgreSQL schema with the baseline migration
+installed and `search_path` baked into every connection the engine hands
+out — including the autocommit connections the detach path creates for
+itself. The baseline SQL names no schema, so every relation and function
+resolves into the disposable schema.
 
 Nothing here touches shared relations: setup creates the schema, teardown
 drops it cascade and verifies nothing remains.
@@ -24,15 +22,16 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from horsies.core.baseline.migration import load_baseline_migration
 from horsies.core.history.ddl.classes import (
+    ClassAlreadyRegistered,
     ClassRegistered,
+    finite_class_parent_name,
     register_finite_retention_class,
 )
-from horsies.core.history.ddl.fragments import frozen_fragments
-from horsies.core.schemas.recovery import (
-    CREATE_RECOVERY_SCAN_CURSORS_SQL,
-    SEED_RECOVERY_SCAN_CURSORS_SQL,
-)
+from horsies.core.history.names import FOREVER_LEAF
+from horsies.core.types.result import Err, Ok
+from tests.attempt_snapshot_support import encode_attempt_snapshot
 
 
 def _database_url() -> str:
@@ -44,18 +43,6 @@ def _database_url() -> str:
     )
 
 
-LIVE_STANDIN_DDL = """
-CREATE TABLE horsies_tasks (
-    id uuid PRIMARY KEY,
-    command_fingerprint_version smallint NOT NULL,
-    command_fingerprint bytea NOT NULL
-)
-"""
-"""Stand-in carrying the real identifier column name (`id`) plus the
-fingerprint columns the lookup probes — the column name is the point:
-a `task_id` stand-in masked a generator defect once."""
-
-
 @dataclass(frozen=True, slots=True)
 class HistorySchema:
     """One disposable schema and the engine whose connections live in it."""
@@ -64,8 +51,26 @@ class HistorySchema:
     engine: AsyncEngine
 
 
+async def install_baseline_schema(connection: AsyncConnection) -> None:
+    """Run the baseline migration in the connection's current schema.
+
+    The text goes through the driver connection with no parameters, so
+    psycopg sends it with the simple query protocol and reads no
+    placeholders in it. It joins the caller's transaction.
+    """
+    match load_baseline_migration():
+        case Ok(migration):
+            pass
+        case Err(unreadable):
+            raise AssertionError(f'baseline SQL unreadable: {unreadable}')
+    raw = await connection.get_raw_connection()
+    driver = raw.driver_connection
+    assert driver is not None, 'the engine has a driver connection'
+    await driver.execute(migration.sql.encode('utf-8'))
+
+
 def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
-    """Build a function-scoped fixture installing the frozen program.
+    """Build a function-scoped fixture installing the baseline schema.
 
     Function scope keeps every test hermetic — each one gets a freshly
     installed schema — and stays inside the repo's strict asyncio mode
@@ -85,23 +90,8 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
             url,
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
-        from horsies.core.history.phase2.quarantine import (
-            quarantine_fragments,
-        )
-
         async with engine.begin() as connection:
-            for fragment in (
-                *frozen_fragments(),
-                LIVE_STANDIN_DDL,
-                WORKFLOW_TASKS_STANDIN_DDL,
-                *quarantine_fragments(),
-            ):
-                await connection.execute(text(fragment))
-            from horsies.core.history.partitions.forever import (
-                ensure_forever_range_partitioning,
-            )
-
-            await ensure_forever_range_partitioning(connection)
+            await install_baseline_schema(connection)
         yield HistorySchema(schema_name=schema_name, engine=engine)
         await engine.dispose()
         async with admin_engine.connect() as connection:
@@ -139,23 +129,26 @@ async def register_class(
     match outcome:
         case ClassRegistered(finite_parent_name=parent_name):
             return parent_name
+        case ClassAlreadyRegistered(class_key=registered_key):
+            return finite_class_parent_name(registered_key)
         case _:
             raise AssertionError(f'class registration failed: {outcome!r}')
 
 
 async def current_forever_leaf(connection: AsyncConnection) -> str:
-    """Return the bounded ``forever`` leaf covering database time."""
+    """Return the static ``forever`` leaf, after checking its catalog row."""
     leaf_name = (
         await connection.execute(
             text(
                 "SELECT leaf_name FROM horsies_task_history_leaf_catalog "
                 "WHERE class_key = 'forever' "
+                "AND lower_bound_kind = 'OPEN' "
                 'AND detached_at IS NULL AND dropped_at IS NULL '
-                'AND lower_anchor <= statement_timestamp() '
                 'AND upper_anchor > statement_timestamp()'
             )
         )
     ).scalar_one()
+    assert leaf_name == FOREVER_LEAF
     return str(leaf_name)
 
 
@@ -166,8 +159,9 @@ def frozen_history_row(
     terminal_at: datetime,
     status: str = 'COMPLETED',
 ) -> dict[str, object]:
-    """Complete parameter set for one frozen-projection history insert."""
+    """Complete parameter set for one history insert."""
     payload = b'{}'
+    snapshot = encode_attempt_snapshot(())
     return {
         'task_id': task_id,
         'task_name': 'integration.task',
@@ -178,19 +172,21 @@ def frozen_history_row(
         'status': status,
         'terminalization_kind': 'COMPLETE_FUSED',
         'terminal_at': terminal_at,
-        'retention_anchor_at': terminal_at,
         'retention_class_key': class_key,
+        'sent_at': terminal_at - timedelta(minutes=1),
         'enqueued_at': terminal_at - timedelta(minutes=1),
         'created_at': terminal_at - timedelta(minutes=1),
         'retry_count': 0,
         'max_retries': 0,
         'result_envelope_version': 1,
-        'result_codec': 'json-utf8',
-        'result_content_type': 'application/json',
         'result_payload': payload,
         'result_digest': sha256(payload).digest(),
         'is_workflow_task': False,
         'history_schema_version': 1,
+        'attempt_archive_version': snapshot.version,
+        'attempt_snapshot': snapshot.payload,
+        'attempt_snapshot_digest': snapshot.digest,
+        'rerun_input_disposition': 'NEVER_ELIGIBLE',
     }
 
 
@@ -198,175 +194,41 @@ INSERT_HISTORY_ROW_SQL = """
 INSERT INTO horsies_task_history (
     task_id, task_name, queue_name, priority,
     command_fingerprint_version, command_fingerprint,
-    status, terminalization_kind, terminal_at, retention_anchor_at,
-    retention_class_key, enqueued_at, created_at,
+    status, terminalization_kind, terminal_at,
+    retention_class_key, sent_at, enqueued_at, created_at,
     retry_count, max_retries,
-    result_envelope_version, result_codec, result_content_type,
+    result_envelope_version,
     result_payload, result_digest,
-    is_workflow_task, history_schema_version
+    is_workflow_task, history_schema_version,
+    attempt_archive_version, attempt_snapshot, attempt_snapshot_digest,
+    rerun_input_disposition
 ) VALUES (
     :task_id, :task_name, :queue_name, :priority,
     :command_fingerprint_version, :command_fingerprint,
-    :status, :terminalization_kind, :terminal_at, :retention_anchor_at,
-    :retention_class_key, :enqueued_at, :created_at,
+    :status, :terminalization_kind, :terminal_at,
+    :retention_class_key, :sent_at, :enqueued_at, :created_at,
     :retry_count, :max_retries,
-    :result_envelope_version, :result_codec, :result_content_type,
+    :result_envelope_version,
     :result_payload, :result_digest,
-    :is_workflow_task, :history_schema_version
+    :is_workflow_task, :history_schema_version,
+    :attempt_archive_version, :attempt_snapshot, :attempt_snapshot_digest,
+    :rerun_input_disposition
 )
 """
-
-
-FULL_LIVE_STANDIN_DDL = """
-CREATE TABLE horsies_tasks (
-    id uuid PRIMARY KEY,
-    task_name varchar(255) NOT NULL,
-    queue_name varchar(100) NOT NULL,
-    priority integer NOT NULL,
-    args text,
-    kwargs text,
-    task_options text,
-    execution text NOT NULL DEFAULT 'ISOLATED',
-    enqueue_sha varchar(64),
-    status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING')),
-    result text,
-    sent_at timestamptz,
-    enqueued_at timestamptz NOT NULL,
-    claimed_at timestamptz,
-    started_at timestamptz,
-    finalizing_at timestamptz,
-    created_at timestamptz NOT NULL,
-    good_until timestamptz,
-    retry_count integer NOT NULL,
-    max_retries integer NOT NULL,
-    claimed_by_worker_id varchar(255),
-    worker_hostname varchar(255),
-    worker_pid integer,
-    worker_process_name varchar(255),
-    is_workflow_task boolean NOT NULL,
-    command_fingerprint_version smallint NOT NULL,
-    command_fingerprint bytea NOT NULL,
-    retention_class_key varchar(64) NOT NULL,
-    input_digest bytea,
-    rerun_of_task_id uuid,
-    rerun_root_task_id uuid,
-    idempotency_key_digest bytea,
-    retain_rerun_input boolean NOT NULL,
-    prepared_rerun_input_disposition varchar(32) NOT NULL,
-    prepared_rerun_input_version smallint,
-    prepared_rerun_input_codec varchar(64),
-    prepared_rerun_input_content_type varchar(255),
-    prepared_rerun_input_digest bytea,
-    prepared_rerun_input_inline bytea,
-    prepared_rerun_input_reference varchar(2048)
-)
-"""
-"""Post-cutover live stand-in: every column the move's snapshot reads."""
-
-ATTEMPTS_STANDIN_DDL = """
-CREATE TABLE horsies_task_attempts (
-    task_id uuid NOT NULL,
-    attempt integer NOT NULL,
-    outcome text NOT NULL,
-    will_retry boolean NOT NULL,
-    started_at timestamptz NOT NULL,
-    finished_at timestamptz NOT NULL,
-    error_code text,
-    error_message text,
-    failed_reason text,
-    worker_id text,
-    worker_hostname text,
-    worker_pid integer,
-    worker_process_name text,
-    UNIQUE (task_id, attempt)
-)
-"""
-
-WORKFLOWS_STANDIN_DDL = """
-CREATE TABLE horsies_workflows (
-    id uuid PRIMARY KEY,
-    status text NOT NULL,
-    depth integer,
-    root_workflow_id uuid,
-    on_error text
-)
-"""
-"""Stand-in with the columns the workflow-scoped sweeps join on."""
-
-HEARTBEATS_STANDIN_DDL = """
-CREATE TABLE horsies_heartbeats (
-    task_id uuid NOT NULL,
-    role text NOT NULL,
-    sent_at timestamptz NOT NULL
-)
-"""
-"""Stand-in with the production column names the stale capture reads."""
-
-WORKFLOW_TASKS_STANDIN_DDL = """
-CREATE TABLE horsies_workflow_tasks (
-    id uuid UNIQUE NOT NULL,
-    workflow_id uuid NOT NULL,
-    task_id uuid,
-    task_index integer NOT NULL,
-    node_id varchar(128),
-    status text NOT NULL DEFAULT 'RUNNING',
-    result text,
-    completed_at timestamptz,
-    UNIQUE (workflow_id, task_index)
-)
-"""
-"""The default keeps earlier suites' nodes runnable — the deferred-kind
-semantics they exercise — while the orphan suites set status explicitly.
-A fixture default, not a schema recommendation."""
 
 
 def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
     schema_name: str,
-    *,
-    partitioned_heartbeats: bool = False,
 ):
-    """Fixture for M8 suites: frozen + gated fragments, full stand-ins,
-    outcome layer, completion family, and a published lookup pair.
+    """Fixture for the terminalization suites: the baseline schema, whose
+    migration holds every table, the move family and the outcome types.
 
-    Gated fragments install through `gated_fragment()` — test-schema
-    consumption per the pinned guardrail-2 boundary; production emission
-    stays wave-4-sequenced.
-
-    `partitioned_heartbeats` swaps the flat heartbeat stand-in for the
-    cutover RANGE-partitioned parent (created leafless; the suite
-    registers the class and ensures coverage before writing heartbeats).
+    The heartbeat parent is RANGE-partitioned and has no leaf until a
+    suite registers the heartbeat class and ensures coverage.
     """
 
     @pytest_asyncio.fixture()
     async def terminalization_schema() -> AsyncGenerator[HistorySchema, None]:
-        from horsies.core.history.ddl.conditional import (
-            GatedFragment,
-            gated_fragment,
-        )
-        from horsies.core.history.phase2.consumption import (
-            consumption_fragments,
-        )
-        from horsies.core.history.heartbeats.partitioning import (
-            HEARTBEATS_PARTITIONED_DDL,
-        )
-        from horsies.core.history.phase2.quarantine import (
-            quarantine_fragments,
-        )
-        from horsies.core.history.terminalization.move import (
-            cancellation_family_fragments,
-            completion_batch_fragments,
-            completion_family_fragments,
-            expiry_family_fragments,
-            failure_family_fragments,
-            workflow_node_family_fragments,
-        )
-        from horsies.core.history.terminalization.outcome import (
-            outcome_fragments,
-        )
-        from horsies.core.history.terminalization.duplicate_guard import (
-            duplicate_guard_fragments,
-        )
-
         url = _database_url()
         admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
         async with admin_engine.connect() as connection:
@@ -379,35 +241,7 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:
-            statements = (
-                *frozen_fragments(),
-                *gated_fragment(GatedFragment.ATTEMPT_SNAPSHOT_COLUMNS),
-                *gated_fragment(GatedFragment.RERUN_INPUT_COLUMNS),
-                *gated_fragment(GatedFragment.RESERVATION_REGISTRY_INDEXES),
-                FULL_LIVE_STANDIN_DDL,
-                ATTEMPTS_STANDIN_DDL,
-                WORKFLOW_TASKS_STANDIN_DDL,
-                WORKFLOWS_STANDIN_DDL,
-                CREATE_RECOVERY_SCAN_CURSORS_SQL.text,
-                SEED_RECOVERY_SCAN_CURSORS_SQL.text,
-                (
-                    HEARTBEATS_PARTITIONED_DDL
-                    if partitioned_heartbeats
-                    else HEARTBEATS_STANDIN_DDL
-                ),
-                *outcome_fragments(),
-                *duplicate_guard_fragments(),
-                *completion_family_fragments(),
-                *completion_batch_fragments(),
-                *failure_family_fragments(),
-                *expiry_family_fragments(),
-                *cancellation_family_fragments(),
-                *workflow_node_family_fragments(),
-                *consumption_fragments(),
-                *quarantine_fragments(),
-            )
-            for statement in statements:
-                await connection.execute(text(statement))
+            await install_baseline_schema(connection)
         yield HistorySchema(schema_name=schema_name, engine=engine)
         await engine.dispose()
         async with admin_engine.connect() as connection:
@@ -444,95 +278,75 @@ async def insert_live_task(
     status: str = 'RUNNING',
     worker: str | None = 'worker-1',
     key_digest: bytes | None = None,
-    retain: bool = True,
-    prepared_disposition: str = 'DECLINED_BY_POLICY',
-    prepared_inline: bytes | None = None,
+    retain: bool = False,
+    input_text: str = '{}',
     is_workflow_task: bool = False,
     started_at_offset: timedelta = timedelta(0),
     good_until_offset: timedelta | None = None,
-    live_result: str | None = None,
     task_id: str | None = None,
 ) -> str:
-    """Insert one post-cutover live row and return its id.
+    """Insert one live row with every baseline column named, and return its id.
 
     The id is minted from the process generator unless `task_id` names one.
+    A sent task carries a command fingerprint; a workflow task carries none.
+    A CLAIMED row carries a lease. With `retain` the move builds the rerun
+    envelope from `input_text`.
     """
     from horsies.core.history.identity.uuid7 import mint_task_id
 
     task_id = task_id if task_id is not None else mint_task_id()
     now = datetime.now(timezone.utc)
-    envelope: dict[str, object] = {
-        'version': None,
-        'codec': None,
-        'content_type': None,
-        'digest': None,
-        'inline': None,
-        'reference': None,
-    }
-    if prepared_disposition == 'INLINE':
-        payload = prepared_inline if prepared_inline is not None else b'{"x":1}'
-        envelope = {
-            'version': 1,
-            'codec': 'json-utf8',
-            'content_type': 'application/json',
-            'digest': sha256(payload).digest(),
-            'inline': payload,
-            'reference': None,
-        }
     await connection.execute(
         text(
             """
             INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, status, result,
-                enqueued_at, created_at, started_at, claimed_at,
-                retry_count, max_retries, good_until,
-                claimed_by_worker_id, worker_hostname, worker_pid,
-                worker_process_name, is_workflow_task,
+                id, task_name, queue_name, priority, input, task_options,
+                execution, retention_class_key, sent_at, created_at,
                 command_fingerprint_version, command_fingerprint,
-                retention_class_key, idempotency_key_digest,
-                retain_rerun_input, prepared_rerun_input_disposition,
-                prepared_rerun_input_version, prepared_rerun_input_codec,
-                prepared_rerun_input_content_type,
-                prepared_rerun_input_digest, prepared_rerun_input_inline,
-                prepared_rerun_input_reference
+                idempotency_key_digest, status, enqueued_at, claimed_at,
+                claimed_by_worker_id, claim_expires_at, started_at,
+                finalizing_at, finalizing_by_worker_id, worker_pid,
+                worker_hostname, worker_process_name, retry_count,
+                max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id,
+                rerun_root_task_id
             ) VALUES (
-                CAST(:task_id AS uuid), 'it.move', 'default', 50, :status,
-                :live_result,
-                :now, :now, :started_at, :now,
-                0, 0, :good_until,
-                :worker, 'it-host', 4242, 'it-proc', :is_workflow_task,
-                1, :fingerprint,
-                :class_key, :key_digest,
-                :retain, :disposition,
-                :env_version, :env_codec, :env_content_type,
-                :env_digest, :env_inline, :env_reference
+                CAST(:task_id AS uuid), 'it.move', 'default', 50, :input_text,
+                NULL, 'ISOLATED', :class_key, :now, :now,
+                :fingerprint_version, :fingerprint,
+                :key_digest, :status, :now, :now,
+                :worker, :claim_expires_at, :started_at,
+                NULL, NULL, 4242,
+                'it-host', 'it-proc', 0,
+                0, NULL, :good_until, :is_workflow_task,
+                :now, :retain, NULL,
+                NULL
             )
             """
         ),
         {
             'task_id': task_id,
-            'status': status,
-            'live_result': live_result,
+            'input_text': input_text,
+            'class_key': class_key,
             'now': now,
+            'fingerprint_version': None if is_workflow_task else 1,
+            'fingerprint': (
+                None if is_workflow_task else sha256(task_id.encode()).digest()
+            ),
+            'key_digest': key_digest,
+            'status': status,
+            'worker': worker,
+            'claim_expires_at': (
+                now + timedelta(minutes=5) if status == 'CLAIMED' else None
+            ),
             'started_at': now + started_at_offset,
             'good_until': (
                 now + good_until_offset
                 if good_until_offset is not None
                 else None
             ),
-            'worker': worker,
             'is_workflow_task': is_workflow_task,
-            'fingerprint': sha256(task_id.encode()).digest(),
-            'class_key': class_key,
-            'key_digest': key_digest,
             'retain': retain,
-            'disposition': prepared_disposition,
-            'env_version': envelope['version'],
-            'env_codec': envelope['codec'],
-            'env_content_type': envelope['content_type'],
-            'env_digest': envelope['digest'],
-            'env_inline': envelope['inline'],
-            'env_reference': envelope['reference'],
         },
     )
     return task_id
@@ -543,14 +357,25 @@ async def create_workflow(
     *,
     status: str,
 ) -> str:
-    """Insert one workflow stand-in row and return its id."""
+    """Insert one root workflow row with every column named; return its id."""
     from uuid import uuid4
 
     workflow_id = str(uuid4())
     await connection.execute(
         text(
-            'INSERT INTO horsies_workflows (id, status) VALUES '
-            '(CAST(:workflow_id AS uuid), :status)'
+            """
+            INSERT INTO horsies_workflows (
+                id, name, definition_key, status, on_error, output_task_index,
+                success_policy, result, error, parent_workflow_id,
+                parent_task_index, root_workflow_id, depth, sent_at,
+                created_at, started_at, completed_at, updated_at
+            ) VALUES (
+                CAST(:workflow_id AS uuid), 'it.workflow', NULL, :status,
+                'fail', NULL, NULL, NULL, NULL, NULL,
+                NULL, CAST(:workflow_id AS uuid), 0, now(),
+                now(), now(), NULL, now()
+            )
+            """
         ),
         {'workflow_id': workflow_id, 'status': status},
     )
@@ -566,16 +391,34 @@ async def link_workflow_node(
     task_index: int = 0,
     node_key: str | None = 'node-0',
 ) -> str:
-    """Link one task into a workflow through a node row; returns node id."""
+    """Link one task into a workflow through a task node row; returns the node row id."""
     from uuid import uuid4
 
     node_id = str(uuid4())
     await connection.execute(
         text(
-            'INSERT INTO horsies_workflow_tasks '
-            '(id, workflow_id, task_id, task_index, node_id, status) VALUES '
-            '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-            'CAST(:task_id AS uuid), :task_index, :node_key, :node_status)'
+            """
+            INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, args_from,
+                workflow_ctx_from, allow_failed_deps, join_type, min_success,
+                task_options, max_retries, execution, good_until,
+                retention_class_key, status, task_id, is_subworkflow,
+                sub_workflow_id, sub_workflow_name, sub_definition_key,
+                sub_workflow_summary, result, error, created_at, started_at,
+                completed_at
+            ) VALUES (
+                CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), :task_index,
+                :node_key, 'it.move', '{}',
+                'default', 50, '{}', NULL,
+                NULL, FALSE, 'all', NULL,
+                NULL, 0, 'ISOLATED', NULL,
+                'forever', :node_status, CAST(:task_id AS uuid), FALSE,
+                NULL, NULL, NULL,
+                NULL, NULL, NULL, now(), NULL,
+                NULL
+            )
+            """
         ),
         {
             'node_id': node_id,

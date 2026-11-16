@@ -87,7 +87,6 @@ from ..partitions.catalog import (
     read_retention_class,
     required_utc_timestamp,
 )
-from ..partitions.forever import FOREVER_LEGACY_LEAF
 from ..partitions.manager import create_daily_leaf
 from ..partitions.publication import UnpublishedLoader
 from ..reads.lookup_generation import CLOCK_BOUND_SECONDS
@@ -119,6 +118,9 @@ Reversal before tightening is a documented ledger walk, not a promise.
 """
 
 _LIVE_STATUSES: Final = "('PENDING', 'CLAIMED', 'RUNNING')"
+
+FOREVER_LEGACY_LEAF = 'horsies_task_history_forever_before_v35'
+"""The bounded legacy forever leaf of a 0.x database (schema v35)."""
 
 
 @dataclass(frozen=True, slots=True)

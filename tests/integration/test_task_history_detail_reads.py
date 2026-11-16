@@ -66,7 +66,7 @@ from tests.integration.task_history_harness import (
 pytestmark = [pytest.mark.integration]
 
 UTC = timezone.utc
-CLASS_KEY = 'it_reads'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-reads-1'
 FAILURE_RESULT = '{"error":{"code":"BOOM"}}'
 
