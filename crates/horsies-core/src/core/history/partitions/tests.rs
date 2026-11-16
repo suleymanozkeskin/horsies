@@ -30,17 +30,18 @@ use crate::core::history::heartbeats::partitioning::{
     CreateHourlyHeartbeatLeaf, EnsureHeartbeatCoverage, HeartbeatClassRegistration,
 };
 use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage, ensure_partition_coverage_in_pool, ensure_startup_coverage,
-    ensure_startup_coverage_in_pool, CoverageOutcome, StartupCoverageOutcome,
+    ensure_partition_coverage, ensure_partition_coverage_in_pool, ensure_periodic_coverage_in_pool,
+    ensure_startup_coverage, ensure_startup_coverage_in_pool, CoverageOutcome,
+    StartupCoverageOutcome,
 };
-use crate::core::history::maintenance::pruning::prune_expired_partitions;
+use crate::core::history::maintenance::pruning::{
+    prune_expired_partitions, sweep_expired_history_leaves, PruneReach,
+};
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
     TASK_HISTORY_FOREVER, TASK_HISTORY_FOREVER_LEAF, TASK_LOOKUP_MANIFEST,
 };
-use crate::core::history::outcomes::{
-    CatalogConflictKind, HealthFault, LeafCreation, LeafDrop, LeafInspection,
-};
+use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation, LeafDrop, LeafInspection};
 use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
@@ -1823,6 +1824,69 @@ async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
     };
     assert_eq!(failure.stage, "coverage_gate_busy");
     assert!(!failure.heartbeat_covered_now);
+    holder
+        .rollback()
+        .await
+        .expect("release coverage gate holder");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("create coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+    let damaged_index: String = sqlx::query_scalar(&format!(
+        "SELECT leaf_name || '_task_idx' FROM {LEAF_CATALOG}
+         WHERE class_key = 'standard_30d' AND dropped_at IS NULL
+         ORDER BY lower_anchor LIMIT 1"
+    ))
+    .fetch_one(&database.pool)
+    .await
+    .expect("read damaged index name");
+    sqlx::query(&format!("DROP INDEX {damaged_index}"))
+        .execute(&database.pool)
+        .await
+        .expect("drop one required index");
+
+    let mut holder = database
+        .pool
+        .begin()
+        .await
+        .expect("begin coverage gate holder");
+    let held: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(
+             hashtextextended('horsies:partition-coverage:v1', 1601)
+         )",
+    )
+    .fetch_one(holder.as_mut())
+    .await
+    .expect("hold coverage maintenance gate");
+    assert!(held);
+
+    let gated = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("gated pass under a busy gate");
+    let CoverageOutcome::Failed(failure) = gated else {
+        panic!("a gated pass under a busy gate repairs nothing: {gated:?}");
+    };
+    assert_eq!(failure.stage, "coverage_gate_busy");
+    let periodic = ensure_periodic_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("periodic pass under a busy gate");
+    assert!(
+        matches!(periodic, CoverageOutcome::Ensured(_)),
+        "{periodic:?}"
+    );
+    let repaired: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&damaged_index)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read repaired index");
+    assert!(repaired);
     holder
         .rollback()
         .await
