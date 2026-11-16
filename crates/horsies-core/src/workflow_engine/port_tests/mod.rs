@@ -10,3 +10,4 @@ mod handle_reads;
 mod output_skipped;
 mod pause_resume_cancel;
 mod recovery_limit_pass;
+mod start_rows;

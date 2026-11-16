@@ -493,6 +493,11 @@ impl NodeSeed {
         self.result = Some(result);
         self
     }
+
+    pub(super) fn input(mut self, input: &str) -> Self {
+        self.input = input.to_owned();
+        self
+    }
 }
 
 /// Inserts the node row and returns its row id.
@@ -723,6 +728,24 @@ pub(super) fn broker(pool: &PgPool) -> Arc<PostgresBroker> {
     Arc::new(PostgresBroker::from_pool(pool.clone()))
 }
 
+/// Starts `spec` through the core start with `workflow_id`, or a new id.
+pub(super) async fn try_start(
+    pool: &PgPool,
+    spec: &WorkflowSpec,
+    workflow_id: Option<Uuid>,
+    registry: &WorkflowSpecRegistry,
+) -> crate::core::WorkflowStartResult<WorkflowHandle<serde_json::Value>> {
+    start_workflow(
+        &broker(pool),
+        spec,
+        workflow_id,
+        registry,
+        &PayloadPolicy::default(),
+        &RetentionConfig::default(),
+    )
+    .await
+}
+
 /// Starts `spec` with a new id through the core start, and returns the id.
 pub(super) async fn start(
     pool: &PgPool,
@@ -730,16 +753,7 @@ pub(super) async fn start(
     registry: &WorkflowSpecRegistry,
 ) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    let started: Result<WorkflowHandle<serde_json::Value>, _> = start_workflow(
-        &broker(pool),
-        spec,
-        Some(workflow_id),
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await;
-    match started {
+    match try_start(pool, spec, Some(workflow_id), registry).await {
         Ok(handle) => assert_eq!(handle.workflow_id(), workflow_id),
         Err(error) => panic!("start of workflow '{}' failed: {error:?}", spec.name),
     }
