@@ -378,7 +378,7 @@ class TestStagedResultReader:
             await _execute(
                 url,
                 render_staged_result_function(
-                    LookupManifest(leaves=(), birth_floor=None)
+                    LookupManifest(leaves=())
                 ),
             )
             engine = create_async_engine(url)
