@@ -493,13 +493,21 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 uptime_s: Some(0),
                 processes: 1,
                 queues: vec![],
-                queue_max_concurrency: None,
+                queue_max_concurrency: BTreeMap::new(),
                 tasks_running: 0,
                 tasks_claimed: 0,
                 cluster_wide_cap: None,
                 memory_usage_mb: None,
                 memory_percent: None,
                 cpu_percent: None,
+                slot_health: SlotHealthKind::SlotsDown,
+                down_slots: vec![DownSlotInfo {
+                    slot: 1,
+                    cause: "the OS ran short of a resource (EMFILE)".to_owned(),
+                    detail: "d".to_owned(),
+                    down_since: now,
+                    failed_boots: 2,
+                }],
             }),
             vec![
                 "worker_id",
@@ -519,7 +527,19 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "memory_usage_mb",
                 "memory_percent",
                 "cpu_percent",
+                "slot_health",
+                "down_slots",
             ],
+        ),
+        (
+            keys(DownSlotInfo {
+                slot: 1,
+                cause: "c".to_owned(),
+                detail: "d".to_owned(),
+                down_since: now,
+                failed_boots: 1,
+            }),
+            vec!["slot", "cause", "detail", "down_since", "failed_boots"],
         ),
         (
             keys(WorkerPingInfo {
@@ -1309,11 +1329,12 @@ async fn seed_node(
         "INSERT INTO horsies_workflow_tasks (
             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
-            sub_workflow_id, created_at, started_at, completed_at, max_retries, execution,
+            sub_workflow_params, sub_workflow_id, created_at, started_at, completed_at,
+            max_retries, execution,
             retention_class_key
         ) VALUES (
             $1, $2, $3, $8 || $3, $8 || 'node_task', 'null', $9, 100, $4, FALSE, 'all', $5, $6,
-            $7 IS NOT NULL, $7, NOW(),
+            $7 IS NOT NULL, CASE WHEN $7 IS NOT NULL THEN 'NOT_GIVEN' END, $7, NOW(),
             CASE WHEN $5 IN ('RUNNING', 'COMPLETED', 'FAILED')
                   THEN NOW() - INTERVAL '30 seconds' ELSE NULL END,
             CASE WHEN $5 IN ('COMPLETED', 'FAILED')

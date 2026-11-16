@@ -60,7 +60,7 @@ from horsies.core.worker.worker import (
     _initialize_worker_pool,
     UNCLAIM_CLAIMED_TASK_SQL,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal
 from tests.broker_resources_support import listener_of
 
@@ -86,30 +86,28 @@ async def _insert_running_task(
 ) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='guard_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='guard_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'guard_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha, :claimed_by_worker_id,
-                 :claimed_at,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'guard_test', 'default', 100, '{}', 'RUNNING', :sent_at,
+                    NOW(), NOW(), 0, 3, NOW(), :claimed_by_worker_id, :claimed_at,
+                    'standard_30d', 1, :command_fingerprint, FALSE, 'ISOLATED', NOW(),
+                    FALSE, 4242, 'host-1', 'child-1'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'claimed_by_worker_id': claimed_by_worker_id,
             'claimed_at': claimed_at,
         },
@@ -142,7 +140,7 @@ async def _insert_running_task_with_retry(
         'good_until': good_until.isoformat(),
     })
 
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='guard_test_retry',
         good_until=good_until,
         task_options=task_options,
@@ -150,24 +148,25 @@ async def _insert_running_task_with_retry(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
-                 created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha, claimed_at,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'guard_test_retry', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
-                 NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha, :claimed_at,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    good_until, task_options, claimed_at, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'guard_test_retry', 'default', 100, '{}', 'RUNNING', :sent_at,
+                    NOW(), NOW(), :retry_count, :max_retries, NOW(), :good_until,
+                    :task_options, :claimed_at, 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE, 4242,
+                    'host-1', 'child-1'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'retry_count': retry_count,
             'max_retries': max_retries,
             'good_until': good_until,
@@ -211,7 +210,10 @@ async def _set_task_status(
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                terminal_at = NULL
+                claim_expires_at = CASE
+                    WHEN CAST(:status AS varchar) = 'CLAIMED'
+                    THEN NOW() + INTERVAL '5 minutes'
+                END
             WHERE id = CAST(:id AS uuid)
         """),
         {'status': status, 'id': task_id},
@@ -240,7 +242,10 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
     workflow_id = str(uuid.uuid4())
     await session.execute(
         text("""
-            UPDATE horsies_tasks SET is_workflow_task = TRUE
+            UPDATE horsies_tasks
+            SET is_workflow_task = TRUE,
+                command_fingerprint_version = NULL,
+                command_fingerprint = NULL
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -250,7 +255,7 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'guard_test_wf', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'guard_test_wf', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},
@@ -258,13 +263,15 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
-            VALUES (:id, :wf, 0, 'node-0', 'guard_test', '[]', '{}',
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES (:id, :wf, 0, 'node-0', 'guard_test', '{}',
                     'default', 100, '{}', FALSE, 'all', FALSE, 'RUNNING',
-                    CAST(:task_id AS uuid), NOW())
+                    CAST(:task_id AS uuid), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
     )

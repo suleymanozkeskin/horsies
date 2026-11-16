@@ -280,6 +280,7 @@ async def insert_live_task(
     key_digest: bytes | None = None,
     retain: bool = False,
     input_text: str = '{}',
+    task_options: str | None = None,
     is_workflow_task: bool = False,
     started_at_offset: timedelta = timedelta(0),
     good_until_offset: timedelta | None = None,
@@ -290,7 +291,7 @@ async def insert_live_task(
     The id is minted from the process generator unless `task_id` names one.
     A sent task carries a command fingerprint; a workflow task carries none.
     A CLAIMED row carries a lease. With `retain` the move builds the rerun
-    envelope from `input_text`.
+    envelope from `input_text` and `task_options`.
     """
     from horsies.core.history.identity.uuid7 import mint_task_id
 
@@ -312,7 +313,7 @@ async def insert_live_task(
                 rerun_root_task_id
             ) VALUES (
                 CAST(:task_id AS uuid), 'it.move', 'default', 50, :input_text,
-                NULL, 'ISOLATED', :class_key, :now, :now,
+                :task_options, 'ISOLATED', :class_key, :now, :now,
                 :fingerprint_version, :fingerprint,
                 :key_digest, :status, :now, :now,
                 :worker, :claim_expires_at, :started_at,
@@ -327,6 +328,7 @@ async def insert_live_task(
         {
             'task_id': task_id,
             'input_text': input_text,
+            'task_options': task_options,
             'class_key': class_key,
             'now': now,
             'fingerprint_version': None if is_workflow_task else 1,
@@ -405,8 +407,8 @@ async def link_workflow_node(
                 task_options, max_retries, execution, good_until,
                 retention_class_key, status, task_id, is_subworkflow,
                 sub_workflow_id, sub_workflow_name, sub_definition_key,
-                sub_workflow_summary, result, error, created_at, started_at,
-                completed_at
+                sub_workflow_params, sub_workflow_summary, result, error,
+                created_at, started_at, completed_at
             ) VALUES (
                 CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), :task_index,
                 :node_key, 'it.move', '{}',
@@ -415,8 +417,8 @@ async def link_workflow_node(
                 NULL, 0, 'ISOLATED', NULL,
                 'forever', :node_status, CAST(:task_id AS uuid), FALSE,
                 NULL, NULL, NULL,
-                NULL, NULL, NULL, now(), NULL,
-                NULL
+                NULL, NULL, NULL, NULL,
+                now(), NULL, NULL
             )
             """
         ),

@@ -46,7 +46,7 @@ MAX_RAISE_TEXT_LENGTH: Final = 500
 """Characters of the raise text that the limit error and the log keep."""
 
 MAX_EXCEPTION_TYPE_LENGTH: Final = 255
-"""The width of the `last_exception_type` column."""
+"""The width of the `last_error_type` column."""
 
 
 class RecoveryCase(Enum):
@@ -204,7 +204,7 @@ COUNT_RECOVERY_RAISE_SQL = text("""
 INSERT INTO horsies_workflow_recovery_failures AS failure (
     workflow_id, failed_passes, last_pass_id,
     first_failed_at, last_failed_at,
-    last_case, last_task_index, last_exception_type
+    last_case, last_task_index, last_error_type
 )
 VALUES (
     CAST(:workflow_id AS uuid), 1, CAST(:pass_id AS uuid),
@@ -217,7 +217,7 @@ SET failed_passes = failure.failed_passes + 1,
     last_failed_at = EXCLUDED.last_failed_at,
     last_case = EXCLUDED.last_case,
     last_task_index = EXCLUDED.last_task_index,
-    last_exception_type = EXCLUDED.last_exception_type
+    last_error_type = EXCLUDED.last_error_type
 WHERE failure.last_pass_id <> EXCLUDED.last_pass_id
 RETURNING failed_passes
 """)

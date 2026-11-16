@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from datetime import timedelta
-
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.phase2.consumption import (
     EVIDENCE_RETAINING_DISPOSITIONS,
@@ -24,7 +22,6 @@ from horsies.core.history.phase2.quarantine import (
     DRAINED_VERDICTS,
     KNOWN_QUARANTINE_VERDICTS,
     PHASE2_QUARANTINE_FUNCTION_DDL,
-    QuarantineLeafBlockers,
     REFUSAL_VERDICTS,
     REPOINTED,
     quarantine_fragments,
@@ -160,20 +157,3 @@ class TestQuarantineVocabulary:
         assert 'CREATE TYPE' in first
         assert 'CREATE FUNCTION' in second
 
-
-class TestQuarantineCommand:
-    def test_horizon_must_be_positive(self) -> None:
-        from horsies.core.history.commands import LeafBounds, LeafRef
-        from datetime import datetime, timezone
-
-        leaf = LeafRef(
-            leaf_name='horsies_task_history_x_20260801',
-            class_key='x',
-            bounds=LeafBounds(
-                lower=datetime(2026, 8, 1, tzinfo=timezone.utc),
-                upper=datetime(2026, 8, 2, tzinfo=timezone.utc),
-            ),
-        )
-        with pytest.raises(ValueError, match='horizon must be positive'):
-            QuarantineLeafBlockers(leaf=leaf, horizon=timedelta(0))
-        QuarantineLeafBlockers(leaf=leaf, horizon=timedelta(days=7))

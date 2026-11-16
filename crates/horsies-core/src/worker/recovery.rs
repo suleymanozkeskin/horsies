@@ -21,7 +21,7 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::{OperationalErrorCode, TaskError, TaskResult};
+use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
@@ -185,7 +185,7 @@ mod p7_maintenance_tests {
                  retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                  updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
              ) VALUES (
-                 $1, 'p7_retention_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                 $1, 'p7_retention_task', 'default', 100, 'null', NULL, 'ISOLATED',
                  'forever', NOW(), NOW(),
                  NULL, NULL, NULL,
                  'RUNNING', NOW(), NOW(), 'p7-retention-worker', NULL,
@@ -913,7 +913,10 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively.
+/// as FAILED or requeuing them respectively. The caller has checked the
+/// client family of the handle that owns both pools
+/// (`Worker::start_database`); the reaper's partition maintenance writes
+/// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     runtime_pool: PgPool,
@@ -1542,9 +1545,10 @@ async fn process_single_stale_task(
         // capture (authoritative); the attempt row is written only for a
         // transition that applied, in the same transaction.
         let task_error = TaskError {
-            error_code: Some(OperationalErrorCode::WorkerCrashed.into()),
+            exception: None,
+            error_code: OperationalErrorCode::WorkerCrashed.into(),
             message: Some(failed_reason.clone()),
-            cause: None,
+            kind: TaskErrorKind::Plain,
             data: Some(serde_json::json!({
                 "stale_threshold_ms": threshold_ms,
                 "stale_threshold_seconds": threshold_secs,
@@ -1559,7 +1563,7 @@ async fn process_single_stale_task(
         let task_result: TaskResult<()> = TaskResult::Err(task_error);
         let result_json = serde_json::to_string(&task_result).unwrap_or_else(|e| {
             tracing::error!(task_id = %task_id, error = %e, "failed to serialize stale task result");
-            r#"{"__type":"err","value":{"message":"serialization failed"}}"#.to_owned()
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"},"data":null,"message":"serialization failed"}}"#.to_owned()
         });
 
         // Write the attempt before the move so the terminalization function
@@ -1851,7 +1855,7 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
     );
     let task_result = TaskResult::<()>::Err(task_error);
     let result_json = serde_json::to_string(&task_result)
-        .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+        .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
     let command = crate::core::lifecycle::TerminalizationCommand::ExpirePendingTasks {
         batch_size: crate::core::lifecycle::BatchSize::new(EXPIRE_BATCH_SIZE)
             .expect("EXPIRE_BATCH_SIZE is positive"),
@@ -2313,7 +2317,7 @@ mod tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'ret_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'ret_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
@@ -2845,3 +2849,6 @@ mod tests {
             .expect("delete attempts");
     }
 }
+
+#[cfg(test)]
+mod reaper_loop_tests;

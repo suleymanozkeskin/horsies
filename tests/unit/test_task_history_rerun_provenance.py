@@ -1,9 +1,8 @@
 """The rerun field-provenance table is closed over the real column set.
 
-The canonical set is derived from the live table's SQLAlchemy model
-plus the declared cutover additions — not hand-copied — so adding a
-column anywhere makes this pin fail until the new column declares its
-side of the replay principle.
+The canonical set is derived from the live table's definition in the
+baseline SQL — not hand-copied — so adding a column there makes this pin
+fail until the new column declares its side of the replay principle.
 """
 
 from __future__ import annotations
@@ -12,24 +11,31 @@ import re
 
 import pytest
 
+from horsies.core.baseline.migration import load_baseline_migration
 from horsies.core.history.rerun.provenance import (
     RERUN_FIELD_PROVENANCE,
     FieldProvenance,
 )
-from horsies.core.history.terminalization.live_cutover import (
-    LIVE_CUTOVER_COLUMNS_DDL,
-)
-from horsies.core.models.task_pg import TaskModel
+from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.unit]
 
+_LIVE_TABLE_OPENING = 'CREATE TABLE horsies_tasks (\n'
+_COLUMN_LINE = re.compile(r'^ {4}([a-z][a-z0-9_]*) [a-z]', re.MULTILINE)
+
 
 def enqueue_visible_columns() -> set[str]:
-    model_columns = {column.name for column in TaskModel.__table__.columns}
-    cutover_columns = set(
-        re.findall(r'ADD COLUMN (\w+)', '\n'.join(LIVE_CUTOVER_COLUMNS_DDL))
-    )
-    return model_columns | cutover_columns
+    """The column names of ``horsies_tasks`` in the baseline SQL."""
+    match load_baseline_migration():
+        case Ok(ok_value=migration):
+            sql = migration.sql
+        case Err(err_value=unreadable):
+            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    body = sql.split(_LIVE_TABLE_OPENING, 1)[1].split('\n);\n', 1)[0]
+    columns = {match.group(1) for match in _COLUMN_LINE.finditer(body)}
+    # A pattern that matches nothing would make every closure check pass.
+    assert {'id', 'input', 'rerun_root_task_id'} <= columns
+    return columns
 
 
 class TestProvenanceIsClosed:

@@ -1,0 +1,1246 @@
+//! Tests of the frame codec: byte examples of the Python codec, pinned
+//! version-2 metadata, every refusal, and the read buffer.
+
+mod python_vectors;
+
+use std::num::NonZeroU64;
+
+use chrono::{DateTime, TimeZone, Utc};
+use uuid::Uuid;
+
+use self::python_vectors::*;
+use super::*;
+use crate::core::codec::StrictJsonError;
+
+const T1: &str = "0190f5a2-7b1c-7d3e-8f00-000000000001";
+const T2: &str = "0190f5a2-7b1c-7d3e-8f00-000000000002";
+const T3: &str = "0190f5a2-7b1c-7d3e-8f00-000000000003";
+const T4: &str = "0190f5a2-7b1c-7d3e-8f00-000000000004";
+const T5: &str = "0190f5a2-7b1c-7d3e-8f00-000000000005";
+
+fn task_id(text: &str) -> Uuid {
+    Uuid::parse_str(text).unwrap()
+}
+
+fn hex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+        .collect()
+}
+
+/// A frame from its metadata text and body; the header names both lengths.
+fn framed(meta: &str, body: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&u32::try_from(meta.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&u64::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(meta.as_bytes());
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+/// The metadata and the body of one whole frame, cut by its header.
+fn split(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut header = [0_u8; HEADER_BYTES];
+    header.copy_from_slice(&bytes[..HEADER_BYTES]);
+    let sizes = parse_header(header).unwrap();
+    let body_at = HEADER_BYTES + sizes.meta_bytes();
+    assert_eq!(bytes.len(), body_at + sizes.body_bytes());
+    (
+        bytes[HEADER_BYTES..body_at].to_vec(),
+        bytes[body_at..].to_vec(),
+    )
+}
+
+fn decode_child_bytes(bytes: &[u8]) -> Result<ChildFrame, ChildFrameRefusal> {
+    let (meta, body) = split(bytes);
+    decode_child_frame(&meta, body)
+}
+
+fn decode_parent_bytes(bytes: &[u8]) -> Result<ParentFrame, ParentFrameRefusal> {
+    let (meta, body) = split(bytes);
+    decode_parent_frame(&meta, body)
+}
+
+/// Encode, check the bytes, decode, check the frame.
+fn assert_child_bytes(frame: &ChildFrame, expected: &[u8]) {
+    let bytes = encode_child_frame(frame).unwrap().to_bytes();
+    assert_eq!(
+        String::from_utf8_lossy(&bytes),
+        String::from_utf8_lossy(expected)
+    );
+    assert_eq!(bytes, expected);
+    assert_eq!(&decode_child_bytes(expected).unwrap(), frame);
+}
+
+fn assert_parent_bytes(frame: &ParentFrame, expected: &[u8]) {
+    let bytes = encode_parent_frame(frame).unwrap().to_bytes();
+    assert_eq!(
+        String::from_utf8_lossy(&bytes),
+        String::from_utf8_lossy(expected)
+    );
+    assert_eq!(bytes, expected);
+    assert_eq!(&decode_parent_bytes(expected).unwrap(), frame);
+}
+
+fn assert_preload_bytes(frame: &PreloadFrame, expected: &[u8]) {
+    let bytes = encode_preload_frame(frame).unwrap().to_bytes();
+    assert_eq!(bytes, expected);
+    let (meta, body) = split(expected);
+    assert_eq!(&decode_preload_frame(&meta, &body).unwrap(), frame);
+}
+
+fn malformed_child(bytes: &[u8]) -> MalformedFrame {
+    match decode_child_bytes(bytes) {
+        Err(ChildFrameRefusal::Malformed(malformed)) => malformed,
+        other => panic!("expected a malformed frame, got {other:?}"),
+    }
+}
+
+fn malformed_parent(bytes: &[u8]) -> MalformedFrame {
+    match decode_parent_bytes(bytes) {
+        Err(ParentFrameRefusal::Malformed(malformed)) => malformed,
+        other => panic!("expected a malformed frame, got {other:?}"),
+    }
+}
+
+fn run_ref(dispatch: u64, task: &str) -> RunRef {
+    RunRef {
+        dispatch: DispatchNumber::new(dispatch).unwrap(),
+        task_id: task_id(task),
+    }
+}
+
+fn rss(value: f64) -> RssReading {
+    RssReading::Mb(RssMb::new(value).unwrap())
+}
+
+fn names(texts: &[&str]) -> Vec<LeftoverName> {
+    texts
+        .iter()
+        .map(|text| LeftoverName::new((*text).to_owned()).unwrap())
+        .collect()
+}
+
+fn claim_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap() + chrono::Duration::microseconds(123_456)
+}
+
+fn whole_second_claim_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap()
+}
+
+fn pool() -> ChildPool {
+    ChildPool {
+        min_size: PoolMinSize::new(0).unwrap(),
+        max_size: PoolMaxSize::new(1).unwrap(),
+        check: true,
+    }
+}
+
+fn isolated_kind() -> ChildKind {
+    ChildKind::Isolated(IsolatedChild {
+        pool: pool(),
+        task_send_pool: TaskSendPool::new(2).unwrap(),
+    })
+}
+
+fn envelope(text: &str) -> ResultEnvelopeText {
+    ResultEnvelopeText::new(text.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Byte examples of the Python codec: frames whose content did not change
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_stop_frame_has_the_python_bytes() {
+    assert_parent_bytes(&ParentFrame::Stop, &hex(PY_STOP));
+}
+
+#[test]
+fn boot_failed_frames_have_the_python_bytes() {
+    assert_child_bytes(
+        &ChildFrame::BootFailed(BootFailedFrame {
+            cause: ReportedBootCause::ResourceShortage(ShortageErrno::Emfile),
+            error_name: BootErrorName::new("OSError".to_owned()).unwrap(),
+            detail: BootDetail::new("[Errno 24] Too many open files".to_owned()).unwrap(),
+        }),
+        &hex(PY_BOOT_FAILED_SHORTAGE),
+    );
+    assert_child_bytes(
+        &ChildFrame::BootFailed(BootFailedFrame {
+            cause: ReportedBootCause::AppLoadFailed,
+            error_name: BootErrorName::new("ImportError".to_owned()).unwrap(),
+            detail: BootDetail::new("no module named app".to_owned()).unwrap(),
+        }),
+        &hex(PY_BOOT_FAILED_APP_LOAD),
+    );
+}
+
+#[test]
+fn left_work_reports_have_the_python_bytes() {
+    assert_child_bytes(
+        &ChildFrame::LeftWorkEnded(LeftWorkEndedFrame {
+            task_id: task_id(T1),
+            end: LeftWorkEnd::Cancelled,
+            rss: rss(41.5),
+        }),
+        &hex(PY_LEFT_WORK_ENDED),
+    );
+    assert_child_bytes(
+        &ChildFrame::LeftWorkEnded(LeftWorkEndedFrame {
+            task_id: task_id(T1),
+            end: LeftWorkEnd::InGrace,
+            rss: RssReading::Unreadable,
+        }),
+        &hex(PY_LEFT_WORK_ENDED_RSS_UNREADABLE),
+    );
+    let job_names: Vec<String> = (0..10).map(|at| format!("job_{at}")).collect();
+    let job_names: Vec<&str> = job_names.iter().map(String::as_str).collect();
+    assert_child_bytes(
+        &ChildFrame::LeftWorkStuck(LeftWorkStuckFrame {
+            task_id: task_id(T1),
+            still: LoopHoldsTasks::new(NonZeroU64::new(12).unwrap(), names(&job_names)).unwrap(),
+        }),
+        &hex(PY_LEFT_WORK_STUCK),
+    );
+}
+
+#[test]
+fn run_reports_have_the_python_bytes() {
+    assert_child_bytes(
+        &ChildFrame::DeadlineFired(run_ref(7, T2)),
+        &hex(PY_DEADLINE_FIRED),
+    );
+    assert_child_bytes(
+        &ChildFrame::SecondCancel(run_ref(7, T2)),
+        &hex(PY_SECOND_CANCEL),
+    );
+    assert_child_bytes(
+        &ChildFrame::RunStuck(RunStuckFrame {
+            run: run_ref(3, T3),
+            work: StuckWork::new(2, 1, names(&["main", "helper"])).unwrap(),
+        }),
+        &hex(PY_RUN_STUCK),
+    );
+}
+
+#[test]
+fn loop_blocked_frames_have_the_python_bytes() {
+    assert_child_bytes(
+        &ChildFrame::LoopBlocked(LoopBlockedFrame {
+            culprit: LoopCulprit::Run(run_ref(4, T4)),
+            blocked_ms: 5012,
+            location: BlockedWhere::new("app.py:12 in spin".to_owned()).unwrap(),
+        }),
+        &hex(PY_LOOP_BLOCKED_BY_RUN),
+    );
+    assert_child_bytes(
+        &ChildFrame::LoopBlocked(LoopBlockedFrame {
+            culprit: LoopCulprit::Unknown,
+            blocked_ms: 0,
+            location: BlockedWhere::new(String::new()).unwrap(),
+        }),
+        &hex(PY_LOOP_BLOCKED_UNKNOWN),
+    );
+}
+
+/// Non-ASCII text stays UTF-8, and quotes and line feeds are escaped as
+/// Python's `json.dumps(ensure_ascii=False)` escapes them.
+#[test]
+fn text_is_escaped_as_python_escapes_it() {
+    assert_child_bytes(
+        &ChildFrame::LoopBlocked(LoopBlockedFrame {
+            culprit: LoopCulprit::Unknown,
+            blocked_ms: 1,
+            location: BlockedWhere::new("\u{e4}\u{f6} \"q\"\n".to_owned()).unwrap(),
+        }),
+        &hex(PY_LOOP_BLOCKED_ESCAPED_TEXT),
+    );
+}
+
+#[test]
+fn preload_frames_have_the_python_bytes() {
+    assert_preload_bytes(
+        &PreloadFrame::PreloadReady {
+            pid: ProcessId::new(4242).unwrap(),
+        },
+        &hex(PY_PRELOAD_READY),
+    );
+    assert_preload_bytes(
+        &PreloadFrame::ChildForked {
+            pid: ProcessId::new(4243).unwrap(),
+        },
+        &hex(PY_CHILD_FORKED),
+    );
+    assert_preload_bytes(
+        &PreloadFrame::ForkFailed {
+            reason: PreloadReason::new("fork: EAGAIN".to_owned()).unwrap(),
+        },
+        &hex(PY_FORK_FAILED),
+    );
+    assert_preload_bytes(
+        &PreloadFrame::PreloadRefused {
+            reason: PreloadReason::new("threads running: 2".to_owned()).unwrap(),
+        },
+        &hex(PY_PRELOAD_REFUSED),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Version check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_version_one_ready_frame_is_a_protocol_mismatch() {
+    assert_eq!(
+        decode_child_bytes(&hex(PY_V1_READY)),
+        Err(ChildFrameRefusal::ProtocolMismatch(ProtocolMismatch {
+            received: ReceivedProtocol::NotNamed,
+        })),
+    );
+}
+
+#[test]
+fn a_version_one_init_frame_is_a_protocol_mismatch() {
+    assert_eq!(
+        decode_parent_bytes(&hex(PY_V1_INIT)),
+        Err(ParentFrameRefusal::ProtocolMismatch(ProtocolMismatch {
+            received: ReceivedProtocol::NotNamed,
+        })),
+    );
+}
+
+/// The version is read before any other field, so a later version with
+/// fields this build does not know is still named as a mismatch.
+#[test]
+fn another_version_is_named_before_the_fields_are_read() {
+    let init = framed(
+        r#"{"kind":"init","protocol":3,"a_field_of_version_3":true}"#,
+        b"",
+    );
+    assert_eq!(
+        decode_parent_bytes(&init),
+        Err(ParentFrameRefusal::ProtocolMismatch(ProtocolMismatch {
+            received: ReceivedProtocol::Named(3),
+        })),
+    );
+    let ready = framed(r#"{"kind":"ready","protocol":1,"pid":5}"#, b"");
+    assert_eq!(
+        decode_child_bytes(&ready),
+        Err(ChildFrameRefusal::ProtocolMismatch(ProtocolMismatch {
+            received: ReceivedProtocol::Named(1),
+        })),
+    );
+}
+
+#[test]
+fn a_protocol_that_is_not_a_whole_number_is_malformed() {
+    let ready = framed(
+        r#"{"kind":"ready","protocol":"2","pid":5,"rss_mb":null}"#,
+        b"",
+    );
+    assert_eq!(
+        malformed_child(&ready),
+        MalformedFrame::WrongType {
+            field: "protocol".to_owned(),
+            expected: ExpectedType::WholeNumber,
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Version-2 content, pinned
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_ready_frame_names_the_protocol() {
+    assert_child_bytes(
+        &ChildFrame::Ready(ReadyFrame {
+            pid: ProcessId::new(4242).unwrap(),
+            rss: rss(27.25),
+        }),
+        &framed(
+            r#"{"kind":"ready","protocol":2,"pid":4242,"rss_mb":27.25}"#,
+            b"",
+        ),
+    );
+}
+
+#[test]
+fn the_init_frame_of_a_rust_child() {
+    assert_parent_bytes(
+        &ParentFrame::Init(InitFrame {
+            program: ChildProgram::Rust,
+            log_level: ChildLogLevel::Info,
+            database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+            process_name: "horsies-child".to_owned(),
+            child_kind: isolated_kind(),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+                r#""database_url":"postgresql://u@h/db","process_name":"horsies-child","#,
+                r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
+                r#""check":true},"task_send_pool":2}}"#,
+            ),
+            b"",
+        ),
+    );
+}
+
+#[test]
+fn the_init_frame_of_a_python_child() {
+    assert_parent_bytes(
+        &ParentFrame::Init(InitFrame {
+            program: ChildProgram::Python(PythonProgram {
+                app_locator: "app:app".to_owned(),
+                imports: vec!["app.tasks".to_owned()],
+                sys_path_roots: vec!["/srv".to_owned()],
+                parent_sys_path: vec!["/srv".to_owned(), "/usr/lib".to_owned()],
+                parent_argv: vec!["horsies".to_owned(), "worker".to_owned()],
+            }),
+            log_level: ChildLogLevel::Warning,
+            database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+            process_name: "horsies-child".to_owned(),
+            child_kind: ChildKind::SharedAsync(SharedAsyncChild {
+                seats: AsyncSeats::new(100).unwrap(),
+                pool: pool(),
+                executor_threads: ExecutorThreads::new(32).unwrap(),
+                task_send_pool: TaskSendPool::new(2).unwrap(),
+            }),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"init","protocol":2,"program":{"kind":"python","#,
+                r#""app_locator":"app:app","imports":["app.tasks"],"sys_path_roots":["/srv"],"#,
+                r#""parent_sys_path":["/srv","/usr/lib"],"parent_argv":["horsies","worker"]},"#,
+                r#""log_level":"warning","database_url":"postgresql://u@h/db","#,
+                r#""process_name":"horsies-child","child_kind":{"kind":"shared_async","#,
+                r#""seats":100,"pool":{"min_size":0,"max_size":1,"check":true},"#,
+                r#""executor_threads":32,"task_send_pool":2}}"#,
+            ),
+            b"",
+        ),
+    );
+}
+
+#[test]
+fn the_isolated_run_frame_carries_the_input_as_its_body() {
+    assert_parent_bytes(
+        &ParentFrame::Run(RunFrame {
+            task_id: task_id(T5),
+            task_name: "app.tasks.add".to_owned(),
+            worker_id: "worker-1".to_owned(),
+            task_kind: TaskKind::Plain,
+            claimed_at: claim_time(),
+            work: IsolatedWork::Run,
+            input: TaskInputText::new(r#"{"a":1,"b":2}"#.to_owned()),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""task_name":"app.tasks.add","worker_id":"worker-1","task_kind":"plain","#,
+                r#""claimed_at":"2026-11-16T09:30:00.123456Z","work":{"kind":"run"}}"#,
+            ),
+            br#"{"a":1,"b":2}"#,
+        ),
+    );
+}
+
+#[test]
+fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
+    assert_parent_bytes(
+        &ParentFrame::Run(RunFrame {
+            task_id: task_id(T5),
+            task_name: "app.tasks.add".to_owned(),
+            worker_id: "worker-1".to_owned(),
+            task_kind: TaskKind::WorkflowTask,
+            claimed_at: whole_second_claim_time(),
+            work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(
+                RefusalReason::new("timeout_ms is below 1000".to_owned()).unwrap(),
+            )),
+            input: TaskInputText::new("null".to_owned()),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""task_name":"app.tasks.add","worker_id":"worker-1","task_kind":"workflow_task","#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","work":{"kind":"refusal","#,
+                r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}}}"#,
+            ),
+            b"null",
+        ),
+    );
+}
+
+#[test]
+fn the_shared_run_frame_carries_the_seat_work() {
+    let frame = |work: SharedWork| {
+        ParentFrame::SharedRun(SharedRunFrame {
+            dispatch: DispatchNumber::new(9).unwrap(),
+            task_id: task_id(T5),
+            task_name: "app.tasks.fetch".to_owned(),
+            worker_id: "worker-1".to_owned(),
+            task_kind: TaskKind::Plain,
+            claimed_at: whole_second_claim_time(),
+            work,
+            input: TaskInputText::new("{}".to_owned()),
+        })
+    };
+    let meta = |work: &str| {
+        format!(
+            concat!(
+                r#"{{"kind":"shared_run","dispatch":9,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","task_kind":"plain","#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","work":{}}}"#,
+            ),
+            work
+        )
+    };
+    assert_parent_bytes(
+        &frame(SharedWork::AsyncTask {
+            timeout_ms: TaskTimeoutMs::new(30_000).unwrap(),
+            cancel_grace_ms: CancelGraceMs::new(1_000).unwrap(),
+        }),
+        &framed(
+            &meta(r#"{"kind":"task","timeout_ms":30000,"cancel_grace_ms":1000}"#),
+            b"{}",
+        ),
+    );
+    assert_parent_bytes(
+        &frame(SharedWork::ThreadTask {
+            timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
+        }),
+        &framed(&meta(r#"{"kind":"thread_task","timeout_ms":5000}"#), b"{}"),
+    );
+    assert_parent_bytes(
+        &frame(SharedWork::Refusal(
+            StoredOptionsRefusal::CancelGraceInvalid(
+                RefusalReason::new("no cancel_grace_ms".to_owned()).unwrap(),
+            ),
+        )),
+        &framed(
+            &meta(
+                r#"{"kind":"refusal","refusal":{"kind":"grace_invalid","reason":"no cancel_grace_ms"}}"#,
+            ),
+            b"{}",
+        ),
+    );
+}
+
+#[test]
+fn the_result_frame_carries_a_closed_run_end() {
+    let frame = |end: RunEnd, rss_reading: RssReading, task_loop: NoLeftWork| {
+        ChildFrame::Result(ResultFrame {
+            task_id: task_id(T5),
+            end,
+            rss: rss_reading,
+            task_loop,
+        })
+    };
+    assert_child_bytes(
+        &frame(
+            RunEnd::Result(envelope(r#"{"ok":3}"#)),
+            rss(30.5),
+            NoLeftWork::NoTaskLoop,
+        ),
+        &framed(
+            concat!(
+                r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"result"},"rss_mb":30.5,"task_loop":{"kind":"none"}}"#,
+            ),
+            br#"{"ok":3}"#,
+        ),
+    );
+    assert_child_bytes(
+        &frame(
+            RunEnd::StoppedBeforeRunning(StopReason::ClaimLost),
+            RssReading::Unreadable,
+            NoLeftWork::LoopHoldsNoTask,
+        ),
+        &framed(
+            concat!(
+                r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"stopped_before_running","reason":"CLAIM_LOST"},"#,
+                r#""rss_mb":null,"task_loop":{"kind":"empty"}}"#,
+            ),
+            b"",
+        ),
+    );
+    assert_child_bytes(
+        &frame(
+            RunEnd::WorkerFailure(FailureDetail::new("encode failed".to_owned()).unwrap()),
+            rss(31.0),
+            NoLeftWork::NoTaskLoop,
+        ),
+        &framed(
+            concat!(
+                r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"worker_failure","detail":"encode failed"},"rss_mb":31.0,"#,
+                r#""task_loop":{"kind":"none"}}"#,
+            ),
+            b"",
+        ),
+    );
+}
+
+#[test]
+fn the_shared_result_frame_carries_a_seat_end() {
+    assert_child_bytes(
+        &ChildFrame::SharedResult(SharedResultFrame {
+            run: run_ref(9, T5),
+            end: SeatEnd::TimedOut,
+            rss: rss(31.0),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"shared_result","dispatch":9,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"timed_out"},"rss_mb":31.0}"#,
+            ),
+            b"",
+        ),
+    );
+    assert_child_bytes(
+        &ChildFrame::SharedResult(SharedResultFrame {
+            run: run_ref(9, T5),
+            end: SeatEnd::Finished(RunEnd::Result(envelope("[1,2]"))),
+            rss: RssReading::Unreadable,
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"shared_result","dispatch":9,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""end":{"kind":"result"},"rss_mb":null}"#,
+            ),
+            b"[1,2]",
+        ),
+    );
+}
+
+#[test]
+fn reports_after_a_return_carry_what_the_body_returned() {
+    let returned = BodyEnd::Result(envelope(r#"{"ok":null}"#));
+    let left = LoopHoldsTasks::new(NonZeroU64::new(1).unwrap(), names(&["poll"])).unwrap();
+    assert_child_bytes(
+        &ChildFrame::BodyReturned(BodyReturnedFrame {
+            task_id: task_id(T5),
+            returned: returned.clone(),
+            left,
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"body_returned","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""returned":{"kind":"result"},"left":{"count":1,"names":["poll"]}}"#,
+            ),
+            br#"{"ok":null}"#,
+        ),
+    );
+    assert_child_bytes(
+        &ChildFrame::LeftoverCancel(LeftoverCancelFrame {
+            run: run_ref(2, T5),
+            returned: returned.clone(),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"leftover_cancel","dispatch":2,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""returned":{"kind":"result"}}"#,
+            ),
+            br#"{"ok":null}"#,
+        ),
+    );
+    assert_child_bytes(
+        &ChildFrame::LeftoverStuck(LeftoverStuckFrame {
+            run: run_ref(2, T5),
+            work: StuckWork::new(0, 2, Vec::new()).unwrap(),
+            returned: BodyEnd::WorkerFailure(FailureDetail::new("x".to_owned()).unwrap()),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"leftover_stuck","dispatch":2,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""tasks":0,"executor_items":2,"names":[],"#,
+                r#""returned":{"kind":"worker_failure","detail":"x"}}"#,
+            ),
+            b"",
+        ),
+    );
+}
+
+#[test]
+fn every_stop_reason_round_trips() {
+    for reason in [
+        StopReason::ClaimLost,
+        StopReason::OwnershipUnconfirmed,
+        StopReason::WorkflowStopped,
+        StopReason::TaskExpired,
+        StopReason::NodeNotLinked,
+    ] {
+        let frame = ChildFrame::SharedResult(SharedResultFrame {
+            run: run_ref(1, T1),
+            end: SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
+            rss: RssReading::Unreadable,
+        });
+        let bytes = encode_child_frame(&frame).unwrap().to_bytes();
+        assert_eq!(decode_child_bytes(&bytes).unwrap(), frame);
+    }
+}
+
+/// The claim generation keeps every digit, so the child fences on the exact
+/// value the claim returned.
+#[test]
+fn the_claim_generation_round_trips_exactly() {
+    let claimed_at = claim_time() + chrono::Duration::nanoseconds(789);
+    let frame = ParentFrame::Run(RunFrame {
+        task_id: task_id(T5),
+        task_name: "t".to_owned(),
+        worker_id: "w".to_owned(),
+        task_kind: TaskKind::Plain,
+        claimed_at,
+        work: IsolatedWork::Run,
+        input: TaskInputText::new("{}".to_owned()),
+    });
+    let bytes = encode_parent_frame(&frame).unwrap().to_bytes();
+    match decode_parent_bytes(&bytes).unwrap() {
+        ParentFrame::Run(run) => assert_eq!(run.claimed_at, claimed_at),
+        other => panic!("expected a run frame, got {other:?}"),
+    }
+}
+
+/// Python writes `isoformat()`, with `+00:00`; the decoder reads it too.
+#[test]
+fn a_claim_generation_with_an_offset_is_read() {
+    let run = framed(
+        concat!(
+            r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+            r#""task_name":"t","worker_id":"w","task_kind":"plain","#,
+            r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","work":{"kind":"run"}}"#,
+        ),
+        b"{}",
+    );
+    match decode_parent_bytes(&run).unwrap() {
+        ParentFrame::Run(run) => assert_eq!(run.claimed_at, claim_time()),
+        other => panic!("expected a run frame, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unknown_kind_is_malformed() {
+    assert_eq!(
+        malformed_child(&framed(r#"{"kind":"dance"}"#, b"")),
+        MalformedFrame::UnknownKind {
+            field: "kind".to_owned(),
+            kind: BoundedText::cut("dance"),
+        },
+    );
+}
+
+#[test]
+fn a_missing_field_is_named() {
+    assert_eq!(
+        malformed_child(&framed(r#"{"kind":"deadline_fired","dispatch":1}"#, b"")),
+        MalformedFrame::MissingField {
+            field: "task_id".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_field_outside_the_frame_is_refused() {
+    let meta = format!(r#"{{"kind":"deadline_fired","dispatch":1,"task_id":"{T1}","x":1}}"#);
+    assert_eq!(
+        malformed_child(&framed(&meta, b"")),
+        MalformedFrame::UnknownField {
+            field: "x".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_nested_field_is_named_with_its_path() {
+    let meta = format!(
+        r#"{{"kind":"loop_blocked","culprit":{{"kind":"run","dispatch":0,"task_id":"{T1}"}},"blocked_ms":1,"where":""}}"#
+    );
+    assert_eq!(
+        malformed_child(&framed(&meta, b"")),
+        MalformedFrame::OutOfBounds {
+            field: "culprit.dispatch".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_repeated_key_is_refused() {
+    assert!(matches!(
+        malformed_parent(&framed(r#"{"kind":"stop","kind":"stop"}"#, b"")),
+        MalformedFrame::MetadataNotJson(StrictJsonError::DuplicateKey { .. }),
+    ));
+}
+
+#[test]
+fn metadata_that_is_not_an_object_is_refused() {
+    assert_eq!(
+        malformed_parent(&framed("[1,2]", b"")),
+        MalformedFrame::MetadataNotObject,
+    );
+}
+
+#[test]
+fn a_body_on_a_frame_without_one_is_refused() {
+    assert_eq!(
+        malformed_parent(&framed(r#"{"kind":"stop"}"#, b"x")),
+        MalformedFrame::UnexpectedBody {
+            kind: "stop",
+            body_bytes: 1,
+        },
+    );
+    let stopped = format!(
+        r#"{{"kind":"result","task_id":"{T1}","end":{{"kind":"stopped_before_running","reason":"CLAIM_LOST"}},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
+    );
+    assert_eq!(
+        malformed_child(&framed(&stopped, b"{}")),
+        MalformedFrame::UnexpectedBody {
+            kind: "stopped_before_running",
+            body_bytes: 2,
+        },
+    );
+}
+
+#[test]
+fn input_that_is_not_utf8_is_refused() {
+    let meta = format!(
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","task_kind":"plain","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+    );
+    assert_eq!(
+        malformed_parent(&framed(&meta, &[0x7b, 0xff])),
+        MalformedFrame::BodyNotUtf8 { valid_up_to: 1 },
+    );
+}
+
+#[test]
+fn a_child_cannot_report_a_spawn_failure() {
+    let meta =
+        r#"{"kind":"boot_failed","cause":{"kind":"spawn_failed"},"error_name":"E","detail":"d"}"#;
+    assert_eq!(
+        malformed_child(&framed(meta, b"")),
+        MalformedFrame::BrokenRule {
+            field: "cause.kind".to_owned(),
+            rule: "a child cannot report a spawn failure",
+        },
+    );
+}
+
+#[test]
+fn a_boot_failure_text_over_its_bound_is_refused() {
+    let meta = format!(
+        r#"{{"kind":"boot_failed","cause":{{"kind":"app_load_failed"}},"error_name":"{}","detail":"d"}}"#,
+        "E".repeat(MAX_BOOT_ERROR_NAME_CHARS + 1),
+    );
+    assert_eq!(
+        malformed_child(&framed(&meta, b"")),
+        MalformedFrame::OutOfBounds {
+            field: "error_name".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_leftover_report_names_min_count_ten_tasks() {
+    let meta = format!(
+        r#"{{"kind":"left_work_stuck","task_id":"{T1}","still":{{"count":12,"names":["a","b","c"]}}}}"#
+    );
+    assert_eq!(
+        malformed_child(&framed(&meta, b"")),
+        MalformedFrame::BrokenRule {
+            field: "still.names".to_owned(),
+            rule: "must name min(count, 10) tasks",
+        },
+    );
+    let zero = format!(
+        r#"{{"kind":"left_work_stuck","task_id":"{T1}","still":{{"count":0,"names":[]}}}}"#
+    );
+    assert_eq!(
+        malformed_child(&framed(&zero, b"")),
+        MalformedFrame::OutOfBounds {
+            field: "still.count".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_stuck_report_names_live_work() {
+    let meta = format!(
+        r#"{{"kind":"run_stuck","dispatch":1,"task_id":"{T1}","tasks":0,"executor_items":0,"names":[]}}"#
+    );
+    assert!(matches!(
+        malformed_child(&framed(&meta, b"")),
+        MalformedFrame::BrokenRule { .. },
+    ));
+    assert_eq!(
+        StuckWork::new(0, 0, Vec::new()),
+        Err(StuckWorkInvalid::NothingAlive)
+    );
+}
+
+#[test]
+fn seat_work_outside_its_bounds_is_refused() {
+    let meta = format!(
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","task_kind":"plain","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
+    );
+    assert_eq!(
+        malformed_parent(&framed(&meta, b"{}")),
+        MalformedFrame::OutOfBounds {
+            field: "work.timeout_ms".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_negative_or_fractional_number_is_refused() {
+    let negative = framed(
+        r#"{"kind":"ready","protocol":2,"pid":-1,"rss_mb":null}"#,
+        b"",
+    );
+    assert_eq!(
+        malformed_child(&negative),
+        MalformedFrame::OutOfBounds {
+            field: "pid".to_owned(),
+        },
+    );
+    let fraction = framed(
+        r#"{"kind":"ready","protocol":2,"pid":1.5,"rss_mb":null}"#,
+        b"",
+    );
+    assert_eq!(
+        malformed_child(&fraction),
+        MalformedFrame::WrongType {
+            field: "pid".to_owned(),
+            expected: ExpectedType::WholeNumber,
+        },
+    );
+    let negative_rss = framed(
+        r#"{"kind":"ready","protocol":2,"pid":1,"rss_mb":-1.0}"#,
+        b"",
+    );
+    assert_eq!(
+        malformed_child(&negative_rss),
+        MalformedFrame::OutOfBounds {
+            field: "rss_mb".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_preload_frame_carries_no_body() {
+    let (meta, _) = split(&hex(PY_PRELOAD_READY));
+    assert_eq!(
+        decode_preload_frame(&meta, b"x"),
+        Err(MalformedFrame::UnexpectedBody {
+            kind: "preload",
+            body_bytes: 1,
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Encoding bounds and value types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn metadata_over_its_bound_is_not_sent() {
+    let long_argv = vec!["a".repeat(1024); 1100];
+    let frame = ParentFrame::Init(InitFrame {
+        program: ChildProgram::Python(PythonProgram {
+            app_locator: "app:app".to_owned(),
+            imports: Vec::new(),
+            sys_path_roots: Vec::new(),
+            parent_sys_path: Vec::new(),
+            parent_argv: long_argv,
+        }),
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        process_name: "c".to_owned(),
+        child_kind: isolated_kind(),
+    });
+    assert!(matches!(
+        encode_parent_frame(&frame),
+        Err(FrameEncodeError::MetadataOverBound { .. }),
+    ));
+}
+
+#[test]
+fn the_debug_form_of_the_database_url_hides_the_password() {
+    let url = DatabaseUrl::new("postgresql://user:secret@host/db".to_owned());
+    let shown = format!("{url:?}");
+    assert!(!shown.contains("secret"), "{shown}");
+}
+
+#[test]
+fn text_bounds_count_characters_not_bytes() {
+    let two_byte_chars = "\u{e4}".repeat(MAX_LEFTOVER_NAME_CHARS);
+    assert!(LeftoverName::new(two_byte_chars.clone()).is_ok());
+    assert_eq!(
+        LeftoverName::new(format!("{two_byte_chars}x")),
+        Err(TextOverBound {
+            chars: MAX_LEFTOVER_NAME_CHARS + 1,
+            bound: MAX_LEFTOVER_NAME_CHARS,
+        }),
+    );
+    assert_eq!(
+        LeftoverName::cut(&format!("{two_byte_chars}x")).as_str(),
+        two_byte_chars
+    );
+}
+
+#[test]
+fn value_types_hold_their_bounds() {
+    assert!(ProcessId::new(0).is_none());
+    assert!(ProcessId::new(u32::MAX).is_none());
+    assert_eq!(ProcessId::new(42).unwrap().as_pid_t(), 42);
+    assert!(DispatchNumber::new(0).is_none());
+    assert!(RssMb::new(f64::NAN).is_none());
+    assert!(RssMb::new(-0.5).is_none());
+    assert!(TaskTimeoutMs::new(999).is_none());
+    assert!(TaskTimeoutMs::new(4_294_967_295).is_some());
+    assert!(TaskTimeoutMs::new(4_294_967_296).is_none());
+    assert!(CancelGraceMs::new(99).is_none());
+    assert!(CancelGraceMs::new(10_001).is_none());
+    assert!(AsyncSeats::new(1_001).is_none());
+    assert!(ThreadSeats::new(257).is_none());
+    assert!(PoolMinSize::new(0).is_some());
+    assert!(PoolMaxSize::new(0).is_none());
+}
+
+#[test]
+fn exit_codes_are_distinct_and_leave_the_worker_code_free() {
+    let mut codes: Vec<i32> = ChildExitCode::ALL.iter().map(|code| code.code()).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), ChildExitCode::ALL.len());
+    assert!(!codes.contains(&crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE));
+    for code in ChildExitCode::ALL {
+        assert_eq!(ChildExitCode::from_code(code.code()), Some(code));
+    }
+    assert_eq!(ChildExitCode::from_code(0), None);
+    assert_eq!(ChildExitCode::from_code(1), None);
+}
+
+// ---------------------------------------------------------------------------
+// The step parser and the read plan (Python `tests/unit/test_frame_parser.py`)
+// ---------------------------------------------------------------------------
+
+/// A frame with `meta_bytes` of metadata and `body_bytes` of body. The
+/// parser does not decode the metadata, so its bytes need not be JSON.
+fn sized_frame(meta_bytes: usize, body_bytes: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&u32::try_from(meta_bytes).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&u64::try_from(body_bytes).unwrap().to_be_bytes());
+    bytes.extend(std::iter::repeat(b'm').take(meta_bytes));
+    bytes.extend(std::iter::repeat(b'b').take(body_bytes));
+    bytes
+}
+
+#[test]
+fn a_split_header_needs_the_whole_header() {
+    let frame = sized_frame(10, 5);
+    for at_hand in 0..HEADER_BYTES {
+        assert_eq!(
+            next_step(&frame, 0, at_hand),
+            FrameStep::NeedBytes {
+                wanted: HEADER_BYTES
+            }
+        );
+    }
+    assert_eq!(
+        next_step(&frame, 0, HEADER_BYTES),
+        FrameStep::NeedBytes {
+            wanted: frame.len()
+        }
+    );
+}
+
+#[test]
+fn a_whole_frame_names_where_its_parts_are() {
+    let start = 100;
+    let mut buffer = vec![b'x'; start];
+    buffer.extend(sized_frame(10, 5));
+    assert_eq!(
+        next_step(&buffer, start, buffer.len()),
+        FrameStep::WholeFrame {
+            meta_at: start + HEADER_BYTES,
+            body_at: start + HEADER_BYTES + 10,
+            frame_end: buffer.len(),
+        }
+    );
+}
+
+#[test]
+fn a_body_over_the_threshold_is_read_directly() {
+    let frame = sized_frame(10, DIRECT_BODY_BYTES + 1);
+    assert_eq!(
+        next_step(&frame, 0, HEADER_BYTES + 9),
+        FrameStep::NeedBytes {
+            wanted: HEADER_BYTES + 10
+        }
+    );
+    assert_eq!(
+        next_step(&frame, 0, frame.len() - 1),
+        FrameStep::ReadBodyDirectly {
+            meta_at: HEADER_BYTES,
+            body_at: HEADER_BYTES + 10,
+            body_bytes: DIRECT_BODY_BYTES + 1,
+        }
+    );
+    let at_threshold = sized_frame(10, DIRECT_BODY_BYTES);
+    assert_eq!(
+        next_step(&at_threshold, 0, at_threshold.len() - 1),
+        FrameStep::NeedBytes {
+            wanted: at_threshold.len()
+        }
+    );
+}
+
+#[test]
+fn a_header_over_the_bounds_is_refused_before_allocation() {
+    let over = |meta_bytes: u32, body_bytes: u64| {
+        let mut header = [0_u8; HEADER_BYTES];
+        header[..4].copy_from_slice(&meta_bytes.to_be_bytes());
+        header[4..].copy_from_slice(&body_bytes.to_be_bytes());
+        parse_header(header)
+    };
+    assert!(over(MIN_META_BYTES - 1, 0).is_err());
+    assert!(over(MAX_META_BYTES + 1, 0).is_err());
+    assert!(over(MIN_META_BYTES, MAX_BODY_BYTES + 1).is_err());
+    assert!(over(MAX_META_BYTES, MAX_BODY_BYTES).is_ok());
+}
+
+#[test]
+fn read_plans_grow_only_to_the_bytes_wanted() {
+    assert_eq!(
+        plan_read(FRAME_READ_BUFFER_BYTES, 0, 0, HEADER_BYTES),
+        ReadPlan::ReadFromFront
+    );
+    assert_eq!(
+        plan_read(FRAME_READ_BUFFER_BYTES, 10, 20, 30),
+        ReadPlan::ReadIntoTail
+    );
+    assert_eq!(
+        plan_read(
+            FRAME_READ_BUFFER_BYTES,
+            FRAME_READ_BUFFER_BYTES - 5,
+            FRAME_READ_BUFFER_BYTES - 1,
+            20
+        ),
+        ReadPlan::MoveToFront
+    );
+    assert_eq!(
+        plan_read(FRAME_READ_BUFFER_BYTES, 0, 10, FRAME_READ_BUFFER_BYTES + 1),
+        ReadPlan::MoveAndGrow {
+            buffer_bytes: FRAME_READ_BUFFER_BYTES + 1
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The read buffer
+// ---------------------------------------------------------------------------
+
+/// Feed `stream` to a reader in reads of the sizes in `reads`, in turn, and
+/// collect every frame.
+fn read_all(stream: &[u8], reads: &[usize]) -> Vec<RawFrame> {
+    let mut reader = FrameReader::new();
+    let mut frames = Vec::new();
+    let mut fed = 0;
+    let mut turn = 0;
+    while fed < stream.len() {
+        while let Some(frame) = reader.next_frame().unwrap() {
+            frames.push(frame);
+        }
+        let space = reader.read_space();
+        let count = reads[turn % reads.len()]
+            .min(space.len())
+            .min(stream.len() - fed);
+        space[..count].copy_from_slice(&stream[fed..fed + count]);
+        reader.arrived(count);
+        fed += count;
+        turn += 1;
+    }
+    while let Some(frame) = reader.next_frame().unwrap() {
+        frames.push(frame);
+    }
+    assert!(!reader.has_partial_frame());
+    assert_eq!(
+        reader.bytes_received(),
+        u64::try_from(stream.len()).unwrap()
+    );
+    frames
+}
+
+#[test]
+fn the_reader_gives_every_frame_in_order_for_any_read_size() {
+    let large_body: Vec<u8> = (0..DIRECT_BODY_BYTES * 3 + 7)
+        .map(|at| u8::try_from(at % 251).unwrap())
+        .collect();
+    let parts: Vec<(&str, Vec<u8>)> = vec![
+        (r#"{"kind":"stop"}"#, Vec::new()),
+        (r#"{"kind":"a"}"#, b"0123456789".to_vec()),
+        (r#"{"kind":"large"}"#, large_body),
+        (r#"{"kind":"b"}"#, b"x".to_vec()),
+    ];
+    let stream: Vec<u8> = parts
+        .iter()
+        .flat_map(|(meta, body)| framed(meta, body))
+        .collect();
+    for reads in [
+        vec![1],
+        vec![7, 13],
+        vec![HEADER_BYTES],
+        vec![4096, 3],
+        vec![DIRECT_BODY_BYTES, 1],
+        vec![usize::MAX],
+    ] {
+        let frames = read_all(&stream, &reads);
+        assert_eq!(frames.len(), parts.len(), "reads {reads:?}");
+        for (frame, (meta, body)) in frames.iter().zip(&parts) {
+            assert_eq!(frame.meta, meta.as_bytes(), "reads {reads:?}");
+            assert_eq!(&frame.body, body, "reads {reads:?}");
+        }
+    }
+}
+
+#[test]
+fn the_reader_refuses_a_header_over_the_bounds() {
+    let mut reader = FrameReader::new();
+    let mut header = [0_u8; HEADER_BYTES];
+    header[..4].copy_from_slice(&(MAX_META_BYTES + 1).to_be_bytes());
+    let space = reader.read_space();
+    space[..HEADER_BYTES].copy_from_slice(&header);
+    reader.arrived(HEADER_BYTES);
+    assert_eq!(
+        reader.next_frame(),
+        Err(FrameOverBound {
+            meta_bytes: MAX_META_BYTES + 1,
+            body_bytes: 0,
+        })
+    );
+}
+
+#[test]
+fn the_reader_knows_a_partial_frame() {
+    let mut reader = FrameReader::new();
+    assert!(!reader.has_partial_frame());
+    let frame = framed(r#"{"kind":"stop"}"#, b"");
+    let space = reader.read_space();
+    space[..5].copy_from_slice(&frame[..5]);
+    reader.arrived(5);
+    assert_eq!(reader.next_frame(), Ok(None));
+    assert!(reader.has_partial_frame());
+}
