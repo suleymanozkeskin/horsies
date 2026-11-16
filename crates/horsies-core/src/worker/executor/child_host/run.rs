@@ -179,7 +179,7 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
 }
 
 /// The body of a blocking task on the calling thread. A panic is
-/// `UNHANDLED_ERROR`.
+/// `UNHANDLED_EXCEPTION`.
 pub(super) fn run_blocking_body(
     task: &Arc<dyn crate::core::task::fn_trait::BlockingTaskFn>,
     input: &[u8],
@@ -187,7 +187,7 @@ pub(super) fn run_blocking_body(
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.execute(input))) {
         Ok(result) => result,
         Err(_panic) => TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::UnhandledError,
+            OperationalErrorCode::UnhandledException,
             "blocking task panicked",
         )),
     }
