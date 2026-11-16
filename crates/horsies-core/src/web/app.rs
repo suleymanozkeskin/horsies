@@ -31,7 +31,7 @@ use super::spa::{
     inject, normalize_base_path, safe_asset_path, AssetStore, EmbeddedAssets, MonitoringUiConfig,
     ASSETS_MISSING_DETAIL,
 };
-use super::task_stats_cache::TaskStatsCache;
+use super::task_stats_cache::{ReadCache, TaskStatsCache};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaResponse {
@@ -54,6 +54,8 @@ pub(crate) struct WebState {
     pub auth_policy: Arc<dyn MonitoringAuthPolicy>,
     pub schema_probe: Arc<SchemaProbe>,
     pub task_stats_cache: Arc<TaskStatsCache>,
+    pub task_facets_cache: Arc<ReadCache<crate::monitoring::Facets>>,
+    pub task_breakdown_cache: Arc<ReadCache<crate::monitoring::Breakdown>>,
     pub events: Arc<EventBroadcaster>,
     pub actions_enabled: bool,
     pub ui_config: MonitoringUiConfig,
@@ -78,6 +80,8 @@ where
     let state = WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
+        task_facets_cache: Arc::new(ReadCache::new()),
+        task_breakdown_cache: Arc::new(ReadCache::new()),
         events: EventBroadcaster::new(Arc::clone(&broker)),
         broker,
         auth_policy: Arc::new(auth_policy),
@@ -195,7 +199,9 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
     let disabled_reason = match schema.state {
         SchemaState::Match => None,
         SchemaState::Unknown => Some(SCHEMA_UNKNOWN.to_owned()),
-        SchemaState::Mismatch | SchemaState::Absent => Some(SCHEMA_INCOMPATIBLE.to_owned()),
+        SchemaState::Mismatch | SchemaState::Absent | SchemaState::ZeroX => {
+            Some(SCHEMA_INCOMPATIBLE.to_owned())
+        }
     };
     Json(MetaResponse {
         horsies_version: env!("CARGO_PKG_VERSION").to_owned(),

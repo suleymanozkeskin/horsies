@@ -1,120 +1,66 @@
 use serde::{de::DeserializeOwned, Serialize};
 
-/// Deserialize a task's declared input type from the worker envelope.
+/// Deserialize a task's declared input type from the task input bytes.
 ///
-/// The envelope is the internal JSON shape produced by the worker:
-/// `{ "args": [...], "kwargs": { ... } }`.
+/// The bytes are the task row's `input`: one JSON value, as the send encoded
+/// it (`null` for a task without input). The value is decoded as stored by
+/// [`deserialize_stored_input`]: an array is one input value, and `null` is
+/// never read as `{}`.
 ///
 /// This helper keeps attribute-macro generated wrappers and the low-level
 /// `async_task_fn!` / `blocking_task_fn!` macros on exactly the same
 /// deserialization path.
-///
-/// Empty-envelope preference (C12): an input serializing to `{}` (empty map /
-/// field-less struct) and a unit/`Option::None` input (serializing to `null`)
-/// both reach decode as `{args:[], kwargs:{}}` — the envelope cannot distinguish
-/// them. Decode prefers `{}` and falls back to `null`, so a type that accepts
-/// `{}` wins first. Consequence: `Option::<Map>::None` decodes as
-/// `Some(empty map)`, because `Option<Map>` deserializes `{}` as `Some({})`
-/// before the `null` fallback is tried. This is an accepted trade of the erased
-/// distinction, not an accident.
 #[doc(hidden)]
-pub fn decode_task_input<T>(args: &[u8]) -> Result<T, crate::core::task::TaskError>
+pub fn decode_task_input<T>(input: &[u8]) -> Result<T, crate::core::task::TaskError>
 where
     T: DeserializeOwned,
 {
-    let mut envelope: serde_json::Value =
-        crate::core::codec::from_json_bytes(args).map_err(|e| {
-            crate::core::task::TaskError::builtin(
-                crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                format!("failed to parse args/kwargs envelope: {}", e),
-            )
-        })?;
+    let candidate: serde_json::Value = crate::core::codec::from_json_bytes(input).map_err(|e| {
+        crate::core::task::TaskError::builtin(
+            crate::core::task::OperationalErrorCode::WorkerSerializationError,
+            format!("failed to parse task input: {}", e),
+        )
+    })?;
 
-    // Take ownership of the envelope's slots instead of deep-cloning them: the
-    // envelope is discarded after selection, so `Value::take` (leaves Null
-    // behind) avoids one full-payload copy per slot (P6).
-    let kwargs_value = envelope
-        .get_mut("kwargs")
-        .map(serde_json::Value::take)
-        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-    let args_value = envelope
-        .get_mut("args")
-        .map(serde_json::Value::take)
-        .unwrap_or(serde_json::Value::Null);
+    // Deserialize by reference (`&Value` implements `Deserializer`).
+    deserialize_stored_input::<T>(&candidate).map_err(|e| crate::core::task::TaskError {
+        exception: None,
+        error_code: crate::core::task::TaskErrorCode::from(
+            crate::core::task::ContractCode::ArgumentTypeMismatch,
+        ),
+        // The error names the type and the cause, never the value (Python
+        // `core/task_decorator.py:1856-1914`).
+        data: Some(serde_json::json!({
+            "expected_type": std::any::type_name::<T>(),
+            "validation_error": e.to_string(),
+        })),
+        message: Some(format!(
+            "task input does not match declared input type {}",
+            std::any::type_name::<T>(),
+        )),
+        kind: crate::core::task::TaskErrorKind::Plain,
+    })
+}
 
-    let mut args_array = match args_value {
-        serde_json::Value::Array(arr) => arr,
-        serde_json::Value::Null => Vec::new(),
-        other => vec![other],
-    };
-
-    // Non-object kwargs (or an empty object) is treated as "no kwargs", so the
-    // input comes from the positional args slot.
-    let kwargs_nonempty = match &kwargs_value {
-        serde_json::Value::Object(map) => !map.is_empty(),
-        _ => false,
-    };
-
-    let candidate = match (kwargs_nonempty, args_array.len()) {
-        // Kwargs object IS the input value.
-        (true, 0) => kwargs_value,
-        // Both positional args and kwargs present is an ambiguous, malformed
-        // envelope. Fail loudly instead of silently dropping the positional
-        // args (which the kwargs-first selection used to do).
-        (true, _) => {
-            return Err(crate::core::task::TaskError::builtin(
-                crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                "args payload must be empty when kwargs is set; envelope carries both positional args and kwargs",
-            ));
-        }
-        // Exactly one positional arg is the input value (owned, not cloned; P6).
-        (false, 1) => args_array.swap_remove(0),
-        // No positional args and an empty (or absent) kwargs object is
-        // ambiguous: an input serializing to `{}` (empty map / field-less struct)
-        // and a unit/`Option::None` input (serializing to `null`) both reach
-        // decode as {args:[], kwargs:{}}. Prefer the empty object; the final
-        // decode falls back to `null` for unit/Option types (C12).
-        (false, 0) => serde_json::Value::Object(serde_json::Map::new()),
-        (false, _) => {
-            return Err(crate::core::task::TaskError::builtin(
-                crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                "args payload must contain exactly one item when kwargs is empty",
-            ));
-        }
-    };
-
-    // Deserialize by reference (`&Value` implements `Deserializer`), so the
-    // candidate survives for the C12 fallback and the error payload without the
-    // unconditional deep clone the owned `from_value` required (P6).
-    match T::deserialize(&candidate) {
-        Ok(value) => Ok(value),
-        Err(e) => {
-            // Ambiguous empty envelope: a unit/`Option::None` input serializes to
-            // `null` but reaches decode as the empty object `{}`. Retry as null so
-            // those types still decode after the empty-object preference (C12).
-            if matches!(&candidate, serde_json::Value::Object(map) if map.is_empty()) {
-                if let Ok(value) = T::deserialize(&serde_json::Value::Null) {
-                    return Ok(value);
-                }
+/// Deserialize a stored input value as `T`.
+///
+/// The value is read as stored, with one rule from Python's keyword input:
+/// an empty object `{}` is a call with no arguments, so a type that does not
+/// take an object (a unit input, or an `Option` of a non-map input) reads `{}`
+/// as `null`. `null` is never read as `{}`, so a `None` map input stays `None`.
+/// A workflow node without static input stores `{}`.
+pub(crate) fn deserialize_stored_input<T>(value: &serde_json::Value) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    match T::deserialize(value) {
+        Ok(decoded) => Ok(decoded),
+        Err(error) => match value {
+            serde_json::Value::Object(map) if map.is_empty() => {
+                T::deserialize(&serde_json::Value::Null).map_err(|_| error)
             }
-            Err(crate::core::task::TaskError {
-                exception: None,
-                error_code: crate::core::task::TaskErrorCode::from(
-                    crate::core::task::ContractCode::ArgumentTypeMismatch,
-                ),
-                // The error names the type and the cause, never the value (Python
-                // `core/task_decorator.py:1856-1914`).
-                data: Some(serde_json::json!({
-                    "expected_type": std::any::type_name::<T>(),
-                    "validation_error": e.to_string(),
-                })),
-                message: Some(format!(
-                    "task args do not match declared input type {}",
-                    std::any::type_name::<T>(),
-                )),
-                kind: crate::core::task::TaskErrorKind::Plain,
-            })
-        }
+            _ => Err(error),
+        },
     }
 }
 
@@ -311,11 +257,11 @@ macro_rules! blocking_task_fn {
     }};
 }
 
-/// Create an async [`RegisteredTask`] that deserializes from a kwargs envelope.
+/// Create an async [`RegisteredTask`] whose input is an object of named fields.
 ///
-/// Expects the input JSON to contain a `"kwargs"` field whose value
-/// deserializes into `$args_type`. This is used by workflow `args_from`
-/// where dependency results are injected as keyword arguments.
+/// Same as [`async_task_fn!`]: the stored input decodes into `$args_type`.
+/// Workflow `args_from` merges dependency results into that object by field
+/// name.
 ///
 /// # Example
 ///
@@ -336,7 +282,7 @@ macro_rules! async_task_fn_kwargs {
     }};
 }
 
-/// Create a blocking [`RegisteredTask`] that deserializes from a kwargs envelope.
+/// Create a blocking [`RegisteredTask`] whose input is an object of named fields.
 ///
 /// Blocking equivalent of [`async_task_fn_kwargs!`].
 #[macro_export]
@@ -398,45 +344,45 @@ mod tests {
     }
 
     #[test]
-    fn decode_task_input_reads_kwargs_payload() {
-        let envelope = serde_json::json!({"kwargs": {"a": 3, "b": 5}});
-        let args = serde_json::to_vec(&envelope).unwrap();
-        let parsed: AddArgs = decode_task_input(&args).unwrap();
+    fn decode_task_input_reads_an_object_input() {
+        let input = serde_json::to_vec(&serde_json::json!({"a": 3, "b": 5})).unwrap();
+        let parsed: AddArgs = decode_task_input(&input).unwrap();
         assert_eq!(parsed.a, 3);
         assert_eq!(parsed.b, 5);
     }
 
     #[test]
-    fn decode_task_input_reads_single_positional_payload() {
-        let envelope = serde_json::json!({"args": [{"a": 4, "b": 7}]});
-        let args = serde_json::to_vec(&envelope).unwrap();
-        let parsed: AddArgs = decode_task_input(&args).unwrap();
-        assert_eq!(parsed.a, 4);
-        assert_eq!(parsed.b, 7);
-    }
-
-    #[test]
-    fn decode_task_input_reads_single_positional_array(/* C3 */) {
-        // A single array-valued argument is carried as one positional element
-        // (args=[[1,2,3]]) and must decode back to the array, not be read as
-        // three separate positional args.
-        let envelope = serde_json::json!({"args": [[1, 2, 3]], "kwargs": {}});
-        let args = serde_json::to_vec(&envelope).unwrap();
-        let parsed: Vec<i32> = decode_task_input(&args).unwrap();
+    fn decode_task_input_reads_an_array_as_one_value(/* C3 */) {
+        // An array-valued input is one input value and decodes back to the
+        // array, not to three separate values.
+        let parsed: Vec<i32> = decode_task_input(b"[1,2,3]").unwrap();
         assert_eq!(parsed, vec![1, 2, 3]);
     }
 
     #[test]
-    fn decode_task_input_rejects_both_args_and_kwargs(/* C14 */) {
-        // An envelope carrying both positional args and kwargs is ambiguous;
-        // decode must fail loudly rather than silently drop the positional args.
-        let envelope = serde_json::json!({"args": [1], "kwargs": {"a": 1, "b": 2}});
-        let args = serde_json::to_vec(&envelope).unwrap();
-        let err: TaskError = decode_task_input::<AddArgs>(&args).unwrap_err();
+    fn decode_task_input_keeps_null_and_empty_object_apart(/* C12 */) {
+        // `null` is the input of a task without input; `{}` is an empty map.
+        // A `None` map input stays `None`.
+        let none: Option<std::collections::HashMap<String, i32>> =
+            decode_task_input(b"null").unwrap();
+        assert!(none.is_none());
+        let empty: Option<std::collections::HashMap<String, i32>> =
+            decode_task_input(b"{}").unwrap();
+        assert_eq!(empty, Some(std::collections::HashMap::new()));
+    }
+
+    #[test]
+    fn an_empty_object_is_no_input_for_a_type_that_takes_no_object() {
+        // A workflow node without static input stores `{}`, Python's empty
+        // keyword input; a unit input reads it as no arguments.
+        decode_task_input::<()>(b"{}").unwrap();
+        let absent: Option<i32> = decode_task_input(b"{}").unwrap();
+        assert!(absent.is_none());
+        let refused = decode_task_input::<i32>(b"{}").unwrap_err();
         assert_eq!(
-            err.error_code,
+            refused.error_code,
             crate::core::task::TaskErrorCode::from(
-                crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                crate::core::task::ContractCode::ArgumentTypeMismatch,
             ),
         );
     }
@@ -454,8 +400,7 @@ mod tests {
             panic!("expected async task");
         };
 
-        let envelope = serde_json::json!({"args": []});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = b"null".to_vec();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -541,8 +486,7 @@ mod tests {
     #[tokio::test]
     async fn async_task_fn_executes() {
         let task = async_task_fn!(add, AddArgs);
-        let envelope = serde_json::json!({"args": [AddArgs { a: 3, b: 5 }], "kwargs": {}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&AddArgs { a: 3, b: 5 }).unwrap();
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Async { task: f, .. } => {
                 let result = f.execute(&args).await.unwrap();
@@ -556,8 +500,7 @@ mod tests {
     #[test]
     fn blocking_task_fn_executes() {
         let task = blocking_task_fn!(multiply, AddArgs);
-        let envelope = serde_json::json!({"args": [AddArgs { a: 4, b: 7 }], "kwargs": {}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&AddArgs { a: 4, b: 7 }).unwrap();
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
                 let result = f.execute(&args).unwrap();
@@ -576,10 +519,7 @@ mod tests {
                 let result = f.execute(b"not json");
                 assert!(result.is_err());
                 let err = result.unwrap_err();
-                assert!(err
-                    .message
-                    .unwrap()
-                    .contains("failed to parse args/kwargs envelope"));
+                assert!(err.message.unwrap().contains("failed to parse task input"));
             }
             _ => panic!("expected blocking task"),
         }
@@ -588,8 +528,7 @@ mod tests {
     #[test]
     fn typed_args_mismatch_returns_argument_type_mismatch() {
         let task = blocking_task_fn!(multiply, AddArgs);
-        let envelope = serde_json::json!({"args": [{"a": "oops", "b": 7}], "kwargs": {}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&serde_json::json!({"a": "oops", "b": 7})).unwrap();
 
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
@@ -612,8 +551,7 @@ mod tests {
     #[tokio::test]
     async fn no_args_task() {
         let task = async_task_fn!(heartbeat, ());
-        let envelope = serde_json::json!({"args": [], "kwargs": {}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = b"null".to_vec();
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Async { task: f, .. } => {
                 let result = f.execute(&args).await.unwrap();
@@ -629,8 +567,7 @@ mod tests {
     #[tokio::test]
     async fn async_kwargs_macro_executes() {
         let task = async_task_fn_kwargs!(add, AddArgs);
-        let envelope = serde_json::json!({"kwargs": {"a": 10, "b": 20}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&serde_json::json!({"a": 10, "b": 20})).unwrap();
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Async { task: f, .. } => {
                 let result = f.execute(&args).await.unwrap();
@@ -644,8 +581,7 @@ mod tests {
     #[test]
     fn blocking_kwargs_macro_executes() {
         let task = blocking_task_fn_kwargs!(multiply, AddArgs);
-        let envelope = serde_json::json!({"kwargs": {"a": 6, "b": 7}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&serde_json::json!({"a": 6, "b": 7})).unwrap();
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
                 let result = f.execute(&args).unwrap();
@@ -657,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn kwargs_macro_bad_envelope_returns_error() {
+    fn kwargs_macro_bad_input_returns_error() {
         let task = blocking_task_fn_kwargs!(multiply, AddArgs);
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
@@ -673,8 +609,7 @@ mod tests {
     #[test]
     fn validate_input_accepts_well_typed_kwargs() {
         let task = blocking_task_fn!(multiply, AddArgs);
-        let envelope = serde_json::json!({"args": [], "kwargs": {"a": 2, "b": 3}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&serde_json::json!({"a": 2, "b": 3})).unwrap();
         match &task {
             RegisteredTask::Blocking { task: f, .. } => {
                 assert!(f.validate_input(&args).is_ok());
@@ -686,8 +621,7 @@ mod tests {
     #[test]
     fn validate_input_rejects_type_mismatch_without_executing() {
         let task = blocking_task_fn!(multiply, AddArgs);
-        let envelope = serde_json::json!({"args": [], "kwargs": {"a": "oops", "b": 3}});
-        let args = serde_json::to_vec(&envelope).unwrap();
+        let args = serde_json::to_vec(&serde_json::json!({"a": "oops", "b": 3})).unwrap();
         match &task {
             RegisteredTask::Blocking { task: f, .. } => {
                 let err = f.validate_input(&args).unwrap_err();
@@ -705,21 +639,21 @@ mod tests {
     #[tokio::test]
     async fn validate_input_via_registered_task_delegates() {
         let task = async_task_fn!(add, AddArgs);
-        let ok = serde_json::to_vec(&serde_json::json!({"kwargs": {"a": 1, "b": 2}})).unwrap();
-        let bad = serde_json::to_vec(&serde_json::json!({"kwargs": {"a": 1}})).unwrap();
+        let ok = serde_json::to_vec(&serde_json::json!({"a": 1, "b": 2})).unwrap();
+        let bad = serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap();
         assert!(task.validate_input(&ok).is_ok());
         assert!(task.validate_input(&bad).is_err());
     }
 
     #[test]
-    fn kwargs_macro_missing_kwargs_field() {
+    fn kwargs_macro_missing_input_fields() {
         let task = blocking_task_fn_kwargs!(multiply, AddArgs);
-        // Envelope without "kwargs" — should try to deserialize empty object
-        let args = serde_json::to_vec(&serde_json::json!({"args": []})).unwrap();
+        // An object without the required fields does not decode.
+        let args = serde_json::to_vec(&serde_json::json!({})).unwrap();
         match &task {
             crate::core::task::fn_trait::RegisteredTask::Blocking { task: f, .. } => {
                 let result = f.execute(&args);
-                // AddArgs requires a and b, so empty kwargs should fail
+                // AddArgs requires a and b, so an empty object should fail
                 assert!(result.is_err());
             }
             _ => panic!("expected blocking task"),

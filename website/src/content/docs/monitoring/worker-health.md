@@ -87,10 +87,9 @@ if is_ok(result):
 | ------------- | ------- |
 | `AllSlotsServing()` | No slot was down |
 | `SlotsDown(slots)` | The worker is degraded. `slots` holds one `DownSlot` per slot that was down, in slot order |
-| `SlotHealthNotRecorded()` | The snapshot comes from a worker version that did not record slot health |
 
 ```python
-from horsies import AllSlotsServing, SlotHealthNotRecorded, SlotsDown, is_ok
+from horsies import AllSlotsServing, SlotsDown, is_ok
 
 result = await app.list_worker_states_async()
 if is_ok(result):
@@ -99,7 +98,7 @@ if is_ok(result):
             case SlotsDown(slots=down):
                 for slot in down:
                     print(f"{snap.worker_id} slot {slot.slot}: {slot.cause} since {slot.down_since}")
-            case AllSlotsServing() | SlotHealthNotRecorded():
+            case AllSlotsServing():
                 pass
 ```
 
@@ -112,10 +111,9 @@ if is_ok(result):
 | `class_capacity` | Meaning |
 | ---------------- | ------- |
 | `ClassBudgets(budgets)` | One `ClassBudget(budget, capacity, serves)` per budget, in `Execution` order. Empty when the worker serves no class |
-| `ClassCapacityNotRecorded()` | The snapshot comes from a worker version that did not record its budgets |
 
 ```python
-from horsies import ClassBudgets, ClassCapacityNotRecorded, is_ok
+from horsies import ClassBudgets, is_ok
 
 result = await app.list_worker_states_async()
 if is_ok(result):
@@ -125,8 +123,6 @@ if is_ok(result):
                 for budget in budgets:
                     served = ", ".join(member.value for member in budget.serves)
                     print(f"{snap.worker_id} {budget.budget.value}: {budget.capacity} in service, serves {served}")
-            case ClassCapacityNotRecorded():
-                pass
 ```
 
 `get_worker_state_async(worker_id)` returns one worker's latest snapshot (or `None`). `get_worker_state_history_async(worker_id, limit=...)` returns the snapshot timeseries newest-first; `limit=None` returns all retained rows.
@@ -165,7 +161,7 @@ if is_ok(result):
 
 A delayed send and a retry that waits for its interval are `PENDING` too, so they count before they are due.
 
-A live snapshot whose `class_capacity` is `ClassCapacityNotRecorded()` comes from a worker version that does not record its budgets, so the classes it serves are unknown. The check leaves that worker out of every stream, does not count it in `live_workers`, and names it in `ClassCoverage.not_recorded`: one `ClassesNotRecorded(worker_id, snapshot_at)` per worker, by worker id. A snapshot whose `class_capacity` is unreadable fails the read with `MONITORING_QUERY_FAILED` and names the worker.
+A snapshot whose `class_capacity` is unreadable fails the read with `MONITORING_QUERY_FAILED` and names the worker.
 
 ### The worker logs it
 
@@ -175,7 +171,7 @@ Each reaper pass runs the same check, one check interval after the worker starts
 PENDING ISOLATED tasks on queue 'default' wait: no live worker serves this class. Start a worker with isolated children on this queue. A shared task that went back to the queue as ISOLATED also waits here.
 ```
 
-Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTERVAL_S`). Live workers that the check left out log one warning per 5 minutes that names up to 10 of them. A check that fails logs one warning per 5 minutes and changes nothing.
+Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTERVAL_S`). A check that fails logs one warning per 5 minutes and changes nothing.
 
 ### What to do
 
@@ -188,7 +184,7 @@ Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTE
 `get_class_report_async` returns the pending streams with the wait of their oldest due row and their coverage, and the budget load of each live worker.
 
 - `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` when at least one row is due, or `NoneDue(next_due_at)` when every row is due later. A row is due when its `enqueued_at` (its send time, or the time its retry became due) is at or before the read.
-- `ClassReport.workers` holds the live workers that recorded their budgets; `ClassReport.not_recorded` the live workers that did not, as in the check above. `GET /api/workers/classes` returns both.
+- `ClassReport.workers` holds the live workers, by worker id. `GET /api/workers/classes` returns the report.
 - `WorkerClassLoad.budgets` holds one `BudgetLoad` per budget: `capacity` and `serves` from the worker's latest snapshot, `in_flight` (the worker's `RUNNING` rows and `CLAIMED` rows with a live lease of the classes it serves, counted at the read, as the claim counts them) and `free` (`capacity - in_flight`, at least 0; a prefetch buffer can hold more rows than the capacity).
 
 ```python
@@ -283,9 +279,9 @@ The fleet check. **Returns:** `Ok(ClassCoverage)` with `checked_at` (database ti
 | `max_claim_per_worker` | `int` | Per-worker claim cap |
 | `cluster_wide_cap` | `int \| None` | Cluster-wide concurrency cap, if set |
 | `queues` | `list[str]` | Queues this worker serves |
-| `queue_priorities` | `dict[str, int] \| None` | Per-queue priorities (CUSTOM mode) |
-| `queue_max_concurrency` | `dict[str, int] \| None` | Per-queue concurrency (CUSTOM mode) |
-| `recovery_config` | `dict[str, Any] \| None` | Recovery configuration snapshot, plus the embedded health payloads below |
+| `queue_priorities` | `dict[str, int]` | Per-queue priorities (CUSTOM mode); empty when none is set |
+| `queue_max_concurrency` | `dict[str, int]` | Per-queue concurrency (CUSTOM mode); empty when none is set |
+| `recovery_config` | `dict[str, Any]` | Recovery configuration snapshot, plus the embedded health payloads below; empty when none is set |
 | `tasks_running` | `int` | RUNNING tasks at snapshot time |
 | `tasks_claimed` | `int` | CLAIMED tasks at snapshot time |
 | `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |
@@ -293,8 +289,8 @@ The fleet check. **Returns:** `Ok(ClassCoverage)` with `checked_at` (database ti
 | `cpu_percent` | `float \| None` | CPU percent (psutil) |
 | `children_memory_mb` | `float \| None` | Summed resident memory of the worker's child processes |
 | `worker_started_at` | `datetime` | Worker process start time |
-| `slot_health` | `SlotHealth` | `AllSlotsServing()`, `SlotsDown(slots)` or `SlotHealthNotRecorded()` |
-| `class_capacity` | `ClassCapacity` | `ClassBudgets(budgets)` or `ClassCapacityNotRecorded()` |
+| `slot_health` | `SlotHealth` | `AllSlotsServing()` or `SlotsDown(slots)` |
+| `class_capacity` | `ClassCapacity` | `ClassBudgets(budgets)` |
 
 ### Embedded health payloads
 

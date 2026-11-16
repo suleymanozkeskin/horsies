@@ -1,6 +1,6 @@
 //! Window-scoped history page and facet statement builders.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::postgres::PgArguments;
 use sqlx::query::Query;
 use sqlx::Postgres;
@@ -154,6 +154,12 @@ pub fn history_sort_expression(field: HistorySortField, descending: bool) -> Str
     format!("{expression} {direction}{null_order}")
 }
 
+/// The widest terminal-time window a history read takes.
+pub const HISTORY_WINDOW_MAX: Duration = Duration::days(30);
+
+/// A terminal-time window of history reads: increasing bounds at most
+/// `HISTORY_WINDOW_MAX` apart. The type carries the bound, so no read checks
+/// it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryWindow {
     lower: DateTime<Utc>,
@@ -166,6 +172,13 @@ impl HistoryWindow {
             return Err(HistoryError::contract(
                 "history window bounds must be increasing",
             ));
+        }
+        if upper - lower > HISTORY_WINDOW_MAX {
+            return Err(HistoryError::contract(format!(
+                "history window of {} exceeds the {}-day maximum",
+                upper - lower,
+                HISTORY_WINDOW_MAX.num_days()
+            )));
         }
         Ok(Self { lower, upper })
     }

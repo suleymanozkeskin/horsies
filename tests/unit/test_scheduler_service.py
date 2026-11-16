@@ -61,6 +61,10 @@ def _not_expired(value: str) -> str:
     return value
 
 
+# A 32-byte config hash that no schedule of these tests produces.
+STALE_CONFIG_HASH = bytes(32)
+
+
 def _deadline_task(*, deadline: Annotated[str, AfterValidator(_not_expired)]) -> None:
     """A parameter whose validator can refuse later what it accepted at boot."""
     return None
@@ -483,7 +487,7 @@ class TestComputeConfigHash:
         for pattern in patterns:
             schedule = TaskSchedule(name='t', task_name='my_task', pattern=pattern)
             digest = scheduler._compute_config_hash(schedule)
-            assert isinstance(digest, str) and len(digest) == 64  # sha256 hex
+            assert type(digest) is bytes and len(digest) == 32  # sha256 digest
 
     def test_time_based_pattern_hash_is_deterministic(self) -> None:
         scheduler = self._make_scheduler()
@@ -1042,7 +1046,7 @@ class TestInitializeSchedules:
         call_count = 0
 
         async def _init_side_effect(
-            name: str, next_run: datetime, config_hash: str, **kwargs: object,
+            name: str, next_run: datetime, config_hash: bytes, **kwargs: object,
         ) -> None:
             nonlocal call_count
             call_count += 1
@@ -1732,7 +1736,7 @@ class TestInitializeSingleScheduleAdditionalPaths:
 
         # Existing state with old hash
         old_state = MagicMock()
-        old_state.config_hash = 'stale_hash_value'
+        old_state.config_hash = STALE_CONFIG_HASH
         old_state.next_run_at = _utc(2025, 6, 1, 11, 0, 0)
 
         state_manager = MagicMock()
@@ -1749,7 +1753,7 @@ class TestInitializeSingleScheduleAdditionalPaths:
         assert update_args[0][0] == 's'  # schedule_name
         # The new config_hash should differ from the stale one
         new_hash = update_args[0][2]
-        assert new_hash != 'stale_hash_value'
+        assert new_hash != STALE_CONFIG_HASH
 
 
 # =============================================================================

@@ -20,10 +20,10 @@ from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
-    ClassCapacityNotRecorded,
+    ClassCapacityUnreadable,
     DatabasePing,
     DownSlot,
-    SlotHealthNotRecorded,
+    SlotHealthUnreadable,
     SlotsDown,
     WorkerPingRequest,
     WorkerPong,
@@ -148,7 +148,7 @@ class TestResultModels:
             pong.worker_id = 'other'  # type: ignore[misc]
 
     def test_worker_state_snapshot_holds_optional_fields(self) -> None:
-        """Snapshot tolerates NULL psutil/config columns as None."""
+        """Snapshot tolerates NULL psutil columns as None; unset maps are empty."""
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
@@ -162,9 +162,9 @@ class TestResultModels:
             max_claim_per_worker=4,
             cluster_wide_cap=None,
             queues=['default'],
-            queue_priorities=None,
-            queue_max_concurrency=None,
-            recovery_config=None,
+            queue_priorities={},
+            queue_max_concurrency={},
+            recovery_config={},
             tasks_running=0,
             tasks_claimed=0,
             memory_usage_mb=None,
@@ -172,8 +172,8 @@ class TestResultModels:
             cpu_percent=None,
             children_memory_mb=None,
             worker_started_at=now,
-            slot_health=SlotHealthNotRecorded(),
-            class_capacity=ClassCapacityNotRecorded(),
+            slot_health=AllSlotsServing(),
+            class_capacity=ClassBudgets(()),
         )
         assert snap.cluster_wide_cap is None
         assert snap.queues == ['default']
@@ -194,8 +194,11 @@ def _down_slot(slot: int) -> DownSlot:
 class TestSlotHealth:
     """The stored ``slots_down`` value and the typed slot health."""
 
-    def test_a_null_value_is_not_recorded(self) -> None:
-        assert parse_slot_health(None, 4) == Ok(SlotHealthNotRecorded())
+    def test_a_null_value_is_unreadable(self) -> None:
+        """No stored value is not a state: the column is NOT NULL."""
+        assert parse_slot_health(None, 4) == Err(
+            SlotHealthUnreadable('slots_down is not a JSON array'),
+        )
 
     def test_an_empty_list_means_every_slot_serves(self) -> None:
         assert parse_slot_health(slots_down_json([]), 4) == Ok(AllSlotsServing())
@@ -301,8 +304,11 @@ _ALL_CLASSES = ['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']
 class TestClassCapacity:
     """The stored ``class_capacity`` value and the typed class capacity."""
 
-    def test_a_null_value_is_not_recorded(self) -> None:
-        assert parse_class_capacity(None) == Ok(ClassCapacityNotRecorded())
+    def test_a_null_value_is_unreadable(self) -> None:
+        """No stored value is not a state: the column is NOT NULL."""
+        assert parse_class_capacity(None) == Err(
+            ClassCapacityUnreadable('class_capacity is not a JSON object'),
+        )
 
     def test_an_empty_object_is_a_worker_that_serves_no_class(self) -> None:
         assert parse_class_capacity({}) == Ok(ClassBudgets(()))

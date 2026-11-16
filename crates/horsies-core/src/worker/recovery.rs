@@ -16,9 +16,9 @@ use crate::core::history::identity::reservations::{
     cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
 };
 use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage_in_pool, CoverageOutcome,
+    ensure_periodic_coverage_in_pool, CoverageOutcome,
 };
-use crate::core::history::maintenance::pruning::prune_expired_partitions;
+use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
@@ -201,11 +201,13 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args,
-                task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-                join_type, status, is_subworkflow, task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p7_retention_task', '[]', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE, $3, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
+                'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -631,6 +633,7 @@ mod p7_maintenance_tests {
             .contains(history_leaves[0].leaf_name()));
         assert_eq!(pruning["errors"].as_array().unwrap().len(), 0);
         assert_eq!(pruning["key_reservations"]["state"], "complete");
+        assert_eq!(pruning["reach"], "within_bounds");
         let phase2 = snapshot.phase2_recovery.unwrap();
         assert_eq!(phase2["considered"], 0);
         assert_eq!(phase2["applied"], 0);
@@ -1265,7 +1268,7 @@ async fn run_reaper_pass(
 
     if tokio::time::Instant::now() >= *next_partition_maintenance {
         let declared = retention.registrable_periods();
-        let coverage_health = match ensure_partition_coverage_in_pool(
+        let coverage_health = match ensure_periodic_coverage_in_pool(
             maintenance_pool,
             retention.history_leaf_horizon_days,
             retention.heartbeat_leaf_horizon_hours,
@@ -1333,6 +1336,10 @@ async fn run_reaper_pass(
             "dropped": prune.dropped_count(),
             "refusals": prune.refusals,
             "errors": prune.errors,
+            "reach": match prune.reach {
+                PruneReach::WithinBounds => "within_bounds",
+                PruneReach::Truncated => "truncated",
+            },
             "key_reservations": key_reservations,
         }));
         *next_partition_maintenance = tokio::time::Instant::now()
@@ -2323,13 +2330,13 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, created_at
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'ret_task', '[]', '{}',
-                'default', 100, '{}', FALSE, 'all',
-                'ENQUEUED', FALSE, $3, NOW() - INTERVAL '2 hours'
+                $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'ENQUEUED', FALSE, $3, NOW() - INTERVAL '2 hours', 0, 'ISOLATED',
+                'standard_30d'
             )",
         )
         .bind(Uuid::new_v4())
@@ -2467,13 +2474,14 @@ mod tests {
             for i in 0..nodes {
                 sqlx::query(
                     "INSERT INTO horsies_workflow_tasks (
-                        id, workflow_id, task_index, node_id, task_name, task_args,
-                        task_kwargs, queue_name, priority, dependencies,
-                        allow_failed_deps, join_type, status, is_subworkflow, created_at
+                        id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                        priority, dependencies, allow_failed_deps, join_type, status,
+                        is_subworkflow, created_at, max_retries, execution,
+                        retention_class_key
                     ) VALUES (
-                        $1, $2, $3, 'node_' || $3, 'ret_budget_task', '[]', '{}',
-                        'default', 100, '{}', FALSE, 'all',
-                        'COMPLETED', FALSE, NOW() - INTERVAL '2 hours'
+                        $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
+                        '{}', FALSE, 'all', 'COMPLETED', FALSE, NOW() - INTERVAL '2 hours', 0,
+                        'ISOLATED', 'standard_30d'
                     )",
                 )
                 .bind(Uuid::new_v4())

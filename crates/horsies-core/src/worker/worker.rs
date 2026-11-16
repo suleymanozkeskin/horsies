@@ -1329,7 +1329,7 @@ mod tests {
                     retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                     updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
                 ) VALUES (
-                    $1, 'finalize_test', $2, 100, '{}', $5, 'ISOLATED',
+                    $1, 'finalize_test', $2, 100, 'null', $5, 'ISOLATED',
                     'standard_30d', NOW(), NOW(),
                     1, decode(repeat('00', 32), 'hex'), NULL,
                     'CLAIMED', NOW(), $6, 'worker-1', NOW() + interval '1 minute',
@@ -1369,7 +1369,7 @@ mod tests {
                     retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                     updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
                 ) VALUES (
-                    $1, 'finalize_test', $2, 100, '{}', $5, 'ISOLATED',
+                    $1, 'finalize_test', $2, 100, 'null', $5, 'ISOLATED',
                     'standard_30d', NOW(), NOW(),
                     1, decode(repeat('00', 32), 'hex'), NULL,
                     'RUNNING', NOW(), NULL, NULL, NULL,
@@ -1401,8 +1401,7 @@ mod tests {
         ClaimedTaskRow {
             id: *task_id,
             task_name: "finalize_test".to_owned(),
-            args: Some("[]".to_owned()),
-            kwargs: Some("{}".to_owned()),
+            input: "null".to_owned(),
             queue_name: queue_name.to_owned(),
             is_workflow_task: false,
             task_options,
@@ -1450,13 +1449,12 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, created_at
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'finalize_test', '[]', '{}',
-                'default', 100, '{}', FALSE, 'all',
-                'ENQUEUED', FALSE, $3, NOW()
+                $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
+                'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
         .bind(workflow_task_id)
@@ -2000,7 +1998,7 @@ mod tests {
                     retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                     updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
                 ) VALUES (
-                    $1, 'finalize_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                    $1, 'finalize_test', 'default', 100, 'null', NULL, 'ISOLATED',
                     'standard_30d', NOW(), NOW(),
                     1, decode(repeat('00', 32), 'hex'), NULL,
                     'RUNNING', NOW(), NULL, $2, NULL,
@@ -3152,7 +3150,7 @@ mod tests {
                         retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                         updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
                     ) VALUES (
-                        $1, 'block_a_while', 'c17q', 100, '{}', NULL, 'ISOLATED',
+                        $1, 'block_a_while', 'c17q', 100, 'null', NULL, 'ISOLATED',
                         'standard_30d', NOW(), NOW(),
                         1, decode(repeat('00', 32), 'hex'), NULL,
                         'CLAIMED', NOW(), NOW(), $2, NOW() + INTERVAL '60 seconds',

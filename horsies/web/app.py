@@ -94,7 +94,7 @@ def _disabled_reason(state: SchemaState) -> str | None:
             return None
         case SchemaState.UNKNOWN:
             return SCHEMA_UNKNOWN
-        case _:
+        case SchemaState.MISMATCH | SchemaState.ABSENT | SchemaState.ZERO_X:
             return SCHEMA_INCOMPATIBLE
 
 

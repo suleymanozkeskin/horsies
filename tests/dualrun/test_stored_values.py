@@ -1,0 +1,501 @@
+"""Unit tests of the stored-value rules: JSON documents, the attempt archive, digests, generated names."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Final
+
+import pytest
+
+from horsies.core.types.result import Err, Ok, Result
+from tests.dualrun.catalog import (
+    ATTEMPT_ARCHIVE,
+    LEAF_NAME,
+    RUN_CLOCK,
+    TASK_OPTIONS,
+    WORKER_ID,
+)
+from tests.dualrun.cells import (
+    NormalizeError,
+    RawRow,
+    RawSnapshot,
+    RawTable,
+    UnreadableBytes,
+    UnreadableJson,
+    UnsupportedStoredFormat,
+    generated_name,
+)
+from tests.dualrun.compare import ColumnDifference, compare_snapshots
+from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.dualrun.rules import (
+    ColumnSpec,
+    DigestOf,
+    Exact,
+    IdFamily,
+    JsonPath,
+    JsonStorage,
+    JsonTime,
+    Key,
+    NormalisedId,
+    SnapshotCatalog,
+    StoredJson,
+    TableRules,
+    TimeEncoding,
+    TimeOrderOnly,
+    Unversioned,
+)
+from tests.dualrun.values import (
+    CalendarUnit,
+    DatedName,
+    DigestMatches,
+    DigestMismatch,
+    DuringRun,
+    ExactValue,
+    IdLabel,
+    JsonDocument,
+    LiteralTime,
+    NormalizedValue,
+    NullValue,
+    RunWindow,
+    TimeRank,
+    json_leaves,
+)
+
+pytestmark = [pytest.mark.unit]
+
+RUN_A: Final = datetime(2026, 1, 1, 10, 30, tzinfo=UTC)
+RUN_B: Final = datetime(2026, 3, 5, 17, 45, tzinfo=UTC)
+
+DOCUMENT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(steps=(Key(name='owner'),), rule=NormalisedId(family=IdFamily.TASK)),
+        JsonPath(
+            steps=(Key(name='due'),),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=TimeOrderOnly()),
+        ),
+        JsonPath(
+            steps=(Key(name='seen'),),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK),
+        ),
+    ),
+)
+
+CATALOG: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='runs',
+            columns=(
+                ColumnSpec(name='id', rule=NormalisedId(family=IdFamily.TASK)),
+                ColumnSpec(name='worker', rule=WORKER_ID),
+                ColumnSpec(name='doc', rule=DOCUMENT),
+                ColumnSpec(name='options', rule=TASK_OPTIONS),
+                ColumnSpec(name='attempt_archive_version', rule=Exact()),
+                ColumnSpec(name='archive', rule=ATTEMPT_ARCHIVE),
+                ColumnSpec(name='archive_digest', rule=DigestOf(column='archive')),
+                ColumnSpec(name='leaf', rule=LEAF_NAME),
+            ),
+            order_by=('doc', 'options', 'id'),
+            identity=('id',),
+        ),
+    ),
+)
+
+
+def _hex(data: bytes) -> str:
+    return '\\x' + data.hex()
+
+
+def _epoch_us(at: datetime) -> int:
+    return round(at.timestamp() * 1_000_000)
+
+
+def _archive(worker: str, run: datetime) -> bytes:
+    attempt = [
+        1,
+        'FAILED',
+        True,
+        _epoch_us(run),
+        _epoch_us(run + timedelta(seconds=2)),
+        'E1',
+        'message',
+        None,
+        worker,
+        'host',
+        7,
+        'proc',
+    ]
+    return json.dumps([attempt], separators=(',', ':')).encode()
+
+
+def _row(
+    raw_id: str,
+    run: datetime,
+    *,
+    doc: str | None = None,
+    options: str | None = '{"good_until":null,"retry_policy":null}',
+    version: str = '1',
+    digest: str | None = None,
+    leaf: str | None = None,
+) -> RawRow:
+    worker = f'{raw_id}-worker'
+    archive = _archive(worker, run)
+    document = (
+        doc
+        if doc is not None
+        else json.dumps({'owner': raw_id, 'due': None, 'seen': run.isoformat()})
+    )
+    return (
+        raw_id,
+        worker,
+        document,
+        options,
+        version,
+        _hex(archive),
+        digest if digest is not None else _hex(hashlib.sha256(archive).digest()),
+        leaf
+        if leaf is not None
+        else f'horsies_task_history_standard_30d_{run:%Y_%m_%d}',
+    )
+
+
+def _raw(rows: Sequence[RawRow]) -> RawSnapshot:
+    return RawSnapshot(tables=(RawTable(name='runs', rows=tuple(rows)),))
+
+
+def _window(run: datetime) -> RunWindow:
+    return RunWindow(start=run, end=run + timedelta(minutes=1))
+
+
+def _normalized(
+    rows: Sequence[RawRow], run: datetime
+) -> Result[NormalizedSnapshot, NormalizeError]:
+    return normalize_snapshot(_raw(rows), CATALOG, _window(run))
+
+
+def _snapshot(rows: Sequence[RawRow], run: datetime) -> NormalizedSnapshot:
+    match _normalized(rows, run):
+        case Ok(snapshot):
+            return snapshot
+        case Err(error):
+            raise AssertionError(f'normalize failed: {error}')
+
+
+def _cell(snapshot: NormalizedSnapshot, column: str) -> NormalizedValue:
+    table = snapshot.table('runs')
+    (row,) = table.rows
+    return row[table.rules.position(column)]
+
+
+def _leaves(value: NormalizedValue) -> list[NormalizedValue]:
+    match value:
+        case JsonDocument(root=root):
+            return json_leaves(root)
+        case _:
+            raise AssertionError(f'{value} is not a JSON document')
+
+
+# ---- JSON documents ----
+
+
+def test_same_documents_with_other_ids_times_key_order_and_spacing_compare_equal() -> (
+    None
+):
+    reference = _snapshot(
+        [
+            _row(
+                'a1',
+                RUN_A,
+                doc='{"owner": "a1", "due": null, "seen": "'
+                + RUN_A.isoformat()
+                + '", "n": [1, 2]}',
+            )
+        ],
+        RUN_A,
+    )
+    candidate = _snapshot(
+        [
+            _row(
+                'b1',
+                RUN_B,
+                doc='{"n":[1,2],"seen":"'
+                + RUN_B.isoformat()
+                + '","due":null,"owner":"b1"}',
+            )
+        ],
+        RUN_B,
+    )
+
+    assert compare_snapshots(reference, candidate).entries == ()
+
+
+def test_an_id_inside_a_document_shares_the_label_of_the_same_id_in_a_column() -> None:
+    snapshot = _snapshot([_row('a1', RUN_A)], RUN_A)
+
+    assert _leaves(_cell(snapshot, 'doc'))[
+        1
+    ] == IdLabel(  # keys sorted: due, owner, seen
+        family=IdFamily.TASK, ordinal=1
+    )
+    assert _cell(snapshot, 'id') == IdLabel(family=IdFamily.TASK, ordinal=1)
+
+
+def test_a_changed_value_outside_the_paths_is_a_difference() -> None:
+    reference = _snapshot([_row('a1', RUN_A, doc='{"owner": "a1", "n": 1}')], RUN_A)
+    candidate = _snapshot([_row('b1', RUN_B, doc='{"owner": "b1", "n": 2}')], RUN_B)
+
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, candidate).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['doc']
+
+
+def test_an_integer_and_a_float_of_equal_value_differ() -> None:
+    reference = _snapshot([_row('a1', RUN_A, doc='{"n": 1}')], RUN_A)
+    candidate = _snapshot([_row('b1', RUN_B, doc='{"n": 1.0}')], RUN_B)
+
+    assert len(compare_snapshots(reference, candidate).entries) == 1
+
+
+def test_document_clock_paths_rank_and_window_their_values() -> None:
+    rows = [
+        _row(
+            'a1',
+            RUN_A,
+            doc=json.dumps(
+                {
+                    'owner': 'a1',
+                    'due': '2030-01-02T00:00:00+00:00',
+                    'seen': '2001-01-01T00:00:00+00:00',
+                }
+            ),
+        ),
+        _row(
+            'a2',
+            RUN_A,
+            doc=json.dumps(
+                {
+                    'owner': 'a2',
+                    'due': '2030-01-01T00:00:00+00:00',
+                    'seen': RUN_A.isoformat(),
+                }
+            ),
+        ),
+    ]
+
+    table = _snapshot(rows, RUN_A).table('runs')
+
+    leaves = sorted(
+        (_leaves(row[table.rules.position('doc')]) for row in table.rows),
+        key=lambda leaf: str(leaf[0]),
+    )
+    assert [leaf[0] for leaf in leaves] == [TimeRank(rank=1), TimeRank(rank=2)]
+    assert leaves[0][2] == DuringRun()
+    assert isinstance(leaves[1][2], LiteralTime)
+
+
+def test_task_options_rank_their_good_until() -> None:
+    late = '{"good_until":"2030-01-02T00:00:00+00:00"}'
+    early = '{"good_until":"2030-01-01T00:00:00+00:00"}'
+    table = _snapshot(
+        [_row('a1', RUN_A, options=late), _row('a2', RUN_A, options=early)], RUN_A
+    ).table('runs')
+
+    ranks = sorted(
+        str(_leaves(row[table.rules.position('options')])) for row in table.rows
+    )
+    assert ranks == [str([TimeRank(rank=1)]), str([TimeRank(rank=2)])]
+
+
+@pytest.mark.parametrize(
+    ('doc', 'cause_part'),
+    [
+        pytest.param('{"owner": ', 'JSONDecodeError', id='truncated'),
+        pytest.param('{"n": NaN}', 'NaN is not valid JSON', id='nan'),
+        pytest.param('{"owner": 12}', 'not text', id='id-path-holds-a-number'),
+        pytest.param(
+            '{"due": "tomorrow"}', 'clock path', id='clock-path-holds-other-text'
+        ),
+        pytest.param('[' * 70 + ']' * 70, 'nesting deeper than 64', id='too-deep'),
+    ],
+)
+def test_an_unreadable_document_is_an_error(doc: str, cause_part: str) -> None:
+    match _normalized([_row('a1', RUN_A, doc=doc)], RUN_A):
+        case Err(UnreadableJson(table='runs', column='doc', cause=cause)):
+            assert cause_part in cause
+        case other:
+            raise AssertionError(f'expected UnreadableJson, got {other}')
+
+
+def test_a_null_document_is_null() -> None:
+    row = _row('a1', RUN_A)
+    snapshot = _snapshot([(*row[:2], None, *row[3:])], RUN_A)
+
+    assert _cell(snapshot, 'doc') == NullValue()
+
+
+# ---- Attempt archive ----
+
+
+def test_archive_times_and_worker_ids_are_normalized_field_by_field() -> None:
+    snapshot = _snapshot([_row('a1', RUN_A)], RUN_A)
+
+    leaves = _leaves(_cell(snapshot, 'archive'))
+    assert leaves == [
+        DuringRun(),
+        DuringRun(),
+        IdLabel(family=IdFamily.WORKER, ordinal=1),
+    ]
+    assert _cell(snapshot, 'worker') == IdLabel(family=IdFamily.WORKER, ordinal=1)
+
+
+def test_archives_of_two_runs_compare_equal_and_a_changed_outcome_differs() -> None:
+    reference = _snapshot([_row('a1', RUN_A)], RUN_A)
+    candidate = _snapshot([_row('b1', RUN_B)], RUN_B)
+    changed_archive = _archive('b1-worker', RUN_B).replace(
+        b'"FAILED"', b'"WORKER_FAILURE"'
+    )
+    changed_row = _row('b1', RUN_B)
+    changed = _snapshot(
+        [
+            (
+                *changed_row[:5],
+                _hex(changed_archive),
+                _hex(hashlib.sha256(changed_archive).digest()),
+                changed_row[7],
+            )
+        ],
+        RUN_B,
+    )
+
+    assert compare_snapshots(reference, candidate).entries == ()
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, changed).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['archive']
+
+
+def test_an_archive_of_another_format_version_is_an_error() -> None:
+    outcome = _normalized([_row('a1', RUN_A, version='2')], RUN_A)
+
+    assert outcome == Err(
+        UnsupportedStoredFormat(
+            table='runs',
+            column='archive',
+            version_column='attempt_archive_version',
+            found='2',
+        ),
+    )
+
+
+def test_archive_bytes_that_are_not_utf8_are_an_error() -> None:
+    row = _row('a1', RUN_A)
+    outcome = _normalized([(*row[:5], '\\xff00', *row[6:])], RUN_A)
+
+    match outcome:
+        case Err(UnreadableJson(column='archive')):
+            pass
+        case _:
+            raise AssertionError(f'expected UnreadableJson for archive, got {outcome}')
+
+
+# ---- Digests ----
+
+
+def test_a_digest_of_its_source_matches() -> None:
+    assert (
+        _cell(_snapshot([_row('a1', RUN_A)], RUN_A), 'archive_digest')
+        == DigestMatches()
+    )
+
+
+def test_a_digest_of_other_bytes_does_not_match() -> None:
+    other = _hex(hashlib.sha256(b'other').digest())
+
+    assert (
+        _cell(_snapshot([_row('a1', RUN_A, digest=other)], RUN_A), 'archive_digest')
+        == DigestMismatch()
+    )
+
+
+def test_a_digest_that_is_not_bytea_text_is_an_error() -> None:
+    outcome = _normalized([_row('a1', RUN_A, digest='not hex')], RUN_A)
+
+    assert outcome == Err(UnreadableBytes(table='runs', column='archive_digest'))
+
+
+# ---- Generated names ----
+
+
+@pytest.mark.parametrize(
+    ('name', 'expected'),
+    [
+        pytest.param(
+            'horsies_task_history_standard_30d_2026_01_02',
+            DatedName(
+                prefix='horsies_task_history_standard_30d',
+                unit=CalendarUnit.DAY,
+                offset=1,
+            ),
+            id='daily-next-day',
+        ),
+        pytest.param(
+            'horsies_task_history_standard_30d_open_2026_01_01',
+            DatedName(
+                prefix='horsies_task_history_standard_30d_open',
+                unit=CalendarUnit.DAY,
+                offset=0,
+            ),
+            id='open-ended',
+        ),
+        pytest.param(
+            'horsies_heartbeats_2026_01_01_09',
+            DatedName(prefix='horsies_heartbeats', unit=CalendarUnit.HOUR, offset=-1),
+            id='hourly-previous-hour',
+        ),
+        pytest.param(
+            'horsies_task_history_forever_open',
+            ExactValue(text='horsies_task_history_forever_open'),
+            id='undated',
+        ),
+        pytest.param(
+            'horsies_heartbeats_2026_02_30',
+            ExactValue(text='horsies_heartbeats_2026_02_30'),
+            id='invalid-date',
+        ),
+    ],
+)
+def test_generated_names_become_offsets_from_the_run_start(
+    name: str, expected: NormalizedValue
+) -> None:
+    assert generated_name(name, _window(RUN_A)) == expected
+
+
+def test_leaves_at_the_same_offset_from_two_runs_compare_equal_and_one_day_later_differs() -> (
+    None
+):
+    reference = _snapshot([_row('a1', RUN_A)], RUN_A)
+    candidate = _snapshot([_row('b1', RUN_B)], RUN_B)
+    later = _snapshot(
+        [
+            _row(
+                'b1',
+                RUN_B,
+                leaf=f'horsies_task_history_standard_30d_{RUN_B + timedelta(days=1):%Y_%m_%d}',
+            )
+        ],
+        RUN_B,
+    )
+
+    assert compare_snapshots(reference, candidate).entries == ()
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, later).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['leaf']

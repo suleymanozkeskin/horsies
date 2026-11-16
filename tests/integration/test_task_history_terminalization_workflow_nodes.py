@@ -117,7 +117,7 @@ class TestWorkflowCancelSingle:
             task_id, _ = await seeded_workflow_task(
                 connection,
                 workflow_status='CANCELLED',
-                node_status='CANCELLED',
+                node_status='ENQUEUED',
                 task_status='PENDING',
                 worker=None,
             )

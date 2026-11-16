@@ -26,6 +26,8 @@ from tests.broker_resources_support import current_resources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEDULER_INSTANCE = 'tests.e2e.tasks.instance_scheduler:app'
+# A 32-byte config_hash (the column's length) that no schedule config hashes to.
+CORRUPTED_CONFIG_HASH = bytes(32)
 
 
 # =============================================================================
@@ -52,7 +54,6 @@ async def test_schedule_persistence(scheduler_broker: PostgresBroker) -> None:
             await asyncio.sleep(0.1)
 
         assert state is not None, 'Schedule state should exist in DB'
-        assert state.next_run_at is not None, 'next_run_at should be set'
         assert state.next_run_at > datetime.now(
             timezone.utc
         ), 'next_run_at should be in the future'
@@ -429,10 +430,11 @@ async def test_config_hash_change_recalculates_next_run(
             text(
                 """
                 UPDATE horsies_schedule_state
-                SET config_hash = 'corrupted_hash'
+                SET config_hash = :corrupted_hash
                 WHERE schedule_name = 'e2e_scheduled_simple_interval'
             """
-            )
+            ),
+            {'corrupted_hash': CORRUPTED_CONFIG_HASH},
         )
         await session.commit()
 
@@ -445,7 +447,7 @@ async def test_config_hash_change_recalculates_next_run(
                 state = await session.get(
                     ScheduleStateModel, 'e2e_scheduled_simple_interval'
                 )
-            if state is not None and state.config_hash != 'corrupted_hash':
+            if state is not None and state.config_hash != CORRUPTED_CONFIG_HASH:
                 corrected = True
                 assert state.config_hash == original_hash, (
                     f'Config hash should be restored to {original_hash}, '
@@ -525,11 +527,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
                     state = await session.get(
                         ScheduleStateModel, 'e2e_schedule_catch_up'
                     )
-                if (
-                    state is not None
-                    and state.next_run_at is not None
-                    and state.next_run_at > past_time
-                ):
+                if state is not None and state.next_run_at > past_time:
                     scheduler_processed = True
                     break
                 await asyncio.sleep(0.3)
@@ -668,7 +666,6 @@ async def test_cron_schedule_fires_on_due_minute(
             if (
                 state is not None
                 and state.run_count >= 1
-                and state.next_run_at is not None
                 and state.next_run_at > due_slot
             ):
                 fired = True
