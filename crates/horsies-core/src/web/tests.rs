@@ -72,11 +72,16 @@ impl SequenceReader {
 
 #[async_trait]
 impl SchemaReader for SequenceReader {
-    async fn read(&self, _expected_version: i64) -> Result<SchemaStatus, sqlx::Error> {
+    async fn read(
+        &self,
+        _expected_version: i64,
+    ) -> Result<SchemaStatus, crate::broker::BrokerError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         match self.answers.lock().await.pop_front() {
             Some(ReaderAnswer::Status(status)) => Ok(status),
-            Some(ReaderAnswer::Failure) | None => Err(sqlx::Error::PoolClosed),
+            Some(ReaderAnswer::Failure) | None => Err(
+                crate::broker::BrokerError::ConnectionFailed("the test reader fails".to_owned()),
+            ),
         }
     }
 }
@@ -220,6 +225,7 @@ async fn every_declared_api_route_is_view_authorized() {
         "/api/workflows/00000000-0000-4000-8000-000000000002/tasks/0",
         "/api/workers/ping",
         "/api/workers/schedules",
+        "/api/workers/classes",
         "/api/workers",
         "/api/workers/w1/history",
         "/api/events",
@@ -823,6 +829,304 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     );
 }
 
+/// Python `test_web_api.py::TestWorkerReads::test_worker_list_carries_the_slot_health`.
+#[tokio::test]
+#[serial]
+async fn worker_list_carries_the_slot_health() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let worker_id = format!("itest-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now(), 'itest-host', 4242, 2, 0, 2,
+            ARRAY['default'], '{}'::jsonb, '{\"default\": 3}'::jsonb, '{}'::jsonb,
+            0, 0, now(),
+            $2, '{}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .bind(serde_json::json!([{
+        "slot": 1,
+        "cause": {"kind": "resource_shortage", "errno": "EMFILE"},
+        "detail": "OSError: [Errno 24] Too many open files",
+        "down_since": "2026-11-10T12:00:00+00:00",
+        "failed_boots": 2,
+    }]))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let worker = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["worker_id"] == worker_id.as_str())
+        .expect("the worker is listed");
+    assert_eq!(worker["slot_health"], "slots_down");
+    assert_eq!(
+        worker["down_slots"],
+        serde_json::json!([{
+            "slot": 1,
+            "cause": "the OS ran short of a resource (EMFILE)",
+            "detail": "OSError: [Errno 24] Too many open files",
+            "down_since": "2026-11-10T12:00:00Z",
+            "failed_boots": 2,
+        }])
+    );
+    assert_eq!(
+        worker["queue_max_concurrency"],
+        serde_json::json!({"default": 3})
+    );
+}
+
+/// A listed state of a worker that started at `worker_started_at`, whose
+/// snapshot is at `snapshot_at`, read by a list statement at `read_at`.
+fn listed_worker(
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+    worker_started_at: chrono::DateTime<chrono::Utc>,
+    read_at: chrono::DateTime<chrono::Utc>,
+) -> crate::broker::health::ListedWorkerState {
+    let stored = crate::broker::health::StoredWorkerState {
+        worker_id: "w-clock".to_owned(),
+        snapshot_at,
+        hostname: "itest-host".to_owned(),
+        pid: 4242,
+        processes: 2,
+        max_claim_batch: 0,
+        max_claim_per_worker: 2,
+        cluster_wide_cap: None,
+        queues: vec!["default".to_owned()],
+        queue_priorities: serde_json::json!({}),
+        queue_max_concurrency: serde_json::json!({}),
+        recovery_config: serde_json::json!({}),
+        tasks_running: 0,
+        tasks_claimed: 0,
+        memory_usage_mb: None,
+        memory_percent: None,
+        cpu_percent: None,
+        children_memory_mb: None,
+        worker_started_at,
+        slots_down: serde_json::json!([]),
+        class_capacity: serde_json::json!({}),
+    };
+    crate::broker::health::ListedWorkerState {
+        snapshot: stored.into_snapshot().expect("a readable stored row"),
+        read_at,
+    }
+}
+
+/// The worker list measures the snapshot age, the staleness and the uptime
+/// to the database clock of the list statement, not to the web host clock
+/// (#765). The instants are days before any run of this test, so an age
+/// measured to the host clock is days long and stale.
+#[test]
+fn worker_list_ages_are_measured_to_the_read_time() {
+    let snapshot_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
+        .single()
+        .expect("a valid instant");
+    let started_at = snapshot_at - chrono::TimeDelta::hours(1);
+    let threshold = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64;
+
+    let fresh = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(30),
+    ));
+    let at_threshold = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(threshold),
+    ));
+    let past_threshold = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(threshold + 1),
+    ));
+
+    assert_eq!(fresh.snapshot_age_s, Some(30));
+    assert!(!fresh.stale);
+    assert_eq!(fresh.uptime_s, Some(3_630));
+    assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
+    assert!(!at_threshold.stale, "stale only past the live window");
+    assert_eq!(past_threshold.snapshot_age_s, Some(threshold + 1));
+    assert!(past_threshold.stale);
+}
+
+/// A snapshot written ten minutes before the read in database time is stale,
+/// whatever the web host clock is (#765). Python
+/// `test_web_api.py::TestWorkerReads::test_worker_list_answers` for the
+/// shape: 200 and a JSON array.
+#[tokio::test]
+#[serial]
+async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let worker_id = format!("itest-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now() - interval '10 minutes', 'itest-host', 4242, 2, 0, 2,
+            ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, now() - interval '1 hour',
+            '[]'::jsonb, '{}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let worker = body
+        .as_array()
+        .expect("the worker list is a JSON array")
+        .iter()
+        .find(|entry| entry["worker_id"] == worker_id.as_str())
+        .expect("the worker is listed");
+    assert_eq!(worker["stale"], true);
+    let age = worker["snapshot_age_s"]
+        .as_i64()
+        .expect("an age in seconds");
+    assert!(age >= 600, "snapshot_age_s {age}");
+    let uptime = worker["uptime_s"].as_i64().expect("an uptime in seconds");
+    assert!(uptime >= 3_600, "uptime_s {uptime}");
+}
+
+/// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
+/// The web tests share one database, so the test reads only its own queue
+/// and worker.
+#[tokio::test]
+#[serial]
+async fn class_report_answers_with_streams_and_budgets() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let worker_id = format!("w-async-{suffix}");
+    let queue = format!("q-{}", &suffix[..12]);
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now(), 'itest-host', 4242, 2, 0, 2,
+            ARRAY[$2::text], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, now(), '[]'::jsonb,
+            '{\"SHARED_ASYNC\": {\"capacity\": 8, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let task_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            is_workflow_task, retry_count, max_retries, command_fingerprint_version,
+            command_fingerprint, retention_class_key, retain_rerun_input, created_at,
+            updated_at, execution
+        ) VALUES (
+            $1, 'class_report_task', $2, 100, 'null', 'PENDING', NOW(), NOW() - interval '5 seconds',
+            FALSE, 0, 3, 1, decode(repeat('0d', 32), 'hex'), 'forever', FALSE, NOW(),
+            NOW(), 'ISOLATED'
+        )",
+    )
+    .bind(task_id)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers/classes"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["live_window_s"], 120);
+    assert!(body.get("not_recorded").is_none());
+    let streams: Vec<&serde_json::Value> = body["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|stream| stream["queue_name"] == queue.as_str())
+        .collect();
+    let [stream] = streams.as_slice() else {
+        panic!("one stream of the test queue: {body}");
+    };
+    assert_eq!(stream["execution"], "ISOLATED");
+    assert_eq!(stream["coverage"], serde_json::json!({"kind": "unserved"}));
+    assert_eq!(stream["wait"]["kind"], "waiting");
+    let worker = body["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["worker_id"] == worker_id.as_str())
+        .expect("the live worker is listed");
+    assert_eq!(
+        worker["budgets"],
+        serde_json::json!([{
+            "budget": "SHARED_ASYNC",
+            "capacity": 8,
+            "serves": ["SHARED_ASYNC"],
+            "in_flight": 0,
+            "free": 8,
+        }])
+    );
+}
+
 async fn clean_w4(pool: &PgPool, prefix: &str) {
     let pattern = format!("{prefix}%");
     for statement in [
@@ -840,8 +1144,13 @@ async fn clean_w4(pool: &PgPool, prefix: &str) {
 
 async fn migrated_state() -> WebState {
     let pool = migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
-    let app = Horsies::new(AppConfig::for_database_url(migrated_database_url().await)).unwrap();
+    let database_url = migrated_database_url().await;
+    // The worker ping route needs the broker's listener.
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        pool,
+        &database_url,
+    ));
+    let app = Horsies::new(AppConfig::for_database_url(database_url)).unwrap();
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
@@ -942,6 +1251,7 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
         "/api/workflows",
         "/api/workers/ping?timeout_seconds=0.1",
         "/api/workers/schedules",
+        "/api/workers/classes",
         "/api/workers",
         "/api/workers/never/history",
     ];
@@ -1009,9 +1319,12 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
 
 #[tokio::test]
 #[serial]
-async fn broadcaster_uses_its_own_listener_and_batches_real_notify_bursts() {
+async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_bursts() {
     let pool = migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        pool.clone(),
+        &migrated_database_url().await,
+    ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
     let mut subscription = broadcaster.subscribe().await;
 
@@ -1047,6 +1360,72 @@ async fn broadcaster_uses_its_own_listener_and_batches_real_notify_bursts() {
     assert_eq!(events[1].topic, "workers");
     assert_eq!(events[2].topic, "workflows");
     broadcaster.close().await;
+}
+
+/// The listener loses its connection: it connects again and LISTENs again,
+/// and the stream sends one event with no ids per topic, because
+/// notifications sent in between are lost.
+#[tokio::test]
+#[serial]
+async fn a_listener_gap_sends_one_refresh_per_topic() {
+    let pool = migrated_pool().await;
+    let url = migrated_database_url().await;
+    let application_name = format!("web_events_gap_{}", Uuid::new_v4().simple());
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        pool.clone(),
+        &format!("{url}{separator}application_name={application_name}"),
+    ));
+    let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
+    let mut subscription = broadcaster.subscribe().await;
+
+    let terminated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+             WHERE application_name = $1
+         ) AS killed",
+    )
+    .bind(&application_name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(terminated, 1, "exactly the listener backend is terminated");
+
+    // Events with ids come from other writers of the shared test database;
+    // the refreshes are the events with no ids.
+    let mut refreshed = std::collections::BTreeSet::new();
+    while refreshed.len() < CHANNEL_TOPICS.len() {
+        let event = tokio::time::timeout(Duration::from_secs(10), subscription.recv())
+            .await
+            .expect("refresh timeout")
+            .expect("subscription open")
+            .expect("not degraded");
+        if event.ids.is_empty() {
+            refreshed.insert(event.topic);
+        }
+    }
+    let topics: Vec<&str> = refreshed.iter().map(String::as_str).collect();
+    assert_eq!(topics, ["tasks", "workers", "workflows"]);
+    broadcaster.close().await;
+}
+
+/// A session URL that cannot be reached: the subscriptions fail to start and
+/// every client reads the degraded marker.
+#[tokio::test]
+async fn a_listener_that_cannot_start_degrades_the_stream() {
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        lazy_pool(),
+        "postgresql://postgres:pw@127.0.0.1:1/none",
+    ));
+    let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(25));
+    let mut subscription = broadcaster.subscribe().await;
+
+    let item = tokio::time::timeout(Duration::from_secs(5), subscription.recv())
+        .await
+        .expect("degraded marker timeout");
+
+    assert_eq!(item, Some(None));
+    assert!(broadcaster.degraded());
 }
 
 #[tokio::test]

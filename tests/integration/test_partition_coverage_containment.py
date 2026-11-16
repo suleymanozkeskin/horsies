@@ -6,9 +6,11 @@ after it silently stopped getting leaves — and because the trigger is a
 registered row rather than a declaration, removing the declaration could
 not clear it.
 
-The trigger is planted the only way it can now occur: written straight to
-`horsies_retention_classes`, since configuration refuses the key. That is
-also the shape a deployment would be left in by a version that accepted it.
+On the baseline a class that cannot be named cannot be stored: CHECK
+`horsies_retention_classes_kind_shape` holds every period key to
+`standard_<days>d`. The failures that remain reachable are a class whose
+next leaf name is taken (a returned refusal) and a class whose parent
+relation an operator dropped (a database error).
 
 Coverage is idempotent, so a pass proves it served a class only when that
 pass owes the class a leaf. Each count-based test registers its own passing
@@ -21,8 +23,10 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
+import psycopg
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.maintenance.coverage import (
@@ -51,13 +55,16 @@ from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-# 35 characters: past the length at which `daily_leaf_name` raises, and
-# below the length at which the parent name would raise first. Leading
-# 'a' so it sorts BEFORE the default class, which is the whole point —
-# the class denied coverage must be one the loop reaches afterwards.
+# 35 characters: past the length at which `daily_leaf_name` raises. The
+# baseline refuses to store it.
 _UNUSABLE_KEY = 'a' + 'k' * 34
-_RAISE_SURVIVOR_KEY = 'z_raise_survivor_7d'
-_RETURN_SURVIVOR_KEY = 'z_return_survivor_7d'
+# Period keys of the baseline form. The refusing class sorts BEFORE the
+# default class (standard_30d) and the survivor sorts after both, so the
+# survivor is reached only if the loop survives the refusing class.
+_REFUSING_KEY = 'standard_1000d'
+_REFUSING_DAYS = 1000
+_RETURN_SURVIVOR_KEY = 'standard_9d'
+_RETURN_SURVIVOR_DAYS = 9
 
 
 async def _leaf_count(broker: PostgresBroker, class_key: str) -> int:
@@ -73,13 +80,15 @@ async def _leaf_count(broker: PostgresBroker, class_key: str) -> int:
         ).scalar_one()
 
 
-async def _register_owned_class(broker: PostgresBroker, class_key: str) -> None:
+async def _register_owned_class(
+    broker: PostgresBroker, class_key: str, days: int
+) -> None:
     await _forget_owned_class(broker, class_key)
     async with current_resources(broker).engine.begin() as connection:
         registration = await register_finite_retention_class(
             connection,
             class_key=class_key,
-            duration=timedelta(days=7),
+            duration=timedelta(days=days),
         )
     assert isinstance(registration, ClassRegistered), registration
 
@@ -98,95 +107,30 @@ async def _forget_owned_class(broker: PostgresBroker, class_key: str) -> None:
         )
 
 
-async def _plant_unusable_class(broker: PostgresBroker) -> None:
-    async with current_resources(broker).engine.begin() as connection:
-        await connection.execute(
-            text(
-                f"""
-                INSERT INTO {RETENTION_CLASSES} (
-                    class_key, duration, partition_interval,
-                    finite_parent_name, created_at
-                ) VALUES (
-                    :key, :duration, :interval, :parent,
-                    statement_timestamp()
-                )
-                ON CONFLICT (class_key) DO NOTHING
-                """
-            ),
-            {
-                'key': _UNUSABLE_KEY,
-                'duration': timedelta(days=5),
-                'interval': timedelta(days=1),
-                'parent': f'horsies_task_history_{_UNUSABLE_KEY}',
-            },
-        )
+async def test_the_keys_sort_in_the_order_the_tests_rest_on() -> None:
+    """Guard the premise: the pass reaches the survivor after the refusal."""
+    assert _REFUSING_KEY < DEFAULT_RETENTION_CLASS_KEY < _RETURN_SURVIVOR_KEY
 
 
-async def _forget_unusable_class(broker: PostgresBroker) -> None:
-    async with current_resources(broker).engine.begin() as connection:
-        await connection.execute(
-            text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
-            {'key': _UNUSABLE_KEY},
-        )
-        await connection.execute(
-            text(f'DELETE FROM {RETENTION_CLASSES} WHERE class_key = :key'),
-            {'key': _UNUSABLE_KEY},
-        )
-
-
-async def test_a_class_that_cannot_be_named_does_not_deny_the_others() -> None:
-    """Guard the premise the test rests on."""
-    assert len(_UNUSABLE_KEY) > MAX_RETENTION_CLASS_KEY_LENGTH
-    assert _UNUSABLE_KEY < DEFAULT_RETENTION_CLASS_KEY, (
-        'the unusable key must sort first or the test proves nothing'
-    )
-
-
-async def test_coverage_contains_the_failure_and_keeps_going(
+async def test_the_database_refuses_a_class_that_cannot_be_named(
     broker: PostgresBroker,
 ) -> None:
-    async with current_resources(broker).engine.begin() as connection:
-        baseline = await ensure_partition_coverage(
-            connection, history_horizon_days=2, heartbeat_horizon_hours=3
-        )
-    assert isinstance(baseline, CoverageEnsured), baseline
-
-    await _register_owned_class(broker, _RAISE_SURVIVOR_KEY)
-    horizon = 3
-    owed = horizon + 1
-    assert await _leaf_count(broker, _RAISE_SURVIVOR_KEY) == 0
-
-    await _plant_unusable_class(broker)
-    try:
-        # The owned class is OWED leaves and can only receive them if the
-        # loop survived the class sorting ahead of it, so the count is
-        # the containment evidence.
+    """The planted row the pass once had to survive cannot be stored."""
+    assert len(_UNUSABLE_KEY) > MAX_RETENTION_CLASS_KEY_LENGTH
+    with pytest.raises(IntegrityError) as refused:
         async with current_resources(broker).engine.begin() as connection:
-            outcome = await ensure_partition_coverage(
-                connection,
-                history_horizon_days=horizon,
-                heartbeat_horizon_hours=3,
+            await connection.execute(
+                text(
+                    f'INSERT INTO {RETENTION_CLASSES} ('
+                    'class_key, class_kind, retention_days, '
+                    'heartbeat_horizon_hours, created_at) VALUES ('
+                    ":key, 'PERIOD', 5, NULL, statement_timestamp())"
+                ),
+                {'key': _UNUSABLE_KEY},
             )
-
-        assert isinstance(outcome, CoverageEnsureFailed), (
-            'the pass must report the failure rather than raise through '
-            f'its caller: {outcome!r}'
-        )
-        assert _UNUSABLE_KEY in outcome.refusal, (
-            f'the refusal must name the class that failed: {outcome!r}'
-        )
-        assert await _leaf_count(broker, _RAISE_SURVIVOR_KEY) == owed, (
-            'a class sorting after the unusable one was denied its leaf; '
-            'the failure is still taking the rest of the pass with it'
-        )
-    finally:
-        await _forget_unusable_class(broker)
-        await _forget_owned_class(broker, _RAISE_SURVIVOR_KEY)
-
-
-# A key that sorts BEFORE the default class, as the `q_` keys of
-# registries written before 0.6.1 do: `q_` < `standard_` in byte order.
-_REFUSING_KEY = 'q_broken_7d'
+    orig = refused.value.orig
+    assert isinstance(orig, psycopg.errors.CheckViolation), orig
+    assert orig.diag.constraint_name == 'horsies_retention_classes_kind_shape'
 
 
 async def _plant_class_row(connection: Any) -> None:
@@ -195,21 +139,15 @@ async def _plant_class_row(connection: Any) -> None:
         text(
             f"""
             INSERT INTO {RETENTION_CLASSES} (
-                class_key, duration, partition_interval,
-                finite_parent_name, created_at
+                class_key, class_kind, retention_days,
+                heartbeat_horizon_hours, created_at
             ) VALUES (
-                :key, :duration, :interval, :parent,
-                statement_timestamp()
+                :key, 'PERIOD', :days, NULL, statement_timestamp()
             )
             ON CONFLICT (class_key) DO NOTHING
             """
         ),
-        {
-            'key': _REFUSING_KEY,
-            'duration': timedelta(days=7),
-            'interval': timedelta(days=1),
-            'parent': f'horsies_task_history_{_REFUSING_KEY}',
-        },
+        {'key': _REFUSING_KEY, 'days': _REFUSING_DAYS},
     )
 
 
@@ -274,7 +212,9 @@ async def _plant_class_with_squatted_leaf(broker: PostgresBroker) -> str:
     """
     async with current_resources(broker).engine.begin() as connection:
         registration = await register_finite_retention_class(
-            connection, class_key=_REFUSING_KEY, duration=timedelta(days=7)
+            connection,
+            class_key=_REFUSING_KEY,
+            duration=timedelta(days=_REFUSING_DAYS),
         )
         assert isinstance(
             registration, (ClassRegistered, ClassAlreadyRegistered)
@@ -299,7 +239,7 @@ async def test_a_returned_refusal_is_contained_like_a_raise(
     never reaches an exception handler, so the pass used to return on
     the first one and deny coverage to every class sorting after it.
     """
-    await _register_owned_class(broker, _RETURN_SURVIVOR_KEY)
+    await _register_owned_class(broker, _RETURN_SURVIVOR_KEY, _RETURN_SURVIVOR_DAYS)
     horizon = 5
     owed = horizon + 1
     assert await _leaf_count(broker, _RETURN_SURVIVOR_KEY) == 0
@@ -397,7 +337,8 @@ async def test_a_database_error_does_not_poison_the_pass(
 # this file refuses at offset 0 or raises first, so none of them can tell
 # the two apart. This one makes the class CREATE and THEN refuse.
 
-_SURVIVOR_KEY = 'q_survivor_7d'
+_SURVIVOR_KEY = 'standard_11d'
+_SURVIVOR_DAYS = 11
 
 
 async def _drop_if_present(broker: PostgresBroker, relation: str) -> None:
@@ -472,7 +413,7 @@ async def test_a_refusal_keeps_the_leaves_created_before_it(
             registration = await register_finite_retention_class(
                 connection,
                 class_key=_SURVIVOR_KEY,
-                duration=timedelta(days=7),
+                duration=timedelta(days=_SURVIVOR_DAYS),
             )
             assert isinstance(
                 registration, (ClassRegistered, ClassAlreadyRegistered)

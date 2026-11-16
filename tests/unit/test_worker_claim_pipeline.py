@@ -40,9 +40,6 @@ from horsies.core.worker.sql import (
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-    READ_IN_FLIGHT_ATTEMPT_SQL,
-    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
 )
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
@@ -288,14 +285,15 @@ class TestOwnershipGateBehavioral:
     """Behavioral tests for _confirm_ownership_and_set_running.
 
     Exercises three code paths by mocking _get_worker_pool:
-    1. Ownership confirmed (UPDATE returns a row)
-    2. Ownership lost (UPDATE returns None, no workflow status)
+    1. Ownership confirmed (horsies_start_attempt answers STARTED)
+    2. Ownership lost (it answers MISSED with NOT_HELD)
     3. Exception path (pool raises)
     """
 
     def test_ownership_confirmed_returns_none_and_commits(self) -> None:
-        """When UPDATE RETURNING returns a row, ownership is confirmed."""
-        cursor = _FakeCursor(fetchone_return=('task-1',))
+        """When the start answers STARTED, ownership is confirmed; the
+        statement committed alone in autocommit."""
+        cursor = _FakeCursor(fetchone_return=('STARTED', None))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -315,22 +313,13 @@ class TestOwnershipGateBehavioral:
             )
 
         assert result is None, 'Ownership confirmed should return None'
-        assert conn.commits == 1, 'Should commit on ownership confirmation'
-        assert conn.rollbacks == 0, 'No rollback on success'
+        assert len(cursor.queries) == 1
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_ownership_lost_returns_claim_lost_and_rollbacks(self) -> None:
-        """When UPDATE RETURNING returns None and no workflow status, returns CLAIM_LOST."""
-        # First fetchone (UPDATE RETURNING) → None (ownership lost)
-        # Second fetchone (workflow status check) → None (not a workflow task)
-        call_count = 0
-
-        class _MultiReturnCursor(_FakeCursor):
-            def fetchone(self) -> Any:
-                nonlocal call_count
-                call_count += 1
-                return None  # Both UPDATE and workflow check return None
-
-        cursor = _MultiReturnCursor()
+        """When the start answers NOT_HELD, returns CLAIM_LOST with no other
+        statement."""
+        cursor = _FakeCursor(fetchone_return=('MISSED', 'NOT_HELD'))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -355,9 +344,8 @@ class TestOwnershipGateBehavioral:
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'CLAIM_LOST'
-        assert conn.rollbacks == 2, 'The start that missed, then the miss path'
-        assert conn.commits == 0, 'No commit on ownership loss'
-        assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
+        assert len(cursor.queries) == 1
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_exception_returns_ownership_unconfirmed(self) -> None:
         """When pool raises an exception, returns OWNERSHIP_UNCONFIRMED."""
@@ -411,7 +399,7 @@ class TestOwnershipGateBehavioral:
         assert conn.commits == 0
 
     def test_an_allowed_start_runs_the_update(self) -> None:
-        cursor = _FakeCursor(fetchone_return=('task-1',))
+        cursor = _FakeCursor(fetchone_return=('STARTED', None))
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -429,7 +417,7 @@ class TestOwnershipGateBehavioral:
 
         assert result is None
         assert len(cursor.queries) == 1
-        assert conn.commits == 1
+        assert conn.commits == 0
 
 
 # ---------------------------------------------------------------------------
@@ -480,8 +468,8 @@ class TestLeaseRenewalSql:
 
 @pytest.mark.unit
 class TestUnclaimSqlClearsLeaseExpiry:
-    """Both unclaim SQL variants must clear claim_expires_at to prevent
-    stale lease timestamps from persisting on re-queued tasks.
+    """The paused-task cleanup must clear claim_expires_at, so no stale
+    lease timestamp persists on a re-queued task.
     """
 
     def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
@@ -491,38 +479,6 @@ class TestUnclaimSqlClearsLeaseExpiry:
         assert 'claim_expires_at = NULL' in normalised
         assert "status = 'CANCELLED'" in normalised
         assert "error_code = 'TASK_CANCELLED'" in normalised
-
-    def test_unclaim_claimed_task_clears_claim_expires_at(self) -> None:
-        """UNCLAIM_CLAIMED_TASK_SQL must SET claim_expires_at = NULL."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-
-    @pytest.mark.parametrize(
-        'statement',
-        [
-            UNCLAIM_CLAIMED_TASK_SQL,
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-            RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
-        ],
-        ids=['release', 'in-flight read', 'class return'],
-    )
-    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
-        """Each statement fences on the claim time of the dispatch. A NULL
-        claim time matches no row: nothing can turn the check off."""
-        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
-
-        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
-        assert 'IS NULL' not in where
-        assert 'COALESCE' not in where
-
-    def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
-        """Pre-execution unclaim must not reset potentially executed RUNNING rows."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "status = 'CLAIMED'" in normalised
-        assert "status IN ('CLAIMED', 'RUNNING')" not in normalised
-        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
@@ -567,12 +523,3 @@ class TestUnclaimSqlClearsLeaseExpiry:
                 'OR ctx.claimed_at = ctx.expected_claimed_at'
                 in normalised
             )
-
-    def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
-        """RUNNING task requeue must clear stale runtime metadata."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'started_at = NULL' in normalised
-        assert 'worker_pid = NULL' in normalised
-        assert 'worker_hostname = NULL' in normalised
-        assert 'worker_process_name = NULL' in normalised

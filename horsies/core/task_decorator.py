@@ -89,6 +89,7 @@ from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, Ok, Err, Result
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
@@ -214,6 +215,20 @@ type _RetentionStamp = _FromQueueMapping | _ExplicitClass
 _SEND_RETRY_COUNT: Final[int] = 3
 _SEND_RETRY_INITIAL_MS: Final[int] = 200
 _SEND_RETRY_MAX_MS: Final[int] = 2000
+
+
+def _send_kind_of_attempt(first: SendKind, attempt: int) -> SendKind:
+    """The send kind of broker call ``attempt`` (0 is the first) of one send.
+
+    ``first`` is the kind of the first call: ``FIRST`` for a new send,
+    ``REPEAT`` for a retry method. Every later call of the resend loop sends
+    the same task id and ``sent_at`` again, so it is a ``REPEAT``. Pure.
+    """
+    match attempt:
+        case 0:
+            return first
+        case _:
+            return SendKind.REPEAT
 
 # The send variants that a broker error maps to.
 type _BrokerSendError = (
@@ -2068,8 +2083,13 @@ def create_task_wrapper(
     def _do_send(
         task_id: str,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core sync send logic. Used by send() and retry_send()."""
+        """Core sync send logic. Used by send() and retry_send().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         if in_running_event_loop():
             return Err(TaskSendAsyncContext(
                 task_id=task_id,
@@ -2099,6 +2119,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2131,8 +2152,13 @@ def create_task_wrapper(
     async def _do_send_async(
         task_id: str,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core async send logic. Used by send_async() and retry_send_async()."""
+        """Core async send logic. Used by send_async() and retry_send_async().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
@@ -2151,6 +2177,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2183,8 +2210,13 @@ def create_task_wrapper(
     def _do_schedule(
         task_id: str,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core sync schedule logic. Used by schedule() and retry_schedule()."""
+        """Core sync schedule logic. Used by schedule() and retry_schedule().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         if in_running_event_loop():
             return Err(TaskSendAsyncContext(
                 task_id=task_id,
@@ -2214,6 +2246,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2247,9 +2280,14 @@ def create_task_wrapper(
     async def _do_schedule_async(
         task_id: str,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core async schedule logic. Used by schedule_async() and
-        retry_schedule_async()."""
+        retry_schedule_async().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
@@ -2268,6 +2306,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2488,7 +2527,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return _do_send(task_id, payload)
+        return _do_send(task_id, payload, SendKind.FIRST)
 
     async def _send_async_with_options(
         args: tuple[Any, ...],
@@ -2527,7 +2566,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return await _do_send_async(task_id, payload)
+        return await _do_send_async(task_id, payload, SendKind.FIRST)
 
     def _stamped_class(
         stamp: _RetentionStamp, queue_name: str
@@ -2712,7 +2751,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return _do_schedule(task_id, payload)
+        return _do_schedule(task_id, payload, SendKind.FIRST)
 
     async def _schedule_async_with_options(
         delay: int,
@@ -2758,7 +2797,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return await _do_schedule_async(task_id, payload)
+        return await _do_schedule_async(task_id, payload, SendKind.FIRST)
 
     def send(
         *args: P.args,
@@ -2920,42 +2959,58 @@ def create_task_wrapper(
     def retry_send(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed send using the stored payload."""
+        """Retry a failed send using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, reject_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return _do_send(task_id, payload)
+        return _do_send(task_id, payload, SendKind.REPEAT)
 
     async def retry_send_async(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed async send using the stored payload."""
+        """Retry a failed async send using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, reject_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return await _do_send_async(task_id, payload)
+        return await _do_send_async(task_id, payload, SendKind.REPEAT)
 
     def retry_schedule(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed schedule using the stored payload."""
+        """Retry a failed schedule using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, require_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return _do_schedule(task_id, payload)
+        return _do_schedule(task_id, payload, SendKind.REPEAT)
 
     async def retry_schedule_async(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed async schedule using the stored payload."""
+        """Retry a failed async schedule using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, require_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return await _do_schedule_async(task_id, payload)
+        return await _do_schedule_async(task_id, payload, SendKind.REPEAT)
 
     class TaskFunctionImpl:
         """The members that both kinds share. A subclass adds `__call__`."""

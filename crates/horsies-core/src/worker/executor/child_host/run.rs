@@ -14,7 +14,9 @@ use crate::broker::claims::{
     release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
     ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
 };
-use crate::broker::{BrokerError, PostgresBroker, WorkflowStop, WorkflowStopBeforeStart};
+use crate::broker::{
+    BrokerError, PostgresBroker, PrestartExpiry, WorkflowStop, WorkflowStopBeforeStart,
+};
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
@@ -92,12 +94,12 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
         beat_sender_id: format!("{}:{}", facts.worker_id, context.pid),
     };
     for _ in 0..PRE_START_CONFIRM_ATTEMPTS {
-        let outcome = start_statement(
-            context.broker.core_main_pool(),
-            context.broker.statement_log(),
-            &command,
-        )
-        .await;
+        let outcome = match context.broker.core_pools_for_write() {
+            Ok((open, _write)) => {
+                start_statement(open.main(), context.broker.statement_log(), &command).await
+            }
+            Err(error) => Err(error),
+        };
         let missed = match outcome {
             Ok(StartOutcome::Started { .. }) => return Started::Running,
             Ok(StartOutcome::Missed(miss)) => after_missed_start(context, facts, miss).await,
@@ -150,7 +152,7 @@ async fn after_missed_start(
                 .expire_claimed_task_before_start(facts.task_id, &facts.worker_id)
                 .await?
             {
-                Some(_stored) => {
+                PrestartExpiry::Expired => {
                     tracing::info!(
                         task_id = %facts.task_id,
                         "Task {} expired before actual execution start; marked EXPIRED.",
@@ -158,7 +160,7 @@ async fn after_missed_start(
                     );
                     Ok(MissedStart::Stop(StopReason::TaskExpired))
                 }
-                None => Ok(claim_lost(facts)),
+                PrestartExpiry::NotExpired => Ok(claim_lost(facts)),
             }
         }
         StartMiss::NotHeld | StartMiss::LeaseExpired => Ok(claim_lost(facts)),
@@ -238,13 +240,13 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
         placement: ReleasePlacement::SameClass,
     };
     for send in 1..=START_RELEASE_SENDS {
-        match release_claims(
-            context.broker.core_main_pool(),
-            context.broker.statement_log(),
-            &command,
-        )
-        .await
-        {
+        let sent = match context.broker.core_pools_for_write() {
+            Ok((open, _write)) => {
+                release_claims(open.main(), context.broker.statement_log(), &command).await
+            }
+            Err(error) => Err(error),
+        };
+        match sent {
             Ok(outcomes) => {
                 let released = matches!(outcomes.as_slice(), [(_, ReleaseOutcome::Released)]);
                 tracing::warn!(
@@ -381,7 +383,7 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
 }
 
 /// The body of a blocking task on the calling thread. A panic is
-/// `UNHANDLED_ERROR`.
+/// `UNHANDLED_EXCEPTION`.
 pub(super) fn run_blocking_body(
     task: &Arc<dyn crate::core::task::fn_trait::BlockingTaskFn>,
     input: &[u8],
@@ -389,7 +391,7 @@ pub(super) fn run_blocking_body(
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.execute(input))) {
         Ok(result) => result,
         Err(_panic) => TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::UnhandledError,
+            OperationalErrorCode::UnhandledException,
             "blocking task panicked",
         )),
     }

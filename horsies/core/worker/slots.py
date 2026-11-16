@@ -73,6 +73,7 @@ from horsies.core.worker.child_runner import (
     LEFT_WORK_MARKER_BOUND_S,
 )
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.cpu_placement import (
     CpuPlacement,
     OwnCore,
@@ -446,7 +447,7 @@ class SharedRunRequest:
     kwargs_json: str | None
     worker_id: str
     is_workflow_task: bool
-    claimed_at: datetime
+    claim: DispatchClaim
     work: SeatWork
 
     def __post_init__(self) -> None:
@@ -474,7 +475,7 @@ class SharedRunRequest:
             kwargs_json=self.kwargs_json,
             worker_id=self.worker_id,
             is_workflow_task=self.is_workflow_task,
-            claimed_at=self.claimed_at,
+            claimed_at=self.claim.claimed_at,
             work=self.work,
         )
 

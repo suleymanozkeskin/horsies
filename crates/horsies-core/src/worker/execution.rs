@@ -23,9 +23,11 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, AttemptFailure,
     AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
+use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
-use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::broker::{ClaimedTaskRow, PostgresBroker, PrestartExpiry, SetRunningRow};
+use crate::core::codec::user_value::check_task_input;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -38,8 +40,11 @@ use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::types::status::TaskStatus;
-use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::workflow_engine::phase2_recovery::terminal_status_of_pending_kind;
+use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
+use crate::workflow_engine::args_merge::unwrap_args_from_entries;
+use crate::workflow_engine::phase2_recovery::{
+    send_phase2_wake, terminal_status_of_pending_kind, Phase2Wake,
+};
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -174,18 +179,20 @@ pub(crate) async fn confirm_ownership_and_set_running(
     // while the row is still CLAIMED. The match set is idempotent across
     // crash-replays (a node already RUNNING matches again). The first handoff
     // stamps `started_at`; a RUNNING replay preserves the original timestamp.
-    // Zero matched rows
-    // is the free orphan signal: no workflow_task linkage in a runnable state
-    // means this row can never legitimately progress — with self-heal on, the
-    // still-CLAIMED row is cancelled through `horsies_cancel_owned_orphan`,
-    // which re-verifies the linkage under its own lock and refuses (leaving
-    // the task to run) when a runnable link exists after all. A transient
-    // handoff failure stays non-fatal: the update is informational
-    // (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED workflow_task), so the
-    // task proceeds. Gated on `is_workflow_task`: a plain task pays no round
-    // trip here (P1).
+    // Gated on `is_workflow_task`: a plain task pays no round trip here (P1).
+    //
+    // User code of a workflow task runs only when its node is linked in a
+    // runnable state, as in Python (`core/worker/child_runner.py`, the
+    // workflow start; `core/lifecycle/classify.py`, WORKFLOW_CHECK_FAILED):
+    // - linked: the start goes on;
+    // - not linked, self-heal on: the claim is cancelled through
+    //   `horsies_cancel_owned_orphan`; whatever it answers, nothing runs;
+    // - not linked, self-heal off: nothing is written and the row stays
+    //   CLAIMED, which the reaper also declines to requeue;
+    // - a database error: nothing runs, and the claim is released at once
+    //   with the fenced release.
     if is_workflow_task {
-        match sqlx::query_scalar::<_, bool>(
+        let node_linked = sqlx::query_scalar::<_, bool>(
             "WITH linked AS MATERIALIZED (
                 SELECT id, status FROM horsies_workflow_tasks
                 WHERE task_id = $1 AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
@@ -197,57 +204,30 @@ pub(crate) async fn confirm_ownership_and_set_running(
         )
         .bind(task_id)
         .fetch_one(broker.pool())
-        .await
-        {
-            Ok(false) if orphan_self_heal => {
-                match terminalize(
-                    broker.pool(),
-                    &TerminalizationCommand::CancelOwnedOrphan {
-                        task_id,
-                        fence: OwnedClaim {
-                            worker_id: worker_id.to_owned(),
-                            claimed_at,
-                        },
-                    },
-                )
-                .await
-                {
-                    Ok(outcomes)
-                        if matches!(
-                            outcomes.first(),
-                            Some(TerminalizationOutcome::Applied { .. })
-                        ) =>
-                    {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            "workflow task orphaned (no runnable workflow_task \
-                             linkage); cancelled before start",
-                        );
-                        return OwnershipOutcome::Aborted;
-                    }
-                    Ok(_) => {
-                        // Refused: a runnable link exists after all (e.g. a
-                        // crash-replay whose node moved between statements),
-                        // or ownership moved — set_running below re-judges.
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            error = %e,
-                            "orphan check failed; proceeding to set_running",
-                        );
-                    }
-                }
+        .await;
+        match (node_linked, orphan_self_heal) {
+            (Ok(true), _) => {}
+            (Ok(false), true) => {
+                cancel_orphan_before_start(broker, task_id, worker_id, claimed_at).await;
+                return OwnershipOutcome::Aborted;
             }
-            Ok(_) => {}
-            Err(e) => {
+            (Ok(false), false) => {
                 tracing::warn!(
                     task_id = %task_id,
-                    error = %e,
-                    "failed to update workflow task to RUNNING; proceeding with \
-                     execution (workflow_task left as-is, which completion \
-                     tolerates)",
+                    "workflow task has no runnable workflow_task linkage and orphan \
+                     self-heal is off; the task does not run and stays CLAIMED",
                 );
+                return OwnershipOutcome::Aborted;
+            }
+            (Err(e), _) => {
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %e,
+                    "workflow node check failed; the task does not run and its claim \
+                     is released",
+                );
+                release_after_start_error(broker, task_id, worker_id, claimed_at).await;
+                return OwnershipOutcome::Aborted;
             }
         }
     }
@@ -262,15 +242,14 @@ pub(crate) async fn confirm_ownership_and_set_running(
                 .expire_claimed_task_before_start(task_id, worker_id)
                 .await
             {
-                Ok(Some(result_json)) => {
+                Ok(PrestartExpiry::Expired) => {
                     tracing::info!(
                         task_id = %task_id,
                         "task expired before execution started",
                     );
-                    let _ = result_json;
                     return OwnershipOutcome::ExpiredBeforeStart;
                 }
-                Ok(None) => {}
+                Ok(PrestartExpiry::NotExpired) => {}
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task_id,
@@ -308,19 +287,95 @@ pub(crate) async fn confirm_ownership_and_set_running(
         }
         Err(e) => {
             tracing::error!(task_id = %task_id, error = %e, "failed to set RUNNING, requeueing");
-            if let Err(ue) = unclaim_task_with_retry(
-                broker,
-                task_id,
-                worker_id,
-                claimed_at,
-                "set RUNNING failed",
-            )
-            .await
-            {
-                tracing::error!(task_id = %task_id, error = %ue, "failed to unclaim task after RUNNING transition error");
-            }
+            release_after_start_error(broker, task_id, worker_id, claimed_at).await;
             OwnershipOutcome::Aborted
         }
+    }
+}
+
+/// Cancel a claimed workflow task whose node is not linked (self-heal on).
+/// The function re-checks the link under its own lock; a refusal or an error
+/// is logged, and the task does not run either way.
+async fn cancel_orphan_before_start(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: chrono::DateTime<Utc>,
+) {
+    let cancelled = terminalize(
+        broker.pool(),
+        &TerminalizationCommand::CancelOwnedOrphan {
+            task_id,
+            fence: OwnedClaim {
+                worker_id: worker_id.to_owned(),
+                claimed_at,
+            },
+        },
+    )
+    .await;
+    match cancelled {
+        Ok(outcomes) => match outcomes.first() {
+            Some(TerminalizationOutcome::Applied { .. }) => tracing::warn!(
+                task_id = %task_id,
+                "workflow task orphaned (no runnable workflow_task linkage); cancelled before start",
+            ),
+            Some(
+                TerminalizationOutcome::AlreadyApplied { .. }
+                | TerminalizationOutcome::LostClaim { .. }
+                | TerminalizationOutcome::SourceStateConflict { .. }
+                | TerminalizationOutcome::TaskAbsent { .. },
+            )
+            | None => tracing::warn!(
+                task_id = %task_id,
+                "orphan cancel wrote nothing; the task does not run in this dispatch",
+            ),
+        },
+        Err(e) => tracing::error!(
+            task_id = %task_id,
+            error = %e,
+            "orphan cancel failed; the task does not run in this dispatch",
+        ),
+    }
+}
+
+/// Release the claim after a database error at the start: the fenced release
+/// returns a still-CLAIMED row of this generation to PENDING at once, and
+/// cannot touch a start that committed. If the release fails too, the lease
+/// returns the row.
+async fn release_after_start_error(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: chrono::DateTime<Utc>,
+) {
+    if let Err(e) =
+        unclaim_task_with_retry(broker, task_id, worker_id, claimed_at, "start failed").await
+    {
+        tracing::error!(
+            task_id = %task_id,
+            error = %e,
+            "failed to release the claim after a start error; the lease returns the row",
+        );
+    }
+}
+
+/// What an expiry before start owes (Python `_classify_abort`, TASK_EXPIRED,
+/// `core/lifecycle/classify.py`): a plain task is done and sends no wake; a
+/// workflow task owes its phase 2.
+fn phase2_after_prestart_expiry(
+    task_id: Uuid,
+    queue_name: String,
+    is_workflow_task: bool,
+) -> Option<Phase2Work> {
+    match is_workflow_task {
+        true => Some(Phase2Work {
+            task_id,
+            is_success: false,
+            queue_name,
+            is_workflow_task,
+            capacity_notified: false,
+        }),
+        false => None,
     }
 }
 
@@ -439,66 +494,81 @@ pub(crate) fn build_claimed_task_input(
 /// input exactly as execution does.
 ///
 /// The input must pass the core's strict JSON read rule; a refused text fails
-/// the task before user code runs. The input is then passed as stored. Only
-/// an object that carries the engine's `__horsies_workflow_ctx__` member
-/// changes: the member becomes `workflow_ctx` when `accepts_workflow_ctx` is
-/// true, and is removed otherwise. Check-time callers pass `false` (no
-/// runtime context).
+/// the task before user code runs. An object input is Python's keyword input;
+/// its engine members (Python `core/worker/child_runner.py:1546-1645`):
+/// - `WORKFLOW_CTX_KWARG` becomes `workflow_ctx` when `accepts_workflow_ctx`,
+///   and is removed otherwise (check-time callers pass `false`: no runtime
+///   context);
+/// - `WORKFLOW_META_KWARG` is removed;
+/// - an `args_from` entry is replaced by its `inner` result envelope, which
+///   the receiving `TaskResult` field decodes with its own type.
+///
+/// Every other member value, and any other input except `null` as one value,
+/// follows the rules of a user value (no engine key, at most
+/// `MAX_VALUE_JSON_DEPTH` levels), and no other member name is an engine key.
+/// A refusal is `WORKER_SERIALIZATION_ERROR`, as Python's
+/// `_serialization_error_response`.
+///
+/// An input with no engine member passes byte for byte. An input with one is
+/// re-encoded, so an integer that the parse would round is refused instead of
+/// changed.
 pub(crate) fn build_task_input(
     input: &str,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
-    crate::core::codec::check_json_text(input).map_err(|e| {
-        TaskError::builtin(
-            OperationalErrorCode::WorkerSerializationError,
-            format!("stored input refused: {e}"),
-        )
-    })?;
-    // Any input without the context member passes byte for byte.
-    if !input.contains(WORKFLOW_CTX_KWARG) {
-        return Ok(input.as_bytes().to_vec());
-    }
-    // The context member is rewritten, which re-encodes the whole object: an
-    // integer that the parse would round is refused instead of changed.
-    crate::core::history::rerun::input_envelope::validate_integer_domain(input).map_err(
-        |detail| {
-            TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                format!("stored input holds a number that a rewrite would round: {detail}"),
-            )
-        },
-    )?;
-    let value: serde_json::Value = serde_json::from_str(input).map_err(|e| {
-        TaskError::builtin(
-            OperationalErrorCode::WorkerSerializationError,
-            format!("failed to parse input JSON: {}", e),
-        )
-    })?;
-
+    let value: serde_json::Value = crate::core::codec::from_json_str(input)
+        .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
+    let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut object = match value {
-        serde_json::Value::Object(object) if object.contains_key(WORKFLOW_CTX_KWARG) => object,
-        _ => return Ok(input.as_bytes().to_vec()),
+        serde_json::Value::Object(object) => object,
+        serde_json::Value::Null => return Ok(input.as_bytes().to_vec()),
+        other => {
+            check_task_input(
+                std::slice::from_ref(&other),
+                &serde_json::Map::new(),
+                &no_engine_members,
+            )
+            .map_err(|refusal| {
+                serialization_error(format!("failed to decode task input: {refusal}"))
+            })?;
+            return Ok(input.as_bytes().to_vec());
+        }
     };
 
-    if let Some(ctx_value) = object.remove(WORKFLOW_CTX_KWARG) {
+    let workflow_ctx = object.remove(WORKFLOW_CTX_KWARG);
+    let workflow_meta = object.remove(WORKFLOW_META_KWARG);
+    let args_from_members = unwrap_args_from_entries(&mut object)
+        .map_err(|refusal| serialization_error(refusal.to_string()))?;
+    check_task_input(&[], &object, &args_from_members).map_err(|refusal| {
+        serialization_error(format!("failed to decode task input: {refusal}"))
+    })?;
+    if workflow_ctx.is_none() && workflow_meta.is_none() && args_from_members.is_empty() {
+        return Ok(input.as_bytes().to_vec());
+    }
+    crate::core::history::rerun::input_envelope::validate_integer_domain(input).map_err(
+        |detail| {
+            serialization_error(format!(
+                "stored input holds a number that a rewrite would round: {detail}"
+            ))
+        },
+    )?;
+
+    if let Some(ctx_value) = workflow_ctx {
         if accepts_workflow_ctx {
             let workflow_ctx = parse_workflow_ctx(ctx_value)?;
             let ctx_json = serde_json::to_value(&workflow_ctx).map_err(|e| {
-                TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
-                    format!("failed to serialize workflow context: {}", e),
-                )
+                serialization_error(format!("failed to serialize workflow context: {}", e))
             })?;
             object.insert("workflow_ctx".to_owned(), ctx_json);
         }
     }
 
-    serde_json::to_vec(&serde_json::Value::Object(object)).map_err(|e| {
-        TaskError::builtin(
-            OperationalErrorCode::WorkerSerializationError,
-            format!("failed to serialize task input: {}", e),
-        )
-    })
+    serde_json::to_vec(&serde_json::Value::Object(object))
+        .map_err(|e| serialization_error(format!("failed to serialize task input: {}", e)))
+}
+
+fn serialization_error(message: String) -> TaskError {
+    TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +613,7 @@ pub(crate) async fn execute_task(
                     task_timeout_error(timeout.unwrap_or_default())
                 }
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("async task panicked: {}", join_err),
                 )),
             }
@@ -569,11 +639,11 @@ pub(crate) async fn execute_task(
             match join {
                 Ok(Ok(r)) => r,
                 Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     "blocking task panicked".to_owned(),
                 )),
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("blocking task join error: {}", join_err),
                 )),
             }
@@ -795,10 +865,12 @@ async fn persist_workflow_success(
         fence,
         result_json,
     };
-    let outcome =
-        finish_workflow_success(broker.core_main_pool(), broker.statement_log(), &command)
-            .await
-            .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+    let outcome = finish_workflow_success(open.main(), broker.statement_log(), &command)
+        .await
+        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { .. } => Ok(FinalizeOutcome::Terminal {
             is_success: true,
@@ -858,7 +930,10 @@ pub(crate) async fn persist_failed_attempt(
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let outcome = finish_failed_attempt(broker.core_main_pool(), broker.statement_log(), command)
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
+    let outcome = finish_failed_attempt(open.main(), broker.statement_log(), command)
         .await
         .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
     after_failed_attempt(broker, command, is_workflow_task, outcome).await
@@ -888,10 +963,12 @@ pub(crate) async fn persist_unreported_attempt(
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
 ) -> Result<UnreportedAttemptWrite, FinalizeError> {
-    let outcome =
-        finish_unreported_attempt(broker.core_main_pool(), broker.statement_log(), command)
-            .await
-            .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+    let outcome = finish_unreported_attempt(open.main(), broker.statement_log(), command)
+        .await
+        .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
     match outcome {
         UnreportedAttemptOutcome::Released(_) => Ok(UnreportedAttemptWrite::ClaimReleased),
         UnreportedAttemptOutcome::Failed(failed) => {
@@ -1020,12 +1097,15 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 
 /// Classify whether a `WorkflowError` is transient (retryable).
 ///
-/// Mirrors Python's `is_retryable_connection_error(exc)` — only DB/broker
-/// connection errors are considered transient. Logic errors (serialization,
-/// not-found, invalid status) are permanent.
+/// Mirrors Python's `is_retryable_connection_error(exc)`
+/// (`core/worker/finalize.py:1676-1697`) — only DB/broker connection errors
+/// are considered transient, by the core's SQLSTATE rule
+/// (`is_retryable_sqlx_error`). Logic errors (serialization, not-found,
+/// invalid status) and a database refusal (for example a wake on a channel
+/// name the server refuses) are permanent.
 fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> bool {
     match e {
-        crate::workflow_engine::WorkflowError::Database(_) => true,
+        crate::workflow_engine::WorkflowError::Database(error) => is_retryable_sqlx_error(error),
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
@@ -1036,10 +1116,18 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
     }
 }
 
-/// Phase 2 of finalization: workflow advancement and worker wake notifications.
+/// Phase 2 of finalization: workflow advancement and the capacity wake of
+/// the task's queue (Python `_finalize_workflow_phase`,
+/// `core/worker/finalize.py:1619-1674`).
 ///
 /// Separate transaction from Phase 1. If this fails after Phase 1 succeeded,
 /// the terminal task result is already durable and workflow recovery can resume.
+///
+/// A workflow task sends the wake as the first statement of its phase-2
+/// transaction; a plain task sends it as one statement. An error of the wake
+/// is a phase-2 error, never dropped: for a plain task it is retryable when
+/// the database error is transient (`is_retryable_sqlx_error`, Python
+/// `_phase2_error`, `core/worker/finalize.py:1676-1697`).
 pub(crate) async fn finalize_workflow_phase(
     pool: &sqlx::PgPool,
     workflow_registry: &WorkflowSpecRegistry,
@@ -1051,18 +1139,26 @@ pub(crate) async fn finalize_workflow_phase(
     payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), FinalizeError> {
+    // Skipped when Phase 1's statement already sent the wake in the same
+    // commit as the transition (waking twice would be harmless but wasteful).
+    let wake = match capacity_notified {
+        true => Phase2Wake::NoWake,
+        false => capacity_wake(queue_name, task_id),
+    };
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
-    if is_workflow_task {
-        crate::workflow_engine::phase2_recovery::finalize_phase2(
+    match is_workflow_task {
+        true => crate::workflow_engine::phase2_recovery::finalize_phase2(
             pool,
             task_id,
             if is_success { "COMPLETED" } else { "FAILED" },
+            &wake,
             workflow_registry,
             payload_policy,
             retention,
         )
         .await
+        .map(|_disposition| ())
         .map_err(|e| {
             let retryable = is_retryable_workflow_error(&e);
             FinalizeError {
@@ -1071,17 +1167,27 @@ pub(crate) async fn finalize_workflow_phase(
                 message: format!("workflow callback failed: {}", e),
                 retryable,
             }
-        })?;
+        }),
+        false => send_phase2_wake(pool, &wake)
+            .await
+            .map_err(|error| FinalizeError {
+                stage: FinalizeStage::Phase2Workflow,
+                task_id,
+                message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
+                retryable: is_retryable_sqlx_error(&error),
+            }),
     }
+}
 
-    // Capacity notification — non-fatal if it fails. Skipped when Phase 1's
-    // fused statement already fired the wake in the same commit as the
-    // transition (waking twice would be harmless but wasteful).
-    if !capacity_notified {
-        notify_worker_capacity(pool, queue_name, task_id).await;
+/// The capacity wake of `queue_name` for `task_id`: the workers of the
+/// queue check their capacity and backlog. It goes only to the queue's
+/// channel; workers do not listen on `task_new` (Python
+/// `core/worker/finalize.py:1657-1660`).
+pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
+    Phase2Wake::Queue {
+        channel: format!("task_queue_{queue_name}"),
+        payload: format!("capacity:{task_id}"),
     }
-
-    Ok(())
 }
 
 /// The kind of a task's phase-2 record. The record has no status column: the
@@ -1138,27 +1244,6 @@ async fn load_pending_phase_two(
 #[cfg(test)]
 mod replay_read_tests;
 
-pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
-    // Wake workers of this queue to re-check capacity/backlog. The capacity
-    // signal is sent only on the per-queue channel; workers no longer listen on
-    // task_new. Parity with horsies PR #101 cafc9200.
-    let payload = format!("capacity:{}", task_id);
-    let channel = format!("task_queue_{}", queue_name);
-    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(&channel)
-        .bind(&payload)
-        .execute(pool)
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            channel = %channel,
-            error = %e,
-            "queue-specific capacity NOTIFY failed; worker polling fallback will recover",
-        );
-    }
-}
-
 pub(crate) async fn finalize_pre_execution_failure(
     broker: Arc<PostgresBroker>,
     row: ClaimedTaskRow,
@@ -1187,13 +1272,7 @@ pub(crate) async fn finalize_pre_execution_failure(
     {
         OwnershipOutcome::Running(running) => running,
         OwnershipOutcome::ExpiredBeforeStart => {
-            return Some(Phase2Work {
-                task_id,
-                is_success: false,
-                queue_name,
-                is_workflow_task,
-                capacity_notified: false,
-            });
+            return phase2_after_prestart_expiry(task_id, queue_name, is_workflow_task);
         }
         OwnershipOutcome::Aborted => return None,
     };
@@ -1336,13 +1415,7 @@ pub(crate) async fn execute_and_finalize(
     {
         OwnershipOutcome::Running(running) => running,
         OwnershipOutcome::ExpiredBeforeStart => {
-            return Some(Phase2Work {
-                task_id,
-                is_success: false,
-                queue_name,
-                is_workflow_task,
-                capacity_notified: false,
-            });
+            return phase2_after_prestart_expiry(task_id, queue_name, is_workflow_task);
         }
         OwnershipOutcome::Aborted => return None,
     };
@@ -1627,24 +1700,35 @@ pub(crate) fn phase_retry_delay(attempt: u32) -> f64 {
 mod parse {
     use std::collections::HashMap;
 
-    use crate::core::task::error::{OperationalErrorCode, TaskError};
+    use crate::core::task::error::{OperationalErrorCode, TaskError, TaskErrorKind};
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::context::WorkflowContext;
     use crate::core::workflow::SubWorkflowSummary;
     use serde::Deserialize;
     use uuid::Uuid;
 
+    /// The context payload in Python's shape (`core/workflows/engine.py:1700-1721`). `definition_key_by_id`
+    /// is not read: the receiving task decodes each result with its own type.
     #[derive(Debug, Deserialize)]
     struct WorkflowCtxPayload {
         workflow_id: Uuid,
         task_index: i32,
         task_name: String,
         #[serde(default)]
-        results_by_id: HashMap<String, String>,
+        results_by_id: HashMap<String, serde_json::Value>,
         #[serde(default)]
-        summaries_by_id: HashMap<String, String>,
+        task_name_by_id: HashMap<String, serde_json::Value>,
+        #[serde(default)]
+        summaries_by_id: HashMap<String, serde_json::Value>,
     }
 
+    /// Read the context payload (Python `core/worker/child_runner.py:1654-1766`).
+    ///
+    /// - A result entry that is `null`, that has no task name, or that is not a result envelope becomes a
+    ///   `RESULT_DESERIALIZATION_ERROR` entry naming the node; the other entries stay readable.
+    /// - A summary entry is the stored summary text; one that does not parse is `WORKER_SERIALIZATION_ERROR`
+    ///   for the whole task. An entry that is not text is skipped.
+    /// - A payload of another shape is `WORKER_SERIALIZATION_ERROR`.
     pub(crate) fn parse_workflow_ctx(
         value: serde_json::Value,
     ) -> Result<WorkflowContext, TaskError> {
@@ -1657,24 +1741,18 @@ mod parse {
 
         let mut results_by_id: HashMap<String, TaskResult<serde_json::Value>> =
             HashMap::with_capacity(payload.results_by_id.len());
-        for (node_id, result_json) in payload.results_by_id {
-            let parsed: TaskResult<serde_json::Value> = serde_json::from_str(&result_json)
-                .map_err(|e| {
-                    TaskError::builtin(
-                        OperationalErrorCode::WorkerSerializationError,
-                        format!(
-                            "failed to parse workflow context result for node_id '{}': {}",
-                            node_id, e,
-                        ),
-                    )
-                })?;
-            results_by_id.insert(node_id, parsed);
+        for (node_id, envelope) in payload.results_by_id {
+            let entry = context_entry(&node_id, envelope, payload.task_name_by_id.get(&node_id));
+            results_by_id.insert(node_id, entry);
         }
 
         let mut summaries_by_id: HashMap<String, SubWorkflowSummary> =
             HashMap::with_capacity(payload.summaries_by_id.len());
         for (node_id, summary_json) in payload.summaries_by_id {
-            let parsed: SubWorkflowSummary = serde_json::from_str(&summary_json).map_err(|e| {
+            let serde_json::Value::String(summary_text) = summary_json else {
+                continue;
+            };
+            let parsed: SubWorkflowSummary = serde_json::from_str(&summary_text).map_err(|e| {
                 TaskError::builtin(
                     OperationalErrorCode::WorkerSerializationError,
                     format!(
@@ -1693,6 +1771,45 @@ mod parse {
             results_by_id,
             summaries_by_id,
         ))
+    }
+
+    /// One result entry of the context, with Python's sentinel errors (`core/worker/child_runner.py:1666-1739`).
+    fn context_entry(
+        node_id: &str,
+        envelope: serde_json::Value,
+        source_task_name: Option<&serde_json::Value>,
+    ) -> TaskResult<serde_json::Value> {
+        let unreadable =
+            |message: String, data: serde_json::Value| -> TaskResult<serde_json::Value> {
+                TaskResult::Err(TaskError {
+                    exception: None,
+                    error_code: OperationalErrorCode::ResultDeserializationError.into(),
+                    data: Some(data),
+                    message: Some(message),
+                    kind: TaskErrorKind::Plain,
+                })
+            };
+        if envelope.is_null() {
+            return unreadable(
+                format!(
+                    "workflow_ctx result for node '{node_id}' unavailable (source task not registered at encode time)"
+                ),
+                serde_json::json!({ "node_id": node_id }),
+            );
+        }
+        let Some(serde_json::Value::String(source_task_name)) = source_task_name else {
+            return unreadable(
+                format!("workflow_ctx missing task_name for node '{node_id}'; cannot decode"),
+                serde_json::json!({ "node_id": node_id }),
+            );
+        };
+        match serde_json::from_value::<TaskResult<serde_json::Value>>(envelope) {
+            Ok(result) => result,
+            Err(e) => unreadable(
+                format!("decode_task_result failed for workflow_ctx node '{node_id}': {e}"),
+                serde_json::json!({ "node_id": node_id, "source_task_name": source_task_name }),
+            ),
+        }
     }
 }
 
@@ -1779,6 +1896,147 @@ mod task_input_tests {
     fn a_long_integer_passes_byte_for_byte() {
         let input = r#"{"k":123456789012345678901234567890}"#;
         assert_eq!(task_input(input), input);
+    }
+
+    fn refusal(input: &str) -> String {
+        let err = build_task_input(input, false).unwrap_err();
+        assert_eq!(err.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+        err.message.unwrap_or_default()
+    }
+
+    fn task_input_value(input: &str) -> serde_json::Value {
+        serde_json::from_str(&task_input(input)).unwrap()
+    }
+
+    /// Python `core/worker/child_runner.py:1566-1612`: the receiving task gets the `inner` envelope of an
+    /// `args_from` entry.
+    #[test]
+    fn an_args_from_entry_is_replaced_by_its_inner_envelope() {
+        let input = r#"{"x": 1, "dep": {"__h_taskresult_envelope__": true, "source_task_name": "produce",
+            "source_definition_key": null, "inner": {"__h_task_result__": true, "ok": 7, "err": null}}}"#;
+        assert_eq!(
+            task_input_value(input),
+            serde_json::json!({
+                "x": 1,
+                "dep": {"__h_task_result__": true, "ok": 7, "err": null},
+            }),
+        );
+    }
+
+    #[test]
+    fn a_malformed_args_from_entry_is_refused() {
+        for entry in [
+            r#"{"__h_taskresult_envelope__": true, "inner": null}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "p", "source_definition_key": 3, "inner": null}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "p", "source_definition_key": null}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "p", "source_definition_key": null, "inner": null, "x": 1}"#,
+        ] {
+            let message = refusal(&format!(r#"{{"dep": {entry}}}"#));
+            assert!(
+                message.contains("args_from envelope for kwarg 'dep'"),
+                "{message}"
+            );
+        }
+    }
+
+    /// Python's child removes the metadata kwarg before the call (`core/worker/child_runner.py:1641-1642`).
+    #[test]
+    fn the_workflow_meta_kwarg_is_removed() {
+        let input = r#"{"x": 1, "__h_workflow_meta__": {"workflow_id": "w", "task_index": 0, "task_name": "t"}}"#;
+        assert_eq!(task_input_value(input), serde_json::json!({"x": 1}));
+    }
+
+    /// Python `decode_kwargs` and `decode_value`: an engine key in a user value, or as a kwarg name, is
+    /// refused; so is a value deeper than 200 levels. A non-object input is one value under the same rules.
+    #[test]
+    fn user_input_follows_the_user_value_rules() {
+        for input in [
+            r#"{"x": {"__h_task_result__": true}}"#,
+            r#"{"x": [{"__builtin_task_code__": "X"}]}"#,
+            r#"{"__horsies_workflow_ctx__": {}}"#,
+            r#"{"__h_other__": 1}"#,
+            r#"[{"__h_x": 1}]"#,
+        ] {
+            assert!(refusal(input).contains("reserved key"), "{input}");
+        }
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let deep = format!(
+            r#"{{"x": {}}}"#,
+            nested(crate::core::codec::MAX_VALUE_JSON_DEPTH + 1)
+        );
+        assert!(refusal(&deep).contains("nested deeper than 200"));
+        let at_bound = format!(
+            r#"{{"x": {}}}"#,
+            nested(crate::core::codec::MAX_VALUE_JSON_DEPTH)
+        );
+        assert_eq!(task_input(&at_bound), at_bound);
+    }
+
+    /// The context kwarg is Python's key; at check time (no runtime context) it is dropped.
+    #[test]
+    fn the_context_kwarg_is_pythons_key() {
+        assert_eq!(WORKFLOW_CTX_KWARG, "__h_workflow_ctx__");
+        let input = r#"{"x": 1, "__h_workflow_ctx__": {"workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 0, "task_name": "t"}}"#;
+        assert_eq!(task_input_value(input), serde_json::json!({"x": 1}));
+    }
+}
+
+#[cfg(test)]
+mod workflow_ctx_tests {
+    use super::parse_workflow_ctx;
+    use crate::core::task::result::TaskResult;
+    use crate::core::workflow::node::NodeKey;
+
+    /// Python's payload (`core/workflows/engine.py:1700-1721`): envelope objects or null, the task name and
+    /// the definition key of each node, and the stored summary text.
+    #[test]
+    fn pythons_context_payload_reads() {
+        let summary = r#"{"status":"COMPLETED","output":5,"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}"#;
+        let payload = serde_json::json!({
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 2,
+            "task_name": "consume",
+            "results_by_id": {
+                "a": {"__h_task_result__": true, "ok": 41, "err": null},
+                "b": null,
+                "c": {"__h_task_result__": true, "ok": 1, "err": null},
+                "d": {"not": "an envelope"},
+                "sub": {"__h_task_result__": true, "ok": 5, "err": null},
+            },
+            "task_name_by_id": {"a": "produce", "b": "produce", "d": "produce", "sub": "__sub_workflow:child"},
+            "definition_key_by_id": {"a": null, "b": null, "c": null, "d": null, "sub": "app.child"},
+            "summaries_by_id": {"sub": summary},
+        });
+        let ctx = parse_workflow_ctx(payload).unwrap();
+        let value: TaskResult<i32> = ctx.result_for(&NodeKey::new("a".to_owned())).unwrap();
+        assert_eq!(value.unwrap(), 41);
+        for (node, message) in [
+            ("b", "unavailable"),
+            ("c", "missing task_name"),
+            ("d", "decode_task_result failed"),
+        ] {
+            let entry: TaskResult<i32> = ctx.result_for(&NodeKey::new(node.to_owned())).unwrap();
+            let error = entry.unwrap_err();
+            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+            assert!(error.message.unwrap().contains(message), "{node}");
+        }
+        let summary = ctx
+            .summary_for(&NodeKey::<i32>::new("sub".to_owned()))
+            .unwrap();
+        assert_eq!(summary.output, Some(serde_json::json!(5)));
+    }
+
+    #[test]
+    fn a_summary_text_that_does_not_parse_fails_the_task() {
+        let payload = serde_json::json!({
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 0,
+            "task_name": "t",
+            "summaries_by_id": {"sub": "{not json"},
+        });
+        let error = parse_workflow_ctx(payload).unwrap_err();
+        assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
     }
 }
 
@@ -2185,6 +2443,27 @@ mod set_running_gate_tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prestart_expiry_tests {
+    //! Python `core/lifecycle/classify.py` (`_classify_abort`, TASK_EXPIRED)
+    //! and `test_lifecycle_classification.py::TestExpiryRoutesByTaskKind`.
+    use super::phase2_after_prestart_expiry;
+    use uuid::Uuid;
+
+    #[test]
+    fn a_plain_task_expired_before_start_owes_nothing() {
+        assert!(phase2_after_prestart_expiry(Uuid::nil(), "q".to_owned(), false).is_none());
+    }
+
+    #[test]
+    fn a_workflow_task_expired_before_start_owes_its_phase_two() {
+        let work = phase2_after_prestart_expiry(Uuid::nil(), "q".to_owned(), true)
+            .expect("phase 2 is owed");
+        assert!(!work.is_success);
+        assert!(work.is_workflow_task);
     }
 }
 
