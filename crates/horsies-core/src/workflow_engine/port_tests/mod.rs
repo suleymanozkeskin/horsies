@@ -6,6 +6,7 @@
 mod support;
 
 mod completion_edges;
+mod completion_path;
 mod dataflow;
 mod error_handling;
 mod handle_reads;
