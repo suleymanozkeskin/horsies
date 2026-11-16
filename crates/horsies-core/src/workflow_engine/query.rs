@@ -15,6 +15,8 @@ use crate::core::{
 };
 use crate::db::{PayloadFilter, WakeEvent, WakeSubscription};
 
+use crate::core::task::result::TASK_RESULT_ENVELOPE_KEY;
+use crate::workflow_engine::engine::OUTPUTLESS_TERMINALS_KEY;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::info::WorkflowTaskInfo;
 
@@ -440,16 +442,10 @@ fn parse_workflow_result<T: DeserializeOwned>(
                     "workflow completed but result is null",
                 ));
             };
-            let raw: TaskResult<serde_json::Value> = match serde_json::from_str(json) {
-                Ok(value) => value,
-                Err(e) => {
-                    return TaskResult::Err(TaskError::builtin(
-                        OperationalErrorCode::ResultDeserializationError,
-                        format!("failed to parse workflow result: {}", e),
-                    ));
-                }
-            };
-            map_task_result_value(raw, workflow_id, None)
+            match read_completed_result(workflow_id, json) {
+                Ok(raw) => map_task_result_value(raw, workflow_id, None),
+                Err(error) => TaskResult::Err(error),
+            }
         }
         "FAILED" => {
             let err = match row.error.as_deref() {
@@ -484,6 +480,117 @@ fn parse_workflow_result<T: DeserializeOwned>(
             RetrievalCode::ResultNotReady,
             format!("workflow {} result not ready", workflow_id),
         )),
+    }
+}
+
+/// The stored result of a COMPLETED workflow. A result with the outputless marker
+/// (`OUTPUTLESS_TERMINALS_KEY`) is read by [`outputless_entries`]; any other text is a result envelope.
+fn read_completed_result(
+    workflow_id: Uuid,
+    text: &str,
+) -> Result<TaskResult<serde_json::Value>, TaskError> {
+    let unreadable = |cause: String| {
+        TaskError::builtin(
+            OperationalErrorCode::ResultDeserializationError,
+            format!("failed to parse workflow result: {cause}"),
+        )
+    };
+    let value: serde_json::Value =
+        crate::core::codec::from_json_str(text).map_err(|e| unreadable(e.to_string()))?;
+    match value.get(OUTPUTLESS_TERMINALS_KEY) == Some(&serde_json::Value::Bool(true)) {
+        true => Ok(outputless_entries(workflow_id, value)),
+        false => serde_json::from_value(value).map_err(|e| unreadable(e.to_string())),
+    }
+}
+
+/// The result of a workflow with no output node: an ok map of the terminal nodes' entries, each a result
+/// envelope. Python's handle (`core/models/workflow/handle.py:600-735`):
+/// - an envelope without the result marker, or a malformed `ok` slot, is `RESULT_DESERIALIZATION_ERROR`;
+/// - a non-null `err` slot is that error;
+/// - an entry that is `null`, has no task name, or is not a result envelope becomes a
+///   `RESULT_DESERIALIZATION_ERROR` entry naming the node; the other entries stay readable.
+fn outputless_entries(
+    workflow_id: Uuid,
+    value: serde_json::Value,
+) -> TaskResult<serde_json::Value> {
+    let malformed = |message: String| -> TaskResult<serde_json::Value> {
+        TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::ResultDeserializationError,
+            message,
+        ))
+    };
+    let serde_json::Value::Object(mut envelope) = value else {
+        return malformed(format!(
+            "Workflow {workflow_id} result envelope is not a dict"
+        ));
+    };
+    if envelope.get(TASK_RESULT_ENVELOPE_KEY) != Some(&serde_json::Value::Bool(true)) {
+        return malformed(format!(
+            "Workflow {workflow_id} result missing __h_task_result__ envelope marker"
+        ));
+    }
+    if let Some(err_slot) = envelope.remove("err").filter(|slot| !slot.is_null()) {
+        return match TaskError::from_stored_value(err_slot) {
+            Ok(error) => TaskResult::Err(error),
+            Err(error) => malformed(format!("TaskError decode failed: {error}")),
+        };
+    }
+    let Some(serde_json::Value::Object(mut ok_slot)) = envelope.remove("ok") else {
+        return malformed("Outputless workflow envelope ok slot malformed".to_owned());
+    };
+    let maps = (
+        ok_slot.remove("results_by_id"),
+        ok_slot.remove("task_name_by_id"),
+        ok_slot.remove("definition_key_by_id"),
+    );
+    let (results, task_names) = match maps {
+        (
+            None | Some(serde_json::Value::Object(_)),
+            None | Some(serde_json::Value::Object(_)),
+            None | Some(serde_json::Value::Object(_)),
+        ) => (object_or_empty(maps.0), object_or_empty(maps.1)),
+        _ => return malformed(
+            "Outputless workflow envelope missing or malformed results_by_id / task_name_by_id / \
+                 definition_key_by_id"
+                .to_owned(),
+        ),
+    };
+    let mut entries = serde_json::Map::with_capacity(results.len());
+    for (node_id, entry) in results {
+        let has_task_name = matches!(task_names.get(&node_id), Some(serde_json::Value::String(_)));
+        let read = match (entry, has_task_name) {
+            (serde_json::Value::Null, _) | (_, false) => Err(format!(
+                "Outputless workflow {workflow_id} node '{node_id}' missing payload or task name"
+            )),
+            (entry, true) => serde_json::from_value::<TaskResult<serde_json::Value>>(entry)
+                .map_err(|error| {
+                    format!("decode_task_result failed for node '{node_id}': {error}")
+                }),
+        };
+        let result = read.unwrap_or_else(|message| {
+            TaskResult::Err(TaskError {
+                data: Some(serde_json::json!({ "node_id": node_id })),
+                ..TaskError::builtin(OperationalErrorCode::ResultDeserializationError, message)
+            })
+        });
+        match serde_json::to_value(&result) {
+            Ok(entry) => {
+                entries.insert(node_id, entry);
+            }
+            Err(error) => {
+                return malformed(format!(
+                    "Outputless workflow {workflow_id} node '{node_id}' does not encode: {error}"
+                ))
+            }
+        }
+    }
+    TaskResult::Ok(serde_json::Value::Object(entries))
+}
+
+fn object_or_empty(value: Option<serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) | None => serde_json::Map::new(),
     }
 }
 
@@ -562,6 +669,64 @@ mod tests {
 
         let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         assert_eq!(result.unwrap(), 42);
+    }
+
+    /// Python's outputless result (`core/workflows/engine.py:3973-3983`) reads as a map of the terminal
+    /// nodes' entries; an entry that does not read names its node (`core/models/workflow/handle.py:672-735`).
+    #[test]
+    fn an_outputless_result_reads_as_a_map_of_entries() {
+        let text = serde_json::json!({
+            "__h_task_result__": true,
+            "__h_outputless_terminals__": true,
+            "ok": {
+                "results_by_id": {
+                    "a": {"__h_task_result__": true, "ok": 1, "err": null},
+                    "b": null,
+                    "c": {"not": "an envelope"},
+                    "d": {"__h_task_result__": true, "ok": 2, "err": null},
+                },
+                "task_name_by_id": {"a": "t", "b": "t", "c": "t"},
+                "definition_key_by_id": {"a": null, "b": null, "c": null, "d": null},
+            },
+            "err": null,
+        })
+        .to_string();
+        let r = row("COMPLETED", Some(&text), None);
+        let result: TaskResult<HashMap<String, TaskResult<i32>>> =
+            parse_workflow_result(Uuid::nil(), &r);
+        let entries = result.unwrap();
+        assert_eq!(entries["a"].clone().unwrap(), 1);
+        for node in ["b", "c", "d"] {
+            let error = entries[node].clone().unwrap_err();
+            assert_eq!(
+                error.error_code.to_string(),
+                "RESULT_DESERIALIZATION_ERROR",
+                "{node}"
+            );
+            assert_eq!(error.data, Some(serde_json::json!({ "node_id": node })));
+        }
+    }
+
+    #[test]
+    fn a_malformed_outputless_result_is_refused() {
+        for ok in [
+            serde_json::json!(5),
+            serde_json::json!({"results_by_id": [1]}),
+        ] {
+            let text = serde_json::json!({
+                "__h_task_result__": true,
+                "__h_outputless_terminals__": true,
+                "ok": ok,
+                "err": null,
+            })
+            .to_string();
+            let r = row("COMPLETED", Some(&text), None);
+            let result: TaskResult<serde_json::Value> = parse_workflow_result(Uuid::nil(), &r);
+            assert_eq!(
+                result.unwrap_err().error_code,
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError)
+            );
+        }
     }
 
     /// Python `_completed_without_stored_result`: the library always stores a
