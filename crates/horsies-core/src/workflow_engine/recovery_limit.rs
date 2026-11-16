@@ -650,11 +650,11 @@ mod tests {
         };
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  max_retries, execution, retention_class_key, status, task_id,
                  is_subworkflow, created_at
-             ) VALUES ($1, $2, $3, $4, 'recovery_limit_task', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, $3, $4, 'recovery_limit_task', '{}', 'default', 100,
                        '{}', FALSE, 'all', 0, 'ISOLATED', 'forever', $5, $6,
                        FALSE, NOW())",
         )
