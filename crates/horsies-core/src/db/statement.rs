@@ -339,6 +339,16 @@ pub(crate) async fn execute_count(
     }
 }
 
+/// Runs one command with the simple query protocol: `BEGIN`, `COMMIT`,
+/// `ROLLBACK`. A command has no parameter, so nothing is prepared, also under
+/// PgBouncer transaction mode.
+pub(crate) async fn run_command(
+    client: &ClientWrapper,
+    sql: &'static str,
+) -> Result<(), AttemptError> {
+    client.batch_execute(sql).await.map_err(at(Stage::Run))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -85,11 +85,20 @@ pub enum ErrorCode {
     ConfigInvalidClusterCap,
     ConfigInvalidPrefetch,
     BrokerInvalidUrl,
+    /// A broker config names a pool field that 0.7.0 moved to the worker
+    /// profile.
+    ConfigInvalidBrokerPool,
     ConfigInvalidRecovery,
     ConfigInvalidSchedule,
     CliInvalidArgs,
     WorkerInvalidLocator,
     ConfigInvalidResilience,
+    /// A worker profile that AppConfig validation refuses.
+    ConfigInvalidWorkerProfile,
+    /// `check --live`: one worker of a profile needs more Postgres
+    /// connections than the server has usable slots, or the server limit
+    /// could not be read.
+    CheckWorkerConnections,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -139,11 +148,14 @@ impl ErrorCode {
             Self::ConfigInvalidClusterCap => "HRS-201",
             Self::ConfigInvalidPrefetch => "HRS-202",
             Self::BrokerInvalidUrl => "HRS-203",
+            Self::ConfigInvalidBrokerPool => "HRS-213",
             Self::ConfigInvalidRecovery => "HRS-204",
             Self::ConfigInvalidSchedule => "HRS-205",
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
             Self::ConfigInvalidResilience => "HRS-208",
+            Self::ConfigInvalidWorkerProfile => "HRS-218",
+            Self::CheckWorkerConnections => "HRS-219",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -198,11 +210,14 @@ impl ErrorCode {
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
             | Self::BrokerInvalidUrl
+            | Self::ConfigInvalidBrokerPool
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
+            | Self::ConfigInvalidWorkerProfile
+            | Self::CheckWorkerConnections
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -266,11 +281,14 @@ impl ErrorCode {
                 | Self::ConfigInvalidClusterCap
                 | Self::ConfigInvalidPrefetch
                 | Self::BrokerInvalidUrl
+                | Self::ConfigInvalidBrokerPool
                 | Self::ConfigInvalidRecovery
                 | Self::ConfigInvalidSchedule
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
                 | Self::ConfigInvalidResilience
+                | Self::ConfigInvalidWorkerProfile
+                | Self::CheckWorkerConnections
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
@@ -466,6 +484,12 @@ mod tests {
         assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
         assert_eq!(ErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
         assert!(ErrorCode::ConfigInvalidResilience.is_config_error());
+        assert_eq!(ErrorCode::CheckWorkerConnections.to_string(), "HRS-219");
+        assert_eq!(
+            ErrorCode::CheckWorkerConnections.category(),
+            ErrorCategory::Config,
+        );
+        assert!(ErrorCode::CheckWorkerConnections.is_config_error());
     }
 
     #[test]

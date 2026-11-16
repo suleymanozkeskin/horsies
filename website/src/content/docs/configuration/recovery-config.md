@@ -137,8 +137,8 @@ intervals after the first pass, which is about 720 seconds.
   worker restart keeps it, and all workers share it. A pass that is lost also
   loses its count, so the bound moves later, never sooner.
 - **The count has no reset, so a later unrelated raise after a repair reaches
-  the limit sooner.** Delete the row of a workflow to start its count again. The
-  retention sweep deletes a row after its workflow is gone.
+  the limit sooner.** Delete the row of a workflow to start its count again. A
+  row is deleted with its workflow.
 - **The resume pass does not count.** It logs the raise, and the reaper counts
   the same candidate.
 

@@ -5,15 +5,23 @@
 #[cfg(test)]
 extern crate self as horsies;
 
+// `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
+// and `#[derive(horsies_macros::ManifestSchema)]` names
+// `::horsies_core::manifest_schema`; this crate reaches both through its own
+// name.
+extern crate self as horsies_core;
+
 // Internal modules (merged from formerly separate crates).
 // `core` is `pub` (rather than `pub(crate)`) because `#[macro_export]` macros
 // in `core::task::macros` use `$crate::core::…` paths that must be
 // resolvable when the macro is expanded in downstream crates.
 pub(crate) mod broker;
+pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
 pub mod manifest;
+pub mod manifest_schema;
 pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;
@@ -33,17 +41,18 @@ pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
     CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
-    ErrorCategory, ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
-    InputField, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
-    OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig, PostgresConfigError,
-    QueueMode, RecoveryConfig, RecoveryConfigError,
+    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
+    HandleResult, HourlySchedule, InputField, IntervalSchedule, JoinType, Month, MonthlySchedule,
+    NodeKey, NodeRef, OnError, OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig,
+    PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
     RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError,
-    SubWorkflowNode, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
-    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions, TaskRegistry,
-    TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
-    TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure,
+    SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
+    TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
+    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
     WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
     WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
     WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
@@ -61,6 +70,15 @@ pub use crate::broker::{
     WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
     MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
+pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+
+// Child mode of a Rust worker binary: the entry checks `child_mode` first
+// and, in child mode, exits with the code of `run_child_host`. Task bodies
+// start work that belongs to their run with `spawn_in_run`.
+pub use crate::worker::executor::child_host::{
+    child_mode, run_child_host, spawn_in_run, ChildApp, ChildArgs, ChildArgsError, ChildHostExit,
+    ChildMode, OrphanSelfHeal, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
+};
 
 // worker re-exports
 pub use crate::worker::{
@@ -71,6 +89,20 @@ pub use crate::worker::{
     WorkerError,
 };
 
+// worker state snapshot values
+pub use crate::broker::{
+    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+
+// fleet check and class report
+pub use crate::broker::{
+    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
+    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
+};
+
+pub use crate::broker::client_family::ClientFamily;
+pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,

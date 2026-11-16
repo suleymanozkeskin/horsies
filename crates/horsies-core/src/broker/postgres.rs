@@ -3,23 +3,20 @@ use std::time::Duration;
 use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, FromRow, Postgres, Transaction};
+use sqlx::{ConnectOptions, Postgres, Transaction};
 use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope;
 use crate::core::history::enqueue::prepare_enqueue_facts;
-use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
-use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
-use crate::core::history::reads::detail::{
-    read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
-};
+use crate::core::history::identity::reservations::ReservationClaim;
+use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
-    read_task_result, HistoryResultPayload, HistoryTaskResult, TaskResultRead,
+    HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
@@ -28,19 +25,27 @@ use crate::core::{
     EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
 };
 
+use crate::broker::core_rows::{
+    checkout_batch, column, execute_in, expired_task_row, one_row, query_in, query_on, read_rows,
+    roll_back, scalar, stale_task_row, stored_worker_state, task_attempt_row, task_info_row,
+    task_result_row, RowDecodeError, StatementLog,
+};
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
-    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    read_worker_snapshot, read_worker_snapshots, DatabasePing, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
+use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow,
+    TaskResultRow, TaskRunningContextRow,
 };
 
+use crate::broker::client_family::ClientFamily;
 use crate::broker::process_listener::{
     default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
     SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
@@ -51,6 +56,12 @@ use crate::broker::task_lists::{
 };
 use crate::broker::wait_limit::WaitLimit;
 use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
+
+use crate::broker::pools::{BrokerPools, PoolProfile};
+use crate::db::{
+    BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
+    StatementFailure, Transaction as CoreTransaction, TypedStatement,
+};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -90,6 +101,53 @@ FROM horsies_tasks WHERE id = $1";
 const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
 SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
 FROM horsies_tasks WHERE id = $1 FOR UPDATE";
+
+/// The enqueue insert. Parameters in order: id, task name, queue name,
+/// priority, input, task options, execution, retention class key, sent at,
+/// fingerprint version, fingerprint, key digest, enqueued at, delay
+/// seconds, max retries, good until, retain rerun input.
+static ENQUEUE: TypedStatement = TypedStatement::new(
+    "enqueue",
+    ENQUEUE_SQL,
+    &[
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
+        ParameterType::Int2,
+        ParameterType::Bytea,
+        ParameterType::Bytea,
+        ParameterType::Timestamptz,
+        ParameterType::Int8,
+        ParameterType::Int4,
+        ParameterType::Timestamptz,
+        ParameterType::Bool,
+    ],
+);
+
+static READ_SEND_IDENTITY: TypedStatement = TypedStatement::new(
+    "read_send_identity",
+    READ_SEND_IDENTITY_SQL,
+    &[ParameterType::Uuid],
+);
+
+static READ_SEND_IDENTITY_FOR_KEY: TypedStatement = TypedStatement::new(
+    "read_send_identity_for_key",
+    READ_SEND_IDENTITY_FOR_KEY_SQL,
+    &[ParameterType::Uuid],
+);
+
+/// Binds a key digest (`$1`) to a task (`$2`) that has none.
+static BIND_IDEMPOTENCY_KEY: TypedStatement = TypedStatement::new(
+    "bind_idempotency_key",
+    "UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2",
+    &[ParameterType::Bytea, ParameterType::Uuid],
+);
 
 // Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
 // its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
@@ -256,10 +314,26 @@ SELECT id, task_name, status, result
 FROM horsies_tasks
 WHERE id = $1";
 
+static GET_RESULT: TypedStatement =
+    TypedStatement::new("get_result", GET_RESULT_SQL, &[ParameterType::Uuid]);
+
+static GET_RAW_RESULT_PROBE: TypedStatement = TypedStatement::new(
+    "get_raw_result_probe",
+    GET_RAW_RESULT_PROBE_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_RAW_RESULT_RECORD: TypedStatement = TypedStatement::new(
+    "get_raw_result_record",
+    GET_RAW_RESULT_RECORD_SQL,
+    &[ParameterType::Uuid],
+);
+
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result
+       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result,
+       execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -272,7 +346,7 @@ const GET_TASK_INFO_MINIMAL_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, NULL::TEXT AS result
+       NULL::TEXT AS failed_reason, NULL::TEXT AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -281,7 +355,7 @@ const GET_TASK_INFO_RESULT_ONLY_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, result
+       NULL::TEXT AS failed_reason, result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -290,7 +364,7 @@ const GET_TASK_INFO_REASON_ONLY_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       failed_reason, NULL::TEXT AS result
+       failed_reason, NULL::TEXT AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -439,6 +513,40 @@ FROM horsies_task_attempts
 WHERE task_id = $1
 ORDER BY attempt DESC";
 
+static SELECT_TASK_ATTEMPTS: TypedStatement = TypedStatement::new(
+    "select_task_attempts",
+    SELECT_TASK_ATTEMPTS_SQL,
+    &[ParameterType::Uuid],
+);
+
+/// Whether the live table holds the task id `$1`.
+static LIVE_TASK_EXISTS: TypedStatement = TypedStatement::new(
+    "live_task_exists",
+    "SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)",
+    &[ParameterType::Uuid],
+);
+
+static GET_TASK_INFO: TypedStatement =
+    TypedStatement::new("get_task_info", GET_TASK_INFO_SQL, &[ParameterType::Uuid]);
+
+static GET_TASK_INFO_MINIMAL: TypedStatement = TypedStatement::new(
+    "get_task_info_minimal",
+    GET_TASK_INFO_MINIMAL_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_TASK_INFO_RESULT_ONLY: TypedStatement = TypedStatement::new(
+    "get_task_info_result_only",
+    GET_TASK_INFO_RESULT_ONLY_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_TASK_INFO_REASON_ONLY: TypedStatement = TypedStatement::new(
+    "get_task_info_reason_only",
+    GET_TASK_INFO_REASON_ONLY_SQL,
+    &[ParameterType::Uuid],
+);
+
 // ---------------------------------------------------------------------------
 // Monitoring / observability SQL
 // ---------------------------------------------------------------------------
@@ -497,7 +605,8 @@ WITH RECURSIVE latest AS (
             worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
             queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-            memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+            memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+            worker_started_at, slots_down, class_capacity
         FROM horsies_worker_states
         ORDER BY worker_id, snapshot_at DESC
         LIMIT 1
@@ -509,7 +618,8 @@ WITH RECURSIVE latest AS (
             w.worker_id, w.snapshot_at, w.hostname, w.pid, w.processes, w.max_claim_batch,
             w.max_claim_per_worker, w.cluster_wide_cap, w.queues, w.queue_priorities,
             w.queue_max_concurrency, w.recovery_config, w.tasks_running, w.tasks_claimed,
-            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.worker_started_at
+            w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.children_memory_mb,
+            w.worker_started_at, w.slots_down, w.class_capacity
         FROM horsies_worker_states w
         WHERE w.worker_id > l.worker_id
         ORDER BY w.worker_id, w.snapshot_at DESC
@@ -524,7 +634,8 @@ SELECT
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+    memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+    worker_started_at, slots_down, class_capacity
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -537,7 +648,8 @@ SELECT
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
-    memory_usage_mb, memory_percent, cpu_percent, worker_started_at
+    memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
+    worker_started_at, slots_down, class_capacity
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -565,14 +677,50 @@ WHERE status = 'PENDING'
 ORDER BY good_until, id
 LIMIT $1";
 
+static GET_STALE_TASKS: TypedStatement = TypedStatement::new(
+    "get_stale_tasks",
+    GET_STALE_TASKS_SQL,
+    &[ParameterType::Int4, ParameterType::Int8],
+);
+
+static LIST_WORKER_STATES: TypedStatement =
+    TypedStatement::new("list_worker_states", LIST_WORKER_STATES_SQL, &[]);
+
+static GET_WORKER_STATE_LATEST: TypedStatement = TypedStatement::new(
+    "get_worker_state_latest",
+    GET_WORKER_STATE_LATEST_SQL,
+    &[ParameterType::Text],
+);
+
+static GET_WORKER_STATE_HISTORY: TypedStatement = TypedStatement::new(
+    "get_worker_state_history",
+    GET_WORKER_STATE_HISTORY_SQL,
+    &[ParameterType::Text, ParameterType::Int8],
+);
+
+static GET_EXPIRED_TASKS: TypedStatement = TypedStatement::new(
+    "get_expired_tasks",
+    GET_EXPIRED_TASKS_SQL,
+    &[ParameterType::Int8],
+);
+
+/// The worker ping broadcast: `$1` the ping channel, `$2` the request JSON.
+static NOTIFY_WORKER_PING: TypedStatement = TypedStatement::new(
+    "notify_worker_ping",
+    "SELECT pg_notify($1, $2)",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
+
+static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH_CHECK_SQL, &[]);
 
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
 /// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
 /// again within this time, and a new connection, are used with no ping.
-pub(crate) const PRE_PING_AFTER_IDLE: Duration = Duration::from_secs(1);
+pub(crate) const PRE_PING_AFTER_IDLE: Duration = crate::db::DEFAULT_IDLE_PING_AFTER;
 
 /// Connect options for every broker pool, including the runtime pool in
 /// PgBouncer transaction mode.
@@ -600,12 +748,10 @@ fn pg_connect_options(database_url: &str, echo: bool) -> Result<PgConnectOptions
     Ok(connect_options)
 }
 
-/// Session setting for every Horsies connection that keeps its session. The
-/// Horsies statements are short; PostgreSQL's JIT compiles them when a cost
-/// estimate passes `jit_above_cost`, and the compile time then exceeds the
-/// run time by orders of magnitude (the partition coverage probe: about 2 ms
-/// of work, 0.7 s or more of JIT compile).
-const DISABLE_JIT_SQL: &str = "SET jit = off";
+/// Session setting for every Horsies connection that keeps its session: the
+/// statement layer's rule ([`crate::db::KEPT_SESSION_SETUP_SQL`]), so the
+/// sqlx pools and the core pools set the same session.
+const DISABLE_JIT_SQL: &str = crate::db::KEPT_SESSION_SETUP_SQL;
 
 /// Whether a pool's connections keep their own session settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -667,10 +813,20 @@ fn pooled_options(config: &PostgresConfig) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(config.pool_size + config.max_overflow)
             .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .max_lifetime(Duration::from_secs(config.pool_recycle as u64))
+            .max_lifetime(connection_lifetime(config.pool_recycle))
             .idle_timeout(None),
         config.pool_pre_ping,
     )
+}
+
+/// The age at which the pool retires a connection, or `None` to keep it.
+fn connection_lifetime(recycle: crate::manifest::PoolRecycle) -> Option<Duration> {
+    match recycle {
+        crate::manifest::PoolRecycle::Never => None,
+        crate::manifest::PoolRecycle::AfterSeconds { seconds } => {
+            Some(Duration::from_secs(u64::from(seconds.get())))
+        }
+    }
 }
 
 fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
@@ -757,10 +913,20 @@ pub enum SchemaInitializationMode {
 
 /// PostgreSQL-backed task broker.
 ///
-/// All operations are async and use connection pooling via `sqlx::PgPool`.
+/// Two sets of pools on the same URLs:
+/// - `core`: the statement layer's pools ([`crate::db::CorePool`], one per
+///   role). The broker's own moved call sites run on them.
+/// - `pool` and `session_pool`: sqlx pools. They are the adapter for the
+///   call sites that have not moved to the statement layer yet: the broker's
+///   lifecycle statements, the worker, the workflow engine, the scheduler,
+///   the web layer, migrations and the listeners, which borrow them through
+///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`].
+///
 /// Every LISTEN of the broker goes through its one listener connection on the
 /// session URL.
 pub struct PostgresBroker {
+    core: BrokerPools,
+    statement_log: StatementLog,
     pool: PgPool,
     session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
@@ -769,17 +935,25 @@ pub struct PostgresBroker {
     listener: ProcessListener,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
+    /// The client family of this handle. The constructors of this type serve
+    /// the Rust client; the Python bridge sets `Python` with
+    /// [`PostgresBroker::with_client_family`].
+    client_family: ClientFamily,
+    /// Set once the family check before the first write passed.
+    client_family_admitted: tokio::sync::OnceCell<()>,
 }
 
 impl PostgresBroker {
-    /// Construct a broker from an existing pool.
+    /// Construct a test broker on the database of a test's sqlx pool. The
+    /// sqlx pool is the adapter pool; the core pools connect to the same
+    /// database ([`crate::broker::pools::pools_for_test_pool`]).
     ///
-    /// Useful for tests and for applications that already manage their own
-    /// `PgPool` lifecycle. The broker has no session URL, so it has no
-    /// listener: result waits poll, and an operation that needs a listener is
-    /// refused with [`ListenError::NoSessionUrl`]. Use
+    /// The broker has no session URL, so it has no listener: result waits
+    /// poll, and an operation that needs a listener is refused with
+    /// [`ListenError::NoSessionUrl`]. Use
     /// [`from_pool_and_session_url`](Self::from_pool_and_session_url) for a
     /// broker with a listener.
+    #[cfg(test)]
     pub fn from_pool(pool: PgPool) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
@@ -788,9 +962,10 @@ impl PostgresBroker {
         )
     }
 
-    /// Construct a broker from an existing pool, with its listener on
-    /// `session_url`. The listener opens its own connection at the first
-    /// subscription; the URL is parsed then.
+    /// Construct a test broker on the database of a test's sqlx pool, with
+    /// its listener on `session_url`. The listener opens its own connection
+    /// at the first subscription; the URL is parsed then.
+    #[cfg(test)]
     pub fn from_pool_and_session_url(pool: PgPool, session_url: &str) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
@@ -799,8 +974,10 @@ impl PostgresBroker {
         )
     }
 
-    /// Construct a monitoring broker that never applies migrations or checks
-    /// the fleet cutover gate. It has no session URL, so it has no listener.
+    /// Construct a test monitoring broker that never applies migrations or
+    /// checks the fleet cutover gate. It has no session URL, so it has no
+    /// listener.
+    #[cfg(test)]
     pub fn from_pool_observe_only(pool: PgPool) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
@@ -809,12 +986,15 @@ impl PostgresBroker {
         )
     }
 
+    #[cfg(test)]
     fn from_pool_with_schema_initialization_mode(
         pool: PgPool,
         schema_initialization_mode: SchemaInitializationMode,
         listener: ProcessListener,
     ) -> Self {
         Self {
+            core: crate::broker::pools::pools_for_test_pool(&pool),
+            statement_log: StatementLog::Off,
             session_pool: pool.clone(),
             pool,
             pgbouncer_transaction_mode: false,
@@ -826,11 +1006,14 @@ impl PostgresBroker {
             listener,
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
+            client_family: ClientFamily::Rust,
+            client_family_admitted: tokio::sync::OnceCell::new(),
         }
     }
 
-    /// Construct from an existing pool with an explicit keyed-enqueue
-    /// reservation window. `None` selects the 24-hour contract default.
+    /// Construct a test broker with an explicit keyed-enqueue reservation
+    /// window. `None` selects the 24-hour contract default.
+    #[cfg(test)]
     pub fn from_pool_with_idempotency_reservation_window(
         pool: PgPool,
         window: Option<chrono::Duration>,
@@ -838,7 +1021,8 @@ impl PostgresBroker {
         Self::from_pool_with_enqueue_policy(pool, false, window)
     }
 
-    /// Construct from an existing pool with both enqueue-time broker policies.
+    /// Construct a test broker with both enqueue-time broker policies.
+    #[cfg(test)]
     pub fn from_pool_with_enqueue_policy(
         pool: PgPool,
         retain_rerun_input_default: bool,
@@ -856,11 +1040,7 @@ impl PostgresBroker {
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
     /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str) -> Result<Self, BrokerError> {
-        PostgresConfig::from_url(database_url).validate()?;
-        let pool = PgPool::connect(database_url)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(Self::from_pool_and_session_url(pool, database_url))
+        Self::connect_with(&PostgresConfig::from_url(database_url)).await
     }
 
     /// Connect using a `PostgresConfig` from horsies-core.
@@ -879,11 +1059,34 @@ impl PostgresBroker {
             .await
     }
 
+    /// Connect a worker's broker: the main URL pool is the worker profile
+    /// pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from
+    /// batch checkouts for the reaper and the per-task writes.
+    pub async fn connect_worker_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(
+            config,
+            SchemaInitializationMode::MigrateAndValidate,
+            PoolProfile::Worker,
+        )
+        .await
+    }
+
     async fn connect_with_schema_initialization_mode(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
     ) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(config, schema_initialization_mode, PoolProfile::Producer).await
+    }
+
+    /// Checks the config, builds the core pools (no connection), then opens
+    /// the sqlx adapter pools (one connection each, as before).
+    async fn connect_with_profile(
+        config: &PostgresConfig,
+        schema_initialization_mode: SchemaInitializationMode,
+        profile: PoolProfile,
+    ) -> Result<Self, BrokerError> {
         config.validate()?;
+        let core = BrokerPools::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let pool = pg_pool_options(config)
             .connect_with(connect_options)
@@ -902,6 +1105,8 @@ impl PostgresBroker {
         };
 
         Ok(Self {
+            core,
+            statement_log: StatementLog::from_echo(config.echo),
             pool,
             session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
@@ -913,6 +1118,8 @@ impl PostgresBroker {
             listener: ProcessListener::on_session_url(config.effective_session_database_url()),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
+            client_family: ClientFamily::Rust,
+            client_family_admitted: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -952,7 +1159,31 @@ impl PostgresBroker {
         if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
             return Ok(());
         }
-        crate::broker::migrations::run_horsies_migrations(&self.session_pool).await
+        crate::broker::migrations::install_schema(&self.session_pool, self.client_family).await
+    }
+
+    /// The same handle for a client of `family`. The install records it, and
+    /// every write checks it once.
+    pub fn with_client_family(mut self, family: ClientFamily) -> Self {
+        self.client_family = family;
+        self
+    }
+
+    /// Check once, before the first write of this handle, that the database
+    /// records this handle's client family. Reads never call it. A handle
+    /// whose install ran in this process has passed it already. A database of
+    /// the other family, or with no family row, is
+    /// `BrokerError::ClientFamilyMismatch`, not retryable; a database failure
+    /// is not kept, so the next write checks again. One statement, once.
+    pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
+        self.client_family_admitted
+            .get_or_try_init(|| async {
+                let recorded =
+                    crate::broker::client_family::read_recorded_family(&self.pool).await?;
+                crate::broker::client_family::admit_family(recorded, self.client_family)
+            })
+            .await?;
+        Ok(())
     }
 
     /// Ensure the embedded schema is initialized exactly once for this broker.
@@ -984,6 +1215,9 @@ impl PostgresBroker {
                 if actual != Some(expected) {
                     return Err(BrokerError::SchemaVersionMismatch { expected, actual });
                 }
+                // The install recorded or checked the family: writes of this
+                // handle need no second read.
+                let _already_admitted = self.client_family_admitted.set(());
                 Ok::<(), BrokerError>(())
             })
             .await?;
@@ -995,15 +1229,70 @@ impl PostgresBroker {
         self.schema_initialization_mode
     }
 
-    /// Get a reference to the underlying connection pool.
+    /// The sqlx pool on `database_url`: the adapter for call sites that
+    /// have not moved to the statement layer. Moved call sites use the core
+    /// pools.
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
-    /// Get the session-capable pool used for schema work, partition
-    /// maintenance, and LISTEN/NOTIFY.
+    /// The sqlx pool on the session URL, used for schema work, partition
+    /// maintenance, and LISTEN/NOTIFY: the adapter for call sites that have
+    /// not moved to the statement layer.
     pub fn session_pool(&self) -> &PgPool {
         &self.session_pool
+    }
+
+    /// Runs one statement on the main core pool and reads every row.
+    ///
+    /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
+    /// moved call sites are producer and monitoring work, never the reaper or
+    /// a per-task write. Bound: the connection's own timeouts, as the sqlx
+    /// path.
+    async fn query_main(
+        &self,
+        statement: &BoundStatement<'_>,
+    ) -> Result<Vec<Row>, StatementFailure> {
+        self.log_statement(statement.statement());
+        self.core
+            .main()
+            .query(
+                CheckoutClass::Batch,
+                statement,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+    }
+
+    /// Runs one statement on the main core pool and reads the count of
+    /// affected rows. Checkout and bound as [`PostgresBroker::query_main`].
+    async fn execute_main(&self, statement: &BoundStatement<'_>) -> Result<u64, StatementFailure> {
+        self.log_statement(statement.statement());
+        self.core
+            .main()
+            .execute(
+                CheckoutClass::Batch,
+                statement,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+    }
+
+    /// Runs one read on the main core pool and reads each row with `read`.
+    ///
+    /// Errors: [`BrokerError::Statement`] when the statement failed;
+    /// [`BrokerError::RowDecode`] for the first row that does not read.
+    async fn read_main<T>(
+        &self,
+        statement: &BoundStatement<'_>,
+        read: fn(&Row, &TypedStatement) -> Result<T, RowDecodeError>,
+    ) -> Result<Vec<T>, BrokerError> {
+        let rows = self.query_main(statement).await?;
+        Ok(read_rows(&rows, statement.statement(), read)?)
+    }
+
+    fn log_statement(&self, statement: &TypedStatement) {
+        self.statement_log.log(statement);
     }
 
     /// Whether this broker's runtime pool is configured for PgBouncer
@@ -1013,11 +1302,18 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction.
+    ///
+    /// The handle checks its client family before the transaction: a
+    /// database of another family, or with no family row, is
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
         let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
         transaction.commit().await?;
@@ -1076,7 +1372,7 @@ impl PostgresBroker {
                 BrokerError::EnqueueContract(format!("task identity mint failed: {error}"))
             })?,
         };
-        let max_retries = parse_max_retries(task_options);
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
         let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
         let retention_class_key = retention.class_key();
@@ -1093,38 +1389,36 @@ impl PostgresBroker {
             idempotency_key,
         )
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        self.ensure_client_family_for_write().await?;
         let sent = SendIdentity {
             fingerprint_version: Some(facts.command_fingerprint_version),
             fingerprint: Some(facts.command_fingerprint.to_vec()),
             sent_at: effective_sent_at,
         };
-        let mut transaction = self.pool.begin().await.map_err(BrokerError::Database)?;
+        let mut connection = checkout_batch(self.core.main(), &ENQUEUE).await?;
+        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
                 &mut transaction,
-                &key_digest,
-                IDEMPOTENCY_SCOPE_VERSION,
-                self.idempotency_reservation_window_seconds,
-                facts.command_fingerprint_version,
-                &facts.command_fingerprint,
-                task_id,
+                self.statement_log,
+                &KeyClaim {
+                    key_digest: &key_digest,
+                    key_scope_version: IDEMPOTENCY_SCOPE_VERSION,
+                    reservation_window_seconds: self.idempotency_reservation_window_seconds,
+                    fingerprint_version: facts.command_fingerprint_version,
+                    fingerprint: &facts.command_fingerprint,
+                    task_id,
+                },
             )
-            .await
-            .map_err(map_history_enqueue_error)?;
+            .await?;
             match claim {
                 ReservationClaim::Applied { .. } => {}
                 ReservationClaim::Replay { task_id } => {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(BrokerError::Database)?;
+                    roll_back(transaction).await?;
                     return Ok(task_id);
                 }
                 ReservationClaim::Conflict { task_id, .. } => {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(BrokerError::Database)?;
+                    roll_back(transaction).await?;
                     return Err(BrokerError::IdempotencyKeyConflict {
                         task_name: task_name.to_owned(),
                         task_id,
@@ -1133,35 +1427,40 @@ impl PostgresBroker {
             }
         }
 
-        let row: Option<(Uuid,)> = sqlx::query_as(ENQUEUE_SQL)
-            .bind(task_id)
-            .bind(task_name)
-            .bind(queue_name)
-            .bind(priority)
-            .bind(input)
-            .bind(task_options)
-            .bind(facts.execution.as_str())
-            .bind(&facts.retention_class_key)
-            .bind(effective_sent_at)
-            .bind(facts.command_fingerprint_version)
-            .bind(facts.command_fingerprint.as_slice())
-            .bind(
-                facts
-                    .idempotency_key_digest
-                    .as_ref()
-                    .map(<[u8; 32]>::as_slice),
-            )
-            .bind(enqueued_at)
-            .bind(enqueue_delay_seconds)
-            .bind(max_retries)
-            .bind(good_until)
-            .bind(facts.retain_rerun_input)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(BrokerError::Database)?;
+        let execution = facts.execution.as_str();
+        let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
+        let bound_key_digest: Option<&[u8]> = facts
+            .idempotency_key_digest
+            .as_ref()
+            .map(<[u8; 32]>::as_slice);
+        let inserted = query_in(
+            &mut transaction,
+            self.statement_log,
+            &ENQUEUE
+                .bind()
+                .value(&task_id)
+                .value(&task_name)
+                .value(&queue_name)
+                .value(&priority)
+                .value(&input)
+                .value(&task_options)
+                .value(&execution)
+                .value(&facts.retention_class_key)
+                .value(&effective_sent_at)
+                .value(&facts.command_fingerprint_version)
+                .value(&fingerprint)
+                .value(&bound_key_digest)
+                .value(&enqueued_at)
+                .value(&enqueue_delay_seconds)
+                .value(&max_retries)
+                .value(&good_until)
+                .value(&facts.retain_rerun_input)
+                .finish(),
+        )
+        .await?;
 
-        if row.is_some() {
-            transaction.commit().await.map_err(BrokerError::Database)?;
+        if !inserted.is_empty() {
+            transaction.commit().await?;
             tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
             return Ok(task_id);
         }
@@ -1178,31 +1477,31 @@ impl PostgresBroker {
                 .await;
         }
 
-        transaction
-            .rollback()
-            .await
-            .map_err(BrokerError::Database)?;
+        roll_back(transaction).await?;
 
         // Conflict: task_id already exists. Compare the fingerprint and sent_at.
         tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
 
-        let stored: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>)> =
-            sqlx::query_as(READ_SEND_IDENTITY_SQL)
-                .bind(task_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
-
-        let outcome = classify_enqueue_conflict(
-            stored.map(|(fingerprint_version, fingerprint, sent_at)| SendIdentity {
-                fingerprint_version,
-                fingerprint,
-                sent_at,
+        let stored_rows = query_on(
+            &mut connection,
+            self.statement_log,
+            &READ_SEND_IDENTITY.bind().value(&task_id).finish(),
+        )
+        .await?;
+        let stored = match stored_rows.first() {
+            Some(row) => Some(SendIdentity {
+                fingerprint_version: column(
+                    row,
+                    &READ_SEND_IDENTITY,
+                    "command_fingerprint_version",
+                )?,
+                fingerprint: column(row, &READ_SEND_IDENTITY, "command_fingerprint")?,
+                sent_at: column(row, &READ_SEND_IDENTITY, "sent_at")?,
             }),
-            &sent,
-            task_id,
-            task_name,
-        );
+            None => None,
+        };
+
+        let outcome = classify_enqueue_conflict(stored, &sent, task_id, task_name);
         if matches!(
             outcome,
             Err(BrokerError::EnqueueConflictUnverifiable { .. })
@@ -1216,40 +1515,39 @@ impl PostgresBroker {
         outcome
     }
 
+    /// The keyed enqueue whose task id already exists: in the same
+    /// transaction, lock the row, compare its send identity, and bind the key
+    /// when the row has none.
     async fn bind_key_after_task_id_conflict(
         &self,
-        mut transaction: Transaction<'_, Postgres>,
+        mut transaction: CoreTransaction<'_>,
         task_id: Uuid,
         task_name: &str,
         sent: &SendIdentity,
         key_digest: &[u8; 32],
     ) -> Result<Uuid, BrokerError> {
-        let existing: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>, Option<Vec<u8>>)> =
-            sqlx::query_as(READ_SEND_IDENTITY_FOR_KEY_SQL)
-                .bind(task_id)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(BrokerError::Database)?;
-        let Some((fingerprint_version, fingerprint, sent_at, bound_digest)) = existing else {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+        let statement: &TypedStatement = &READ_SEND_IDENTITY_FOR_KEY;
+        let existing = query_in(
+            &mut transaction,
+            self.statement_log,
+            &statement.bind().value(&task_id).finish(),
+        )
+        .await?;
+        let Some(row) = existing.first() else {
+            roll_back(transaction).await?;
             return Err(BrokerError::EnqueueConflictUnverifiable {
                 task_id,
                 task_name: task_name.to_owned(),
             });
         };
         let stored = SendIdentity {
-            fingerprint_version,
-            fingerprint,
-            sent_at,
+            fingerprint_version: column(row, statement, "command_fingerprint_version")?,
+            fingerprint: column(row, statement, "command_fingerprint")?,
+            sent_at: column(row, statement, "sent_at")?,
         };
+        let bound_digest: Option<Vec<u8>> = column(row, statement, "idempotency_key_digest")?;
         if &stored != sent {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+            roll_back(transaction).await?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
         // The task id is bound to another key: the same command with a changed
@@ -1259,21 +1557,23 @@ impl PostgresBroker {
             .as_deref()
             .is_some_and(|digest| digest != key_digest.as_slice())
         {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+            roll_back(transaction).await?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
         if bound_digest.is_none() {
-            sqlx::query("UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2")
-                .bind(key_digest.as_slice())
-                .bind(task_id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(BrokerError::Database)?;
+            let key: &[u8] = key_digest.as_slice();
+            let _bound = execute_in(
+                &mut transaction,
+                self.statement_log,
+                &BIND_IDEMPOTENCY_KEY
+                    .bind()
+                    .value(&key)
+                    .value(&task_id)
+                    .finish(),
+            )
+            .await?;
         }
-        transaction.commit().await.map_err(BrokerError::Database)?;
+        transaction.commit().await?;
         Ok(task_id)
     }
 
@@ -1411,7 +1711,7 @@ impl PostgresBroker {
         );
         let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
         let result_json = serde_json::to_string(&task_result)
-            .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+            .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
 
         let outcomes = crate::broker::terminalization::terminalize(
             &self.pool,
@@ -1565,21 +1865,20 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<Vec<TaskAttemptRow>, BrokerError> {
-        let rows: Vec<TaskAttemptRow> = sqlx::query_as(SELECT_TASK_ATTEMPTS_SQL)
-            .bind(task_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+        let rows = self
+            .read_main(
+                &SELECT_TASK_ATTEMPTS.bind().value(&task_id).finish(),
+                task_attempt_row,
+            )
+            .await?;
         if !rows.is_empty() {
             return Ok(rows);
         }
 
-        let live: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)")
-                .bind(task_id)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
+        let live_rows = self
+            .query_main(&LIVE_TASK_EXISTS.bind().value(&task_id).finish())
+            .await?;
+        let live: bool = scalar(&one_row(live_rows, &LIVE_TASK_EXISTS)?, &LIVE_TASK_EXISTS)?;
         if live {
             return Ok(rows);
         }
@@ -1795,22 +2094,23 @@ impl PostgresBroker {
         include_failed_reason: bool,
         include_attempts: bool,
     ) -> BrokerResult<Option<TaskInfo>> {
-        let sql = match (include_result, include_failed_reason) {
-            (true, true) => GET_TASK_INFO_SQL,
-            (true, false) => GET_TASK_INFO_RESULT_ONLY_SQL,
-            (false, true) => GET_TASK_INFO_REASON_ONLY_SQL,
-            (false, false) => GET_TASK_INFO_MINIMAL_SQL,
+        let statement: &'static TypedStatement = match (include_result, include_failed_reason) {
+            (true, true) => &GET_TASK_INFO,
+            (true, false) => &GET_TASK_INFO_RESULT_ONLY,
+            (false, true) => &GET_TASK_INFO_REASON_ONLY,
+            (false, false) => &GET_TASK_INFO_MINIMAL,
         };
 
-        let row: Option<TaskInfoRow> = sqlx::query_as(sql)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
+        let row = self
+            .read_main(&statement.bind().value(&task_id).finish(), task_info_row)
             .await
-            .map_err(|e| BrokerOperationError {
+            .map_err(|error| BrokerOperationError {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
-                message: format!("{}", e),
-                retryable: is_retryable_sqlx_error(&e),
-            })?;
+                message: error.to_string(),
+                retryable: error.is_retryable(),
+            })?
+            .into_iter()
+            .next();
 
         match row {
             Some(r) => {
@@ -2205,8 +2505,10 @@ impl PostgresBroker {
         Ok(row.is_some())
     }
 
-    /// Close the connection pool.
+    /// Close the core pools and the sqlx main pool. Later checkouts on them
+    /// fail as closed; neither reopens.
     pub async fn close(&self) {
+        self.core.close();
         self.pool.close().await;
     }
 
@@ -2223,16 +2525,8 @@ impl PostgresBroker {
     /// [`check_session_delivery`](Self::check_session_delivery) at every
     /// boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
-        let _: (i32,) = sqlx::query_as(HEALTH_CHECK_SQL)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|err| {
-                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
-                    prepared_statement_tracking_error(err)
-                } else {
-                    BrokerError::Database(err)
-                }
-            })?;
+        let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
+        let _row = one_row(rows, &HEALTH_CHECK)?;
         Ok(())
     }
 
@@ -2244,16 +2538,19 @@ impl PostgresBroker {
     /// for monitoring. Mirrors Python's `ping_database_async`.
     pub async fn ping_database(&self) -> BrokerResult<DatabasePing> {
         let start = std::time::Instant::now();
-        let probe: Result<(i32,), sqlx::Error> =
-            sqlx::query_as(HEALTH_CHECK_SQL).fetch_one(&self.pool).await;
+        let probe = self
+            .query_main(&HEALTH_CHECK.bind().finish())
+            .await
+            .map_err(BrokerError::Statement)
+            .and_then(|rows| one_row(rows, &HEALTH_CHECK).map_err(BrokerError::RowDecode));
         match probe {
-            Ok(_) => Ok(DatabasePing {
+            Ok(_row) => Ok(DatabasePing {
                 latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             }),
-            Err(e) => Err(BrokerOperationError {
+            Err(error) => Err(BrokerOperationError {
                 code: BrokerErrorCode::DbPingFailed,
-                message: format!("database ping failed: {}", e),
-                retryable: is_retryable_sqlx_error(&e),
+                message: format!("database ping failed: {error}"),
+                retryable: error.is_retryable(),
             }),
         }
     }
@@ -2320,12 +2617,18 @@ impl PostgresBroker {
         })?;
 
         let start = std::time::Instant::now();
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(WORKER_PING_CHANNEL)
-            .bind(&payload)
-            .execute(self.pool())
+        let _notified = self
+            .execute_main(
+                &NOTIFY_WORKER_PING
+                    .bind()
+                    .value(&WORKER_PING_CHANNEL)
+                    .value(&payload)
+                    .finish(),
+            )
             .await
-            .map_err(|e| worker_ping_error("ping notify", e))?;
+            .map_err(|failure| {
+                worker_ping_statement_error("ping notify", BrokerError::Statement(failure))
+            })?;
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2433,10 +2736,16 @@ impl PostgresBroker {
         stale_threshold_minutes: i32,
     ) -> BrokerResult<BoundedTaskList<StaleTaskRow>> {
         let threshold = StaleMinutes::parse(stale_threshold_minutes)?;
-        let rows: Vec<StaleTaskRow> = sqlx::query_as(GET_STALE_TASKS_SQL)
-            .bind(threshold.minutes())
-            .bind(TASK_LIST_READ_LIMIT)
-            .fetch_all(&self.pool)
+        let minutes = threshold.minutes();
+        let rows = self
+            .read_main(
+                &GET_STALE_TASKS
+                    .bind()
+                    .value(&minutes)
+                    .value(&TASK_LIST_READ_LIMIT)
+                    .finish(),
+                stale_task_row,
+            )
             .await
             .map_err(|error| monitoring_query_error("get_stale_tasks", error))?;
         Ok(BoundedTaskList::from_read(rows, TASK_LIST_BOUND))
@@ -2448,32 +2757,47 @@ impl PostgresBroker {
     /// reported a snapshot appears regardless of current load — unlike the
     /// retired `get_worker_stats` (which counted RUNNING tasks only and missed
     /// idle workers). Mirrors Python's `list_worker_states_async`.
+    ///
+    /// A stored `slots_down`, `class_capacity` or map column of another shape
+    /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
+    /// worker and the column (Python `postgres.py:2961-3034`).
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
-        sqlx::query_as(LIST_WORKER_STATES_SQL)
-            .fetch_all(&self.pool)
+        let rows = self
+            .read_main(&LIST_WORKER_STATES.bind().finish(), stored_worker_state)
             .await
-            .map_err(|e| monitoring_query_error("list_worker_states", e))
+            .map_err(|error| monitoring_query_error("list_worker_states", error))?;
+        read_worker_snapshots("list_worker_states", rows)
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.
     ///
-    /// Mirrors Python's `get_worker_state_async`.
+    /// An unreadable stored row fails the read as in
+    /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
+    /// `get_worker_state_async`.
     pub async fn get_worker_state(
         &self,
         worker_id: &str,
     ) -> BrokerResult<Option<WorkerStateSnapshot>> {
-        sqlx::query_as(GET_WORKER_STATE_LATEST_SQL)
-            .bind(worker_id)
-            .fetch_optional(&self.pool)
+        let rows = self
+            .read_main(
+                &GET_WORKER_STATE_LATEST.bind().value(&worker_id).finish(),
+                stored_worker_state,
+            )
             .await
-            .map_err(|e| monitoring_query_error("get_worker_state", e))
+            .map_err(|error| monitoring_query_error("get_worker_state", error))?;
+        rows.into_iter()
+            .next()
+            .map(|stored| read_worker_snapshot("get_worker_state", stored))
+            .transpose()
     }
 
     /// State-snapshot history for one worker, newest first.
     ///
     /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
     /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
-    /// Mirrors Python's `get_worker_state_history_async`.
+    /// An unreadable stored row fails the read as in
+    /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
+    /// `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,
@@ -2484,12 +2808,18 @@ impl PostgresBroker {
                 "limit must be positive when set, got {refused}"
             )));
         }
-        sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
-            .bind(worker_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
+        let rows = self
+            .read_main(
+                &GET_WORKER_STATE_HISTORY
+                    .bind()
+                    .value(&worker_id)
+                    .value(&limit)
+                    .finish(),
+                stored_worker_state,
+            )
             .await
-            .map_err(|e| monitoring_query_error("get_worker_state_history", e))
+            .map_err(|error| monitoring_query_error("get_worker_state_history", error))?;
+        read_worker_snapshots("get_worker_state_history", rows)
     }
 
     /// Find PENDING tasks that have expired (past their `good_until` deadline).
@@ -2503,9 +2833,14 @@ impl PostgresBroker {
     /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_expired_tasks()` in the Python library.
     pub async fn get_expired_tasks(&self) -> BrokerResult<BoundedTaskList<ExpiredTaskRow>> {
-        let rows: Vec<ExpiredTaskRow> = sqlx::query_as(GET_EXPIRED_TASKS_SQL)
-            .bind(TASK_LIST_READ_LIMIT)
-            .fetch_all(&self.pool)
+        let rows = self
+            .read_main(
+                &GET_EXPIRED_TASKS
+                    .bind()
+                    .value(&TASK_LIST_READ_LIMIT)
+                    .finish(),
+                expired_task_row,
+            )
             .await
             .map_err(|error| monitoring_query_error("get_expired_tasks", error))?;
         Ok(BoundedTaskList::from_read(rows, TASK_LIST_BOUND))
@@ -2523,11 +2858,7 @@ impl PostgresBroker {
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        let read = read_task_result(&mut connection, task_id)
-            .await
-            .map_err(map_history_read_error)?;
-        drop(connection);
+        let read = read_task_result(self.core.main(), self.statement_log, task_id).await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
@@ -2559,24 +2890,24 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<ResultRowProbe, BrokerError> {
-        let live: Option<TaskResultRow> = sqlx::query_as(GET_RESULT_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        if let Some(row) = live {
+        let live = self
+            .read_main(&GET_RESULT.bind().value(&task_id).finish(), task_result_row)
+            .await?;
+        if let Some(row) = live.into_iter().next() {
             return Ok(ResultRowProbe::Row(row));
         }
         self.confirm_result_absence(task_id).await
     }
 
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
-        let live: Option<RawResultProbeRow> = sqlx::query_as(GET_RAW_RESULT_PROBE_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
+        let live = self
+            .read_main(
+                &GET_RAW_RESULT_PROBE.bind().value(&task_id).finish(),
+                raw_result_probe_row,
+            )
             .await
-            .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
-        if let Some(row) = live {
+            .map_err(raw_result_operation_error)?;
+        if let Some(row) = live.into_iter().next() {
             let status: crate::core::TaskStatus = row
                 .status
                 .parse()
@@ -2587,12 +2918,14 @@ impl PostgresBroker {
                     | crate::core::TaskStatus::Failed
                     | crate::core::TaskStatus::Expired
             ) {
-                let terminal: Option<RawResultDbRow> = sqlx::query_as(GET_RAW_RESULT_RECORD_SQL)
-                    .bind(task_id)
-                    .fetch_optional(&self.pool)
+                let terminal = self
+                    .read_main(
+                        &GET_RAW_RESULT_RECORD.bind().value(&task_id).finish(),
+                        raw_result_db_row,
+                    )
                     .await
-                    .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
-                let Some(terminal) = terminal else {
+                    .map_err(raw_result_operation_error)?;
+                let Some(terminal) = terminal.into_iter().next() else {
                     return self.history_raw_result_probe(task_id).await;
                 };
                 let terminal_status: crate::core::TaskStatus =
@@ -2634,17 +2967,7 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<Option<TaskDetailResult>, BrokerError> {
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        if !staged_detail_published(&mut connection)
-            .await
-            .map_err(map_history_read_error)?
-        {
-            return Ok(None);
-        }
-        read_task_detail(&mut connection, task_id)
-            .await
-            .map(Some)
-            .map_err(map_history_read_error)
+        read_history_detail(self.core.main(), self.statement_log, task_id).await
     }
 
     /// Poll the result row once for the wait loop.
@@ -2702,17 +3025,22 @@ fn idempotency_reservation_window_seconds(
     Ok(window.num_seconds())
 }
 
-fn map_history_enqueue_error(error: HistoryError) -> BrokerError {
+/// The rerun error of a failed client-family check.
+///
+/// # Panics
+///
+/// `ensure_client_family_for_write` fails only with a database error or a
+/// family mismatch; any other error is a defect of that function.
+fn rerun_family_error(error: BrokerError) -> RerunError {
     match error {
-        HistoryError::Database(error) => BrokerError::Database(error),
-        other => BrokerError::EnqueueContract(other.to_string()),
-    }
-}
-
-fn map_history_read_error(error: HistoryError) -> BrokerError {
-    match error {
-        HistoryError::Database(error) => BrokerError::Database(error),
-        other => BrokerError::HistoryReadContract(other.to_string()),
+        BrokerError::ClientFamilyMismatch { stored, own } => {
+            RerunError::ClientFamilyMismatch { stored, own }
+        }
+        BrokerError::Database(database) => RerunError::Database(database),
+        other => panic!(
+            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
+             error nor a family mismatch"
+        ),
     }
 }
 
@@ -2741,19 +3069,42 @@ enum ResultRowProbe {
     Absent,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct RawResultProbeRow {
     id: Uuid,
     task_name: String,
     status: String,
 }
 
-#[derive(Debug, FromRow)]
+fn raw_result_probe_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<RawResultProbeRow, RowDecodeError> {
+    Ok(RawResultProbeRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+    })
+}
+
+#[derive(Debug)]
 struct RawResultDbRow {
     id: Uuid,
     task_name: String,
     status: String,
     result: Option<String>,
+}
+
+fn raw_result_db_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<RawResultDbRow, RowDecodeError> {
+    Ok(RawResultDbRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+        result: column(row, statement, "result")?,
+    })
 }
 
 enum RawResultProbe {
@@ -2883,7 +3234,7 @@ fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, Broker
         .transpose()?;
     Ok(TaskResultRow {
         id: detail.task_id,
-        status: detail.status,
+        status: detail.status.to_string(),
         result,
         failed_reason: detail.final_failed_reason,
     })
@@ -2925,8 +3276,7 @@ fn history_task_info(
     include_failed_reason: bool,
     include_attempts: bool,
 ) -> BrokerResult<TaskInfo> {
-    let status = crate::broker::row::task::parse_task_status(&detail.status)
-        .map_err(task_info_history_error)?;
+    let status = detail.status;
     let result = match include_result {
         false => None,
         true => decode_history_result_value(&detail)
@@ -2980,6 +3330,8 @@ fn history_task_info(
             .flatten(),
         result,
         attempts,
+        // The history table has no `execution` column (Python reports `None`).
+        execution: crate::core::ExecutionClass::NotKeptInHistory,
     })
 }
 
@@ -3044,23 +3396,13 @@ fn is_terminal_status(status: &str) -> bool {
 }
 
 /// Build a `MONITORING_QUERY_FAILED` broker error for a failed read query.
-/// `retryable` is the driver classification of the cause, as Python's
+/// `retryable` is the classification of the cause, as Python's
 /// `_operation_failed`.
-fn monitoring_query_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
+fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperationError {
     BrokerOperationError {
         code: BrokerErrorCode::MonitoringQueryFailed,
-        message: format!("{} failed: {}", operation, err),
-        retryable: is_retryable_sqlx_error(&err),
-    }
-}
-
-/// Build a `WORKER_PING_FAILED` broker error for a failed ping-pong step.
-/// `retryable` is the driver classification of the cause.
-fn worker_ping_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
-    BrokerOperationError {
-        code: BrokerErrorCode::WorkerPingFailed,
-        message: format!("ping_workers {} failed: {}", operation, err),
-        retryable: is_retryable_sqlx_error(&err),
+        message: format!("{operation} failed: {error}"),
+        retryable: error.is_retryable(),
     }
 }
 
@@ -3080,6 +3422,16 @@ fn worker_ping_subscribe_error(error: &ListenError) -> BrokerOperationError {
             message: format!("ping_workers reply subscribe failed: {error}"),
             retryable: error.is_retryable(),
         },
+    }
+}
+
+/// Build a `WORKER_PING_FAILED` broker error for a failed core statement of
+/// a ping. `retryable` is the classification of the cause.
+fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::WorkerPingFailed,
+        message: format!("ping_workers {operation} failed: {error}"),
+        retryable: error.is_retryable(),
     }
 }
 
@@ -3116,46 +3468,53 @@ fn decode_pong(
 
 /// Parse the result row into a `TaskResult<T>`.
 ///
-/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED/FAILED.
-/// Maps database statuses to `TaskResult` variants:
-/// - `COMPLETED`/`FAILED` + valid JSON -> decoded `TaskResult<T>`
-/// - `COMPLETED`/`FAILED` + null -> `TaskResult::Err(ResultNotAvailable)`
-/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))`
+/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED,
+/// FAILED and EXPIRED. Maps database statuses to `TaskResult` variants
+/// (Python `TaskHandle._record_to_task_result`):
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + valid JSON -> decoded `TaskResult<T>`
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + null -> `TaskResult::Err(ResultNotAvailable)`
+///   with `data = {"task_id": "<id>", "status": "<status>"}`
+/// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
+///   `data = {"task_id": "<id>"}`
 #[allow(clippy::needless_pass_by_value)]
 fn parse_task_result_row<T: DeserializeOwned>(
     row: TaskResultRow,
 ) -> Result<TaskResult<T>, BrokerError> {
     match row.status.as_str() {
-        "COMPLETED" | "FAILED" => match row.result {
+        // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`,
+        // so an EXPIRED row decodes like COMPLETED and FAILED.
+        "COMPLETED" | "FAILED" | "EXPIRED" => match row.result {
             Some(ref result_json) => {
                 let task_result: TaskResult<T> =
                     serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
                 Ok(task_result)
             }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                RetrievalCode::ResultNotAvailable,
-                format!("task {} completed but result is null", row.id),
-            ))),
+            // Python `TaskHandle._record_to_task_result`: a terminal row
+            // that stored no result is RESULT_NOT_AVAILABLE, with the id and
+            // the status in `data`.
+            None => Ok(TaskResult::Err(TaskError {
+                data: Some(serde_json::json!({
+                    "task_id": row.id.to_string(),
+                    "status": row.status,
+                })),
+                ..TaskError::builtin(
+                    RetrievalCode::ResultNotAvailable,
+                    format!(
+                        "Task {} reached terminal status {} but stored no result payload",
+                        row.id, row.status
+                    ),
+                )
+            })),
         },
-        "EXPIRED" => match row.result {
-            // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`;
-            // decode it like COMPLETED/FAILED. A NULL result (older rows, or a
-            // lost write) still yields the terminal expired outcome instead of a
-            // spurious "non-terminal status EXPIRED" broker error (C2).
-            Some(ref result_json) => {
-                let task_result: TaskResult<T> =
-                    serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
-                Ok(task_result)
-            }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                OutcomeCode::TaskExpired,
-                format!("task {} expired", row.id),
-            ))),
-        },
-        "CANCELLED" => Ok(TaskResult::Err(TaskError::builtin(
-            OutcomeCode::TaskCancelled,
-            format!("task {} was cancelled", row.id),
-        ))),
+        // Python `TaskHandle._record_to_task_result`: the code, the message
+        // and the task id in `data`.
+        "CANCELLED" => Ok(TaskResult::Err(TaskError {
+            data: Some(serde_json::json!({ "task_id": row.id.to_string() })),
+            ..TaskError::builtin(
+                OutcomeCode::TaskCancelled,
+                format!("Task {} was cancelled before completion", row.id),
+            )
+        })),
         other => Err(BrokerError::InvalidStatus(format!(
             "task {} has non-terminal status {}",
             row.id, other,
@@ -3163,7 +3522,22 @@ fn parse_task_result_row<T: DeserializeOwned>(
     }
 }
 
-use crate::core::task::retry_utils::parse_max_retries;
+use crate::worker::retry::stored_max_retries;
+
+/// The `max_retries` that enqueue stores, by Python's rule
+/// (`horsies/core/codec/task_options.py:80-103`, `stored_max_retries`): no
+/// options and no `retry_policy` store 0; a policy stores its `max_retries`.
+/// The options are read with the reader of the dispatch
+/// ([`stored_max_retries`]), so a text that the worker would refuse is refused
+/// here, before any statement: text that does not parse, that is not a JSON
+/// object, or whose `retry_policy` does not fit Python's `RetryPolicy` (a
+/// limit outside 1 to 20, a wrong field, no code) is `EnqueueContract`, which
+/// a send reports as `VALIDATION_FAILED`. Other keys are not judged here.
+fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
+    stored_max_retries(task_options).map_err(|refusal| {
+        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {refusal}"))
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Result wait
@@ -3262,22 +3636,6 @@ mod tests {
     }
 
     #[test]
-    fn set_running_guards_good_until_before_start() {
-        assert!(
-            SET_RUNNING_SQL.contains("AND (good_until IS NULL OR good_until > now())"),
-            "CLAIMED -> RUNNING must reject tasks whose deadline has passed",
-        );
-    }
-
-    #[test]
-    fn expired_task_queries_treat_equal_deadline_as_expired() {
-        assert!(
-            GET_EXPIRED_TASKS_SQL.contains("AND good_until <= NOW()"),
-            "good_until is the last valid instant; equality is expired",
-        );
-    }
-
-    #[test]
     fn parse_completed_result() {
         let wrapped = TaskResult::Ok(42);
         let result_json = serde_json::to_string(&wrapped).unwrap();
@@ -3303,12 +3661,12 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
     fn parse_failed_with_task_error() {
-        let err = TaskError::new("VALIDATION", "bad input");
+        let err = TaskError::new("VALIDATION", "bad input").unwrap();
         let wrapped: TaskResult<i32> = TaskResult::Err(err);
         let err_json = serde_json::to_string(&wrapped).unwrap();
         let row = TaskResultRow {
@@ -3332,7 +3690,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3380,21 +3738,52 @@ mod tests {
         assert_eq!(err.error_code, expected);
     }
 
-    /// C2: an EXPIRED row with a NULL result must still yield the terminal
-    /// expired outcome (fallback), not an `InvalidStatus` broker error.
+    /// A terminal row that stored no result reads as `RESULT_NOT_AVAILABLE`
+    /// with Python's message and the id and status in `data`, for each of
+    /// COMPLETED, FAILED and EXPIRED (Python
+    /// `TaskHandle._record_to_task_result`; `test_app_get_result.py::
+    /// TestHorsiesGetResultEnvelopeGuards::
+    /// test_terminal_status_with_none_payload_is_result_not_available`). An
+    /// EXPIRED row with no stored result does not read as `TASK_EXPIRED`,
+    /// and it is no `InvalidStatus` broker error.
     #[test]
-    fn parse_expired_null_result() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "EXPIRED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        let err = task_result.unwrap_err();
-        let expected = TaskError::builtin(OutcomeCode::TaskExpired, "").error_code;
-        assert_eq!(err.error_code, expected);
-        assert!(err.message.unwrap().contains("expired"));
+    fn a_terminal_row_without_a_result_reads_as_result_not_available() {
+        let task_id = Uuid::new_v4();
+        for status in ["COMPLETED", "FAILED", "EXPIRED"] {
+            let row = TaskResultRow {
+                id: task_id,
+                status: status.to_owned(),
+                result: None,
+                failed_reason: None,
+            };
+
+            let task_result: TaskResult<serde_json::Value> =
+                parse_task_result_row(row).expect("a terminal row reads");
+
+            let TaskResult::Err(error) = task_result else {
+                panic!("{status}: a row with no result must read as an error");
+            };
+            assert_eq!(
+                error.error_code,
+                TaskError::builtin(RetrievalCode::ResultNotAvailable, "").error_code,
+                "{status}"
+            );
+            assert_eq!(
+                error.message.as_deref(),
+                Some(
+                    format!(
+                        "Task {task_id} reached terminal status {status} but stored no result payload"
+                    )
+                    .as_str()
+                ),
+                "{status}"
+            );
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({ "task_id": task_id.to_string(), "status": status })),
+                "{status}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3467,7 +3856,7 @@ mod tests {
         let row = TaskResultRow {
             id: Uuid::nil(),
             status: "CANCELLED".to_owned(),
-            result: Some(r#"{"__type":"ok","value":42}"#.to_owned()),
+            result: Some(r#"{"__h_task_result__":true,"ok":42,"err":null}"#.to_owned()),
             failed_reason: None,
         };
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
@@ -3478,6 +3867,41 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&Uuid::nil().to_string()));
+    }
+
+    /// A CANCELLED task reads as `TASK_CANCELLED` with Python's message and
+    /// its task id in `data` (Python `TaskHandle._record_to_task_result`;
+    /// `tests/e2e/test_layer1_tasks.py::test_task_cancelled`:
+    /// `result.err.data['task_id'] == task_id`).
+    #[test]
+    fn parse_cancelled_carries_the_task_id_in_data() {
+        let task_id = Uuid::new_v4();
+        let row = TaskResultRow {
+            id: task_id,
+            status: "CANCELLED".to_owned(),
+            result: None,
+            failed_reason: None,
+        };
+
+        let task_result: TaskResult<serde_json::Value> =
+            parse_task_result_row(row).expect("a CANCELLED row reads");
+
+        let TaskResult::Err(error) = task_result else {
+            panic!("a CANCELLED task must read as an error");
+        };
+        assert_eq!(
+            error.error_code,
+            TaskError::builtin(OutcomeCode::TaskCancelled, "").error_code
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some(format!("Task {task_id} was cancelled before completion").as_str())
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({ "task_id": task_id.to_string() }))
+        );
+        assert!(error.cause.is_none());
     }
 
     /// Completed task with a string result type.
@@ -3842,7 +4266,7 @@ mod horsies_claim_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'pr160_task', $2, $3, '{}', NULL, 'ISOLATED',
+                $1, 'pr160_task', $2, $3, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 $4, NOW(), CASE WHEN $4 IN ('CLAIMED', 'RUNNING') THEN NOW() END, $5, CASE WHEN $4 = 'CLAIMED' THEN COALESCE($6, NOW() + interval '1 minute') END,
@@ -4347,7 +4771,7 @@ mod fused_finalize_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'fused_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'fused_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -4554,65 +4978,6 @@ mod fused_finalize_tests {
             cleanup(&pool, id).await;
         }
     }
-
-    /// C10: the retry requeue CAS is likewise fenced by `started_at`, so a stale
-    /// attempt cannot requeue a task the worker is re-running under a new claim.
-    #[tokio::test]
-    #[serial]
-    async fn requeue_in_tx_fenced_by_started_at() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
-
-        let current: DateTime<Utc> =
-            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
-                .bind(test_uuid(&id))
-                .fetch_one(&pool)
-                .await
-                .expect("started_at");
-        let stale = current - chrono::Duration::minutes(1);
-
-        // Stale generation: fenced out.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(stale),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(!applied, "stale started_at must not requeue");
-
-        // Current generation: applies.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(current),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(applied, "matching started_at must requeue");
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(test_uuid(&id))
-            .fetch_one(&pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "PENDING");
-
-        cleanup(&pool, &id).await;
-    }
 }
 
 #[cfg(test)]
@@ -4638,7 +5003,7 @@ mod set_running_heartbeat_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'hb_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 'CLAIMED', NOW(), NOW(), $2, NOW() + interval '1 minute',
@@ -4784,7 +5149,7 @@ mod set_running_heartbeat_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'hb_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
@@ -5119,7 +5484,7 @@ mod filter_non_runnable_tests {
                             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
                         ) VALUES (
-                            $1, 'lookup_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                            $1, 'lookup_test', 'default', 100, 'null', NULL, 'ISOLATED',
                             'forever', NOW(), NOW(),
                             1, decode(repeat('00', 32), 'hex'), NULL,
                             'PENDING', NOW(), NULL, NULL, NULL,
@@ -5230,7 +5595,7 @@ mod filter_non_runnable_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'c15_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'c15_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 NULL, NULL, NULL,
                 'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
@@ -5340,7 +5705,7 @@ mod terminal_at_stamp_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'terminal_at_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'terminal_at_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -5451,7 +5816,7 @@ mod terminal_at_stamp_tests {
                     worker_id: "w1".to_owned(),
                 },
                 result_json: "{\"Err\":{}}".to_owned(),
-                error_code: Some("TASK_ERROR".to_owned()),
+                error_code: Some("TASK_EXCEPTION".to_owned()),
                 failed_reason: None,
             },
         )
@@ -5553,11 +5918,12 @@ mod session_settings_tests {
             session_database_url: None,
             pgbouncer_transaction_mode,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         }
     }
@@ -5618,62 +5984,6 @@ mod session_settings_tests {
         assert_eq!(jit(&not_kept).await, jit(&plain).await);
         plain.close().await;
         not_kept.close().await;
-    }
-}
-
-#[cfg(test)]
-mod connect_options_tests {
-    use super::*;
-    use serial_test::serial;
-    use sqlx::PgConnection;
-
-    const REPEATED_EXECUTIONS: i64 = 20;
-
-    async fn prepared_statement_count(connection: &mut PgConnection) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements")
-            .fetch_one(&mut *connection)
-            .await
-            .expect("count prepared statements")
-    }
-
-    /// Runs against PostgreSQL directly, so every statement name the runtime
-    /// pool prepares is visible in `pg_prepared_statements` on its connection.
-    #[tokio::test]
-    #[serial]
-    async fn transaction_mode_runtime_pool_prepares_a_repeated_query_once() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        // PgBouncer mode refuses a session URL equal to `database_url`; a
-        // distinct application name keeps the same server.
-        let separator = if url.contains('?') { '&' } else { '?' };
-        let session_url = format!("{url}{separator}application_name=prepared_session");
-        let config = PostgresConfig::from_pgbouncer_urls(url, session_url);
-        let broker = PostgresBroker::connect_with(&config)
-            .await
-            .expect("connect broker");
-        let mut connection = broker
-            .pool()
-            .acquire()
-            .await
-            .expect("acquire runtime connection");
-
-        let before = prepared_statement_count(&mut connection).await;
-        for execution in 0..REPEATED_EXECUTIONS {
-            let echoed: i64 = sqlx::query_scalar("SELECT $1::bigint")
-                .bind(execution)
-                .fetch_one(&mut *connection)
-                .await
-                .expect("run repeated query");
-            assert_eq!(echoed, execution);
-        }
-        let after = prepared_statement_count(&mut connection).await;
-
-        assert_eq!(
-            after - before,
-            1,
-            "{REPEATED_EXECUTIONS} executions of one query must leave one prepared statement"
-        );
-        drop(connection);
-        broker.pool().close().await;
     }
 }
 
@@ -5815,7 +6125,7 @@ mod broker_operation_error_tests {
     #[tokio::test]
     async fn a_database_ping_on_a_closed_pool_is_not_retryable() {
         let broker = unreachable_broker();
-        broker.pool().close().await;
+        broker.close().await;
 
         let Err(failed) = broker.ping_database().await else {
             panic!("a closed pool cannot ping");
@@ -5825,13 +6135,39 @@ mod broker_operation_error_tests {
         assert!(!failed.retryable);
     }
 
+    fn checkout_failed(cause: crate::db::CheckoutFailure) -> BrokerError {
+        BrokerError::Statement(StatementFailure::NotSent {
+            statement: "read",
+            cause: crate::db::NotSentCause::Checkout(cause),
+        })
+    }
+
+    fn checkout_timed_out() -> BrokerError {
+        checkout_failed(crate::db::CheckoutFailure::TimedOut {
+            role: crate::db::PoolRole::Main,
+            waited: Duration::from_secs(30),
+        })
+    }
+
+    fn pool_closed() -> BrokerError {
+        checkout_failed(crate::db::CheckoutFailure::PoolClosed {
+            role: crate::db::PoolRole::Main,
+        })
+    }
+
     #[test]
     fn a_monitoring_read_failure_carries_the_driver_classification() {
-        assert!(monitoring_query_error("read", sqlx::Error::PoolTimedOut).retryable);
-        assert!(!monitoring_query_error("read", sqlx::Error::PoolClosed).retryable);
-        assert!(!monitoring_query_error("read", sqlx::Error::RowNotFound).retryable);
-        assert!(worker_ping_error("notify", sqlx::Error::PoolTimedOut).retryable);
-        assert!(!worker_ping_error("notify", sqlx::Error::PoolClosed).retryable);
+        assert!(monitoring_query_error("read", checkout_timed_out()).retryable);
+        assert!(!monitoring_query_error("read", pool_closed()).retryable);
+        assert!(
+            !monitoring_query_error(
+                "read",
+                BrokerError::RowDecode(RowDecodeError::NoRow { statement: "read" })
+            )
+            .retryable
+        );
+        assert!(worker_ping_statement_error("notify", checkout_timed_out()).retryable);
+        assert!(!worker_ping_statement_error("notify", pool_closed()).retryable);
     }
 }
 
@@ -6010,11 +6346,12 @@ mod result_wait_tests {
             session_database_url: None,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
         };
         let broker = PostgresBroker::connect_observe_only(&config)
@@ -6207,7 +6544,7 @@ mod pool_options_tests {
         config.pool_size = 3;
         config.max_overflow = 2;
         config.pool_timeout = 7;
-        config.pool_recycle = 1_800;
+        config.pool_recycle = crate::manifest::PoolRecycle::after_seconds(1_800);
         config.pool_pre_ping = pool_pre_ping;
         config
     }
@@ -6220,6 +6557,15 @@ mod pool_options_tests {
         assert_eq!(options.get_idle_timeout(), None);
         assert_eq!(options.get_max_connections(), 5);
         assert_eq!(options.get_acquire_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn a_pool_that_never_recycles_keeps_its_connections() {
+        let mut never = config(true);
+        never.pool_recycle = crate::manifest::PoolRecycle::Never;
+
+        assert_eq!(pg_pool_options(&never).get_max_lifetime(), None);
+        assert_eq!(pg_session_pool_options(&never).get_max_lifetime(), None);
     }
 
     #[test]
@@ -6313,6 +6659,143 @@ mod pool_options_tests {
 }
 
 #[cfg(test)]
+mod enqueue_task_options_tests {
+    //! Python `test_enqueue_retry_limit.py` and `test_broker_postgres.py`
+    //! (`test_malformed_task_options_raises`,
+    //! `test_task_options_with_non_dict_retry_policy_is_refused`): enqueue
+    //! stores a policy's limit, no policy stores 0, and options the worker
+    //! would refuse are refused before any statement.
+    use super::*;
+
+    fn policy(max_retries: u32, extra: &str) -> String {
+        let intervals = vec!["60"; max_retries as usize].join(", ");
+        format!(
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+                "backoff_strategy": "fixed", "jitter": false,
+                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+              "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
+              "cancel_grace_ms": null}}"#
+        )
+    }
+
+    #[test]
+    fn no_options_and_no_policy_store_zero_retries() {
+        for options in [
+            None,
+            Some(""),
+            Some(r#"{"retry_policy": null, "execution": "ISOLATED"}"#),
+            Some("{}"),
+        ] {
+            assert_eq!(
+                enqueue_max_retries("t", options).expect("accepted"),
+                0,
+                "{options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_policy_stores_its_limit() {
+        for limit in [1, 3, 20] {
+            assert_eq!(
+                enqueue_max_retries("t", Some(&policy(limit, ""))).expect("accepted"),
+                limit as i32
+            );
+        }
+    }
+
+    #[test]
+    fn options_the_worker_would_refuse_are_refused() {
+        let over_limit = policy(21, "");
+        let unknown_field = policy(2, r#", "extra": 1"#);
+        for options in [
+            "not json",
+            "[]",
+            r#"{"retry_policy": 5}"#,
+            r#"{"retry_policy": {"max_retries": 2}}"#,
+            over_limit.as_str(),
+            unknown_field.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    enqueue_max_retries("t", Some(options)),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{options}"
+            );
+        }
+    }
+
+    /// What the core writes for a task is what its enqueue accepts.
+    #[test]
+    fn the_core_written_options_are_accepted() {
+        let options = crate::core::TaskOptions {
+            task_name: "t".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User("X".to_owned())]),
+            retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
+            timeout_ms: Some(1_000),
+        };
+        let text = options.serialize_retry_options().expect("options are set");
+
+        assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
+    }
+}
+
+#[cfg(test)]
+mod client_family_tests {
+    //! The client family at install and before the first write: a handle
+    //! writes only into a database of its own family, and reads are not
+    //! checked.
+    use super::*;
+    use serial_test::serial;
+
+    async fn family_row(pool: &PgPool) -> Option<String> {
+        sqlx::query_scalar("SELECT family FROM horsies_client_family")
+            .fetch_optional(pool)
+            .await
+            .expect("read the family row")
+    }
+
+    /// The shared test database is installed for the Rust client.
+    #[tokio::test]
+    #[serial]
+    async fn the_install_records_the_family_and_a_rust_handle_may_write() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
+
+        let broker = PostgresBroker::from_pool(pool);
+        broker
+            .ensure_client_family_for_write()
+            .await
+            .expect("a Rust handle writes into a Rust database");
+    }
+
+    /// A handle of the other family is refused before it writes, and the
+    /// refusal is not retryable. The check reads only.
+    #[tokio::test]
+    #[serial]
+    async fn a_handle_of_the_other_family_is_refused_before_its_first_write() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let broker =
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+
+        let refused = broker.ensure_client_family_for_write().await.unwrap_err();
+
+        assert!(matches!(
+            refused,
+            BrokerError::ClientFamilyMismatch {
+                stored: crate::broker::client_family::RecordedFamily::Recorded(ClientFamily::Rust),
+                own: ClientFamily::Python,
+            }
+        ));
+        assert!(!refused.is_retryable());
+        assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
+    }
+}
+
+#[cfg(test)]
 mod task_info_code_tests {
     //! Python's task info codes (`horsies/core/brokers/postgres.py:4889-4904`,
     //! `:4973-4977`): only a stored result that fails its check is
@@ -6348,4 +6831,27 @@ mod task_info_code_tests {
         assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
         assert!(mapped.retryable);
     }
+
+    #[test]
+    fn a_core_statement_failure_is_task_info_query_failed_with_its_transience() {
+        let timed_out =
+            task_info_history_error(BrokerError::Statement(StatementFailure::NotSent {
+                statement: "select_task_attempts",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: Duration::from_secs(30),
+                }),
+            }));
+        assert_eq!(timed_out.code, BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(timed_out.retryable);
+
+        let undecodable = task_info_history_error(BrokerError::RowDecode(RowDecodeError::NoRow {
+            statement: "live_task_exists",
+        }));
+        assert_eq!(undecodable.code, BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(!undecodable.retryable);
+    }
 }
+
+#[cfg(test)]
+mod result_read_spec_tests;
