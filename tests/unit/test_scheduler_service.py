@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import AfterValidator
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.kwargs import encode_kwargs_read_back
 from horsies.core.codec.validation_errors import ValueValidationError
@@ -2887,6 +2888,7 @@ class TestEnqueueScheduledTask:
         assert enqueue_kwargs['sent_at'] == slot
         assert enqueue_kwargs['task_name'] == 'my_task'
         assert enqueue_kwargs['task_id'] is not None
+        assert enqueue_kwargs['send_kind'] is SendKind.FIRST
 
     async def test_no_args_skips_serialization(self) -> None:
         """Schedule with no args/kwargs → args_json=None, kwargs_json=None."""
