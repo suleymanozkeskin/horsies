@@ -338,7 +338,8 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
 }
 
 /// The chain starts at the baseline and ascends; only the baseline writes the
-/// family row; each checksum is SHA-384 of its text.
+/// family row and publishes the history readers; each checksum is SHA-384 of
+/// its text.
 #[test]
 fn the_chain_ascends_from_the_baseline_and_only_the_baseline_writes_the_family() {
     let chain = embedded_migrations();
@@ -351,11 +352,15 @@ fn the_chain_ascends_from_the_baseline_and_only_the_baseline_writes_the_family()
     assert_eq!(versions.last(), Some(&expected_schema_version()));
     assert_eq!(shipped_versions(), versions);
     for (index, migration) in chain.iter().enumerate() {
-        let family_row = match index {
-            0 => FamilyRow::WrittenWithMigration,
-            _ => FamilyRow::NotWritten,
+        let (family_row, readers) = match index {
+            0 => (
+                FamilyRow::WrittenWithMigration,
+                ReaderPublication::PublishedWithMigration,
+            ),
+            _ => (FamilyRow::NotWritten, ReaderPublication::NotPublished),
         };
         assert_eq!(migration.family_row, family_row, "{}", migration.version);
+        assert_eq!(migration.readers, readers, "{}", migration.version);
         assert_eq!(
             migration.checksum.as_slice(),
             Sha384::digest(migration.script.sql().as_bytes()).as_slice(),
@@ -376,6 +381,7 @@ fn test_chain() -> Vec<EmbeddedMigration> {
             description: "test",
             script: SqlScript::new("test_migration", "SELECT 1"),
             family_row: FamilyRow::NotWritten,
+            readers: ReaderPublication::NotPublished,
             checksum: [u8::try_from(version - 999).expect("a small test version"); CHECKSUM_BYTES],
         })
         .into()
@@ -1209,6 +1215,127 @@ async fn a_deadlock_on_every_run_stops_after_the_last_attempt() {
         .expect("read the probe count");
     assert_eq!(runs, i64::from(INSTALL_MAX_ATTEMPTS));
     assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
+    database.drop().await;
+}
+
+// ---- The history readers of migration 1000 ----
+
+/// The install returns with the history readers published: each reader of
+/// `horsies_history_reader_signatures()` exists and is current, the manifest
+/// is the static forever leaf, and the detail reader answers an unknown id
+/// with no row (Python `test_install_returns_with_the_history_readers_published`).
+#[tokio::test]
+#[serial]
+async fn an_installed_database_has_its_history_readers() {
+    let database = MigrationTestDatabase::create().await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+
+    let missing: Vec<String> = sqlx::query_scalar(
+        "SELECT s.signature FROM horsies_history_reader_signatures() AS s \
+         WHERE to_regprocedure(s.signature) IS NULL ORDER BY 1",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .expect("read the reader signatures");
+    assert!(missing.is_empty(), "missing readers: {missing:?}");
+    let current: bool = sqlx::query_scalar("SELECT horsies_history_readers_current()")
+        .fetch_one(&database.pool)
+        .await
+        .expect("read the reader stamps");
+    assert!(current);
+    let manifest: Vec<String> = sqlx::query_scalar(
+        "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .expect("read the manifest");
+    assert_eq!(
+        manifest,
+        vec!["horsies_task_history_forever_open".to_owned()]
+    );
+    let detail_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM horsies_task_detail_staged($1)")
+            .bind(Uuid::new_v4())
+            .fetch_one(&database.pool)
+            .await
+            .expect("call the detail reader");
+    assert_eq!(detail_rows, 0);
+    database.drop().await;
+}
+
+/// The transaction of a migration is READ COMMITTED whatever the server
+/// default is: the publication refuses any other isolation (25000).
+#[tokio::test]
+#[serial]
+async fn the_readers_are_published_under_a_serializable_server_default() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .execute(&format!(
+            "ALTER DATABASE \"{}\" SET default_transaction_isolation = 'serializable'",
+            database.name
+        ))
+        .await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install under a serializable default");
+
+    let current: bool = sqlx::query_scalar("SELECT horsies_history_readers_current()")
+        .fetch_one(&database.pool)
+        .await
+        .expect("read the reader stamps");
+    assert!(current);
+    database.drop().await;
+}
+
+/// A publication that fails rolls migration 1000 back with it: no
+/// bookkeeping row, no family row, no table. An event trigger fails the DDL
+/// of the publication statement only.
+#[tokio::test]
+#[serial]
+async fn a_failed_reader_publication_rolls_back_migration_1000() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .execute(
+            "CREATE FUNCTION install_publication_probe() RETURNS event_trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF current_query() LIKE 'SELECT outcome FROM horsies_publish_history_readers()%' THEN
+                     RAISE EXCEPTION 'injected publication failure';
+                 END IF;
+             END
+             $$",
+        )
+        .await;
+    database
+        .execute(
+            "CREATE EVENT TRIGGER install_publication_probe ON ddl_command_start
+             EXECUTE FUNCTION install_publication_probe()",
+        )
+        .await;
+
+    let failed = database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await;
+
+    match failed {
+        Err(SchemaInstallError::Statement(StatementFailure::StatementRefused {
+            statement,
+            cause,
+        })) => {
+            assert_eq!(statement, "publish_history_readers");
+            assert_eq!(cause.server_error().code(), &SqlState::RAISE_EXCEPTION);
+        }
+        other => panic!("expected the refused publication, got {other:?}"),
+    }
+    assert!(!relation_exists(&database.pool, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database.pool, "horsies_client_family").await);
+    assert!(!relation_exists(&database.pool, "horsies_task_lookup_manifest").await);
     database.drop().await;
 }
 
