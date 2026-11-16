@@ -173,19 +173,26 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, enqueued_at, started_at, claimed, claimed_at,
-                claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition, created_at, updated_at
-             ) VALUES ($1, 'p7_retention_task', 'default', 100, '[]', '{}', 'RUNNING',
-                       NOW(), NOW(), NOW(), TRUE, NOW(), 'p7-retention-worker', TRUE,
-                       0, 0, $1::text, 1, $2, 'forever', FALSE,
-                       'NEVER_ELIGIBLE', NOW(), NOW())",
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'p7_retention_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 NULL, NULL, NULL,
+                 'RUNNING', NOW(), NOW(), 'p7-retention-worker', NULL,
+                 NOW(), NULL, NULL,
+                 4242, 'p7-host', 'p7-process',
+                 0, 0, NULL, NULL, TRUE,
+                 NOW(), FALSE, NULL, NULL
+             )",
         )
         .bind(task_id)
-        .bind(vec![23_u8; 32])
         .execute(pool)
         .await
         .unwrap();
@@ -2074,18 +2081,23 @@ mod tests {
     async fn insert_stale_running_task(pool: &PgPool, task_id: Uuid, finalizing_at_sql: &str) {
         let sql = format!(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
-                finalizing_at, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'reaper_test', 'default', 100, '[]', '{{}}', 'RUNNING',
-                NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', NOW(), NOW(), TRUE,
-                'worker-1', 0, 0,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                {finalizing_at_sql}, 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'reaper_test', 'default', 100, '{{}}', NULL, 'ISOLATED',
+                'standard_30d', NOW() - INTERVAL '1 hour', NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'RUNNING', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', 'worker-1', NULL,
+                NOW() - INTERVAL '1 hour', {finalizing_at_sql}, NULL,
+                4242, 'reaper-host', 'reaper-process',
+                0, 0, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )"
         );
         sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
@@ -2260,15 +2272,23 @@ mod tests {
         // A still-live (RUNNING) backing task row + its workflow_task linkage.
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, retry_count, max_retries, enqueue_sha,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'ret_task', 'default', 100, '[]', '{}', 'RUNNING',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 0, 0, $1,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'ret_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
+                NOW() - INTERVAL '2 hours', NULL, NULL,
+                NULL, NULL, NULL,
+                0, 0, NULL, NULL, FALSE,
+                NOW() - INTERVAL '2 hours', FALSE, NULL, NULL
             )",
         )
         .bind(task_id)
