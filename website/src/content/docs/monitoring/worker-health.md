@@ -283,9 +283,9 @@ The fleet check. **Returns:** `Ok(ClassCoverage)` with `checked_at` (database ti
 | `max_claim_per_worker` | `int` | Per-worker claim cap |
 | `cluster_wide_cap` | `int \| None` | Cluster-wide concurrency cap, if set |
 | `queues` | `list[str]` | Queues this worker serves |
-| `queue_priorities` | `dict[str, int] \| None` | Per-queue priorities (CUSTOM mode) |
-| `queue_max_concurrency` | `dict[str, int] \| None` | Per-queue concurrency (CUSTOM mode) |
-| `recovery_config` | `dict[str, Any] \| None` | Recovery configuration snapshot, plus the embedded health payloads below |
+| `queue_priorities` | `dict[str, int]` | Per-queue priorities (CUSTOM mode); empty when none is set |
+| `queue_max_concurrency` | `dict[str, int]` | Per-queue concurrency (CUSTOM mode); empty when none is set |
+| `recovery_config` | `dict[str, Any]` | Recovery configuration snapshot, plus the embedded health payloads below; empty when none is set |
 | `tasks_running` | `int` | RUNNING tasks at snapshot time |
 | `tasks_claimed` | `int` | CLAIMED tasks at snapshot time |
 | `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |

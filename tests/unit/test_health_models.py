@@ -148,7 +148,7 @@ class TestResultModels:
             pong.worker_id = 'other'  # type: ignore[misc]
 
     def test_worker_state_snapshot_holds_optional_fields(self) -> None:
-        """Snapshot tolerates NULL psutil/config columns as None."""
+        """Snapshot tolerates NULL psutil columns as None; unset maps are empty."""
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
@@ -162,9 +162,9 @@ class TestResultModels:
             max_claim_per_worker=4,
             cluster_wide_cap=None,
             queues=['default'],
-            queue_priorities=None,
-            queue_max_concurrency=None,
-            recovery_config=None,
+            queue_priorities={},
+            queue_max_concurrency={},
+            recovery_config={},
             tasks_running=0,
             tasks_claimed=0,
             memory_usage_mb=None,

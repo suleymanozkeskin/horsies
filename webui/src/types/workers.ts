@@ -25,7 +25,7 @@ export interface WorkerState {
   uptime_s: number | null;
   processes: number;
   queues: string[];
-  queue_max_concurrency: Record<string, number> | null;
+  queue_max_concurrency: Record<string, number>;
   tasks_running: number;
   tasks_claimed: number;
   cluster_wide_cap: number | null;

@@ -20,6 +20,15 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies.core.history.heartbeats.partitioning import (
+    CreateHourlyHeartbeatLeaf,
+    HeartbeatClassRegistered,
+    create_hourly_heartbeat_leaf,
+    hourly_leaf_ref,
+    register_heartbeat_class,
+)
+from horsies.core.history.outcomes import LeafCreated
+from horsies.core.history.partitions.catalog import database_now
 from tests.integration.task_history_harness import (
     HistorySchema,
     create_workflow,
@@ -284,13 +293,30 @@ class TestStalenessGuard:
                 worker=WORKER,
                 started_at_offset=timedelta(minutes=-10),
             )
+            # The heartbeat table has no default partition: the beat's
+            # hour needs its leaf.
+            registered = await register_heartbeat_class(
+                connection, horizon=timedelta(hours=2),
+            )
+            assert isinstance(registered, HeartbeatClassRegistered)
+            landing = await database_now(connection)
+            created = await create_hourly_heartbeat_leaf(
+                connection,
+                CreateHourlyHeartbeatLeaf(
+                    leaf=hourly_leaf_ref(
+                        landing.replace(minute=0, second=0, microsecond=0),
+                    ),
+                ),
+            )
+            assert isinstance(created, LeafCreated)
             await connection.execute(
                 text(
-                    'INSERT INTO horsies_heartbeats (task_id, role, sent_at) '
-                    "VALUES (CAST(:task_id AS uuid), 'runner', "
-                    'statement_timestamp())'
+                    'INSERT INTO horsies_heartbeats '
+                    '(task_id, sender_id, role, sent_at, hostname, pid) '
+                    "VALUES (CAST(:task_id AS uuid), :worker, 'runner', "
+                    "statement_timestamp(), 'it-host', 4242)"
                 ),
-                {'task_id': task_id},
+                {'task_id': task_id, 'worker': WORKER},
             )
             refusal = await fail_stale(connection, task_id)
             assert refusal.outcome == 'SOURCE_STATE_CONFLICT'

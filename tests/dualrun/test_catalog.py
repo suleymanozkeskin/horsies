@@ -10,8 +10,10 @@ import pytest
 from horsies.core.types.result import Err, Ok
 from tests.dualrun.catalog import BASELINE_CATALOG
 from tests.dualrun.coverage import (
-    AnchorTypeMismatch,
     DatabaseType,
+    DetachedLeaf,
+    DetachedLeafShapeMismatch,
+    ReferencedTypeMismatch,
     RuleTypeMismatch,
     RuleWithoutColumn,
     SchemaColumn,
@@ -19,30 +21,47 @@ from tests.dualrun.coverage import (
     UnknownType,
     UnsupportedColumnType,
     check_coverage,
+    detached_leaf,
     parse_column_type,
+    rule_fits_type,
+    split_detached_leaves,
 )
 from tests.dualrun.rules import (
+    AnchoredJsonTime,
     AnchorReference,
-    AnchorUnknown,
     CatalogDefect,
+    ColumnRule,
     ColumnSpec,
+    DigestOf,
     DuplicateColumn,
     DuplicateTable,
+    EachItem,
     EmptyIgnoreReason,
+    EmptyJsonPath,
     EmptyKey,
     Exact,
+    FormatVersion,
+    GeneratedName,
     IdFamily,
     Ignored,
+    JsonPath,
+    JsonStorage,
+    JsonTime,
+    Key,
     KeyColumnNotComparable,
     KeyColumnUnknown,
     KeyRole,
     NegativeBound,
     NormalisedId,
+    ReferencedColumnUnknown,
     RunWindowReference,
     SnapshotCatalog,
+    StoredJson,
     TableRules,
+    TimeEncoding,
     TimeOrderOnly,
     TimeWithin,
+    Unversioned,
     catalog_defects,
 )
 from tests.dualrun.values import (
@@ -89,10 +108,10 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_255_columns_in_20_tables() -> None:
-    # 253 table columns of migration 1000, plus tableoid of the two partitioned parents.
+def test_baseline_catalog_has_a_rule_for_each_of_257_columns_in_20_tables() -> None:
+    # 255 table columns of migration 1000, plus tableoid of the two partitioned parents.
     assert len(BASELINE_CATALOG.tables) == 20
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 255
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 257
 
 
 def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
@@ -105,8 +124,6 @@ def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
 
     assert set(ignored) == {
         ('horsies_migrations', 'execution_time'),
-        ('horsies_task_history', 'attempt_snapshot'),
-        ('horsies_task_history', 'attempt_snapshot_digest'),
         ('horsies_worker_states', 'memory_usage_mb'),
         ('horsies_worker_states', 'memory_percent'),
         ('horsies_worker_states', 'cpu_percent'),
@@ -124,8 +141,8 @@ def test_partitioned_parents_capture_the_leaf_of_each_row() -> None:
     }
 
     assert leaf_rules == {
-        'horsies_task_history': NormalisedId(family=IdFamily.PARTITION_LEAF),
-        'horsies_heartbeats': NormalisedId(family=IdFamily.PARTITION_LEAF),
+        'horsies_task_history': GeneratedName(),
+        'horsies_heartbeats': GeneratedName(),
     }
 
 
@@ -212,7 +229,11 @@ def test_baseline_catalog_owners_come_before_their_references() -> None:
             SnapshotCatalog(
                 tables=(_table(ID, ColumnSpec(name='ends_at', rule=ANCHORED)),)
             ),
-            (AnchorUnknown(table='things', column='ends_at', anchor='made_at'),),
+            (
+                ReferencedColumnUnknown(
+                    table='things', column='ends_at', referenced='made_at'
+                ),
+            ),
             id='anchor-unknown',
         ),
         pytest.param(
@@ -375,11 +396,11 @@ def test_anchor_column_that_is_not_a_clock_is_a_mismatch() -> None:
     )
 
     assert check_coverage(schema, catalog) == (
-        AnchorTypeMismatch(
+        ReferencedTypeMismatch(
             table='things',
             column='ends_at',
-            anchor='made_at',
-            anchor_type=DatabaseType.TEXT,
+            referenced='made_at',
+            referenced_type=DatabaseType.TEXT,
         ),
     )
 
@@ -474,3 +495,243 @@ def test_run_window_needs_aware_readings_in_order() -> None:
     assert make_run_window(naive, end) == Err(
         RunWindowInvalid(start=naive, end=end, fault=RunWindowFault.NAIVE_TIME)
     )
+
+
+# ---- Rules that read stored values or other columns ----
+
+_JSON_TEXT: Final = StoredJson(storage=JsonStorage.TEXT, format=Unversioned(), paths=())
+
+
+@pytest.mark.parametrize(
+    ('spec', 'expected'),
+    [
+        pytest.param(
+            ColumnSpec(
+                name='doc',
+                rule=StoredJson(
+                    storage=JsonStorage.UTF8_BYTES,
+                    format=FormatVersion(column='version', version=1),
+                    paths=(),
+                ),
+            ),
+            (
+                ReferencedColumnUnknown(
+                    table='things', column='doc', referenced='version'
+                ),
+            ),
+            id='format-version-column-unknown',
+        ),
+        pytest.param(
+            ColumnSpec(name='doc_digest', rule=DigestOf(column='doc')),
+            (
+                ReferencedColumnUnknown(
+                    table='things', column='doc_digest', referenced='doc'
+                ),
+            ),
+            id='digest-source-unknown',
+        ),
+        pytest.param(
+            ColumnSpec(
+                name='doc',
+                rule=StoredJson(
+                    storage=JsonStorage.TEXT,
+                    format=Unversioned(),
+                    paths=(
+                        JsonPath(steps=(), rule=NormalisedId(family=IdFamily.TASK)),
+                    ),
+                ),
+            ),
+            (EmptyJsonPath(table='things', column='doc'),),
+            id='empty-json-path',
+        ),
+        pytest.param(
+            ColumnSpec(
+                name='doc',
+                rule=StoredJson(
+                    storage=JsonStorage.TEXT,
+                    format=Unversioned(),
+                    paths=(
+                        JsonPath(
+                            steps=(Key(name='at'),),
+                            rule=JsonTime(
+                                encoding=TimeEncoding.ISO_TEXT, rule=ANCHORED
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            (AnchoredJsonTime(table='things', column='doc'),),
+            id='anchored-json-time',
+        ),
+        pytest.param(
+            ColumnSpec(
+                name='doc',
+                rule=StoredJson(
+                    storage=JsonStorage.TEXT,
+                    format=Unversioned(),
+                    paths=(JsonPath(steps=(EachItem(),), rule=Ignored(reason='')),),
+                ),
+            ),
+            (EmptyIgnoreReason(table='things', column='doc'),),
+            id='json-path-ignored-without-reason',
+        ),
+    ],
+)
+def test_catalog_defects_of_stored_value_rules(
+    spec: ColumnSpec, expected: tuple[CatalogDefect, ...]
+) -> None:
+    assert catalog_defects(SnapshotCatalog(tables=(_table(ID, spec),))) == expected
+
+
+def test_stored_json_digest_and_generated_name_are_valid_key_columns() -> None:
+    catalog = SnapshotCatalog(
+        tables=(
+            _table(
+                ID,
+                ColumnSpec(name='doc', rule=_JSON_TEXT),
+                ColumnSpec(name='leaf', rule=GeneratedName()),
+                ColumnSpec(name='doc_digest', rule=DigestOf(column='doc')),
+                order_by=('doc', 'leaf', 'doc_digest', 'id'),
+            ),
+        ),
+    )
+
+    assert catalog_defects(catalog) == ()
+
+
+@pytest.mark.parametrize(
+    ('rule', 'fits', 'misfits'),
+    [
+        pytest.param(
+            _JSON_TEXT, DatabaseType.JSONB, DatabaseType.BYTEA, id='json-text'
+        ),
+        pytest.param(
+            StoredJson(storage=JsonStorage.UTF8_BYTES, format=Unversioned(), paths=()),
+            DatabaseType.BYTEA,
+            DatabaseType.TEXT,
+            id='json-bytes',
+        ),
+        pytest.param(
+            GeneratedName(), DatabaseType.OID, DatabaseType.INT4, id='generated-name'
+        ),
+        pytest.param(
+            DigestOf(column='doc'), DatabaseType.BYTEA, DatabaseType.TEXT, id='digest'
+        ),
+    ],
+)
+def test_stored_value_rules_read_only_their_column_types(
+    rule: ColumnRule,
+    fits: DatabaseType,
+    misfits: DatabaseType,
+) -> None:
+    assert rule_fits_type(rule, fits)
+    assert not rule_fits_type(rule, misfits)
+
+
+@pytest.mark.parametrize(
+    ('spec', 'referenced', 'referenced_type'),
+    [
+        pytest.param(
+            ColumnSpec(
+                name='doc',
+                rule=StoredJson(
+                    storage=JsonStorage.TEXT,
+                    format=FormatVersion(column='note', version=1),
+                    paths=(),
+                ),
+            ),
+            'note',
+            DatabaseType.TEXT,
+            id='format-version-not-integer',
+        ),
+        pytest.param(
+            ColumnSpec(name='doc', rule=DigestOf(column='note')),
+            'note',
+            DatabaseType.TEXT,
+            id='digest-source-not-bytea',
+        ),
+    ],
+)
+def test_referenced_column_of_the_wrong_type_is_a_gap(
+    spec: ColumnSpec, referenced: str, referenced_type: DatabaseType
+) -> None:
+    catalog = SnapshotCatalog(
+        tables=(_table(ID, ColumnSpec(name='note', rule=Exact()), spec),)
+    )
+    schema = _schema(id=DatabaseType.UUID, note=referenced_type, doc=DatabaseType.BYTEA)
+
+    gaps = check_coverage(schema, catalog)
+
+    assert (
+        ReferencedTypeMismatch(
+            table='things',
+            column='doc',
+            referenced=referenced,
+            referenced_type=referenced_type,
+        )
+        in gaps
+    )
+
+
+# ---- Detached leaves ----
+
+
+def _columns_of(table: str, **types: DatabaseType) -> tuple[SchemaColumn, ...]:
+    return tuple(
+        SchemaColumn(table=table, column=name, column_type=kind)
+        for name, kind in types.items()
+    )
+
+
+PARENT_SCHEMA: Final = _columns_of(
+    'horsies_task_history',
+    tableoid=DatabaseType.OID,
+    task_id=DatabaseType.UUID,
+    terminal_at=DatabaseType.TIMESTAMPTZ,
+)
+
+
+def test_detached_leaf_with_the_parent_columns_leaves_the_schema() -> None:
+    leaf_columns = _columns_of(
+        'horsies_task_history_standard_30d_2026_01_01',
+        task_id=DatabaseType.UUID,
+        terminal_at=DatabaseType.TIMESTAMPTZ,
+    )
+    leaf = detached_leaf('horsies_task_history_standard_30d_2026_01_01', 'standard_30d')
+
+    remaining, leaves, gaps = split_detached_leaves(
+        PARENT_SCHEMA + leaf_columns, (leaf,)
+    )
+
+    assert remaining == PARENT_SCHEMA
+    assert leaves == (
+        DetachedLeaf(
+            table='horsies_task_history_standard_30d_2026_01_01',
+            parent='horsies_task_history',
+        ),
+    )
+    assert gaps == ()
+
+
+def test_detached_leaf_with_other_columns_is_a_gap() -> None:
+    leaf_columns = _columns_of(
+        'horsies_task_history_standard_30d_2026_01_01',
+        task_id=DatabaseType.UUID,
+        terminal_at=DatabaseType.TEXT,
+    )
+    leaf = detached_leaf('horsies_task_history_standard_30d_2026_01_01', 'standard_30d')
+
+    _, _, gaps = split_detached_leaves(PARENT_SCHEMA + leaf_columns, (leaf,))
+
+    assert gaps == (
+        DetachedLeafShapeMismatch(table=leaf.table, parent='horsies_task_history'),
+    )
+
+
+def test_detached_leaf_whose_table_is_gone_is_skipped() -> None:
+    leaf = detached_leaf('horsies_heartbeats_2026_01_01_10', 'heartbeats')
+
+    remaining, leaves, gaps = split_detached_leaves(PARENT_SCHEMA, (leaf,))
+
+    assert (remaining, leaves, gaps) == (PARENT_SCHEMA, (), ())
+    assert leaf.parent == 'horsies_heartbeats'

@@ -308,6 +308,7 @@ def _epoch_microseconds(at: datetime) -> int:
 
 def _history_row(ids: _Ids, at: dict[int, datetime]) -> Params:
     payload = b'{"ok":3}'
+    # Attempt archive version 1: one 12-field array per attempt.
     attempts = [
         [
             1,
@@ -316,11 +317,15 @@ def _history_row(ids: _Ids, at: dict[int, datetime]) -> Params:
             _epoch_microseconds(at[20]),
             _epoch_microseconds(at[30]),
             None,
-        ]
+            None,
+            None,
+            ids.worker,
+            _HOST,
+            _PID,
+            _PROCESS,
+        ],
     ]
-    snapshot = json.dumps(
-        [*attempts, [ids.worker, _HOST]], separators=(',', ':')
-    ).encode()
+    snapshot = json.dumps(attempts, separators=(',', ':')).encode()
     return {
         'task_id': ids.extract,
         'workflow_id': ids.workflow,

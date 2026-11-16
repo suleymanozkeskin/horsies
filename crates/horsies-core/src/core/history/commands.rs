@@ -266,36 +266,6 @@ impl DropDetachedHistoryLeaf {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollectPartitionHealth {
-    class_key: String,
-    application_managed: bool,
-}
-
-impl CollectPartitionHealth {
-    pub fn new(
-        class_key: impl Into<String>,
-        application_managed: bool,
-    ) -> Result<Self, HistoryCommandError> {
-        let class_key = class_key.into();
-        if class_key.is_empty() {
-            return Err(HistoryCommandError::Invalid("class key must be non-empty"));
-        }
-        Ok(Self {
-            class_key,
-            application_managed,
-        })
-    }
-
-    pub fn class_key(&self) -> &str {
-        &self.class_key
-    }
-
-    pub fn application_managed(&self) -> bool {
-        self.application_managed
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionMaintenanceCommand {
     InspectHistoryLeaf(InspectHistoryLeaf),
     CreateDailyHistoryLeaf(CreateDailyHistoryLeaf),
@@ -303,7 +273,6 @@ pub enum PartitionMaintenanceCommand {
     DetachExpiredHistoryLeaf(DetachExpiredHistoryLeaf),
     FinalizeInterruptedLeafDetach(FinalizeInterruptedLeafDetach),
     DropDetachedHistoryLeaf(DropDetachedHistoryLeaf),
-    CollectPartitionHealth(CollectPartitionHealth),
 }
 
 #[cfg(test)]
@@ -360,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn command_union_carries_exactly_the_seven_variants() {
+    fn command_union_carries_exactly_the_six_variants() {
         let variants = [
             PartitionMaintenanceCommand::InspectHistoryLeaf(InspectHistoryLeaf::new(leaf(1))),
             PartitionMaintenanceCommand::CreateDailyHistoryLeaf(
@@ -378,12 +347,8 @@ mod tests {
             PartitionMaintenanceCommand::DropDetachedHistoryLeaf(DropDetachedHistoryLeaf::new(
                 leaf(1),
             )),
-            PartitionMaintenanceCommand::CollectPartitionHealth(
-                CollectPartitionHealth::new("finite", true).unwrap(),
-            ),
         ];
-        assert_eq!(variants.len(), 7);
-        assert!(CollectPartitionHealth::new("", false).is_err());
+        assert_eq!(variants.len(), 6);
     }
 
     #[test]
