@@ -20,7 +20,6 @@ stores it and no reader decodes it.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Final, cast
@@ -42,8 +41,6 @@ is OVER_BOUND and is not stored."""
 _ENVELOPE_PREFIX: Final = '{"input":'
 _OPTIONS_SEPARATOR: Final = ',"options":'
 _ENVELOPE_SUFFIX: Final = '}'
-_JSON_WHITESPACE: Final = frozenset(' \t\n\r')
-_VALUE_DECODER: Final = json.JSONDecoder()
 _FRAMING_REFUSED: Final = (
     'content is not framed as {"input":<input>,"options":<options>}'
 )
@@ -167,36 +164,28 @@ def decode_input_envelope(
 def _split_frame(text: str) -> tuple[str, str] | InputEnvelopeCorrupt:
     """The input and options texts of a framed envelope, exactly as stored.
 
-    ``text`` is a document that the strict parse accepted, so the value
-    after the prefix decodes.
+    The separator ``,"options":`` can also occur inside the input, as a
+    member of a nested object; a quote inside a JSON string is escaped, so
+    it never occurs inside a string. A complete JSON value followed by more
+    text is not one value, and a proper prefix of an object is not one
+    either, so exactly one occurrence leaves an input text that parses: the
+    first that does is the boundary. Each try starts after the previous
+    occurrence, so the scan ends within the length of ``text``.
     """
     if not (
         text.startswith(_ENVELOPE_PREFIX) and text.endswith(_ENVELOPE_SUFFIX)
     ):
         return InputEnvelopeCorrupt(detail=_FRAMING_REFUSED)
     input_start = len(_ENVELOPE_PREFIX)
-    value_start = _after_whitespace(text, input_start)
-    try:
-        _, value_end = _VALUE_DECODER.raw_decode(text, value_start)
-    except json.JSONDecodeError:
-        return InputEnvelopeCorrupt(detail=_FRAMING_REFUSED)
-    separator_start = _after_whitespace(text, value_end)
-    if not text.startswith(_OPTIONS_SEPARATOR, separator_start):
-        return InputEnvelopeCorrupt(detail=_FRAMING_REFUSED)
-    options_start = separator_start + len(_OPTIONS_SEPARATOR)
     options_end = len(text) - len(_ENVELOPE_SUFFIX)
-    return text[input_start:separator_start], text[options_start:options_end]
-
-
-def _after_whitespace(text: str, index: int) -> int:
-    """The first index at or after ``index`` that is not JSON whitespace.
-
-    Returns ``len(text)`` when only whitespace follows.
-    """
-    end = len(text)
-    while index < end and text[index] in _JSON_WHITESPACE:
-        index += 1
-    return index
+    separator = text.find(_OPTIONS_SEPARATOR, input_start, options_end)
+    while separator != -1:
+        input_json = text[input_start:separator]
+        if input_json and not is_err(loads_json(input_json)):
+            options_start = separator + len(_OPTIONS_SEPARATOR)
+            return input_json, text[options_start:options_end]
+        separator = text.find(_OPTIONS_SEPARATOR, separator + 1, options_end)
+    return InputEnvelopeCorrupt(detail=_FRAMING_REFUSED)
 
 
 def _parse_member(member_json: str) -> Result[Any, InputEnvelopeCorrupt]:
