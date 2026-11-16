@@ -54,10 +54,10 @@ Where Result stops and exceptions take over (the "stop line"):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, Literal, assert_never
 from uuid import UUID
 
+from horsies._catalog.broker import BrokerErrorCode as BrokerErrorCode
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
 
@@ -66,67 +66,6 @@ if TYPE_CHECKING:
     from horsies.core.brokers.resources import EventLoopLimit
     from horsies.core.codec.typed import Json
     from horsies.core.types.status import TaskStatus
-
-
-class BrokerErrorCode(str, Enum):
-    """Categorized broker operation failure codes.
-
-    Each member names one variant of ``BrokerOperationError``. The nine
-    operation codes from ``SCHEMA_INIT_FAILED`` to
-    ``LISTENER_SUBSCRIBE_FAILED`` share the variant ``BrokerOperationFailed``.
-    """
-
-    SCHEMA_INIT_FAILED = 'SCHEMA_INIT_FAILED'
-    ENQUEUE_FAILED = 'ENQUEUE_FAILED'
-    PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
-    IDEMPOTENCY_KEY_CONFLICT = 'IDEMPOTENCY_KEY_CONFLICT'
-    TASK_INFO_QUERY_FAILED = 'TASK_INFO_QUERY_FAILED'
-    MONITORING_QUERY_FAILED = 'MONITORING_QUERY_FAILED'
-    DB_PING_FAILED = 'DB_PING_FAILED'
-    WORKER_PING_FAILED = 'WORKER_PING_FAILED'
-    CLEANUP_FAILED = 'CLEANUP_FAILED'
-    CLOSE_FAILED = 'CLOSE_FAILED'
-    LISTENER_START_FAILED = 'LISTENER_START_FAILED'
-    LISTENER_SUBSCRIBE_FAILED = 'LISTENER_SUBSCRIBE_FAILED'
-    NO_BROKER = 'NO_BROKER'
-    # Strict-serde additions (design §8). NO_TYPE_AVAILABLE fires when a
-    # typed-result decode is requested but the local task catalog can't
-    # supply the OkT (task not registered in the calling process).
-    # INVALID_JSON_PAYLOAD fires when raw wire JSON fails strict
-    # validation (malformed syntax, NaN / Infinity, envelope shape
-    # violations); distinct from existing TaskError-domain codes because
-    # this surfaces at the Result-returning app/broker layer.
-    NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
-    INVALID_JSON_PAYLOAD = 'INVALID_JSON_PAYLOAD'
-    # The task options passed to enqueue are not valid JSON, or carry a
-    # retry limit that cannot be stored; nothing was written.
-    INVALID_TASK_OPTIONS = 'INVALID_TASK_OPTIONS'
-    # The broker already holds resource sets for its limit of open event
-    # loops, and this call ran on a new one. Nothing ran. It clears when one
-    # of those loops closes.
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    # A sync facade was called on a thread that runs an event loop. Its
-    # wait would stall that loop, so nothing ran. Repeating the sync call
-    # on that thread returns the same error; call the ``*_async`` form.
-    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    # A sync facade could not run the call on the broker's sync runner: the
-    # runner is stopped, its thread did not start, or scheduling failed.
-    # Nothing ran. A stopped runner does not start again (``close()`` and
-    # ``close_async()`` stop it); call the ``*_async`` form or use a new
-    # broker.
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    # An argument of the call was refused before anything ran. Nothing was
-    # written. The same arguments are refused again.
-    INVALID_INPUT = 'INVALID_INPUT'
-    # The broker was built with ``assume_initialized=True`` and has no
-    # listener, so an operation that needs one cannot run. Nothing ran. It
-    # does not clear for this broker.
-    LISTENER_DISABLED = 'LISTENER_DISABLED'
-    # A result wait was called in a process that runs task bodies (a worker
-    # child). A wait there can hold the child slot that the awaited task
-    # needs, so nothing ran. Every result wait in that process returns the
-    # same error; compose the tasks with a workflow.
-    WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'
 
 
 type BrokerOperationFailedCode = Literal[

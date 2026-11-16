@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, assert_never
 
 from sqlalchemy import text
@@ -36,6 +35,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
@@ -64,25 +64,6 @@ from horsies.core.utils.db import is_retryable_connection_error
 
 if TYPE_CHECKING:
     from horsies.core.brokers.resources import EventLoopLimit
-
-
-class TaskActionErrorCode(str, Enum):
-    """Why a task action did not apply.
-
-    Each member names one variant of ``TaskActionError``.
-    """
-
-    TASK_NOT_FOUND = 'TASK_NOT_FOUND'
-    TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
-    TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
-    DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-    # The broker already holds resource sets for its limit of open event
-    # loops, and this call ran on a new one. Nothing changed. It clears when
-    # one of those loops closes.
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    # Stored task data does not parse. Nothing changed. A repeat gives the
-    # same result until the stored row changes.
-    STORED_DATA_INVALID = 'STORED_DATA_INVALID'
 
 
 @dataclass(slots=True, frozen=True)
