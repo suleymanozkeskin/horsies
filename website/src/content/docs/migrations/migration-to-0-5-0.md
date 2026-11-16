@@ -20,6 +20,10 @@ cutover stages and adds a durable completion marker plus bounded RANGE leaves
 for the `forever` class. The v34 statements below describe the released
 0.5.0/0.5.1 database shape; the v35 notes state the current behavior.
 
+The cutover entrypoints on this page (`horsies.core.history.cutover`,
+including `validate_cutover`) are in releases 0.5.0 to 0.7.x only. Run the
+cutover stages with one of those releases.
+
 If you set `RecoveryConfig.queue_terminal_record_retention_hours` in
 0.4.x, its successor is
 [`AppConfig.retention.queue_retention`](../../configuration/retention-config#retention-per-queue):

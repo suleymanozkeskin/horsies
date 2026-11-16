@@ -82,6 +82,7 @@ probed (cached 60 s):
 | `MATCH` | stored == expected | served | allowed (policy permitting) |
 | `MISMATCH` | version differs | served | 409 `SCHEMA_INCOMPATIBLE`, server-side |
 | `ABSENT` | a successful probe found no horsies schema | — | refused; the tool never initializes a database |
+| `ZERO_X` | a successful probe found a horsies 0.x schema (`horsies_schema_version` without `horsies_migrations`, or a version below 1000) | — | refused; the remedy is a new database, not a worker start |
 | `UNKNOWN` | the probe has never succeeded (unreachable DB) | — | refused (`SCHEMA_UNKNOWN`); never conflated with ABSENT |
 
 `GET /api/meta` reports `schema_version`, `expected_schema_version`,

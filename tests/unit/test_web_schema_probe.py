@@ -4,7 +4,7 @@
 
 The monitoring tool must never migrate a database it is pointed at, and must
 never write through a schema it does not recognize. These cover the probe's
-three verdicts, its caching, what it does when the database cannot answer, and
+verdicts, its caching, what it does when the database cannot answer, and
 that the broker flag genuinely suppresses the DDL seam.
 """
 
@@ -22,6 +22,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.baseline.migration import BASELINE_VERSION
 from horsies.web.schema import (
     EXPECTED_SCHEMA_VERSION,
     SCHEMA_INCOMPATIBLE,
@@ -30,6 +31,8 @@ from horsies.web.schema import (
     SchemaProbe,
     SchemaState,
     SchemaStatus,
+    classify_stored_version,
+    classify_without_migrations,
     schema_guard,
 )
 from tests.broker_resources_support import resources_of
@@ -72,7 +75,41 @@ class TestSchemaStatus:
         assert status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION).compatible is True
         assert status(SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION - 1).compatible is False
         assert status(SchemaState.ABSENT, None).compatible is False
+        assert status(SchemaState.ZERO_X, None).compatible is False
         assert status(SchemaState.UNKNOWN, None).compatible is False
+
+
+class TestClassification:
+    """What each set of catalog facts means."""
+
+    def test_no_bookkeeping_at_all_is_absent(self) -> None:
+        assert classify_without_migrations(schema_version_table=False) == status(
+            SchemaState.ABSENT, None,
+        )
+
+    def test_the_0x_python_bookkeeping_alone_is_a_0x_schema(self) -> None:
+        """horsies_schema_version without horsies_migrations is horsies 0.x."""
+        assert classify_without_migrations(schema_version_table=True) == status(
+            SchemaState.ZERO_X, None,
+        )
+
+    def test_no_successful_migration_is_absent(self) -> None:
+        assert classify_stored_version(0) == status(SchemaState.ABSENT, None)
+
+    @pytest.mark.parametrize('stored', [1, 65, BASELINE_VERSION - 1])
+    def test_a_version_below_the_baseline_is_a_0x_schema(self, stored: int) -> None:
+        """horsies-rust 0.x records versions 1 to 65 in horsies_migrations."""
+        assert classify_stored_version(stored) == status(SchemaState.ZERO_X, stored)
+
+    def test_the_expected_version_matches(self) -> None:
+        assert classify_stored_version(EXPECTED_SCHEMA_VERSION) == status(
+            SchemaState.MATCH, EXPECTED_SCHEMA_VERSION,
+        )
+
+    def test_a_newer_version_is_a_mismatch(self) -> None:
+        assert classify_stored_version(EXPECTED_SCHEMA_VERSION + 1) == status(
+            SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION + 1,
+        )
 
 
 class TestProbeCaching:
@@ -184,6 +221,18 @@ class TestSchemaGuard:
         assert raised.value.code == SCHEMA_INCOMPATIBLE
         assert 'no horsies schema' in raised.value.detail
         assert 'never modifies the database schema' in raised.value.detail
+
+    async def test_a_0x_schema_names_the_new_database_remedy(self) -> None:
+        """A worker start cannot fix a 0.x database: the copy must not say so."""
+        guard = schema_guard(StubProbe([status(SchemaState.ZERO_X, None)]))
+
+        with pytest.raises(SchemaIncompatible) as raised:
+            await guard()
+
+        assert raised.value.code == SCHEMA_INCOMPATIBLE
+        assert 'horsies 0.x schema' in raised.value.detail
+        assert 'new database' in raised.value.detail
+        assert 'Start a horsies app or worker' not in raised.value.detail
 
 
 class TestNoDdlConstructionFlag:

@@ -14,17 +14,13 @@ import re
 import pytest
 
 from horsies.core.history.ddl.fragments import frozen_fragments
-from horsies.core.history.maintenance.gate import (
-    ARCHIVE_AVAILABILITY_FUNCTION_DDL,
-    gate_fragments,
-)
 from horsies.core.history.terminalization.live_cutover import (
     LIVE_CUTOVER_COLUMNS_DDL,
 )
-from horsies.core.history.cutover.program import installation_fragments
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
     ATTEMPT_ENCODER_FUNCTION,
+    COMPLETE_FUSED_BATCH_FUNCTION,
     COMPLETE_FUSED_FUNCTION,
     COMPLETE_LOCKED_FUNCTION,
     FAIL_LOCKED_FUNCTION,
@@ -51,28 +47,12 @@ from horsies.core.history.terminalization.outcome import (
     outcome_fragments,
 )
 from horsies.core.lifecycle.operations import TerminalizationKind
+from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
 
 MOVE_BODY = completion_family_fragments()[1]
-
-
-class TestGate:
-    def test_gate_joins_the_frozen_fragments(self) -> None:
-        combined = '\n'.join(frozen_fragments())
-        assert 'horsies_archive_access_gate' in combined
-        assert 'horsies_assert_archive_available' in combined
-
-    def test_assert_takes_shared_lock_and_types_the_refusal(self) -> None:
-        assert 'FOR SHARE' in ARCHIVE_AVAILABILITY_FUNCTION_DDL
-        assert "ERRCODE = 'object_in_use'" in ARCHIVE_AVAILABILITY_FUNCTION_DDL
-
-    def test_gate_installs_before_use(self) -> None:
-        fragments = gate_fragments()
-        assert 'CREATE TABLE' in fragments[0]
-        assert 'INSERT INTO' in fragments[1]
-        assert 'CREATE FUNCTION' in fragments[3]
 
 
 class TestOutcomeLayer:
@@ -103,7 +83,6 @@ class TestOutcomeLayer:
 
 class TestMoveStructure:
     def test_reconciled_step_order(self) -> None:
-        availability = MOVE_BODY.index('horsies_assert_archive_available')
         advisory = MOVE_BODY.index('pg_advisory_xact_lock')
         snapshot = MOVE_BODY.index('SELECT * INTO STRICT v_task')
         uniqueness = MOVE_BODY.index('horsies_task_history_duplicate_staged')
@@ -111,8 +90,7 @@ class TestMoveStructure:
         deletes = MOVE_BODY.index('DELETE FROM horsies_task_attempts')
         notify = MOVE_BODY.index("pg_notify('task_done'")
         assert (
-            availability < advisory < snapshot < uniqueness < insert
-            < deletes < notify
+            advisory < snapshot < uniqueness < insert < deletes < notify
         )
 
     def test_uniqueness_guard_uses_the_duplicate_guard(self) -> None:
@@ -357,7 +335,6 @@ class TestBatchBuilder:
     )
     def test_stage_order_is_the_builders(self, batch: str) -> None:
         size_check = batch.index('p_batch_size must be a positive integer')
-        availability = batch.index('horsies_assert_archive_available')
         discovery = batch.index('FOR UPDATE')
         uniqueness = batch.index('exists in multiple locations')
         insert = batch.index('INSERT INTO horsies_task_history')
@@ -366,7 +343,7 @@ class TestBatchBuilder:
         deletes = batch.index('DELETE FROM horsies_task_attempts')
         notify = batch.index("pg_notify('task_done'")
         assert (
-            size_check < availability < discovery < uniqueness < insert
+            size_check < discovery < uniqueness < insert
             < reservation < outcome < deletes < notify
         )
 
@@ -539,9 +516,8 @@ class TestWorkflowNodeFamily:
     )
     def test_id_keyed_preconditions_precede_any_work(self, batch: str) -> None:
         distinct = batch.index('batch task ids must be distinct')
-        availability = batch.index('horsies_assert_archive_available')
         lock = batch.index('ORDER BY t.id')
-        assert distinct < availability < lock
+        assert distinct < lock
 
     @pytest.mark.parametrize(
         'batch', [*workflow_node_family_fragments()[2:4]]
@@ -766,14 +742,10 @@ class TestBatchedFusedCompletion:
         ):
             assert self.BODY.index(check) < loop
 
-    def test_the_program_installs_it_after_the_fused_completion(self) -> None:
-        fragments = installation_fragments()
-        fused = next(
-            index
-            for index, fragment in enumerate(fragments)
-            if f'CREATE FUNCTION {COMPLETE_FUSED_FUNCTION}(' in fragment
-        )
-        batched = fragments.index(self.BODY)
+    def test_the_install_creates_it_after_the_fused_completion(self) -> None:
+        sql = baseline_sql()
+        fused = sql.index(f'CREATE FUNCTION {COMPLETE_FUSED_FUNCTION}(')
+        batched = sql.index(f'CREATE FUNCTION {COMPLETE_FUSED_BATCH_FUNCTION}(')
         assert fused < batched
 
     def test_the_v56_replacement_is_the_same_function_as_create_or_replace(

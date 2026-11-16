@@ -4,8 +4,8 @@
 export type ServerSchemaState =
   | 'MATCH'
   | 'MISMATCH'
-  | 'CUTOVER_REQUIRED'
   | 'ABSENT'
+  | 'ZERO_X'
   | 'UNKNOWN';
 
 export interface MonitoringMeta {

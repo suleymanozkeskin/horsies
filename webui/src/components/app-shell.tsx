@@ -1,9 +1,10 @@
 // Application chrome and the boot-time gates.
 //
-// Four conditions stop the UI before any surface renders: the viewer is not
-// authorized, /api/meta is unreachable, the database has no horsies schema, or
-// its schema state could not be determined at all. A schema mismatch is not a
-// stop — it degrades the whole UI to read-only with a persistent banner.
+// Five conditions stop the UI before any surface renders: the viewer is not
+// authorized, /api/meta is unreachable, the database has no horsies schema, it
+// holds a horsies 0.x schema, or its schema state could not be determined at
+// all. A schema mismatch is not a stop — it degrades the whole UI to read-only
+// with a persistent banner.
 
 import type { ReactNode } from 'react';
 
@@ -19,6 +20,7 @@ import { ApiError } from '@/lib/http';
 import {
   NO_SCHEMA_MESSAGE,
   SCHEMA_UNREACHABLE_MESSAGE,
+  ZERO_X_SCHEMA_MESSAGE,
   schemaBannerMessage,
   schemaState,
   type BannerSchemaState,
@@ -51,8 +53,7 @@ function FullScreen({
   );
 }
 
-/** Read-only banner shown for the whole session while the schema mismatches
- * or the offline cutover is incomplete. */
+/** Read-only banner shown for the whole session while the schema mismatches. */
 function SchemaBanner({
   meta,
   state,
@@ -161,11 +162,19 @@ export function AppShell() {
     );
   }
 
+  if (schemaState(meta) === 'zero_x') {
+    return (
+      <FullScreen icon={Database} title="horsies 0.x schema">
+        <p className="text-sm text-muted-foreground">{ZERO_X_SCHEMA_MESSAGE}</p>
+      </FullScreen>
+    );
+  }
+
   const state = schemaState(meta);
   return (
     <CapabilityProvider meta={meta}>
       <div className="flex min-h-screen flex-col">
-        {(state === 'mismatch' || state === 'cutover_required') && (
+        {state === 'mismatch' && (
           <SchemaBanner meta={meta} state={state} />
         )}
         <header className="glass sticky top-0 z-40 flex flex-wrap items-center gap-4 border-b border-border px-4 py-3">

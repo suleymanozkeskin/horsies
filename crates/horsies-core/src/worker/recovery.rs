@@ -12,10 +12,13 @@ use crate::broker::listener::notify_task_queue;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage_in_pool, CoverageOutcome,
+use crate::core::history::identity::reservations::{
+    cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
 };
-use crate::core::history::maintenance::pruning::prune_expired_partitions;
+use crate::core::history::maintenance::coverage::{
+    ensure_periodic_coverage_in_pool, CoverageOutcome,
+};
+use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
@@ -173,19 +176,26 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, enqueued_at, started_at, claimed, claimed_at,
-                claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition, created_at, updated_at
-             ) VALUES ($1, 'p7_retention_task', 'default', 100, '[]', '{}', 'RUNNING',
-                       NOW(), NOW(), NOW(), TRUE, NOW(), 'p7-retention-worker', TRUE,
-                       0, 0, $1::text, 1, $2, 'forever', FALSE,
-                       'NEVER_ELIGIBLE', NOW(), NOW())",
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'p7_retention_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 NULL, NULL, NULL,
+                 'RUNNING', NOW(), NOW(), 'p7-retention-worker', NULL,
+                 NOW(), NULL, NULL,
+                 4242, 'p7-host', 'p7-process',
+                 0, 0, NULL, NULL, TRUE,
+                 NOW(), FALSE, NULL, NULL
+             )",
         )
         .bind(task_id)
-        .bind(vec![23_u8; 32])
         .execute(pool)
         .await
         .unwrap();
@@ -620,6 +630,8 @@ mod p7_maintenance_tests {
             .unwrap()
             .contains(history_leaves[0].leaf_name()));
         assert_eq!(pruning["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(pruning["key_reservations"]["state"], "complete");
+        assert_eq!(pruning["reach"], "within_bounds");
         let phase2 = snapshot.phase2_recovery.unwrap();
         assert_eq!(phase2["considered"], 0);
         assert_eq!(phase2["applied"], 0);
@@ -1254,7 +1266,7 @@ async fn run_reaper_pass(
 
     if tokio::time::Instant::now() >= *next_partition_maintenance {
         let declared = retention.registrable_periods();
-        let coverage_health = match ensure_partition_coverage_in_pool(
+        let coverage_health = match ensure_periodic_coverage_in_pool(
             maintenance_pool,
             retention.history_leaf_horizon_days,
             retention.heartbeat_leaf_horizon_hours,
@@ -1296,12 +1308,37 @@ async fn run_reaper_pass(
         // Coverage and pruning are independently contained: either half runs
         // and publishes health even when the other refuses.
         let prune = prune_expired_partitions(maintenance_pool, &StagedLoaderPublisher).await;
+        // Expired key reservations are removed after pruning, in bounded
+        // batches; the rest waits for the next pass.
+        let key_reservations = match cleanup_expired_reservations_pass(
+            maintenance_pool,
+            i32::try_from(retention.retention_delete_batch_size).unwrap_or(i32::MAX),
+            RESERVATION_CLEANUP_BATCHES_PER_PASS,
+        )
+        .await
+        {
+            Ok(ReservationCleanupPass::Complete { deleted }) => {
+                serde_json::json!({"state": "complete", "deleted": deleted})
+            }
+            Ok(ReservationCleanupPass::Truncated { deleted }) => {
+                serde_json::json!({"state": "truncated", "deleted": deleted})
+            }
+            Err(error) => {
+                tracing::error!(%error, "expired key reservation cleanup failed");
+                serde_json::json!({"state": "error", "error": error.to_string()})
+            }
+        };
         health.write().await.partition_pruning = Some(serde_json::json!({
             "finalized": prune.finalized_leaves.len(),
             "detached": prune.detached_count(),
             "dropped": prune.dropped_count(),
             "refusals": prune.refusals,
             "errors": prune.errors,
+            "reach": match prune.reach {
+                PruneReach::WithinBounds => "within_bounds",
+                PruneReach::Truncated => "truncated",
+            },
+            "key_reservations": key_reservations,
         }));
         *next_partition_maintenance = tokio::time::Instant::now()
             + Duration::from_secs(retention.partition_maintenance_interval_s);
@@ -2074,18 +2111,23 @@ mod tests {
     async fn insert_stale_running_task(pool: &PgPool, task_id: Uuid, finalizing_at_sql: &str) {
         let sql = format!(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
-                finalizing_at, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'reaper_test', 'default', 100, '[]', '{{}}', 'RUNNING',
-                NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', NOW(), NOW(), TRUE,
-                'worker-1', 0, 0,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                {finalizing_at_sql}, 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'reaper_test', 'default', 100, '{{}}', NULL, 'ISOLATED',
+                'standard_30d', NOW() - INTERVAL '1 hour', NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'RUNNING', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', 'worker-1', NULL,
+                NOW() - INTERVAL '1 hour', {finalizing_at_sql}, NULL,
+                4242, 'reaper-host', 'reaper-process',
+                0, 0, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )"
         );
         sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
@@ -2260,15 +2302,23 @@ mod tests {
         // A still-live (RUNNING) backing task row + its workflow_task linkage.
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, retry_count, max_retries, enqueue_sha,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'ret_task', 'default', 100, '[]', '{}', 'RUNNING',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 0, 0, $1,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'ret_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
+                NOW() - INTERVAL '2 hours', NULL, NULL,
+                NULL, NULL, NULL,
+                0, 0, NULL, NULL, FALSE,
+                NOW() - INTERVAL '2 hours', FALSE, NULL, NULL
             )",
         )
         .bind(task_id)

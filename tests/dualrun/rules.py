@@ -20,7 +20,6 @@ class IdFamily(Enum):
     WORKFLOW_NODE = 'workflow_node'
     WORKER = 'worker'
     COMMAND_FINGERPRINT = 'command_fingerprint'
-    PARTITION_LEAF = 'partition_leaf'
     RECOVERY_PASS = 'recovery_pass'
     RECOVERY_CLAIM = 'recovery_claim'
     SCAN_POSITION = 'scan_position'
@@ -87,7 +86,128 @@ class Ignored:
     reason: str
 
 
-ColumnRule = Exact | NormalisedId | TimeOrderOnly | TimeWithin | Ignored
+# ---- Stored JSON ----
+
+
+@dataclass(frozen=True, slots=True)
+class Key:
+    """A path step into an object member."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class Index:
+    """A path step into one array element, from 0."""
+
+    position: int
+
+
+@dataclass(frozen=True, slots=True)
+class EachItem:
+    """A path step into every element of an array."""
+
+
+PathStep = Key | Index | EachItem
+
+
+class TimeEncoding(Enum):
+    """How a JSON document stores a clock value."""
+
+    ISO_TEXT = 'ISO 8601 text with a UTC offset'
+    EPOCH_MICROSECONDS = 'integer microseconds since 1970-01-01 UTC'
+
+
+@dataclass(frozen=True, slots=True)
+class JsonTime:
+    """A clock value inside a JSON document.
+
+    ``rule`` applies as it does to a column. ``TimeOrderOnly`` ranks the
+    values of one path in one column. An anchor is not available inside a
+    document.
+    """
+
+    encoding: TimeEncoding
+    rule: TimeOrderOnly | TimeWithin
+
+
+JsonLeafRule = NormalisedId | JsonTime | Ignored
+
+
+@dataclass(frozen=True, slots=True)
+class JsonPath:
+    """The rule of the values at one path of a JSON document."""
+
+    steps: tuple[PathStep, ...]
+    rule: JsonLeafRule
+
+
+class JsonStorage(Enum):
+    """How a column stores a JSON document."""
+
+    TEXT = 'text'
+    """A text, varchar or jsonb column."""
+
+    UTF8_BYTES = 'utf-8 bytes'
+    """A bytea column that holds UTF-8 JSON text."""
+
+
+@dataclass(frozen=True, slots=True)
+class FormatVersion:
+    """The document is read only when ``column`` of the same row holds ``version``."""
+
+    column: str
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class Unversioned:
+    """The column has no format version column."""
+
+
+@dataclass(frozen=True, slots=True)
+class StoredJson:
+    """A stored JSON document, parsed and compared as JSON.
+
+    Key order and white space do not count. The values at ``paths`` get
+    their own rule; every other value compares exactly.
+    """
+
+    storage: JsonStorage
+    format: FormatVersion | Unversioned
+    paths: tuple[JsonPath, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedName:
+    """A relation name that can end in ``_YYYY_MM_DD`` or ``_YYYY_MM_DD_HH`` (UTC).
+
+    The date or hour becomes an offset from the day or hour of the run
+    start. A name without such an ending compares exactly.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class DigestOf:
+    """A SHA-256 digest of the bytea column ``column`` of the same row.
+
+    Normalized to whether it matches, because the source column compares
+    by its own rule.
+    """
+
+    column: str
+
+
+ColumnRule = (
+    Exact
+    | NormalisedId
+    | TimeOrderOnly
+    | TimeWithin
+    | Ignored
+    | StoredJson
+    | GeneratedName
+    | DigestOf
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,12 +299,28 @@ class KeyColumnNotComparable:
 
 
 @dataclass(frozen=True, slots=True)
-class AnchorUnknown:
-    """An anchored time rule names a column that has no rule in its table."""
+class ReferencedColumnUnknown:
+    """A rule names another column (anchor, format version, digest source) that has no rule in its table."""
 
     table: str
     column: str
-    anchor: str
+    referenced: str
+
+
+@dataclass(frozen=True, slots=True)
+class EmptyJsonPath:
+    """A JSON path rule has no step."""
+
+    table: str
+    column: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnchoredJsonTime:
+    """A JSON clock rule names an anchor, which a document does not have."""
+
+    table: str
+    column: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,16 +345,25 @@ CatalogDefect = (
     | EmptyKey
     | KeyColumnUnknown
     | KeyColumnNotComparable
-    | AnchorUnknown
+    | ReferencedColumnUnknown
     | EmptyIgnoreReason
     | NegativeBound
+    | EmptyJsonPath
+    | AnchoredJsonTime
 )
 
 
 def is_key_comparable(rule: ColumnRule) -> bool:
     """Whether a rule gives values that can order and pair rows by plain equality."""
     match rule:
-        case Exact() | NormalisedId() | TimeOrderOnly():
+        case (
+            Exact()
+            | NormalisedId()
+            | TimeOrderOnly()
+            | StoredJson()
+            | GeneratedName()
+            | DigestOf()
+        ):
             return True
         case TimeWithin(reference=reference):
             match reference:
@@ -252,6 +397,60 @@ def _key_defects(
     return defects
 
 
+def _time_defects(
+    table: str, column: str, rule: TimeWithin, names: set[str]
+) -> list[CatalogDefect]:
+    defects: list[CatalogDefect] = []
+    if rule.bound < timedelta(0):
+        defects.append(NegativeBound(table=table, column=column))
+    match rule.reference:
+        case AnchorReference(column=anchor) if anchor not in names:
+            defects.append(
+                ReferencedColumnUnknown(table=table, column=column, referenced=anchor)
+            )
+        case AnchorReference() | RunWindowReference():
+            pass
+    return defects
+
+
+def _path_defects(table: str, column: str, path: JsonPath) -> list[CatalogDefect]:
+    defects: list[CatalogDefect] = []
+    if not path.steps:
+        defects.append(EmptyJsonPath(table=table, column=column))
+    match path.rule:
+        case Ignored(reason=reason) if not reason.strip():
+            defects.append(EmptyIgnoreReason(table=table, column=column))
+        case JsonTime(rule=TimeWithin() as rule):
+            match rule.reference:
+                case AnchorReference():
+                    defects.append(AnchoredJsonTime(table=table, column=column))
+                case RunWindowReference():
+                    pass
+            if rule.bound < timedelta(0):
+                defects.append(NegativeBound(table=table, column=column))
+        case Ignored() | JsonTime() | NormalisedId():
+            pass
+    return defects
+
+
+def _json_defects(
+    table: str, column: str, rule: StoredJson, names: set[str]
+) -> list[CatalogDefect]:
+    defects: list[CatalogDefect] = []
+    match rule.format:
+        case FormatVersion(column=version_column) if version_column not in names:
+            defects.append(
+                ReferencedColumnUnknown(
+                    table=table, column=column, referenced=version_column
+                ),
+            )
+        case FormatVersion() | Unversioned():
+            pass
+    for path in rule.paths:
+        defects.extend(_path_defects(table, column, path))
+    return defects
+
+
 def _column_defects(
     table: TableRules, spec: ColumnSpec, names: set[str]
 ) -> list[CatalogDefect]:
@@ -260,19 +459,17 @@ def _column_defects(
             if reason.strip():
                 return []
             return [EmptyIgnoreReason(table=table.name, column=spec.name)]
-        case TimeWithin(reference=reference, bound=bound):
-            defects: list[CatalogDefect] = []
-            if bound < timedelta(0):
-                defects.append(NegativeBound(table=table.name, column=spec.name))
-            match reference:
-                case AnchorReference(column=anchor) if anchor not in names:
-                    defects.append(
-                        AnchorUnknown(table=table.name, column=spec.name, anchor=anchor)
-                    )
-                case AnchorReference() | RunWindowReference():
-                    pass
-            return defects
-        case Exact() | NormalisedId() | TimeOrderOnly():
+        case TimeWithin() as rule:
+            return _time_defects(table.name, spec.name, rule, names)
+        case StoredJson() as rule:
+            return _json_defects(table.name, spec.name, rule, names)
+        case DigestOf(column=source) if source not in names:
+            return [
+                ReferencedColumnUnknown(
+                    table=table.name, column=spec.name, referenced=source
+                )
+            ]
+        case Exact() | NormalisedId() | TimeOrderOnly() | GeneratedName() | DigestOf():
             return []
 
 
