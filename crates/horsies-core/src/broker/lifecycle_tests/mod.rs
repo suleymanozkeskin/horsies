@@ -9,6 +9,7 @@ mod autocommit_outcomes;
 mod failed_attempt_finish;
 mod failed_attempt_round_trips;
 mod finalize_status_guard;
+mod success_batch_write;
 mod support;
 mod task_attempt_history;
 mod task_history_terminalization_cancellation;

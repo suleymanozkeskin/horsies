@@ -278,6 +278,30 @@ pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
     .expect("the URL of a test pool is accepted by the statement layer")
 }
 
+/// A worker profile core pool of `size` connections on the database of a
+/// test's sqlx pool: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
+/// checkouts, as the pool of a worker. Connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    config.pool_size = size;
+    config.max_overflow = 0;
+    let plan = pool_plan(
+        &config,
+        PoolRole::WorkerProfile,
+        Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS),
+        runtime_protocol(&config),
+    )
+    .expect("a test worker pool is larger than its reserve");
+    open_pool(
+        &config.database_url,
+        plan,
+        &ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer")
+}
+
 /// The checkout wait of [`unpinged_single_connection_core_pool`].
 #[cfg(test)]
 const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
