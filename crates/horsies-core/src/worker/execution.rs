@@ -1721,6 +1721,7 @@ pub(crate) async fn execute_and_finalize(
         broker.pool().clone(),
         task_id,
         worker_id.clone(),
+        row.claimed_at,
         hostname.clone(),
         pid,
         Duration::from_millis(recovery.runner_heartbeat_interval_ms),
