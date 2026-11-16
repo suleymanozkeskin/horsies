@@ -301,9 +301,12 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
         .header(INTENT_HEADER, INTENT_VALUE)
         .body(Body::empty())
         .unwrap();
+    // The absent body is accepted; the refusal is the path id's.
+    let absent_response = router.clone().oneshot(absent).await.unwrap();
+    assert_eq!(absent_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
-        router.clone().oneshot(absent).await.unwrap().status(),
-        StatusCode::NOT_FOUND
+        json(absent_response).await["detail"][0]["loc"],
+        serde_json::json!(["path", "task_id"])
     );
 
     let task_id = Uuid::new_v4();
@@ -392,10 +395,22 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
             "datetime_parsing",
         ),
         (
-            "/api/workflows/not-a-uuid/tasks/not-an-int",
+            "/api/workflows/00000000-0000-0000-0000-000000000000/tasks/not-an-int",
             serde_json::json!(["path", "task_index"]),
             serde_json::json!("not-an-int"),
             "int_parsing",
+        ),
+        (
+            "/api/tasks/not-a-uuid",
+            serde_json::json!(["path", "task_id"]),
+            serde_json::json!("not-a-uuid"),
+            "uuid_parsing",
+        ),
+        (
+            "/api/workflows/not-a-uuid",
+            serde_json::json!(["path", "workflow_id"]),
+            serde_json::json!("not-a-uuid"),
+            "uuid_parsing",
         ),
     ] {
         let response = router
@@ -457,6 +472,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         assert_eq!(meta_response.status(), StatusCode::OK);
         let meta = json(meta_response).await;
         assert_eq!(meta["schema_compatible"], compatible);
+        assert_eq!(meta["schema_state"], serde_json::to_value(state).unwrap());
         assert_eq!(meta["actions_enabled"], compatible);
         assert_eq!(
             meta["schema_version"],
@@ -473,7 +489,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             .await
             .unwrap();
         if compatible {
-            assert_eq!(action.status(), StatusCode::NOT_FOUND);
+            assert_eq!(action.status(), StatusCode::UNPROCESSABLE_ENTITY);
         } else {
             assert_eq!(action.status(), StatusCode::CONFLICT);
             assert_eq!(json(action).await["code"], reason.unwrap());
@@ -483,7 +499,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             .oneshot(request(Method::GET, "/api/tasks/not-a-uuid"))
             .await
             .unwrap();
-        assert_eq!(read.status(), StatusCode::NOT_FOUND);
+        assert_eq!(read.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
 
@@ -984,7 +1000,6 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
         serde_json::json!({
             "outcome": "cancelled",
             "was_status": "PENDING",
-            "next_attempt_number": null,
             "warning": null
         })
     );
@@ -1145,5 +1160,71 @@ async fn default_broker_mode_still_migrates_and_validates() {
     assert_eq!(
         broker.schema_initialization_mode(),
         SchemaInitializationMode::MigrateAndValidate
+    );
+}
+
+/// A path id that is not a UUID answers FastAPI's 422 `uuid_parsing` body,
+/// as a `uuid.UUID` path parameter does, with no database call (the router's
+/// pool is lazy and unreachable).
+#[tokio::test]
+async fn a_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let response = router
+        .clone()
+        .oneshot(request(Method::GET, "/api/tasks/not-a-uuid"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    let issue = &body["detail"][0];
+    assert_eq!(issue["type"], "uuid_parsing");
+    assert_eq!(issue["loc"], serde_json::json!(["path", "task_id"]));
+    assert_eq!(issue["input"], "not-a-uuid");
+    let reason = issue["ctx"]["error"]
+        .as_str()
+        .expect("ctx.error is the parser's reason");
+    assert_eq!(
+        issue["msg"],
+        serde_json::json!(format!("Input should be a valid UUID, {reason}"))
+    );
+
+    for path in [
+        "/api/workflows/not-a-uuid/pause",
+        "/api/workflows/not-a-uuid/resume",
+        "/api/workflows/not-a-uuid/cancel",
+    ] {
+        let response = router.clone().oneshot(action_request(path)).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{path}"
+        );
+        assert_eq!(
+            json(response).await["detail"][0]["loc"],
+            serde_json::json!(["path", "workflow_id"]),
+            "{path}"
+        );
+    }
+
+    let both = router
+        .oneshot(request(
+            Method::GET,
+            "/api/workflows/not-a-uuid/tasks/not-an-int",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(both.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(both).await;
+    assert_eq!(
+        body["detail"][0]["loc"],
+        serde_json::json!(["path", "workflow_id"])
+    );
+    assert_eq!(
+        body["detail"][1]["loc"],
+        serde_json::json!(["path", "task_index"])
     );
 }

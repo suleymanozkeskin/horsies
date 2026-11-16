@@ -66,7 +66,7 @@ from tests.integration.task_history_harness import (
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 DST_ZONE = 'Europe/Berlin'
-CLASS_KEY = 'it_dst'
+CLASS_KEY = 'standard_30d'
 # The first pass of the repeated hour in Europe/Berlin, in each year.
 COMING_FOLD = datetime(2026, 10, 25, tzinfo=UTC)
 PAST_FOLD = datetime(2025, 10, 26, tzinfo=UTC)
@@ -78,7 +78,7 @@ HORIZON = heartbeat_horizon(
 
 history_schema = task_history_schema_fixture('task_history_it_dst')
 heartbeat_schema = terminalization_schema_fixture(
-    'task_history_it_dst_heartbeats', partitioned_heartbeats=True
+    'task_history_it_dst_heartbeats'
 )
 
 

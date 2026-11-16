@@ -30,7 +30,13 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime, timezone
 
-from ..commands import OPEN_END_ANCHOR, is_safe_identifier
+from ..commands import (
+    OPEN_END_ANCHOR,
+    AnchoredLowerBound,
+    LowerBound,
+    OpenLowerBound,
+    is_safe_identifier,
+)
 from ..names import (
     CLOCK_SKEW_EXCEPTIONS,
     TASK_DUPLICATE_GUARD_FUNCTION,
@@ -89,12 +95,11 @@ CREATE TABLE {TASK_LOOKUP_MANIFEST} (
 
 @dataclass(frozen=True, slots=True)
 class LookupLeaf:
-    """One finite leaf as the generated function will probe it."""
+    """One leaf as the generated function will probe it."""
 
     relation_name: str
-    lower_anchor: datetime
+    lower_bound: LowerBound
     upper_anchor: datetime
-    min_birth_at: datetime | None
 
     def __post_init__(self) -> None:
         if not is_safe_identifier(self.relation_name):
@@ -102,38 +107,24 @@ class LookupLeaf:
                 f'lookup leaf name is not a safe identifier: '
                 f'{self.relation_name!r}'
             )
-        if self.lower_anchor.tzinfo is None or self.upper_anchor.tzinfo is None:
+        if self.upper_anchor.tzinfo is None:
             raise ValueError('lookup leaf bounds must be timezone-aware')
-        if self.lower_anchor >= self.upper_anchor:
-            raise ValueError('lookup leaf bounds must be increasing')
-        if self.min_birth_at is not None and self.min_birth_at.tzinfo is None:
-            raise ValueError('lookup leaf birth metadata must be timezone-aware')
+        match self.lower_bound:
+            case AnchoredLowerBound(anchor=anchor) if anchor >= self.upper_anchor:
+                raise ValueError('lookup leaf bounds must be increasing')
+            case AnchoredLowerBound() | OpenLowerBound():
+                pass
 
 
 @dataclass(frozen=True, slots=True)
 class LookupManifest:
-    """What the generated functions probe, and where history begins.
+    """What the generated functions probe.
 
-    Two jobs, and only the first is filtered by relation existence.
     `leaves` is the probe list: a relation that does not exist cannot be
     probed, and naming it anyway kills the function at execution.
-
-    `birth_floor` is the retained-history floor, computed over the
-    COMPLETE attached set including leaves whose relation is gone. It is
-    set only when every attached leaf carried verified birth metadata; a
-    single unverified leaf disables the constant-time purged fast path
-    and the walk decides absence the long way.
-
-    The floor is deliberately not narrowed to the probe list. Absence and
-    the EXPLANATION of absence are different claims: a task whose leaf was
-    destroyed out of band is genuinely unreadable, but it does not predate
-    retained history, and saying it does would present an accidental drop
-    as ordinary ageing. A floor computed over the full attached set errs
-    low, which only ever means probing before concluding absence.
     """
 
     leaves: tuple[LookupLeaf, ...]
-    birth_floor: datetime | None
 
 
 def manifest_from_catalog(
@@ -163,28 +154,32 @@ def manifest_from_catalog(
     history_rows = [
         row for row in rows if row.class_key != HEARTBEAT_CLASS_KEY
     ]
-    ordered = sorted(
-        history_rows, key=lambda row: (row.lower_anchor, row.leaf_name)
-    )
+    ordered = sorted(history_rows, key=_probe_order)
     names = [row.leaf_name for row in ordered]
     if len(set(names)) != len(names):
         raise ValueError('lookup manifest relation names must be distinct')
     leaves = tuple(
         LookupLeaf(
             relation_name=row.leaf_name,
-            lower_anchor=row.lower_anchor,
+            lower_bound=row.lower_bound,
             upper_anchor=row.upper_anchor,
-            min_birth_at=row.min_birth_at,
         )
         for row in ordered
         if row.leaf_name not in absent_relations
     )
-    birth_floor: datetime | None = None
-    if ordered and all(row.min_birth_verified for row in ordered):
-        observed = [row.min_birth_at for row in ordered if row.min_birth_at]
-        if observed:
-            birth_floor = min(observed)
-    return LookupManifest(leaves=leaves, birth_floor=birth_floor)
+    return LookupManifest(leaves=leaves)
+
+
+def _probe_order(row: LeafCatalogRow) -> tuple[int, datetime, str]:
+    """Open lower bound first, then by lower anchor, then by name.
+
+    The same order as the SQL ``ORDER BY lower_anchor NULLS FIRST, leaf_name``.
+    """
+    match row.lower_bound:
+        case OpenLowerBound():
+            return (0, row.upper_anchor, row.leaf_name)
+        case AnchoredLowerBound(anchor=anchor):
+            return (1, anchor, row.leaf_name)
 
 
 def render_staged_lookup_function(manifest: LookupManifest) -> str:
@@ -439,13 +434,6 @@ def _staged_function(
     if not manifest.leaves:
         finite_section = ''
     else:
-        floor_check = ''
-        if manifest.birth_floor is not None:
-            floor_check = f"""
-            IF v_birth_at < {_timestamp_literal(manifest.birth_floor)} THEN
-                {absence}
-            END IF;
-"""
         pruned_probes = '\n'.join(
             _pruned_probe(leaf, history_probe(leaf.relation_name))
             for leaf in manifest.leaves
@@ -486,7 +474,6 @@ def _staged_function(
             v_birth_at := to_timestamp(
                 v_birth_milliseconds::double precision / 1000.0
             );
-{floor_check}
             v_effective_birth :=
                 v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';
 {pruned_probes}

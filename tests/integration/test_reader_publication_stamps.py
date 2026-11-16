@@ -53,7 +53,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 partition_schema = terminalization_schema_fixture(
     'task_history_it_reader_stamps',
-    partitioned_heartbeats=True,
 )
 
 

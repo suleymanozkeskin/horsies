@@ -6,8 +6,8 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::monitoring::{
-    ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection, TaskGroupBy,
-    TaskSortField,
+    ErrorCategory, MonitoringQueryError, MonitoringQueryErrorCode, PaginationRefused,
+    SortDirection, TaskGroupBy, TaskSortField,
 };
 use crate::TaskStatus;
 
@@ -25,7 +25,8 @@ pub(crate) struct SchemaBody {
 #[derive(Debug)]
 pub(crate) enum ApiError {
     Detail(StatusCode, String),
-    Validation(ValidationIssue),
+    /// FastAPI's 422 body: every refused parameter, in parameter order.
+    Validation(Vec<ValidationIssue>),
 }
 
 #[derive(Debug, Serialize)]
@@ -58,13 +59,13 @@ impl ApiError {
         message: impl Into<String>,
         input: impl Into<serde_json::Value>,
     ) -> Self {
-        Self::Validation(ValidationIssue {
+        Self::Validation(vec![ValidationIssue {
             error_type,
             loc: vec!["query", field],
             msg: message.into(),
             input: input.into(),
             ctx: None,
-        })
+        }])
     }
 
     pub(crate) fn query_constraint(
@@ -77,13 +78,13 @@ impl ApiError {
     ) -> Self {
         let mut context = serde_json::Map::new();
         context.insert(context_key.to_owned(), context_value.into());
-        Self::Validation(ValidationIssue {
+        Self::Validation(vec![ValidationIssue {
             error_type,
             loc: vec!["query", field],
             msg: message.into(),
             input: input.into(),
             ctx: Some(serde_json::Value::Object(context)),
-        })
+        }])
     }
 
     pub(crate) fn path_validation(
@@ -92,23 +93,50 @@ impl ApiError {
         message: impl Into<String>,
         input: impl Into<serde_json::Value>,
     ) -> Self {
-        Self::Validation(ValidationIssue {
+        Self::Validation(vec![Self::path_issue(field, error_type, message, input)])
+    }
+
+    /// One refused path parameter, for a 422 body that lists several.
+    pub(crate) fn path_issue(
+        field: &'static str,
+        error_type: &'static str,
+        message: impl Into<String>,
+        input: impl Into<serde_json::Value>,
+    ) -> ValidationIssue {
+        ValidationIssue {
             error_type,
             loc: vec!["path", field],
             msg: message.into(),
             input: input.into(),
             ctx: None,
-        })
+        }
+    }
+
+    /// FastAPI's answer for a path id that is not a UUID, as for a
+    /// `uuid.UUID` path parameter: type `uuid_parsing`, pydantic's message,
+    /// and the parser's reason in `ctx.error`. No database call is made.
+    pub(crate) fn path_uuid(
+        field: &'static str,
+        raw: &str,
+        error: &uuid::Error,
+    ) -> ValidationIssue {
+        ValidationIssue {
+            error_type: "uuid_parsing",
+            loc: vec!["path", field],
+            msg: format!("Input should be a valid UUID, {error}"),
+            input: raw.into(),
+            ctx: Some(serde_json::json!({ "error": error.to_string() })),
+        }
     }
 
     pub(crate) fn body_validation(message: impl Into<String>, input: serde_json::Value) -> Self {
-        Self::Validation(ValidationIssue {
+        Self::Validation(vec![ValidationIssue {
             error_type: "value_error",
             loc: vec!["body"],
             msg: message.into(),
             input,
             ctx: None,
-        })
+        }])
     }
 }
 
@@ -116,9 +144,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             Self::Detail(status, detail) => (status, Json(DetailBody { detail })).into_response(),
-            Self::Validation(issue) => (
+            Self::Validation(issues) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({"detail": [issue]})),
+                Json(serde_json::json!({ "detail": issues })),
             )
                 .into_response(),
         }
@@ -348,8 +376,19 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
     }
 }
 
+/// Map a monitoring read failure to its response, as Python
+/// (`horsies/web/routes/_common.py:103-127`): a database failure is 503, the
+/// dependency failed and the state can clear; stored history data that does
+/// not decode is 500, the request was valid and a repeat gives the same
+/// answer until the stored row changes.
 pub(crate) fn query_failed(surface: &str, error: MonitoringQueryError) -> ApiError {
-    ApiError::unavailable(format!("{surface} query failed: {}", error.message))
+    let detail = format!("{surface} query failed: {}", error.message);
+    match error.code {
+        MonitoringQueryErrorCode::DbOperationFailed => ApiError::unavailable(detail),
+        MonitoringQueryErrorCode::HistoryContractViolation => {
+            ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, detail)
+        }
+    }
 }
 
 pub(crate) fn pagination_refused(
@@ -372,4 +411,11 @@ pub(crate) fn pagination_refused(
             .unwrap_or_else(|| serde_json::Value::from(default_input));
         ApiError::query_validation(field, "value_error", error.reason, input)
     }
+}
+
+/// Parse a path id. Text that is not a UUID is refused with FastAPI's 422
+/// `uuid_parsing` body before any database call.
+pub(crate) fn parse_path_uuid(field: &'static str, raw: &str) -> Result<uuid::Uuid, ApiError> {
+    uuid::Uuid::parse_str(raw)
+        .map_err(|error| ApiError::Validation(vec![ApiError::path_uuid(field, raw, &error)]))
 }

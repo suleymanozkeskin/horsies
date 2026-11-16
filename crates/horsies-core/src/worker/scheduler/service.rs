@@ -81,11 +81,124 @@ fn resolve_queue_priority(app_config: &AppConfig, queue_name: &str) -> i32 {
     100
 }
 
+/// Why the scheduler refused to start. Nothing is written before a refusal.
+#[derive(Debug, thiserror::Error)]
+pub enum SchedulerStartError {
+    /// The schedule section is invalid (pattern bounds, timezone, names).
+    #[error("invalid schedule config: {0}")]
+    InvalidScheduleConfig(String),
+    /// An enabled schedule's pattern has no slot after the start time, so its
+    /// `next_run_at` (NOT NULL) cannot be stored.
+    #[error("schedule '{schedule}' has no run after {after}: its pattern never fires again")]
+    NoNextSlot {
+        schedule: String,
+        after: DateTime<Utc>,
+    },
+}
+
+/// Why one slot was not enqueued.
+#[derive(Debug, thiserror::Error)]
+enum ScheduleFireError {
+    /// The schedule's args or kwargs are over `payload.reject_bytes`.
+    #[error(
+        "payload for schedule '{schedule}' is {size} bytes, exceeding \
+         payload.reject_bytes={limit}; slot not enqueued"
+    )]
+    PayloadTooLarge {
+        schedule: String,
+        size: usize,
+        limit: u64,
+    },
+    /// The schedule's args or kwargs do not encode to JSON text.
+    #[error("input of schedule '{schedule}' does not encode to JSON: {source}")]
+    InputEncoding {
+        schedule: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The broker refused or failed the enqueue.
+    #[error("enqueue for schedule '{schedule}' failed: {source}")]
+    Broker {
+        schedule: String,
+        #[source]
+        source: crate::broker::BrokerError,
+    },
+}
+
+/// What one slot's enqueue did, as the fire rules read it.
+enum SlotOutcome {
+    /// The slot's task row was written, or already holds the same command.
+    Enqueued(Uuid),
+    /// The slot's task id already holds a row with a different command. The
+    /// slot has its task, so it counts as fired (Python
+    /// `_count_existing_slot_as_fired`).
+    HeldByOtherCommand(Uuid),
+    /// The enqueue failed with an error that may clear: the slot stays due
+    /// and the next tick fires it once.
+    Transient(ScheduleFireError),
+    /// The enqueue failed with an error that repeats on every try: the
+    /// schedule moves past this slot and records no run.
+    Permanent(ScheduleFireError),
+}
+
+impl ScheduleFireError {
+    /// True when the failure may clear on a later try: only a retryable
+    /// broker error. Payload and encoding refusals repeat on every try.
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Broker { source, .. } => source.is_retryable(),
+            Self::PayloadTooLarge { .. } | Self::InputEncoding { .. } => false,
+        }
+    }
+}
+
+impl SlotOutcome {
+    /// Classify an enqueue result by Python's rules: a payload mismatch
+    /// counts as fired; a retryable broker error is transient; every other
+    /// error is permanent.
+    fn from_result(result: Result<Uuid, ScheduleFireError>) -> Self {
+        match result {
+            Ok(task_id) => Self::Enqueued(task_id),
+            Err(ScheduleFireError::Broker {
+                source: crate::broker::BrokerError::PayloadMismatch { task_id },
+                ..
+            }) => Self::HeldByOtherCommand(task_id),
+            Err(error) if error.is_retryable() => Self::Transient(error),
+            Err(error) => Self::Permanent(error),
+        }
+    }
+}
+
+/// Checks that run before the scheduler writes anything: the schedule
+/// section is valid and every enabled pattern has a slot after `now`.
+fn check_schedules_at_start(
+    schedule_config: &ScheduleConfig,
+    now: DateTime<Utc>,
+) -> Result<(), SchedulerStartError> {
+    schedule_config
+        .validate()
+        .map_err(SchedulerStartError::InvalidScheduleConfig)?;
+    for schedule in schedule_config.schedules.iter().filter(|s| s.enabled) {
+        if next_run_at(&schedule.pattern, now, &schedule.timezone).is_none() {
+            return Err(SchedulerStartError::NoNextSlot {
+                schedule: schedule.name.clone(),
+                after: now,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Spawn the scheduler service loop.
 ///
 /// The scheduler:
-/// 1. Initializes schedule state for all configured schedules
-/// 2. On each tick, checks for due schedules and enqueues their tasks.
+/// 1. Refuses to start, writing nothing, when the schedule section is invalid
+///    or an enabled pattern has no next slot. The join handle then yields the
+///    [`SchedulerStartError`]; the host exits non-zero.
+/// 2. Initializes schedule state for all configured schedules; one schedule's
+///    failure is logged and the others go on (the existence heal retries it).
+/// 3. Runs one tick at once, then one per `check_interval_seconds`: each tick
+///    enqueues the due slots of each due schedule.
 ///
 /// Multiple scheduler instances can coexist — each due schedule is guarded by
 /// a per-schedule transaction-scoped advisory try-lock (matching Python's
@@ -99,53 +212,55 @@ pub fn spawn_scheduler(
     schedule_config: ScheduleConfig,
     app_config: AppConfig,
     cancel: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        if !schedule_config.enabled || schedule_config.schedules.is_empty() {
-            tracing::info!("scheduler disabled or no schedules configured");
-            return;
+) -> JoinHandle<Result<(), SchedulerStartError>> {
+    tokio::spawn(run_scheduler(broker, schedule_config, app_config, cancel))
+}
+
+/// The body of [`spawn_scheduler`]: start checks, state initialization, then
+/// the tick loop until `cancel` fires.
+async fn run_scheduler(
+    broker: Arc<PostgresBroker>,
+    schedule_config: ScheduleConfig,
+    app_config: AppConfig,
+    cancel: CancellationToken,
+) -> Result<(), SchedulerStartError> {
+    if !schedule_config.enabled || schedule_config.schedules.is_empty() {
+        tracing::info!("scheduler disabled or no schedules configured");
+        return Ok(());
+    }
+
+    check_schedules_at_start(&schedule_config, Utc::now())?;
+    initialize_schedules(broker.pool(), &schedule_config.schedules, Utc::now()).await;
+
+    let lock_pool = scheduler_lock_pool(broker.pool());
+    tracing::info!("scheduler started");
+    let check_interval = Duration::from_secs(u64::from(schedule_config.check_interval_seconds));
+    let mut existence_cadence = ExistenceCheckCadence::new(schedule_config.check_interval_seconds);
+
+    // Main loop: the first tick runs at once (Python `run_forever`).
+    while !cancel.is_cancelled() {
+        if let Err(e) = check_and_enqueue(
+            &lock_pool,
+            &broker,
+            &schedule_config.schedules,
+            schedule_config.check_interval_seconds,
+            &app_config,
+            &mut existence_cadence,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "scheduler check failed");
         }
 
-        // Initialize schedule states (one-time, outside the per-tick lock).
-        if let Err(e) = initialize_schedules(broker.pool(), &schedule_config.schedules).await {
-            tracing::error!(error = %e, "failed to initialize schedule states");
-            return;
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(check_interval) => {}
         }
+    }
 
-        let lock_pool = scheduler_lock_pool(broker.pool());
-        tracing::info!("scheduler started");
-        let check_interval = Duration::from_secs(schedule_config.check_interval_seconds as u64);
-        let mut existence_cadence =
-            ExistenceCheckCadence::new(schedule_config.check_interval_seconds);
-
-        // Main loop.
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(check_interval) => {}
-            }
-
-            if cancel.is_cancelled() {
-                break;
-            }
-
-            if let Err(e) = check_and_enqueue(
-                &lock_pool,
-                &broker,
-                &schedule_config.schedules,
-                schedule_config.check_interval_seconds,
-                &app_config,
-                &mut existence_cadence,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "scheduler check failed");
-            }
-        }
-
-        lock_pool.close().await;
-        tracing::info!("scheduler stopped");
-    })
+    lock_pool.close().await;
+    tracing::info!("scheduler stopped");
+    Ok(())
 }
 
 fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
@@ -159,14 +274,12 @@ fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
 
 /// Initialize schedule states in the database.
 ///
-/// For each configured schedule, creates a state row if one doesn't exist,
-/// or updates the next_run_at if the config changed.
-async fn initialize_schedules(
-    pool: &sqlx::PgPool,
-    schedules: &[TaskSchedule],
-) -> Result<(), sqlx::Error> {
-    let now = Utc::now();
-
+/// For each enabled schedule, creates a state row if one doesn't exist, or
+/// moves `next_run_at` when the pattern or timezone changed (the run record is
+/// kept). Per-schedule isolation (Python `_initialize_schedules`): one
+/// schedule's failure is logged and the rest proceed; a schedule left without
+/// a row is recreated by the tick's existence heal.
+async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule], now: DateTime<Utc>) {
     // Schedule-state rows whose name is absent from this process's config are
     // left intact, not deleted: another scheduler (rolling deploy, shared DB)
     // may own them, and deleting would silently stop its schedule. Such rows are
@@ -192,41 +305,70 @@ async fn initialize_schedules(
         }
     }
 
-    for schedule in schedules {
-        if !schedule.enabled {
-            continue;
-        }
-
-        let existing = state::get_state(pool, &schedule.name).await?;
-        let config_hash = compute_config_hash(schedule);
-
-        match existing {
-            Some(row) if row.config_hash.as_deref() == Some(&config_hash) => {
-                // Config unchanged, keep existing state.
-                tracing::debug!(schedule = %schedule.name, "schedule state unchanged");
-            }
-            _ => {
-                // New or changed schedule — compute next_run_at.
-                let next = next_run_at(&schedule.pattern, now, &schedule.timezone);
-                state::upsert_state(
-                    pool,
-                    &schedule.name,
-                    None, // last_run_at
-                    next,
-                    None, // last_task_id
-                    0,
-                    Some(&config_hash),
-                )
-                .await?;
-                tracing::info!(
-                    schedule = %schedule.name,
-                    next_run_at = ?next,
-                    "schedule initialized",
-                );
-            }
+    let mut failed: Vec<&str> = Vec::new();
+    for schedule in schedules.iter().filter(|s| s.enabled) {
+        if let Err(e) = initialize_schedule(pool, schedule, now).await {
+            tracing::error!(
+                schedule = %schedule.name,
+                error = %e,
+                "failed to initialize schedule state",
+            );
+            failed.push(schedule.name.as_str());
         }
     }
+    if !failed.is_empty() {
+        tracing::error!(
+            failed = ?failed,
+            "{} schedule(s) failed to initialize; remaining schedules will proceed",
+            failed.len(),
+        );
+    }
+}
 
+/// Why one schedule's state row was not initialized.
+#[derive(Debug, thiserror::Error)]
+enum ScheduleInitError {
+    #[error("state read or write failed: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("the pattern has no run after {after}")]
+    NoNextSlot { after: DateTime<Utc> },
+}
+
+/// Create the state row of one schedule, or store its changed pattern or
+/// timezone. An unchanged schedule is not written.
+async fn initialize_schedule(
+    pool: &sqlx::PgPool,
+    schedule: &TaskSchedule,
+    now: DateTime<Utc>,
+) -> Result<(), ScheduleInitError> {
+    let config_hash = compute_config_hash(schedule);
+    let existing = state::get_state(pool, &schedule.name).await?;
+    if existing
+        .as_ref()
+        .is_some_and(|row| row.config_hash.as_slice() == config_hash.as_slice())
+    {
+        tracing::debug!(schedule = %schedule.name, "schedule state unchanged");
+        return Ok(());
+    }
+
+    let next = next_run_at(&schedule.pattern, now, &schedule.timezone)
+        .ok_or(ScheduleInitError::NoNextSlot { after: now })?;
+    match existing {
+        None => {
+            let _inserted =
+                state::insert_state_if_absent(pool, &schedule.name, next, &config_hash).await?;
+            tracing::info!(schedule = %schedule.name, next_run_at = %next, "schedule initialized");
+        }
+        Some(_) => {
+            let _written =
+                state::update_schedule_config(pool, &schedule.name, next, &config_hash).await?;
+            tracing::warn!(
+                schedule = %schedule.name,
+                next_run_at = %next,
+                "schedule pattern or timezone changed; next_run_at recalculated, run record kept",
+            );
+        }
+    }
     Ok(())
 }
 
@@ -274,22 +416,20 @@ async fn ensure_states_exist(
         }
 
         let config_hash = compute_config_hash(schedule);
-        let next = next_run_at(&schedule.pattern, now, &schedule.timezone);
+        let Some(next) = next_run_at(&schedule.pattern, now, &schedule.timezone) else {
+            healthy = false;
+            tracing::error!(
+                schedule = %schedule.name,
+                after = %now,
+                "schedule self-heal: the pattern has no next run; row not created",
+            );
+            continue;
+        };
 
-        match state::insert_state_if_absent(
-            pool,
-            &schedule.name,
-            None,
-            next,
-            None,
-            0,
-            Some(&config_hash),
-        )
-        .await
-        {
+        match state::insert_state_if_absent(pool, &schedule.name, next, &config_hash).await {
             Ok(true) => tracing::info!(
                 schedule = %schedule.name,
-                next_run_at = ?next,
+                next_run_at = %next,
                 "self-healed missing schedule state",
             ),
             Ok(false) => {} // lost the check-then-insert race; winner's row stands
@@ -311,7 +451,8 @@ async fn ensure_states_exist(
 /// No tick-level lock (parity with Python's `_check_and_run_schedules`):
 /// concurrent schedulers coordinate per schedule via
 /// `try_acquire_schedule_lock`, and `process_schedule` re-reads state under
-/// that lock before enqueueing.
+/// that lock before enqueueing. Returns the error of the due read; each due
+/// schedule's own failure is logged and the other schedules go on.
 async fn check_and_enqueue(
     lock_pool: &sqlx::PgPool,
     broker: &Arc<PostgresBroker>,
@@ -319,7 +460,7 @@ async fn check_and_enqueue(
     check_interval_seconds: u32,
     app_config: &AppConfig,
     existence_cadence: &mut ExistenceCheckCadence,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), sqlx::Error> {
     let now = Utc::now();
 
     // Only query for enabled schedules — filter at the DB level.
@@ -381,186 +522,228 @@ async fn check_and_enqueue(
     Ok(())
 }
 
+/// Fire the due slots of one schedule and move its state row.
+///
+/// Returns the error of a state read or write. Enqueue failures do not
+/// return: a transient one leaves the slot due, a permanent one moves past
+/// the slot with no run recorded, and a payload mismatch counts as fired.
 async fn process_schedule(
     broker: &Arc<PostgresBroker>,
     schedule: &TaskSchedule,
     now: chrono::DateTime<Utc>,
     _check_interval_seconds: u32,
     app_config: &AppConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), sqlx::Error> {
     let Some(state_row) = state::get_state(broker.pool(), &schedule.name).await? else {
         tracing::warn!(
             schedule = %schedule.name,
             "schedule state missing; reinitializing",
         );
         let config_hash = compute_config_hash(schedule);
-        let next = next_run_at(&schedule.pattern, now, &schedule.timezone);
-        state::upsert_state(
-            broker.pool(),
-            &schedule.name,
-            None,
-            next,
-            None,
-            0,
-            Some(&config_hash),
-        )
-        .await?;
-        return Ok(());
-    };
-
-    let Some(stored_next_run_at) = state_row.next_run_at else {
-        return Ok(());
-    };
-    if !should_run_now(Some(stored_next_run_at), now) {
-        return Ok(());
-    }
-
-    let mut missed_runs = Vec::new();
-    if schedule.catch_up_missed {
-        if let Some(last_scheduled_run) = state_row.next_run_at {
-            missed_runs = calculate_missed_runs(
-                schedule,
-                last_scheduled_run,
-                now,
-                schedule.max_catch_up_runs,
-            );
+        match next_run_at(&schedule.pattern, now, &schedule.timezone) {
+            Some(next) => {
+                let _inserted = state::insert_state_if_absent(
+                    broker.pool(),
+                    &schedule.name,
+                    next,
+                    &config_hash,
+                )
+                .await?;
+            }
+            None => tracing::error!(
+                schedule = %schedule.name,
+                after = %now,
+                "the pattern has no next run; state row not created",
+            ),
         }
+        return Ok(());
+    };
+
+    if !should_run_now(Some(state_row.next_run_at), now) {
+        return Ok(());
     }
 
-    if !missed_runs.is_empty() {
+    // With catch_up_missed on, the due slots fire in order; with it off, or
+    // when no slot is due under the cap, only the latest due slot fires
+    // (Python `_check_schedule`).
+    let due_runs = match schedule.catch_up_missed {
+        true => calculate_missed_runs(
+            schedule,
+            state_row.next_run_at,
+            now,
+            schedule.max_catch_up_runs,
+        ),
+        false => Vec::new(),
+    };
+    match due_runs.is_empty() {
+        false => fire_catch_up(broker, schedule, &due_runs, now, app_config).await,
+        true => fire_latest_slot(broker, schedule, &state_row, now, app_config).await,
+    }
+}
+
+/// `catch_up_missed = true`: fire the due slots in order, at most
+/// `max_catch_up_runs` per tick. A transient failure stops the tick and
+/// keeps the progress of the slots before it; a permanent failure also moves
+/// past its slot (Python `_check_schedule`, catch-up branch).
+async fn fire_catch_up(
+    broker: &Arc<PostgresBroker>,
+    schedule: &TaskSchedule,
+    due_runs: &[DateTime<Utc>],
+    now: DateTime<Utc>,
+    app_config: &AppConfig,
+) -> Result<(), sqlx::Error> {
+    if due_runs.len() > 1 {
         tracing::warn!(
             schedule = %schedule.name,
-            missed = missed_runs.len(),
+            due = due_runs.len(),
             max_catch_up = schedule.max_catch_up_runs,
             "catching up missed schedule runs",
         );
+    }
 
-        // Partial-progress: track successful enqueues. If one fails, persist
-        // progress for the successful ones so they aren't retried next tick.
-        let mut caught_up: Vec<chrono::DateTime<Utc>> = Vec::new();
-        let mut last_task_id = None;
-        for missed_time in &missed_runs {
-            match enqueue_scheduled_task(broker, schedule, app_config, *missed_time).await {
-                Ok(task_id) => {
-                    tracing::info!(
-                        schedule = %schedule.name,
-                        task_id = %task_id,
-                        missed_run_at = ?missed_time,
-                        "catch-up run enqueued",
-                    );
-                    last_task_id = Some(task_id);
-                    caught_up.push(*missed_time);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        schedule = %schedule.name,
-                        error = %e,
-                        caught_up = caught_up.len(),
-                        total = missed_runs.len(),
-                        "catch-up enqueue failed, persisting partial progress",
-                    );
-                    break;
-                }
+    let mut last_recorded: Option<Uuid> = None;
+    let mut progress_slot: Option<DateTime<Utc>> = None;
+    for (index, slot) in due_runs.iter().enumerate() {
+        let result = enqueue_scheduled_task(broker, schedule, app_config, *slot).await;
+        let outcome = SlotOutcome::from_result(result);
+        log_recorded_slot(schedule, *slot, &outcome);
+        match outcome {
+            SlotOutcome::Enqueued(task_id) | SlotOutcome::HeldByOtherCommand(task_id) => {
+                last_recorded = Some(task_id);
+                progress_slot = Some(*slot);
             }
-        }
-
-        if !caught_up.is_empty() {
-            let last_slot = *caught_up.last().expect("caught_up not empty");
-            let next = next_run_at(&schedule.pattern, last_slot, &schedule.timezone);
-            if next.is_none() {
+            SlotOutcome::Transient(error) => {
                 tracing::error!(
                     schedule = %schedule.name,
-                    last_slot = %last_slot,
-                    "next_run_at returned None; persisting NULL will stop this schedule",
+                    run = index + 1,
+                    total = due_runs.len(),
+                    error = %error,
+                    "catch-up enqueue failed (transient); the slot stays due",
                 );
+                break;
             }
-            state::upsert_state(
-                broker.pool(),
-                &schedule.name,
-                Some(now),
-                next,
-                last_task_id,
-                state_row.run_count + 1,
-                state_row.config_hash.as_deref(),
-            )
-            .await?;
-
-            if caught_up.len() < missed_runs.len() {
-                tracing::warn!(
+            SlotOutcome::Permanent(error) => {
+                tracing::error!(
                     schedule = %schedule.name,
-                    caught_up = caught_up.len(),
-                    total = missed_runs.len(),
-                    "partially caught up — remainder will retry next tick",
+                    run = index + 1,
+                    total = due_runs.len(),
+                    slot = %slot,
+                    error = %error,
+                    "catch-up enqueue failed (permanent); skipping the slot",
                 );
+                progress_slot = Some(*slot);
+                break;
             }
         }
-        // If nothing caught up, don't advance state — retry everything next tick.
-    } else {
-        // catch_up_missed=false: fire only the latest due slot. Older missed
-        // slots (scheduler downtime) are dropped and the schedule resumes
-        // strictly in the future, instead of replaying the whole backlog one
-        // tick at a time (C5). `slot_time` stays slot-aligned so the enqueue
-        // slot and slot-derived task_id remain deterministic (parity with
-        // horsies PR #46). Falls back to `now` for the first run, where there
-        // is no prior slot.
-        let first_due = state_row.next_run_at.unwrap_or(now);
-        let (slot_time, next, skipped) = advance_to_latest_due_slot(schedule, first_due, now);
+    }
 
-        if skipped > 0 {
+    // Nothing fired and nothing skipped: every slot stays due for the next tick.
+    let Some(progress_slot) = progress_slot else {
+        return Ok(());
+    };
+    let Some(next) = next_run_at(&schedule.pattern, progress_slot, &schedule.timezone) else {
+        log_no_next_slot(schedule, progress_slot);
+        return Ok(());
+    };
+    match last_recorded {
+        Some(task_id) => state::record_run(broker.pool(), &schedule.name, now, next, task_id).await,
+        None => state::advance_next_run(broker.pool(), &schedule.name, next).await,
+    }
+}
+
+/// `catch_up_missed = false`: fire only the latest due slot. Older missed
+/// slots (scheduler downtime) are dropped and the schedule resumes strictly
+/// in the future (C5). `slot_time` stays slot-aligned so the slot-derived
+/// task id stays deterministic (parity with horsies PR #46).
+async fn fire_latest_slot(
+    broker: &Arc<PostgresBroker>,
+    schedule: &TaskSchedule,
+    state_row: &state::ScheduleStateRow,
+    now: DateTime<Utc>,
+    app_config: &AppConfig,
+) -> Result<(), sqlx::Error> {
+    let (slot_time, next, skipped) =
+        advance_to_latest_due_slot(schedule, state_row.next_run_at, now);
+    if skipped > 0 {
+        tracing::warn!(
+            schedule = %schedule.name,
+            skipped,
+            slot = %slot_time,
+            "missed run(s); skipping to latest due slot (catch_up_missed=false)",
+        );
+    }
+
+    // next_run_at is NOT NULL: a slot with no successor is not fired, and the
+    // row stays due (Python raises from calculate_next_run before the fire).
+    let Some(next) = next else {
+        log_no_next_slot(schedule, slot_time);
+        return Ok(());
+    };
+
+    // Scan cap reached on a very deep backlog: persist progress without
+    // firing a stale slot; the next tick continues advancing from here.
+    if next <= now {
+        return state::advance_next_run(broker.pool(), &schedule.name, next).await;
+    }
+
+    let result = enqueue_scheduled_task(broker, schedule, app_config, slot_time).await;
+    let outcome = SlotOutcome::from_result(result);
+    log_recorded_slot(schedule, slot_time, &outcome);
+    match outcome {
+        SlotOutcome::Enqueued(task_id) | SlotOutcome::HeldByOtherCommand(task_id) => {
+            state::record_run(broker.pool(), &schedule.name, now, next, task_id).await
+        }
+        SlotOutcome::Transient(error) => {
             tracing::warn!(
                 schedule = %schedule.name,
-                skipped,
-                slot = %slot_time,
-                "missed run(s); skipping to latest due slot (catch_up_missed=false)",
+                error = %error,
+                "schedule enqueue failed (transient); the slot stays due",
             );
+            Ok(())
         }
-
-        // Scan cap reached on a very deep backlog: persist progress without
-        // firing a stale slot; the next tick continues advancing from here.
-        if let Some(next) = next {
-            if next <= now {
-                state::upsert_state(
-                    broker.pool(),
-                    &schedule.name,
-                    state_row.last_run_at,
-                    Some(next),
-                    state_row.last_task_id,
-                    state_row.run_count,
-                    state_row.config_hash.as_deref(),
-                )
-                .await?;
-                return Ok(());
-            }
-        }
-
-        let task_id = enqueue_scheduled_task(broker, schedule, app_config, slot_time).await?;
-        tracing::info!(
-            schedule = %schedule.name,
-            task_name = %schedule.task_name,
-            task_id = %task_id,
-            "scheduled task enqueued",
-        );
-
-        if next.is_none() {
+        SlotOutcome::Permanent(error) => {
+            // A refusal that repeats on every try (horsies-rust #77): move
+            // past the slot so the schedule does not retry it every tick.
             tracing::error!(
                 schedule = %schedule.name,
                 slot = %slot_time,
-                "next_run_at returned None; persisting NULL will stop this schedule",
+                error = %error,
+                "schedule enqueue failed (permanent); skipping the slot",
             );
+            state::advance_next_run(broker.pool(), &schedule.name, next).await
         }
-        state::upsert_state(
-            broker.pool(),
-            &schedule.name,
-            Some(now),
-            next,
-            Some(task_id),
-            state_row.run_count + 1,
-            state_row.config_hash.as_deref(),
-        )
-        .await?;
     }
+}
 
-    Ok(())
+/// Log a slot that counts as fired. Failed slots are logged by the caller,
+/// which knows whether the slot stays due or is skipped.
+fn log_recorded_slot(schedule: &TaskSchedule, slot: DateTime<Utc>, outcome: &SlotOutcome) {
+    match outcome {
+        SlotOutcome::Enqueued(task_id) => tracing::info!(
+            schedule = %schedule.name,
+            task_name = %schedule.task_name,
+            task_id = %task_id,
+            slot = %slot,
+            "scheduled task enqueued",
+        ),
+        SlotOutcome::HeldByOtherCommand(task_id) => tracing::warn!(
+            schedule = %schedule.name,
+            task_id = %task_id,
+            slot = %slot,
+            "the slot's task id already holds a task with a different command (an \
+             earlier version, or a change to the schedule's input or the task's \
+             options); the slot counts as fired and is not enqueued again",
+        ),
+        SlotOutcome::Transient(_) | SlotOutcome::Permanent(_) => {}
+    }
+}
+
+fn log_no_next_slot(schedule: &TaskSchedule, slot: DateTime<Utc>) {
+    tracing::error!(
+        schedule = %schedule.name,
+        slot = %slot,
+        "the pattern has no run after this slot; the state row is not moved",
+    );
 }
 
 /// Bound the per-tick slot scan so a pathological backlog (tiny period, very
@@ -670,37 +853,39 @@ async fn enqueue_scheduled_task(
     schedule: &TaskSchedule,
     app_config: &AppConfig,
     slot_time: DateTime<Utc>,
-) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
-    let args_json = if schedule.args == serde_json::Value::Null {
-        None
-    } else {
-        Some(serde_json::to_string(&schedule.args)?)
+) -> Result<Uuid, ScheduleFireError> {
+    let encode = |value: &serde_json::Value| -> Result<Option<String>, ScheduleFireError> {
+        match value {
+            serde_json::Value::Null => Ok(None),
+            other => serde_json::to_string(other).map(Some).map_err(|source| {
+                ScheduleFireError::InputEncoding {
+                    schedule: schedule.name.clone(),
+                    source,
+                }
+            }),
+        }
     };
-
-    let kwargs_json = if schedule.kwargs == serde_json::Value::Null {
-        None
-    } else {
-        Some(serde_json::to_string(&schedule.kwargs)?)
-    };
+    let args_json = encode(&schedule.args)?;
+    let kwargs_json = encode(&schedule.kwargs)?;
 
     // Schedule args/kwargs are static config, so a violation repeats on every
-    // fire — the warn rate-limit collapses that to one line and the reject
-    // surfaces per-slot through the schedule's normal enqueue-failure
-    // logging. Parity with horsies PR #208.
+    // fire — the warn rate-limit collapses that to one line, and the refusal
+    // is permanent: the schedule moves past the slot. Parity with horsies
+    // PR #208.
     let encoded_len =
         args_json.as_deref().map_or(0, str::len) + kwargs_json.as_deref().map_or(0, str::len);
-    if let Some(oversize) = crate::core::config::payload::enforce_payload_policy(
+    let oversize = crate::core::config::payload::enforce_payload_policy(
         &app_config.payload,
         &schedule.task_name,
         crate::core::config::payload::PayloadKind::Kwargs,
         encoded_len,
-    ) {
-        return Err(format!(
-            "payload for schedule '{}' is {} bytes, exceeding payload.reject_bytes={:?}; \
-             slot not enqueued",
-            schedule.name, oversize, app_config.payload.reject_bytes,
-        )
-        .into());
+    );
+    if let (Some(size), Some(limit)) = (oversize, app_config.payload.reject_bytes) {
+        return Err(ScheduleFireError::PayloadTooLarge {
+            schedule: schedule.name.clone(),
+            size,
+            limit,
+        });
     }
 
     let queue = schedule.queue_name.as_deref().unwrap_or("default");
@@ -723,7 +908,7 @@ async fn enqueue_scheduled_task(
         None,      // task_options
     );
 
-    let result_id = broker
+    broker
         .enqueue(
             &schedule.task_name,
             args_json.as_deref(),
@@ -741,26 +926,37 @@ async fn enqueue_scheduled_task(
             retention_class_key.as_deref(),
             None,
         )
-        .await?;
-
-    Ok(result_id)
+        .await
+        .map_err(|source| ScheduleFireError::Broker {
+            schedule: schedule.name.clone(),
+            source,
+        })
 }
 
-/// Compute a simple hash of the schedule config for change detection.
-fn compute_config_hash(schedule: &TaskSchedule) -> String {
+/// The part of a schedule that decides its slots: pattern and timezone.
+#[derive(serde::Serialize)]
+struct ScheduleTiming<'a> {
+    pattern: &'a crate::core::config::SchedulePattern,
+    timezone: &'a str,
+}
+
+/// SHA-256 of the schedule's pattern and timezone, for change detection
+/// (Python `_compute_config_hash`). A change of input, queue or catch-up
+/// settings does not move `next_run_at`.
+///
+/// Stable across toolchain upgrades (C20): SHA-256 over serde_json text of a
+/// struct with a fixed field order.
+fn compute_config_hash(schedule: &TaskSchedule) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
-    // Stable across toolchain upgrades. `DefaultHasher`'s algorithm is
-    // explicitly unspecified between Rust releases: a shifted hash would make
-    // `initialize_schedules` treat every schedule as changed and reset
-    // `last_run_at`/`run_count`/`next_run_at`, dropping any pending catch-up
-    // backlog and run history (C20). Upgrade note: deployments holding the old
-    // 16-char DefaultHasher value in `config_hash` see every schedule counted as
-    // changed on the first run after this change, incurring that reset exactly
-    // once — the same symptom, paid one time to move onto the stable hash.
-    let json = serde_json::to_string(schedule).unwrap_or_default();
-    let digest = Sha256::digest(json.as_bytes());
-    format!("{:x}", digest)
+    let timing = ScheduleTiming {
+        pattern: &schedule.pattern,
+        timezone: &schedule.timezone,
+    };
+    // The pattern types hold only strings, integers, enums and times: they
+    // always serialize. A failure here is a defect, not an operational error.
+    let text = serde_json::to_vec(&timing).expect("schedule pattern serializes to JSON");
+    Sha256::digest(&text).into()
 }
 
 #[cfg(test)]
@@ -935,17 +1131,192 @@ mod tests {
             max_catch_up_runs: 100,
         };
         let hash = compute_config_hash(&schedule);
-        assert_eq!(hash.len(), 64, "expected 64-char SHA-256 hex");
-        assert!(
-            hash.chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "hash must be lowercase hex: {hash}",
-        );
-        // Golden value pins the exact algorithm + serialization basis.
+        // Golden value pins the exact algorithm + serialization basis:
+        // SHA-256 of {"pattern":{"type":"interval","seconds":60},"timezone":"UTC"}.
+        let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
-            hash,
-            "f017c54428c546a2d8ce73c45d1eafcf207d910b03ff1b73d29a4bd9407c1374",
+            hex,
+            "b896b67f1120471246f798d1f83ba3b4601931e97069ae773d2bf0c1880f705f",
         );
+    }
+
+    /// Python `_compute_config_hash` covers the pattern and the timezone
+    /// only: a change of input, queue or catch-up settings does not move
+    /// `next_run_at`.
+    #[test]
+    fn compute_config_hash_covers_pattern_and_timezone_only() {
+        let base = interval_schedule_secs("hash_scope", 60);
+        let hash = compute_config_hash(&base);
+
+        let mut other_settings = base.clone();
+        other_settings.task_name = "another_task".to_owned();
+        other_settings.kwargs = serde_json::json!({"changed": true});
+        other_settings.args = serde_json::json!([1]);
+        other_settings.queue_name = Some("bulk".to_owned());
+        other_settings.catch_up_missed = true;
+        other_settings.max_catch_up_runs = 7;
+        assert_eq!(compute_config_hash(&other_settings), hash);
+
+        let mut other_timezone = base.clone();
+        other_timezone.timezone = "Europe/Istanbul".to_owned();
+        assert_ne!(compute_config_hash(&other_timezone), hash);
+
+        let other_pattern = interval_schedule_secs("hash_scope", 61);
+        assert_ne!(compute_config_hash(&other_pattern), hash);
+    }
+
+    /// Python `_count_existing_slot_as_fired` and the retryable / permanent
+    /// split of `_check_schedule`.
+    #[test]
+    fn slot_outcome_follows_the_fire_rules() {
+        let task_id = Uuid::new_v4();
+        let broker_error = |source: crate::broker::BrokerError| {
+            Err(ScheduleFireError::Broker {
+                schedule: "s".to_owned(),
+                source,
+            })
+        };
+
+        assert!(matches!(
+            SlotOutcome::from_result(Ok(task_id)),
+            SlotOutcome::Enqueued(id) if id == task_id
+        ));
+        assert!(matches!(
+            SlotOutcome::from_result(broker_error(
+                crate::broker::BrokerError::PayloadMismatch { task_id }
+            )),
+            SlotOutcome::HeldByOtherCommand(id) if id == task_id
+        ));
+        assert!(matches!(
+            SlotOutcome::from_result(broker_error(crate::broker::BrokerError::ConnectionFailed(
+                "reset".to_owned()
+            ))),
+            SlotOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            SlotOutcome::from_result(broker_error(
+                crate::broker::BrokerError::EnqueueConflictUnverifiable {
+                    task_id,
+                    task_name: "t".to_owned(),
+                }
+            )),
+            SlotOutcome::Permanent(_)
+        ));
+        assert!(matches!(
+            SlotOutcome::from_result(Err(ScheduleFireError::PayloadTooLarge {
+                schedule: "s".to_owned(),
+                size: 10,
+                limit: 5,
+            })),
+            SlotOutcome::Permanent(_)
+        ));
+    }
+
+    /// The scheduler refuses to start, before any statement, when the
+    /// schedule section is invalid (Python: start errors reach the CLI, exit 1).
+    #[tokio::test]
+    async fn start_refuses_an_invalid_schedule_section_before_any_statement() {
+        // A pool that cannot connect: a statement would fail with a
+        // connection error, not with the start refusal.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
+            .expect("lazy pool");
+        let broker = Arc::new(PostgresBroker::from_pool(pool));
+        let mut schedule = interval_schedule_secs("bad_tz", 60);
+        schedule.timezone = "Not/A_Timezone".to_owned();
+
+        let outcome = spawn_scheduler(
+            broker,
+            ScheduleConfig::new(vec![schedule]),
+            default_app_config(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("scheduler task joins");
+        assert!(matches!(
+            outcome,
+            Err(SchedulerStartError::InvalidScheduleConfig(ref message))
+                if message.contains("Not/A_Timezone")
+        ));
+    }
+
+    #[test]
+    fn start_checks_accept_valid_schedules() {
+        let config = ScheduleConfig::new(vec![interval_schedule_secs("fine", 60)]);
+        assert!(check_schedules_at_start(&config, Utc::now()).is_ok());
+    }
+
+    /// Python `test_scheduler_service.py::test_normal_run_permanent_failure_skips_slot`:
+    /// a refusal that repeats moves past the slot, records no run and writes
+    /// no task (horsies-rust #77).
+    #[tokio::test]
+    #[serial]
+    async fn normal_run_permanent_failure_skips_slot() {
+        let pool = test_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let name = format!("permanent_skip_{}", Uuid::new_v4().simple());
+        let mut schedule = interval_schedule_secs(&name, 60);
+        schedule.task_name = name.clone();
+        schedule.kwargs = serde_json::json!({"payload": "over the limit"});
+        let mut app_config = default_app_config();
+        app_config.payload.reject_bytes = Some(1);
+
+        let slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        state::seed_state(&pool, &name, slot).await.unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 30).unwrap();
+        process_schedule(&broker, &schedule, now, 1, &app_config)
+            .await
+            .unwrap();
+
+        let row = state::get_state(&pool, &name).await.unwrap().unwrap();
+        assert_eq!(
+            row.next_run_at,
+            Utc.with_ymd_and_hms(2025, 6, 1, 12, 1, 0).unwrap()
+        );
+        assert_eq!(row.run_count, 0);
+        assert!(row.last_task_id.is_none());
+        let tasks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                .bind(&name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tasks, 0);
+        state::delete_state(&pool, &name).await.unwrap();
+    }
+
+    /// Python `test_scheduler_service.py::test_catch_up_permanent_failure_skips_doomed_slot`:
+    /// in catch-up mode a permanent refusal of the first due slot moves past
+    /// that one slot only.
+    #[tokio::test]
+    #[serial]
+    async fn catch_up_permanent_failure_skips_doomed_slot() {
+        let pool = test_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let name = format!("catch_up_skip_{}", Uuid::new_v4().simple());
+        let mut schedule = interval_schedule_secs(&name, 60);
+        schedule.task_name = name.clone();
+        schedule.catch_up_missed = true;
+        schedule.kwargs = serde_json::json!({"payload": "over the limit"});
+        let mut app_config = default_app_config();
+        app_config.payload.reject_bytes = Some(1);
+
+        let first_slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        state::seed_state(&pool, &name, first_slot).await.unwrap();
+        // Three slots are due: 12:00, 12:01, 12:02.
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 2, 30).unwrap();
+        process_schedule(&broker, &schedule, now, 1, &app_config)
+            .await
+            .unwrap();
+
+        let row = state::get_state(&pool, &name).await.unwrap().unwrap();
+        assert_eq!(
+            row.next_run_at,
+            Utc.with_ymd_and_hms(2025, 6, 1, 12, 1, 0).unwrap()
+        );
+        assert_eq!(row.run_count, 0);
+        state::delete_state(&pool, &name).await.unwrap();
     }
 
     #[test]
@@ -1051,7 +1422,7 @@ mod tests {
         app_config
             .retention
             .queue_retention
-            .insert("bulk".to_owned(), Some(chrono::Duration::hours(36)));
+            .insert("bulk".to_owned(), Some(chrono::Duration::days(2)));
         let slot = Utc::now() - chrono::Duration::seconds(1);
 
         let task_id = enqueue_scheduled_task(&broker, &schedule, &app_config, slot)
@@ -1068,7 +1439,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(row.0, task_id.to_string());
-        assert_eq!(row.1, "q_bulk_36h");
+        assert_eq!(row.1, "standard_2d");
         assert_eq!(row.2, "DECLINED_BY_POLICY");
         assert_eq!(row.3, 32);
         assert!(!row.4);
@@ -1129,9 +1500,7 @@ mod tests {
         // Seed a due slot at 12:00:00; the tick arrives late at 12:00:03 —
         // within one 5s period, so the following slot (12:00:05) is future.
         let due_slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
-        state::upsert_state(&pool, name, None, Some(due_slot), None, 0, None)
-            .await
-            .unwrap();
+        state::seed_state(&pool, name, due_slot).await.unwrap();
 
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 3).unwrap();
         process_schedule(&broker, &schedule, now, 1, &app_config)
@@ -1142,7 +1511,7 @@ mod tests {
         let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
         assert_eq!(
             state_row.next_run_at,
-            Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 5).unwrap()),
+            Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 5).unwrap(),
             "next_run must anchor to the due slot, not wall-clock now",
         );
 
@@ -1196,9 +1565,7 @@ mod tests {
         let app_config = default_app_config();
 
         let due_slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
-        state::upsert_state(&pool, name, None, Some(due_slot), None, 0, None)
-            .await
-            .unwrap();
+        state::seed_state(&pool, name, due_slot).await.unwrap();
 
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
         process_schedule(&broker, &schedule, now, 1, &app_config)
@@ -1209,11 +1576,11 @@ mod tests {
         let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
         assert_eq!(
             state_row.next_run_at,
-            Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 20).unwrap()),
+            Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 20).unwrap(),
             "next_run must skip past now to the latest slot's successor",
         );
         assert!(
-            state_row.next_run_at.unwrap() > now,
+            state_row.next_run_at > now,
             "persisted next_run must be strictly in the future",
         );
 
@@ -1296,8 +1663,10 @@ mod tests {
 
         // Missing enabled schedule was healed with a strictly-future next_run.
         let healed = state::get_state(&pool, &missing).await.unwrap().unwrap();
-        let next = healed.next_run_at.expect("next_run set");
-        assert!(next > now, "healed next_run must be strictly future");
+        assert!(
+            healed.next_run_at > now,
+            "healed next_run must be strictly future"
+        );
 
         // Disabled schedule is not created.
         assert!(state::get_state(&pool, &disabled).await.unwrap().is_none());
@@ -1374,66 +1743,6 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn process_schedule_preserves_null_after_due_discovery() {
-        let pool = test_pool().await;
-        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-        let mut schedule = interval_schedule_secs("stopped_after_due_discovery", 60);
-        schedule.task_name = "stopped_after_due_discovery".to_owned();
-        let now = Utc::now();
-        let config_hash = compute_config_hash(&schedule);
-        state::upsert_state(
-            &pool,
-            &schedule.name,
-            None,
-            Some(now - chrono::Duration::seconds(1)),
-            None,
-            0,
-            Some(&config_hash),
-        )
-        .await
-        .unwrap();
-        let due = state::get_due_schedules_filtered(&pool, &[schedule.name.clone()], now)
-            .await
-            .unwrap();
-        assert_eq!(due.len(), 1);
-
-        state::upsert_state(
-            &pool,
-            &schedule.name,
-            None,
-            None,
-            None,
-            0,
-            Some(&config_hash),
-        )
-        .await
-        .unwrap();
-        let lock = state::try_acquire_schedule_lock(&pool, &schedule.name)
-            .await
-            .unwrap()
-            .unwrap();
-        process_schedule(&broker, &schedule, now, 1, &default_app_config())
-            .await
-            .unwrap();
-        state::release_schedule_lock(lock).await.unwrap();
-
-        let stored = state::get_state(&pool, &schedule.name)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(stored.next_run_at.is_none());
-        assert_eq!(stored.run_count, 0);
-        assert!(stored.last_task_id.is_none());
-        let tasks: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
-                .bind(&schedule.task_name)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(tasks, 0);
-    }
-    #[tokio::test]
-    #[serial]
     async fn private_scheduler_pool_preserves_replay_cancellation_and_connection_hooks() {
         let admin = test_pool().await;
         let runtime = sqlx::postgres::PgPoolOptions::new()
@@ -1468,17 +1777,9 @@ mod tests {
             let name = format!("test_private_{scenario}");
             let mut schedule = interval_schedule_secs(&name, 60);
             schedule.task_name = name.clone();
-            state::upsert_state(
-                &admin,
-                &name,
-                None,
-                Some(Utc::now() - chrono::Duration::seconds(1)),
-                None,
-                0,
-                None,
-            )
-            .await
-            .unwrap();
+            state::seed_state(&admin, &name, Utc::now() - chrono::Duration::seconds(1))
+                .await
+                .unwrap();
             let schedules = vec![schedule];
             match scenario {
                 "state_failure" => {
@@ -1705,7 +2006,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), service)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .expect("the scheduler started and stopped without a start error");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let sessions: i64 = sqlx::query_scalar(

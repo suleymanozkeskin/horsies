@@ -113,11 +113,11 @@ async fn published_manifest_matches_catalog(
         "WITH expected AS (
              SELECT
                  leaf_name,
-                 row_number() OVER (ORDER BY lower_anchor, leaf_name) - 1
+                 row_number() OVER (ORDER BY lower_anchor NULLS FIRST, leaf_name) - 1
                      AS probe_position,
+                 lower_bound_kind,
                  lower_anchor,
-                 upper_anchor,
-                 min_birth_at
+                 upper_anchor
              FROM {LEAF_CATALOG}
              WHERE detached_at IS NULL
                AND dropped_at IS NULL
@@ -126,18 +126,20 @@ async fn published_manifest_matches_catalog(
          ),
          difference AS (
              (
-                 SELECT leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor
                  FROM expected
                  EXCEPT
-                 SELECT leaf_name, probe_position::bigint, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position::bigint, lower_bound_kind, lower_anchor,
+                        upper_anchor
                  FROM {TASK_LOOKUP_MANIFEST}
              )
              UNION ALL
              (
-                 SELECT leaf_name, probe_position::bigint, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position::bigint, lower_bound_kind, lower_anchor,
+                        upper_anchor
                  FROM {TASK_LOOKUP_MANIFEST}
                  EXCEPT
-                 SELECT leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at
+                 SELECT leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor
                  FROM expected
              )
          )
@@ -165,36 +167,35 @@ async fn rewrite_manifest_table(
 ) -> Result<(), HistoryError> {
     let mut names = Vec::with_capacity(manifest.leaves().len());
     let mut positions = Vec::with_capacity(manifest.leaves().len());
+    let mut kinds = Vec::with_capacity(manifest.leaves().len());
     let mut lowers = Vec::with_capacity(manifest.leaves().len());
     let mut uppers = Vec::with_capacity(manifest.leaves().len());
-    let mut births = Vec::with_capacity(manifest.leaves().len());
     for (position, leaf) in manifest.leaves().iter().enumerate() {
         let position = i32::try_from(position)
             .map_err(|_| HistoryError::contract("lookup manifest exceeds integer positions"))?;
         names.push(leaf.relation_name());
         positions.push(position);
-        lowers.push(leaf.lower_anchor());
+        kinds.push(leaf.lower_anchor().kind());
+        lowers.push(leaf.lower_anchor().at());
         uppers.push(leaf.upper_anchor());
-        births.push(leaf.min_birth_at());
     }
     sqlx::query(&format!("DELETE FROM {TASK_LOOKUP_MANIFEST}"))
         .execute(&mut *connection)
         .await?;
     sqlx::query(&format!(
         "INSERT INTO {TASK_LOOKUP_MANIFEST} (
-             leaf_name, probe_position, lower_anchor, upper_anchor,
-             min_birth_at, published_at
-         ) SELECT leaf_name, probe_position, lower_anchor, upper_anchor,
-                  min_birth_at, statement_timestamp()
-           FROM UNNEST($1::text[], $2::int[], $3::timestamptz[],
-                       $4::timestamptz[], $5::timestamptz[])
-             AS leaves(leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at)"
+             leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor,
+             published_at
+         ) SELECT leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor,
+                  statement_timestamp()
+           FROM UNNEST($1::text[], $2::int[], $3::text[], $4::timestamptz[], $5::timestamptz[])
+             AS leaves(leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor)"
     ))
     .bind(names)
     .bind(positions)
+    .bind(kinds)
     .bind(lowers)
     .bind(uppers)
-    .bind(births)
     .execute(connection)
     .await?;
     Ok(())
@@ -202,6 +203,7 @@ async fn rewrite_manifest_table(
 #[cfg(test)]
 mod publication_contract_tests {
     use super::*;
+    use crate::core::history::partitions::catalog::LeafLowerBound;
     use crate::core::history::reads::lookup_generation::LookupLeaf;
     use chrono::{Duration, Utc};
     use serial_test::serial;
@@ -217,22 +219,18 @@ mod publication_contract_tests {
                 .map(|i| {
                     LookupLeaf::new(
                         format!("manifest_contract_{i}"),
-                        anchor + Duration::days(i),
+                        LeafLowerBound::At(anchor + Duration::days(i)),
                         anchor + Duration::days(i + 1),
-                        match i % 2 {
-                            0 => None,
-                            _ => Some(anchor - Duration::days(i + 1)),
-                        },
                     )
                     .unwrap()
                 })
                 .collect();
-            let manifest = LookupManifest::new(leaves, None).unwrap();
+            let manifest = LookupManifest::new(leaves).unwrap();
             rewrite_manifest_table(tx.as_mut(), &manifest)
                 .await
                 .unwrap();
-            let rows: Vec<(String, i32, chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
-                "SELECT leaf_name, probe_position, lower_anchor, upper_anchor, min_birth_at FROM horsies_task_lookup_manifest ORDER BY probe_position",
+            let rows: Vec<(String, i32, String, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)> = sqlx::query_as(
+                "SELECT leaf_name, probe_position, lower_bound_kind::text, lower_anchor, upper_anchor FROM horsies_task_lookup_manifest ORDER BY probe_position",
             ).fetch_all(tx.as_mut()).await.unwrap();
             assert_eq!(rows.len(), count as usize);
             for (position, (row, leaf)) in rows.iter().zip(manifest.leaves()).enumerate() {
@@ -241,9 +239,9 @@ mod publication_contract_tests {
                     &(
                         leaf.relation_name().to_owned(),
                         position as i32,
-                        leaf.lower_anchor(),
+                        leaf.lower_anchor().kind().to_owned(),
+                        leaf.lower_anchor().at(),
                         leaf.upper_anchor(),
-                        leaf.min_birth_at()
                     )
                 );
             }

@@ -213,7 +213,7 @@ mod tests {
             "host-1".to_owned(),
             1,
             Duration::from_secs(3600),
-            Some(60_000),
+            60_000,
             180_000,
             cancel.clone(),
         );

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_startup_coverage_in_pool, DeclaredRetentionClass, StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, StartupCoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::task::TaskRegistry;
@@ -24,6 +24,9 @@ use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::recovery::{new_reaper_health, spawn_reaper};
+use crate::worker::runner_beats::{
+    launch_runner_beats, runner_beat_pool, BeatSender, LiveDispatches, StaleRunningRecovery,
+};
 
 /// Decode a liveness ping and reply when it is a broadcast or addressed to
 /// this worker.
@@ -89,6 +92,29 @@ fn advisory_key_queue(queue: &str) -> i64 {
 /// stays in round-robin mode here and still services uncapped queues; Python
 /// switches to custom mode and drops them. Rust's cap accounting is keyed on
 /// `queue_max_concurrency` alone, so caps are enforced in both modes.
+/// The lease of every claim: `claim_lease_ms`, or [`DEFAULT_CLAIM_LEASE_MS`]
+/// when it is not set. Every claim is lease-bounded, in hard-cap and soft-cap
+/// mode alike, so a crashed worker's claims become reclaimable (Python
+/// `claiming.py:697-708`).
+fn effective_claim_lease_ms(app_config: &AppConfig) -> u32 {
+    app_config
+        .claim_lease_ms
+        .unwrap_or(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS)
+}
+
+/// Bound of one attempt of the database start steps (Python
+/// `_start_with_resilience_config`: `asyncio.wait_for(self.start(), 30.0)`).
+const START_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How the worker start ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    /// The database steps completed; the worker goes on to listen and claim.
+    Started,
+    /// A stop was requested while a retry waited; the worker does not start.
+    StopRequested,
+}
+
 fn compute_ordered_queues(
     queues: &[String],
     queue_priorities: &std::collections::HashMap<String, i32>,
@@ -223,6 +249,9 @@ pub struct Worker {
     /// The buffered-dispatch probe skips these so a task still in its
     /// CLAIMED→RUNNING window is not re-fetched and re-dispatched next pass (P7).
     in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
+    /// Dispatches whose rows the runner-beat writer beats, with their claim
+    /// generations.
+    live_dispatches: LiveDispatches,
 }
 
 impl Worker {
@@ -253,6 +282,7 @@ impl Worker {
             cancel: CancellationToken::new(),
             hostname,
             in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            live_dispatches: LiveDispatches::default(),
         })
     }
 
@@ -287,27 +317,17 @@ impl Worker {
         self.run().await
     }
 
-    /// Run the worker until cancelled or a fatal error occurs.
-    pub async fn run(&self) -> Result<(), WorkerError> {
-        // Fleet authorization and partition coverage precede every runtime
-        // surface: no LISTEN, heartbeat, or claim may race an incomplete
-        // cutover or a missing current-hour heartbeat leaf.
+    /// Authorize the schema and ensure the partition coverage of the
+    /// current period: the database steps of the worker start. It does not
+    /// retry.
+    async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
-        let declared_classes: Vec<DeclaredRetentionClass> = self
-            .app_config
-            .retention
-            .registrable_classes()
-            .into_iter()
-            .map(|class| DeclaredRetentionClass {
-                class_key: class.key,
-                duration: class.duration,
-            })
-            .collect();
+        let declared_periods = self.app_config.retention.registrable_periods();
         let startup_coverage = ensure_startup_coverage_in_pool(
             self.broker.session_pool(),
             self.app_config.retention.history_leaf_horizon_days,
             self.app_config.retention.heartbeat_leaf_horizon_hours,
-            &declared_classes,
+            &declared_periods,
             &StagedLoaderPublisher,
         )
         .await?;
@@ -320,6 +340,59 @@ impl Worker {
                     "task-history startup coverage refused: {outcome:?}"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// Run [`Worker::start_database`] with each attempt bounded at
+    /// [`START_ATTEMPT_TIMEOUT`]. A timed-out attempt and a retryable error
+    /// are retried with the resilience backoff; a refusal, or a retryable
+    /// error after the retry budget, is returned. A stop request during a
+    /// backoff wait ends the start without an error.
+    async fn start_database_with_resilience(&self) -> Result<StartOutcome, WorkerError> {
+        let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
+        loop {
+            let error =
+                match tokio::time::timeout(START_ATTEMPT_TIMEOUT, self.start_database()).await {
+                    Ok(Ok(())) => return Ok(StartOutcome::Started),
+                    Ok(Err(error)) if !error.is_retryable() => return Err(error),
+                    Ok(Err(error)) => error,
+                    Err(_elapsed) => WorkerError::StartTimedOut {
+                        bound: START_ATTEMPT_TIMEOUT,
+                    },
+                };
+            if !backoff.can_retry() {
+                tracing::error!(
+                    %error,
+                    attempts = backoff.attempts(),
+                    "worker start failed and its retries are exhausted",
+                );
+                return Err(error);
+            }
+            let delay = backoff.next_delay_seconds();
+            tracing::error!(
+                %error,
+                attempt = backoff.attempts(),
+                delay_s = format!("{:.1}", delay),
+                "worker start failed; retrying",
+            );
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Ok(StartOutcome::StopRequested),
+                _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+            }
+        }
+    }
+
+    /// Run the worker until cancelled or a fatal error occurs.
+    pub async fn run(&self) -> Result<(), WorkerError> {
+        // Fleet authorization and partition coverage precede every runtime
+        // surface: no LISTEN, heartbeat, or claim may race an incomplete
+        // install or a missing current-hour heartbeat leaf. A transient
+        // failure or a slow attempt is retried with backoff (Python
+        // `_start_with_resilience_config`).
+        match self.start_database_with_resilience().await? {
+            StartOutcome::Started => {}
+            StartOutcome::StopRequested => return Ok(()),
         }
 
         // Print the startup banner before any log lines.
@@ -410,7 +483,7 @@ impl Worker {
             self.hostname.clone(),
             std::process::id() as i32,
             claimer_interval,
-            self.app_config.claim_lease_ms,
+            effective_claim_lease_ms(&self.app_config),
             self.app_config.max_claim_renew_age_ms,
             self.cancel.clone(),
         );
@@ -444,6 +517,29 @@ impl Worker {
             self.cancel.clone(),
         );
 
+        // Runner heartbeats: one fenced statement per interval for every held
+        // dispatch, on its own connection, and a fail-closed watchdog thread
+        // (exit 77). They run until the in-flight dispatches have drained, so
+        // they have their own token, cancelled after `shutdown`.
+        let beats_cancel = CancellationToken::new();
+        let (runner_beat_watch, runner_beats) = launch_runner_beats(
+            runner_beat_pool(self.broker.pool()),
+            BeatSender {
+                worker_id: self.worker_id.clone(),
+                hostname: self.hostname.clone(),
+                pid: std::process::id() as i32,
+            },
+            Duration::from_millis(self.app_config.recovery.runner_heartbeat_interval_ms),
+            StaleRunningRecovery::from_config(&self.app_config.recovery),
+            self.live_dispatches.clone(),
+            beats_cancel.clone(),
+        )
+        .map_err(|error| {
+            WorkerError::Config(format!(
+                "the runner heartbeat watchdog thread did not start: {error}"
+            ))
+        })?;
+
         // Supervise the service loops (C11-inverse): a loop that dies without
         // a shutdown request — panic or unexpected return; DB errors are
         // handled inside each loop — must not leave the worker claiming with
@@ -455,8 +551,9 @@ impl Worker {
         // the closed channel.
         let (fatal_tx, mut fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let services: [(&'static str, tokio::task::JoinHandle<()>); 3] = [
+        let services: [(&'static str, tokio::task::JoinHandle<()>); 4] = [
             ("claimer-heartbeat", claimer_hb),
+            ("runner-heartbeat", runner_beats),
             ("reaper", reaper),
             ("worker-state", state_loop),
         ];
@@ -572,6 +669,16 @@ impl Worker {
 
         // Graceful shutdown: wait for in-flight tasks.
         self.shutdown().await;
+
+        // No dispatch is held any more: stop the runner beats and their
+        // watchdog.
+        beats_cancel.cancel();
+        if tokio::task::spawn_blocking(move || runner_beat_watch.stop())
+            .await
+            .is_err()
+        {
+            tracing::error!("stopping the runner heartbeat watchdog failed");
+        }
 
         // A fatal claim error broke the loop; surface it so the process exits
         // non-zero for a supervisor restart. In-flight tasks were still
@@ -828,7 +935,7 @@ impl Worker {
             max_claim_per_worker: self.worker_config.max_claim_per_worker,
             max_claim_batch: self.worker_config.max_claim_batch,
             cluster_wide_cap: self.app_config.cluster_wide_cap,
-            claim_lease_ms: self.app_config.claim_lease_ms,
+            claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),
         };
         let mut claimed_rows = self.broker.claim_batch(&params).await?;
 
@@ -847,7 +954,7 @@ impl Worker {
         if claimed_rows.iter().any(|r| r.is_workflow_task) {
             // The claim generations travel with their ids: one batch can span
             // claim transactions, so each task fences on its own claimed_at.
-            let claims: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+            let claims: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
                 claimed_rows.iter().map(|r| (r.id, r.claimed_at)).collect();
             let filtered_ids = self
                 .broker
@@ -1014,6 +1121,10 @@ impl Worker {
             .expect("in_dispatch poisoned")
             .insert(task_id);
         let in_dispatch = Arc::clone(&self.in_dispatch);
+        // The runner-beat writer beats this row from here until its outcome
+        // is written; its fence lands a beat only while the row is RUNNING
+        // at this claim generation and has no finalizing marker.
+        let held_dispatch = self.live_dispatches.hold(task_id, row.claimed_at);
 
         self.tracker.spawn(async move {
             let phase2_work = execution::execute_and_finalize(
@@ -1026,6 +1137,9 @@ impl Worker {
                 payload_policy,
             )
             .await;
+
+            // The outcome is written: no more runner beats for this row.
+            drop(held_dispatch);
 
             // Release permit immediately after Phase 1 completes,
             // before potentially slow Phase 2 workflow callbacks.
@@ -1054,8 +1168,8 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::worker::execution::{
-        execute_and_finalize, finalize_with_retry, notify_worker_capacity, persist_terminal_state,
-        run_phase2, FinalizeStage, FINALIZE_MAX_RETRIES,
+        execute_and_finalize, notify_worker_capacity, persist_terminal_state, run_phase2,
+        FinalizeStage,
     };
 
     use crate::async_task_fn;
@@ -1179,6 +1293,14 @@ mod tests {
         Arc::new(PostgresBroker::from_pool(test_pool().await))
     }
 
+    /// The claim generation of every row that `insert_claimed_task` seeds and
+    /// of every dispatch row that `claimed_task_row` builds, so a test's
+    /// dispatch fences on the generation its row carries.
+    fn test_claim_generation() -> chrono::DateTime<Utc> {
+        static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
+        *GENERATION.get_or_init(Utc::now)
+    }
+
     async fn insert_claimed_task(
         pool: &PgPool,
         task_id: &Uuid,
@@ -1196,7 +1318,7 @@ mod tests {
                 retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'finalize_test', $2, 100, '[]', '{}', 'CLAIMED',
-                NOW(), NOW(), NOW(), NOW(), TRUE,
+                NOW(), $6, NOW(), NOW(), TRUE,
                 'worker-1', $3, $4, $5,
                 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
@@ -1207,6 +1329,7 @@ mod tests {
         .bind(retry_count)
         .bind(max_retries)
         .bind(task_options)
+        .bind(test_claim_generation())
         .execute(pool)
         .await
         .unwrap();
@@ -1262,7 +1385,7 @@ mod tests {
             queue_name: queue_name.to_owned(),
             is_workflow_task: false,
             task_options,
-            claimed_at: None,
+            claimed_at: test_claim_generation(),
         }
     }
 
@@ -1478,13 +1601,19 @@ mod tests {
             .find("pub async fn run(&self)")
             .expect("Worker::run source")
             .to_owned()..];
-        let schema = run
+        let start = run
+            .find("self.start_database_with_resilience().await")
+            .expect("database start with retry");
+        let database = &source[source
+            .find("async fn start_database(&self)")
+            .expect("database start steps")..];
+        let schema = database
             .find("ensure_schema_initialized().await")
             .expect("schema authorization");
-        let coverage = run
+        let coverage = database
             .find("ensure_startup_coverage_in_pool(")
             .expect("startup partition coverage");
-        let session_pool = run[coverage..]
+        let session_pool = database[coverage..]
             .find("self.broker.session_pool()")
             .map(|offset| coverage + offset)
             .expect("startup coverage session pool");
@@ -1502,11 +1631,60 @@ mod tests {
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
         assert!(schema < coverage);
         assert!(coverage < session_pool);
-        assert!(session_pool < banner);
-        assert!(coverage < banner);
-        assert!(coverage < listener);
-        assert!(coverage < heartbeats);
-        assert!(coverage < claims);
+        assert!(start < banner);
+        assert!(start < listener);
+        assert!(start < heartbeats);
+        assert!(start < claims);
+    }
+
+    /// A start attempt that does not finish in time is retryable, as in
+    /// Python, where `asyncio.TimeoutError` takes the retry path.
+    #[test]
+    fn a_timed_out_start_attempt_is_retryable() {
+        let error = WorkerError::StartTimedOut {
+            bound: START_ATTEMPT_TIMEOUT,
+        };
+        assert!(error.is_retryable());
+        assert_eq!(START_ATTEMPT_TIMEOUT, Duration::from_secs(30));
+        assert!(!WorkerError::Config("coverage refused".to_owned()).is_retryable());
+    }
+
+    /// Python `test_worker_helpers.py::test_hard_cap_returns_default_lease`:
+    /// with no `claim_lease_ms`, claims carry the 60 s default lease.
+    #[test]
+    fn hard_cap_returns_default_lease() {
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        assert_eq!(app_config.claim_lease_ms, None);
+        assert_eq!(
+            effective_claim_lease_ms(&app_config),
+            crate::core::defaults::DEFAULT_CLAIM_LEASE_MS,
+        );
+        assert_eq!(effective_claim_lease_ms(&app_config), 60_000);
+
+        app_config.claim_lease_ms = Some(90_000);
+        assert_eq!(effective_claim_lease_ms(&app_config), 90_000);
+    }
+
+    /// Every claim and every claimer beat use the effective lease: the claim
+    /// pass never sends `None`, and the heartbeat always renews.
+    #[test]
+    fn claims_and_renewals_always_carry_a_lease() {
+        let source = include_str!("worker.rs");
+        // Production code only: the test module quotes the searched text.
+        let production = &source[..source
+            .find(&["#[cfg(test)]", "\nmod tests {"].concat())
+            .expect("test module marker")];
+        let run = &production[production
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")..];
+        let heartbeat = &run[run
+            .find("spawn_claimer_heartbeat(")
+            .expect("claimer heartbeat startup")..];
+        let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
+        assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
+        assert!(production
+            .contains("claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),"));
+        assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
     }
 
     #[test]
@@ -1671,19 +1849,9 @@ mod tests {
         );
     }
 
-    // -- finalize_with_retry unit tests --
-
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static EXECUTION_COUNT: AtomicU32 = AtomicU32::new(0);
-
-    fn transient_error() -> crate::broker::BrokerError {
-        crate::broker::BrokerError::ConnectionFailed("simulated transient".to_owned())
-    }
-
-    fn non_retryable_error() -> crate::broker::BrokerError {
-        crate::broker::BrokerError::InvalidStatus("simulated non-retryable".to_owned())
-    }
 
     async fn succeed(_: ()) -> Result<String, TaskError> {
         Ok("done".to_owned())
@@ -1735,70 +1903,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = RawTaskResult> + Send + '_>> {
             Box::pin(async { TaskResult::Ok(b"not-json".to_vec()) })
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_succeeds_on_first_attempt() {
-        let result =
-            finalize_with_retry(Uuid::new_v4(), "test", || async { Ok::<i32, _>(42) }).await;
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_recovers_after_transient_error() {
-        let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
-            let n = call_count.fetch_add(1, Ordering::SeqCst);
-            async move {
-                if n < 2 {
-                    Err(transient_error())
-                } else {
-                    Ok::<i32, _>(99)
-                }
-            }
-        })
-        .await;
-        assert_eq!(result.unwrap(), 99);
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            3,
-            "should have tried 3 times"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_exhausted_returns_error() {
-        let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
-            call_count.fetch_add(1, Ordering::SeqCst);
-            async { Err::<i32, _>(transient_error()) }
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "should return error after exhausting retries"
-        );
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            FINALIZE_MAX_RETRIES,
-            "should have tried exactly FINALIZE_MAX_RETRIES times",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finalize_retry_non_retryable_fails_immediately() {
-        let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
-            call_count.fetch_add(1, Ordering::SeqCst);
-            async { Err::<i32, _>(non_retryable_error()) }
-        })
-        .await;
-        assert!(result.is_err());
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "non-retryable error should not trigger retry",
-        );
     }
 
     /// Helper: run execute_and_finalize + Phase 2 with an empty workflow registry.
@@ -2343,6 +2447,84 @@ mod tests {
         assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
     }
 
+    /// Python `test_stored_timeout_refusal.py::test_unreadable_options_fail_in_one_claim_and_do_not_retry`:
+    /// stored options that do not parse fail the task before user code runs,
+    /// with WORKER_SERIALIZATION_ERROR, and the task does not retry (its
+    /// retry policy is inside the unreadable text).
+    #[tokio::test]
+    #[serial]
+    async fn unreadable_stored_options_fail_the_task_before_user_code_runs() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 3, Some("{")).await;
+
+        run_finalize(
+            &broker,
+            async_task_fn!(succeed, ()),
+            claimed_task_row(&task_id, "default", Some("{".to_owned())),
+        )
+        .await;
+
+        let (status, _result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "FAILED", "a run of `succeed` would have completed");
+        assert_eq!(error_code.as_deref(), Some("WORKER_SERIALIZATION_ERROR"));
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
+        assert_eq!(outcome, "FAILED");
+        assert!(!will_retry);
+        assert_eq!(
+            attempt_error_code.as_deref(),
+            Some("WORKER_SERIALIZATION_ERROR")
+        );
+    }
+
+    /// Python `test_stored_timeout_refusal.py::test_a_refused_timeout_retries_until_max_retries_when_asked`:
+    /// a stored timeout above the limit refuses the run, and a readable
+    /// policy that names WORKER_SERIALIZATION_ERROR still retries it.
+    #[tokio::test]
+    #[serial]
+    async fn a_refused_timeout_retries_when_the_policy_names_the_refusal() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        let task_options = serde_json::json!({
+            "timeout_ms": 4_294_967_296_u64,
+            "retry_policy": {
+                "max_retries": 2,
+                "intervals": [1, 1],
+                "backoff_strategy": "fixed",
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["WORKER_SERIALIZATION_ERROR"]
+            }
+        })
+        .to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 2, Some(&task_options)).await;
+
+        run_finalize(
+            &broker,
+            async_task_fn!(succeed, ()),
+            claimed_task_row(&task_id, "default", Some(task_options)),
+        )
+        .await;
+
+        let (status, _result, _error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "PENDING", "the refusal is retried, not run");
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
+        assert_eq!(outcome, "FAILED");
+        assert!(will_retry);
+        assert_eq!(
+            attempt_error_code.as_deref(),
+            Some("WORKER_SERIALIZATION_ERROR")
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_retryable_failure_requeues_and_skips_callback() {
@@ -2351,12 +2533,15 @@ mod tests {
         clean(&pool).await;
 
         let task_id = Uuid::new_v4();
+        // Python's stored layout: auto_retry_for lives inside retry_policy.
         let task_options = serde_json::json!({
-            "auto_retry_for": ["RETRY_ME"],
             "retry_policy": {
+                "max_retries": 3,
                 "intervals": [1, 1, 1],
                 "backoff_strategy": "fixed",
-                "jitter": false
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["RETRY_ME"]
             }
         })
         .to_string();
@@ -2466,6 +2651,63 @@ mod tests {
             .is_some_and(|msg| msg.contains("async task panicked")),);
     }
 
+    /// A database error during the failed-attempt write decides neither the
+    /// retry nor the failure: phase 1 reports a phase-1 error and writes
+    /// nothing, and the next try sends the same statement (Python
+    /// `core/worker/finalize.py`, `_persist_failed_attempt`). Before, an error
+    /// of the retry write fell through to the terminal failure write.
+    #[tokio::test]
+    #[serial]
+    async fn a_database_error_in_the_failed_attempt_write_decides_nothing() {
+        let pool = test_pool().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        let task_options = serde_json::json!({
+            "retry_policy": {
+                "max_retries": 3,
+                "intervals": [1, 1, 1],
+                "backoff_strategy": "fixed",
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["RETRY_ME"]
+            }
+        })
+        .to_string();
+        insert_running_task(&pool, &task_id, "default", 0, 3, Some(&task_options)).await;
+
+        let closed_broker = test_broker().await;
+        closed_broker.pool().close().await;
+
+        let Err(err) = persist_terminal_state(
+            &closed_broker,
+            task_id,
+            TaskResult::Err(TaskError::new("RETRY_ME", "try again")),
+            &claimed_task_row(&task_id, "default", Some(task_options.clone())),
+            &crate::worker::retry::read_stored_options(Some(&task_options)),
+            &crate::broker::SetRunningRow {
+                id: task_id,
+                started_at: Utc::now(),
+                retry_count: 0,
+                max_retries: 3,
+                good_until: None,
+            },
+            "worker-1",
+            &crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        else {
+            panic!("a closed pool must fail the failed-attempt write");
+        };
+
+        assert_eq!(err.stage, FinalizeStage::Phase1Persist);
+        let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "RUNNING");
+        assert_eq!(result, None);
+        assert_eq!(error_code, None);
+        assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_phase1_db_failure_leaves_task_running_for_reaper() {
@@ -2483,6 +2725,7 @@ mod tests {
             task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
+            &crate::worker::retry::read_stored_options(None),
             &crate::broker::SetRunningRow {
                 id: task_id,
                 started_at: Utc::now(),
@@ -2491,7 +2734,6 @@ mod tests {
                 good_until: None,
             },
             "worker-1",
-            "localhost",
             &crate::core::config::payload::PayloadPolicy::default(),
         )
         .await
@@ -2589,8 +2831,8 @@ mod tests {
     /// after the worker gives up — advertising a dead worker as alive and holding
     /// claim leases. The broker is built with a distinct session URL so the
     /// listener has its own pool: closing only the main pool lets the loop start
-    /// (background loops spawn), then makes every claim fail with a retryable
-    /// `PoolClosed`; a 1-retry budget exhausts and breaks the loop fatally.
+    /// (background loops spawn), then makes every claim fail with `PoolClosed`,
+    /// which is not retryable, so the loop breaks fatally at the first claim.
     #[tokio::test]
     #[serial]
     async fn run_fires_cancel_on_fatal_claim_exit() {
