@@ -74,11 +74,46 @@ impl std::fmt::Debug for RegisteredWorkflowSpec {
     }
 }
 
+/// The name of the client's child-builder hook, as the client-facing error
+/// texts of a child start write it: Python `build_with()`, Rust
+/// `spec_builder`.
+///
+/// The client that builds a [`WorkflowSpecRegistry`] supplies it with its
+/// builders. The core has no default name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuilderHookName(&'static str);
+
+impl BuilderHookName {
+    /// The hook of the registrations of this crate's [`Horsies`] app:
+    /// [`RegisteredWorkflowSpec::spec_builder`] and
+    /// [`RegisteredWorkflowDefinition::spec_builder`].
+    ///
+    /// [`Horsies`]: crate::core::app::Horsies
+    pub const SPEC_BUILDER: Self = Self::new("spec_builder");
+
+    /// The hook name `name`, as the client's error texts write it.
+    ///
+    /// Panics for an empty name, a defect of the client; in a `const` item
+    /// the panic is a compile error.
+    pub const fn new(name: &'static str) -> Self {
+        assert!(!name.is_empty(), "a builder hook name must not be empty");
+        Self(name)
+    }
+
+    /// The name, as the client's error texts write it.
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
 /// Registry mapping workflow names to their registered specs.
 ///
 /// Used by the engine to look up sub-workflow specs at runtime.
 /// Thread-safe for shared reads (behind `Arc` in the worker).
 pub struct WorkflowSpecRegistry {
+    /// The client's name of its child-builder hook: the error texts of a
+    /// child start name it.
+    builder_hook: BuilderHookName,
     specs: HashMap<String, RegisteredWorkflowSpec>,
     dynamic_definitions: HashMap<String, RegisteredWorkflowDefinition>,
     /// Pre-computed map of task_name -> serialized retry options JSON.
@@ -102,6 +137,7 @@ pub struct WorkflowSpecRegistry {
 impl Clone for WorkflowSpecRegistry {
     fn clone(&self) -> Self {
         Self {
+            builder_hook: self.builder_hook,
             specs: self.specs.clone(),
             dynamic_definitions: self.dynamic_definitions.clone(),
             task_options_map: self.task_options_map.clone(),
@@ -123,15 +159,22 @@ enum WorkflowVertex<'a> {
 }
 
 impl WorkflowSpecRegistry {
-    /// Create an empty registry.
-    pub fn new() -> Self {
+    /// Create an empty registry for the client whose child-builder hook is
+    /// `builder_hook`.
+    pub fn new(builder_hook: BuilderHookName) -> Self {
         Self {
+            builder_hook,
             specs: HashMap::new(),
             dynamic_definitions: HashMap::new(),
             task_options_map: HashMap::new(),
             task_defaults_map: HashMap::new(),
             queue_priority_map: HashMap::new(),
         }
+    }
+
+    /// The client's name of its child-builder hook.
+    pub fn builder_hook(&self) -> BuilderHookName {
+        self.builder_hook
     }
 
     /// Register a workflow spec. Returns an error if the name is already taken
@@ -704,15 +747,10 @@ impl WorkflowSpecRegistry {
     }
 }
 
-impl Default for WorkflowSpecRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl std::fmt::Debug for WorkflowSpecRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkflowSpecRegistry")
+            .field("builder_hook", &self.builder_hook)
             .field("spec_count", &self.specs.len())
             .field("dynamic_definition_count", &self.dynamic_definitions.len())
             .field("spec_names", &self.specs.keys().collect::<Vec<_>>())
@@ -747,8 +785,17 @@ mod tests {
     }
 
     #[test]
+    fn the_registry_keeps_the_builder_hook_of_its_client() {
+        let hook = BuilderHookName::new("build_with()");
+        let registry = WorkflowSpecRegistry::new(hook);
+        assert_eq!(registry.builder_hook(), hook);
+        assert_eq!(registry.clone().builder_hook().as_str(), "build_with()");
+        assert_eq!(BuilderHookName::SPEC_BUILDER.as_str(), "spec_builder");
+    }
+
+    #[test]
     fn register_and_lookup() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         assert!(registry.contains("wf_a"));
         assert!(registry.get("wf_a").is_some());
@@ -757,7 +804,7 @@ mod tests {
 
     #[test]
     fn duplicate_name_rejected() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         let result = registry.register(make_registered("wf_a"));
         assert!(result.is_err());
@@ -765,21 +812,21 @@ mod tests {
 
     #[test]
     fn missing_returns_none() {
-        let registry = WorkflowSpecRegistry::new();
+        let registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         assert!(registry.get("missing").is_none());
         assert!(!registry.contains("missing"));
     }
 
     #[test]
     fn empty_registry() {
-        let registry = WorkflowSpecRegistry::new();
+        let registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
     }
 
     #[test]
     fn spec_names_iterator() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("alpha")).unwrap();
         registry.register(make_registered("beta")).unwrap();
         let mut names: Vec<&str> = registry.spec_names().collect();
@@ -825,7 +872,7 @@ mod tests {
     #[test]
     fn subworkflow_no_cycle_accepted() {
         // A -> B (no cycle, B has no subworkflows)
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_b")).unwrap();
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
@@ -836,7 +883,7 @@ mod tests {
     #[test]
     fn subworkflow_direct_cycle_rejected() {
         // A -> B and B -> A creates a direct cycle.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
             .unwrap();
@@ -851,7 +898,7 @@ mod tests {
     #[test]
     fn subworkflow_indirect_cycle_rejected() {
         // A -> B -> C -> A creates an indirect cycle.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
             .unwrap();
@@ -867,7 +914,7 @@ mod tests {
     #[test]
     fn subworkflow_self_cycle_rejected() {
         // A -> A: self-referencing sub-workflow.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         let result = registry.register(make_registered_with_sub("wf_a", "wf_a"));
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -877,7 +924,7 @@ mod tests {
     #[test]
     fn subworkflow_diamond_no_cycle_accepted() {
         // A -> B, A -> C, B -> D, C -> D. No cycle.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_d")).unwrap();
         registry
             .register(make_registered_with_sub("wf_b", "wf_d"))
@@ -922,7 +969,7 @@ mod tests {
     #[test]
     fn subworkflow_unregistered_child_no_false_positive() {
         // A -> "unregistered_wf" -- child not yet in registry. No cycle.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "unregistered_wf"))
             .unwrap();
@@ -941,7 +988,7 @@ mod tests {
 
     #[test]
     fn a_child_is_resolved_by_its_definition_key_only() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_keyed_registered("child", "tests.child.v1"))
             .unwrap();
@@ -954,7 +1001,7 @@ mod tests {
 
     #[test]
     fn a_subworkflow_node_with_no_definition_key_is_refused() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("child")).unwrap();
 
         let mut builder = WorkflowSpecBuilder::new("parent");
@@ -974,7 +1021,7 @@ mod tests {
 
     #[test]
     fn subworkflow_explicit_input_requires_spec_builder() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_keyed_registered("child", "tests.child.v1"))
             .unwrap();
@@ -1013,7 +1060,7 @@ mod tests {
             ("null", SubWorkflowParams::Given, false),
             ("{}", SubWorkflowParams::Given, false),
         ] {
-            let mut registry = WorkflowSpecRegistry::new();
+            let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
             registry
                 .register(make_keyed_registered("child", "tests.child.v1"))
                 .unwrap();
@@ -1037,7 +1084,7 @@ mod tests {
 
     #[test]
     fn unregister_existing() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         assert!(registry.contains("wf_a"));
         let removed = registry.unregister("wf_a");
@@ -1048,14 +1095,14 @@ mod tests {
 
     #[test]
     fn unregister_missing_returns_none() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         let removed = registry.unregister("nonexistent");
         assert!(removed.is_none());
     }
 
     #[test]
     fn unregister_allows_re_register() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         registry.unregister("wf_a");
         // Should be able to register again after unregister.
@@ -1069,7 +1116,7 @@ mod tests {
 
     #[test]
     fn get_node_returns_node() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         let node = registry.get_node("wf_a", 0);
         assert!(node.is_some());
@@ -1078,20 +1125,20 @@ mod tests {
 
     #[test]
     fn get_node_out_of_range() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         assert!(registry.get_node("wf_a", 99).is_none());
     }
 
     #[test]
     fn get_node_missing_workflow() {
-        let registry = WorkflowSpecRegistry::new();
+        let registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         assert!(registry.get_node("missing", 0).is_none());
     }
 
     #[test]
     fn get_task_node_returns_non_subworkflow() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry.register(make_registered("wf_a")).unwrap();
         // make_registered creates a simple task (not a subworkflow).
         let node = registry.get_task_node("wf_a", 0);
@@ -1101,7 +1148,7 @@ mod tests {
 
     #[test]
     fn get_task_node_rejects_subworkflow() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
             .unwrap();
@@ -1112,7 +1159,7 @@ mod tests {
 
     #[test]
     fn get_subworkflow_node_returns_subworkflow() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
             .unwrap();
@@ -1124,7 +1171,7 @@ mod tests {
 
     #[test]
     fn get_subworkflow_node_rejects_regular() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
             .unwrap();
@@ -1135,7 +1182,7 @@ mod tests {
     #[test]
     fn cycle_rejected_does_not_leave_spec_in_registry() {
         // After a cycle rejection, the offending spec should NOT be in the registry.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register(make_registered_with_sub("wf_a", "wf_b"))
             .unwrap();
@@ -1192,7 +1239,7 @@ mod tests {
     #[test]
     fn dynamic_self_cycle_rejected() {
         // A declares itself as a child.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         let result = registry.register_definition(make_dynamic_def(
             "dyn_a",
             "test.dyn_a.v1",
@@ -1206,7 +1253,7 @@ mod tests {
     #[test]
     fn dynamic_direct_cycle_rejected() {
         // A declares child B, B declares child A.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register_definition(make_dynamic_def(
                 "dyn_a",
@@ -1227,7 +1274,7 @@ mod tests {
     #[test]
     fn dynamic_no_cycle_accepted() {
         // A declares child B, B has no children. No cycle.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register_definition(make_dynamic_def("dyn_b", "test.dyn_b.v1", &[]))
             .unwrap();
@@ -1244,7 +1291,7 @@ mod tests {
     #[test]
     fn dynamic_empty_declared_children_accepted() {
         // Empty declared_children is the default. No cycle check issues.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register_definition(make_dynamic_def("dyn_a", "test.dyn_a.v1", &[]))
             .unwrap();
@@ -1254,7 +1301,7 @@ mod tests {
     #[test]
     fn static_to_dynamic_to_static_cycle_rejected() {
         // Static A -> Dynamic B (via sub_definition_key) -> Static A (via declared_children).
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
 
         // Register static A referencing dynamic B via definition key.
         let spec_a = make_spec_with_sub_definition_key("wf_a", "dyn_b", "test.dyn_b.v1");
@@ -1271,7 +1318,7 @@ mod tests {
         // Let's use a different approach: B declares A by A's definition_key.
 
         // Actually, let's give A a definition_key.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         let mut spec_a = make_spec_with_sub_definition_key("wf_a", "dyn_b", "test.dyn_b.v1");
         spec_a.definition_key = Some("test.wf_a.v1".to_owned());
         registry
@@ -1295,7 +1342,7 @@ mod tests {
     #[test]
     fn dynamic_to_static_to_dynamic_cycle_rejected() {
         // Dynamic A declares child Static B, Static B refs Dynamic A (via sub_definition_key).
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
 
         // Register dynamic A that declares static B as child.
         registry
@@ -1321,7 +1368,7 @@ mod tests {
     #[test]
     fn dynamic_diamond_no_false_positive() {
         // A declares [B, C], B declares [D], C declares [D]. No cycle.
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register_definition(make_dynamic_def("dyn_d", "test.dyn_d.v1", &[]))
             .unwrap();
@@ -1351,7 +1398,7 @@ mod tests {
 
     #[test]
     fn dynamic_cycle_rejected_does_not_leave_definition_in_registry() {
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry = WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER);
         registry
             .register_definition(make_dynamic_def(
                 "dyn_a",
