@@ -186,7 +186,7 @@ class TestDispositionLadder:
                     text(
                         'SELECT workflow_id, workflow_node_row_id, '
                         'recovery_source, history_class, history_anchor, '
-                        'result_digest, terminal_status '
+                        'result_digest, terminalization_kind '
                         'FROM horsies_workflow_phase2_pending '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
@@ -197,7 +197,7 @@ class TestDispositionLadder:
             assert str(pending.workflow_node_row_id) == node_row_id
             assert pending.recovery_source == 'HISTORY'
             assert pending.history_class == CLASS_KEY
-            assert pending.terminal_status == 'FAILED'
+            assert pending.terminalization_kind == 'FAIL_RUNNING'
             assert bytes(pending.result_digest) == sha256(
                 b'{"error":{"code":"BOOM"}}'
             ).digest()

@@ -1214,10 +1214,10 @@ class TestRetention:
                         INSERT INTO horsies_workflow_recovery_failures (
                             workflow_id, failed_passes, last_pass_id,
                             first_failed_at, last_failed_at, last_case,
-                            last_exception_type
+                            last_task_index, last_error_type
                         ) VALUES (
                             :id, 1, gen_random_uuid(), NOW(), NOW(),
-                            'ready_not_enqueued', 'DataError'
+                            'ready_not_enqueued', 0, 'DataError'
                         )
                     """),
                     {'id': workflow_id},

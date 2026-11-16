@@ -269,7 +269,7 @@ class TestDiscoveryBatch:
                 await connection.execute(
                     text(
                         'SELECT workflow_id, recovery_source, '
-                        'terminal_status, result_digest '
+                        'terminalization_kind, result_digest '
                         'FROM horsies_workflow_phase2_pending '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
@@ -278,7 +278,7 @@ class TestDiscoveryBatch:
             ).one()
             assert str(pending.workflow_id) == workflow_id
             assert pending.recovery_source == 'HISTORY'
-            assert pending.terminal_status == 'EXPIRED'
+            assert pending.terminalization_kind == 'EXPIRE_PENDING'
             assert bytes(pending.result_digest) == sha256(
                 b'{"error":{"code":"TASK_EXPIRED"}}'
             ).digest()
