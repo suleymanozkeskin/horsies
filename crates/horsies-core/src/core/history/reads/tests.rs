@@ -19,18 +19,19 @@ use crate::core::history::commands::{
     CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::{
-    finite_class_parent_name, register_finite_retention_class, ClassRegistration,
+    finite_class_parent_name, register_period_class, ClassRegistration,
 };
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_PARENT};
 use crate::core::history::outcomes::{LeafCreation, LeafDrop};
-use crate::core::history::partitions::catalog::{database_now, LeafCatalogRow};
+use crate::core::history::partitions::catalog::{database_now, LeafCatalogRow, LeafLowerBound};
 use crate::core::history::partitions::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, NoQuarantine,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::periods::RetentionDays;
 
 use super::aggregates::{
     history_breakdown_statement, history_count_statement, history_estimate_statement,
@@ -54,7 +55,7 @@ use super::result::{
     decode_result_row, read_task_result, staged_result_published, HistoryResultPayload,
     LiveTaskResult, ResultWireRow, TaskResultRead,
 };
-use super::{detail::read_task_detail, detail::TaskDetailResult};
+use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
 const PYTHON_STAGED_FIXTURE: &str =
     include_str!("../../../../tests/fixtures/task_history/python-v052-staged-readers.json");
@@ -68,28 +69,34 @@ fn timestamp(value: &str) -> DateTime<Utc> {
 fn catalog_row(
     leaf_name: impl Into<String>,
     class_key: impl Into<String>,
-    parent_name: impl Into<String>,
     lower: DateTime<Utc>,
     upper: DateTime<Utc>,
-    min_birth_at: Option<DateTime<Utc>>,
-    min_birth_verified: bool,
 ) -> LeafCatalogRow {
-    let leaf_name = leaf_name.into();
     LeafCatalogRow {
-        id_index_name: format!("{leaf_name}_task_idx"),
-        leaf_name,
-        parent_name: parent_name.into(),
+        leaf_name: leaf_name.into(),
         class_key: class_key.into(),
-        lower_anchor: lower,
+        lower_anchor: LeafLowerBound::At(lower),
         upper_anchor: upper,
         index_schema_version: 1,
-        partition_bound: "FOR VALUES FROM ... TO ...".to_owned(),
-        min_birth_at,
-        min_birth_verified,
         created_at: lower,
         detached_at: None,
         dropped_at: None,
     }
+}
+
+/// The Python fixture body without its birth-floor check. The baseline has no
+/// birth floor: the absence reason is derived from the detached leaves.
+fn without_birth_floor(body: &str) -> String {
+    let start = body
+        .find("\n            IF v_birth_at < ")
+        .expect("fixture body carries the birth-floor check");
+    let end_marker = "            END IF;\n";
+    let end = start
+        + body[start..]
+            .find(end_marker)
+            .expect("birth-floor check ends")
+        + end_marker.len();
+    format!("{}{}", &body[..start], &body[end..])
 }
 
 fn fixture_manifest() -> (LookupManifest, Value) {
@@ -102,13 +109,8 @@ fn fixture_manifest() -> (LookupManifest, Value) {
             catalog_row(
                 row["leaf_name"].as_str().expect("leaf name"),
                 row["class_key"].as_str().expect("class key"),
-                row["parent_name"].as_str().expect("parent name"),
                 timestamp(row["lower_anchor"].as_str().expect("lower")),
                 timestamp(row["upper_anchor"].as_str().expect("upper")),
-                row["min_birth_at"].as_str().map(timestamp),
-                row["min_birth_verified"]
-                    .as_bool()
-                    .expect("birth verification"),
             )
         })
         .collect::<Vec<_>>();
@@ -131,10 +133,6 @@ fn staged_renderer_is_byte_identical_to_the_python_fixture() {
         fixture["source_commit"].as_str(),
         Some("a43b77808364868797c1d2ee6df0c96695e40122")
     );
-    assert_eq!(
-        manifest.birth_floor(),
-        Some(timestamp("2026-08-08T23:59:59+00:00"))
-    );
     assert_eq!(manifest.leaves().len(), 2);
     assert_eq!(
         manifest
@@ -149,60 +147,62 @@ fn staged_renderer_is_byte_identical_to_the_python_fixture() {
     );
     assert_eq!(
         render_staged_lookup_function(&manifest),
-        fixture["functions"]["lookup"]
-            .as_str()
-            .expect("lookup body")
+        without_birth_floor(
+            fixture["functions"]["lookup"]
+                .as_str()
+                .expect("lookup body")
+        )
     );
     assert_eq!(
         render_staged_provenance_function(&manifest),
-        fixture["functions"]["provenance"]
-            .as_str()
-            .expect("provenance body")
+        without_birth_floor(
+            fixture["functions"]["provenance"]
+                .as_str()
+                .expect("provenance body")
+        )
     );
     assert_eq!(
         render_staged_detail_function(&manifest),
-        fixture["functions"]["detail"]
-            .as_str()
-            .expect("detail body")
+        without_birth_floor(
+            fixture["functions"]["detail"]
+                .as_str()
+                .expect("detail body")
+        )
     );
 }
 
 #[test]
-fn manifest_validation_order_floor_and_heartbeat_exclusion_are_fail_closed() {
+fn manifest_validation_order_and_heartbeat_exclusion_are_fail_closed() {
     let base = timestamp("2026-08-01T00:00:00Z");
-    assert!(LookupLeaf::new("unsafe;drop", base, base + Duration::days(1), None).is_err());
-    assert!(LookupLeaf::new("safe_leaf", base, base, None).is_err());
+    assert!(LookupLeaf::new(
+        "unsafe;drop",
+        LeafLowerBound::At(base),
+        base + Duration::days(1)
+    )
+    .is_err());
+    assert!(LookupLeaf::new("safe_leaf", LeafLowerBound::At(base), base).is_err());
+    assert!(LookupLeaf::new("open_leaf", LeafLowerBound::Open, base).is_ok());
     let early = catalog_row(
         "history_early",
-        "finite_7d_v1",
-        "history_parent_a",
+        "standard_7d",
         base,
         base + Duration::days(1),
-        Some(base - Duration::hours(4)),
-        true,
     );
     let late = catalog_row(
         "history_late",
-        "finite_30d_v1",
-        "history_parent_b",
+        "standard_30d",
         base + Duration::days(1),
         base + Duration::days(2),
-        Some(base - Duration::hours(1)),
-        true,
     );
     let heartbeat = catalog_row(
         "heartbeat_leaf",
         "heartbeats",
-        "horsies_heartbeats",
         base,
         base + Duration::hours(1),
-        None,
-        false,
     );
     let absent = HashSet::from([early.leaf_name.clone()]);
     let manifest = manifest_from_catalog(&[late.clone(), heartbeat, early.clone()], &absent)
         .expect("manifest");
-    assert_eq!(manifest.birth_floor(), early.min_birth_at);
     assert_eq!(
         manifest
             .leaves()
@@ -212,21 +212,6 @@ fn manifest_validation_order_floor_and_heartbeat_exclusion_are_fail_closed() {
         vec![late.leaf_name.as_str()]
     );
     assert!(manifest_from_catalog(&[late.clone(), late], &HashSet::new()).is_err());
-    let unverified = catalog_row(
-        "history_unverified",
-        "finite_30d_v1",
-        "history_parent_b",
-        base + Duration::days(2),
-        base + Duration::days(3),
-        None,
-        false,
-    );
-    assert_eq!(
-        manifest_from_catalog(&[early, unverified], &HashSet::new())
-            .expect("unverified manifest")
-            .birth_floor(),
-        None
-    );
 }
 
 #[test]
@@ -236,15 +221,13 @@ fn staged_skeleton_covers_live_likely_fallback_legacy_and_boundary_scale() {
         .map(|offset| {
             LookupLeaf::new(
                 format!("history_leaf_{offset:03}"),
-                base + Duration::days(offset),
+                LeafLowerBound::At(base + Duration::days(offset)),
                 base + Duration::days(offset + 1),
-                None,
             )
             .expect("lookup leaf")
         })
         .collect();
-    let body =
-        render_staged_lookup_function(&LookupManifest::new(leaves, None).expect("large manifest"));
+    let body = render_staged_lookup_function(&LookupManifest::new(leaves).expect("large manifest"));
     assert_eq!(body.matches("IF v_effective_birth <").count(), 512);
     assert_eq!(body.matches("FROM history_leaf_000\n").count(), 3);
     assert_eq!(body.matches("FROM history_leaf_255\n").count(), 3);
@@ -253,9 +236,8 @@ fn staged_skeleton_covers_live_likely_fallback_legacy_and_boundary_scale() {
     assert!(!body.contains("FROM horsies_task_history\n"));
     assert!(body.contains("v_birth_at - INTERVAL '5 seconds'"));
     assert!(body.contains("(get_byte(v_uuid_bytes, 8) & 192) = 128"));
-    let empty = render_staged_lookup_function(
-        &LookupManifest::new(Vec::new(), None).expect("empty manifest"),
-    );
+    let empty =
+        render_staged_lookup_function(&LookupManifest::new(Vec::new()).expect("empty manifest"));
     assert!(empty.contains("FROM horsies_tasks\n"));
     assert!(!empty.contains("uuid_send"));
 }
@@ -264,12 +246,11 @@ fn staged_skeleton_covers_live_likely_fallback_legacy_and_boundary_scale() {
 fn staged_timestamp_literals_preserve_python_microsecond_rendering() {
     let lower = timestamp("2026-08-01T00:00:00.001000Z");
     let upper = timestamp("2026-08-02T00:00:00.123456Z");
-    let leaf = LookupLeaf::new("history_microseconds", lower, upper, Some(lower))
+    let leaf = LookupLeaf::new("history_microseconds", LeafLowerBound::At(lower), upper)
         .expect("microsecond leaf");
     let body = render_staged_lookup_function(
-        &LookupManifest::new(vec![leaf], Some(lower)).expect("microsecond manifest"),
+        &LookupManifest::new(vec![leaf]).expect("microsecond manifest"),
     );
-    assert!(body.contains("TIMESTAMPTZ '2026-08-01T00:00:00.001000Z'"));
     assert!(body.contains("TIMESTAMPTZ '2026-08-02T00:00:00.123456Z'"));
 }
 
@@ -327,12 +308,7 @@ fn test_window() -> HistoryWindow {
 #[test]
 fn page_facet_and_aggregate_builders_pin_bounds_filters_columns_and_sorts() {
     assert_eq!(HISTORY_SUMMARY_COLUMNS.len(), 18);
-    for envelope in [
-        "result_payload",
-        "prior_result_payload",
-        "attempt_snapshot",
-        "rerun_input_inline",
-    ] {
+    for envelope in ["result_payload", "attempt_snapshot", "rerun_input_inline"] {
         assert!(!HISTORY_SUMMARY_COLUMNS.contains(&envelope));
     }
     assert!(HistoryPageQuery::new(test_window(), 0).is_err());
@@ -384,8 +360,8 @@ fn page_facet_and_aggregate_builders_pin_bounds_filters_columns_and_sorts() {
     assert!(facet.sql().contains("error_code <> ''"));
     let aggregate = history_status_aggregate_statement(HistoryStatusAggregate::new(test_window()));
     for statement in [page.sql(), facet.sql(), aggregate.sql()] {
-        assert!(statement.contains("retention_anchor_at >= $1"));
-        assert!(statement.contains("retention_anchor_at < $2"));
+        assert!(statement.contains("terminal_at >= $1"));
+        assert!(statement.contains("terminal_at < $2"));
     }
 }
 
@@ -433,7 +409,7 @@ fn every_facet_sort_and_aggregate_variant_has_a_bounded_statement() {
     for facet in HistoryFacet::ALL {
         let statement = history_facet_statement(&HistoryFacetQuery::new(test_window(), facet));
         assert!(statement.sql().contains(facet.column()));
-        assert!(statement.sql().contains("retention_anchor_at >= $1"));
+        assert!(statement.sql().contains("terminal_at >= $1"));
         assert!(statement.sql().contains("LIMIT $3"));
     }
     assert_eq!(HistorySortField::ALL.len(), 11);
@@ -553,10 +529,16 @@ async fn register_test_class(
     class_key: &str,
     duration_days: i64,
 ) -> String {
-    let outcome =
-        register_finite_retention_class(connection, class_key, Duration::days(duration_days))
-            .await
-            .expect("register P4 retention class");
+    let days =
+        RetentionDays::parse_period(Duration::days(duration_days)).expect("P4 retention period");
+    assert_eq!(
+        days.class_key(),
+        class_key,
+        "a class key is derived from its period"
+    );
+    let outcome = register_period_class(connection, days)
+        .await
+        .expect("register P4 retention class");
     assert!(matches!(
         outcome,
         ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
@@ -643,23 +625,21 @@ async fn seed_history_row_with_payload(
         "INSERT INTO {TASK_HISTORY_PARENT} (
              task_id, task_name, queue_name, priority,
              command_fingerprint_version, command_fingerprint,
-             status, terminalization_kind, terminal_at,
-             retention_anchor_at, retention_class_key,
+             status, terminalization_kind, terminal_at, retention_class_key,
              sent_at, enqueued_at, started_at, created_at,
              retry_count, max_retries, last_claimed_worker_id,
              last_worker_hostname, last_worker_pid,
-             result_envelope_version, result_codec, result_content_type,
-             result_payload, result_digest, error_code, final_failed_reason,
+             result_envelope_version, result_payload, result_digest,
+             error_code, final_failed_reason,
              is_workflow_task, history_schema_version,
-             attempt_archive_version, attempt_snapshot_codec,
-             attempt_snapshot_content_type, attempt_snapshot,
+             attempt_archive_version, attempt_snapshot,
              attempt_snapshot_digest, rerun_input_disposition
          ) VALUES (
              $1, 'p4.history', 'default', 100,
-             1, $2, $3, $4, $5, $5, $6,
+             1, $2, $3, $4, $5, $6,
              $5, $5, $5, $5, 1, 3, 'worker-p4', 'host-p4', 42,
-             1, 'json-utf8', 'application/json', $7, $8, 'BOOM', 'failed',
-             FALSE, 1, $9, $10, $11, $12, $13, 'NEVER_ELIGIBLE'
+             1, $7, $8, 'BOOM', 'failed',
+             FALSE, 1, $9, $10, $11, 'NEVER_ELIGIBLE'
          )"
     );
     sqlx::query(&sql)
@@ -672,8 +652,6 @@ async fn seed_history_row_with_payload(
         .bind(result_payload)
         .bind(archive_digest(result_payload).to_vec())
         .bind(attempts.version)
-        .bind(attempts.codec)
-        .bind(attempts.content_type)
         .bind(&attempts.payload)
         .bind(attempts.digest.to_vec())
         .execute(connection)
@@ -690,13 +668,17 @@ async fn seed_live_row(
 ) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, status, sent_at, enqueued_at,
-             enqueue_sha, command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition
+             id, task_name, queue_name, priority, input, task_options, execution,
+             retention_class_key, sent_at, created_at,
+             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+             status, enqueued_at, retry_count, max_retries, is_workflow_task, updated_at,
+             retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          ) VALUES (
-             $1, 'p4.live', 'default', 'PENDING', $2, $2,
-             'p4-live-sha', 1, $3, $4, FALSE, 'NEVER_ELIGIBLE'
+             $1, 'p4.live', 'default', 100, '{}', NULL, 'ISOLATED',
+             $4, $2, $2,
+             1, $3, NULL,
+             'PENDING', $2, 0, 0, FALSE, $2,
+             FALSE, NULL, NULL
          )",
     )
     .bind(task_id)
@@ -708,30 +690,18 @@ async fn seed_live_row(
     .expect("seed P4 live row");
 }
 
-async fn stamp_leaf_birth(connection: &mut PgConnection, leaf_name: &str, birth: DateTime<Utc>) {
-    sqlx::query(&format!(
-        "UPDATE {LEAF_CATALOG} SET min_birth_at = $1, min_birth_verified = TRUE
-         WHERE leaf_name = $2"
-    ))
-    .bind(birth)
-    .bind(leaf_name)
-    .execute(connection)
-    .await
-    .expect("stamp P4 leaf birth");
-}
-
 #[tokio::test]
 #[serial]
 async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identity_paths() {
     let database = TestDatabase::create().await;
-    let class_key = "p4_lookup";
+    let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin P4 lookup setup");
     let now = database_now(&mut transaction).await.expect("database now");
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
-    let other_class_key = "p4_lookup_b";
-    let other_parent = register_test_class(&mut transaction, other_class_key, 30).await;
+    let other_class_key = "standard_31d";
+    let other_parent = register_test_class(&mut transaction, other_class_key, 31).await;
     let other_leaf =
         create_test_leaf(&mut transaction, &other_parent, other_class_key, today).await;
     let normal_id = v7_with_birth(today + Duration::hours(1));
@@ -776,18 +746,6 @@ async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identit
     .await;
     let live_id = v7_with_birth(today + Duration::hours(5));
     seed_live_row(&mut transaction, live_id, class_key, now).await;
-    stamp_leaf_birth(
-        &mut transaction,
-        leaf.leaf_name(),
-        today + Duration::minutes(30),
-    )
-    .await;
-    stamp_leaf_birth(
-        &mut transaction,
-        other_leaf.leaf_name(),
-        today + Duration::hours(6),
-    )
-    .await;
     sqlx::query(
         "CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
          RETURNS horsies_task_provenance LANGUAGE sql STABLE AS
@@ -954,7 +912,7 @@ async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missin
 #[serial]
 async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as_ageing() {
     let database = TestDatabase::create().await;
-    let class_key = "p4_missing";
+    let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin missing setup");
     let now = database_now(&mut transaction).await.expect("database now");
     let today = utc_day(now);
@@ -968,12 +926,6 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
         today + Duration::hours(3),
         "FAILED",
         "FAIL_RUNNING",
-    )
-    .await;
-    stamp_leaf_birth(
-        &mut transaction,
-        leaf.leaf_name(),
-        today + Duration::hours(1),
     )
     .await;
     StagedLoaderPublisher
@@ -1023,7 +975,7 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
             .expect("classify destroyed-leaf detail"),
         TaskDetailResult::Absent {
             task_id: found,
-            predates_retained_floor: Some(false),
+            reason: TaskAbsenceReason::WithinRetainedHistory,
         } if found == task_id
     ));
     let catalog_still_attached: bool = sqlx::query_scalar(&format!(
@@ -1043,14 +995,14 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
 #[serial]
 async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
     let database = TestDatabase::create().await;
-    let class_key = "p4_purged";
+    let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin purged setup");
     let now = database_now(&mut transaction).await.expect("database now");
     let today = utc_day(now);
     let old_day = today - Duration::days(40);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let old_leaf = create_test_leaf(&mut transaction, &parent, class_key, old_day).await;
-    let current_leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let _current_leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
     let old_id = v7_with_birth(old_day + Duration::hours(1));
     let current_id = v7_with_birth(today + Duration::hours(1));
     let old_snapshot = seed_history_row(
@@ -1069,18 +1021,6 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
         today + Duration::hours(2),
         "COMPLETED",
         "COMPLETE_FUSED",
-    )
-    .await;
-    stamp_leaf_birth(
-        &mut transaction,
-        old_leaf.leaf_name(),
-        old_day + Duration::hours(1),
-    )
-    .await;
-    stamp_leaf_birth(
-        &mut transaction,
-        current_leaf.leaf_name(),
-        today + Duration::hours(1),
     )
     .await;
     StagedLoaderPublisher
@@ -1145,7 +1085,7 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
             .expect("classify purged detail"),
         TaskDetailResult::Absent {
             task_id,
-            predates_retained_floor: Some(true),
+            reason: TaskAbsenceReason::PredatesRetainedHistory,
         } if task_id == old_id
     ));
     transaction.commit().await.expect("commit old leaf drop");
@@ -1156,7 +1096,7 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
 #[serial]
 async fn page_facet_aggregate_estimate_and_plans_are_window_and_index_bounded() {
     let database = TestDatabase::create().await;
-    let class_key = "p4_pages";
+    let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin pages setup");
     let now = database_now(&mut transaction).await.expect("database now");
     let today = utc_day(now);
@@ -1172,7 +1112,7 @@ async fn page_facet_aggregate_estimate_and_plans_are_window_and_index_bounded() 
     let forever_leaf: String = sqlx::query_scalar(&format!(
         "SELECT leaf_name FROM {LEAF_CATALOG}
          WHERE class_key = 'forever' AND detached_at IS NULL AND dropped_at IS NULL
-           AND lower_anchor <= $1 AND upper_anchor > $1"
+           AND (lower_bound_kind = 'OPEN' OR lower_anchor <= $1) AND upper_anchor > $1"
     ))
     .bind(today + Duration::hours(1))
     .fetch_one(&mut *transaction)
@@ -1209,8 +1149,6 @@ async fn page_facet_aggregate_estimate_and_plans_are_window_and_index_bounded() 
         )
         .await;
     }
-    stamp_leaf_birth(&mut transaction, finite_leaf.leaf_name(), today).await;
-    stamp_leaf_birth(&mut transaction, &forever_leaf, today).await;
     StagedLoaderPublisher
         .republish(&mut transaction)
         .await
@@ -1374,7 +1312,7 @@ async fn guard_marker(connection: &mut PgConnection) -> Option<String> {
 #[serial]
 async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() {
     let database = TestDatabase::create().await;
-    let class_key = "p4_guard";
+    let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin guard setup");
     assert_eq!(guard_marker(&mut transaction).await, None);
     let now = database_now(&mut transaction).await.expect("database now");
@@ -1440,8 +1378,7 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
         .execute(&mut *connection)
         .await
         .expect("drop rendered guard");
-    let interim_functions =
-        include_str!("../../../../migrations/1000_baseline/0003_interim_functions.sql");
+    let interim_functions = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
     let guard_start = interim_functions
         .find("CREATE FUNCTION horsies_task_history_duplicate_staged(")
         .expect("first guard version in the baseline");
@@ -1479,19 +1416,15 @@ fn open_ended_leaf_is_probed_in_the_pruned_and_legacy_passes_only() {
     let open_lower = timestamp("2026-09-26T00:00:00Z");
     let daily = "horsies_task_history_forever_2026_09_25";
     let open = "horsies_task_history_forever_open_2026_09_26";
-    let manifest = LookupManifest::new(
-        vec![
-            LookupLeaf::new(daily, daily_lower, open_lower, None).unwrap(),
-            LookupLeaf::new(
-                open,
-                open_lower,
-                crate::core::history::commands::open_end_anchor(),
-                None,
-            )
-            .unwrap(),
-        ],
-        None,
-    )
+    let manifest = LookupManifest::new(vec![
+        LookupLeaf::new(daily, LeafLowerBound::At(daily_lower), open_lower).unwrap(),
+        LookupLeaf::new(
+            open,
+            LeafLowerBound::At(open_lower),
+            crate::core::history::commands::open_end_anchor(),
+        )
+        .unwrap(),
+    ])
     .unwrap();
     let provenance = render_staged_provenance_function(&manifest);
     let guard = render_staged_duplicate_guard_function(&manifest);
@@ -1512,8 +1445,6 @@ fn result_wire_row(location: &str) -> ResultWireRow {
         live_result: None,
         failed_reason: None,
         result_envelope_version: Some(1),
-        result_codec: Some("json-utf8".to_owned()),
-        result_content_type: Some("application/json".to_owned()),
         result_payload: Some(b"1".to_vec()),
         result_digest: Some(vec![3; 32]),
     }
@@ -1568,7 +1499,7 @@ fn result_wire_decode_is_typed_and_fail_closed() {
             ..result_wire_row("LIVE")
         },
         ResultWireRow {
-            result_codec: None,
+            result_envelope_version: None,
             ..result_wire_row("HISTORY")
         },
         ResultWireRow {
@@ -1590,12 +1521,12 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     use crate::core::TaskResult;
 
     let database = TestDatabase::create().await;
-    let class_key = "p4_result";
+    let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin result setup");
     let now = database_now(&mut transaction).await.expect("database now");
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
-    let leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
     let failed_id = v7_with_birth(today + Duration::hours(2));
     let completed_id = Uuid::from_u128(v7_with_birth(today + Duration::hours(2)).as_u128() + 1);
     let live_id = v7_with_birth(today + Duration::hours(4));
@@ -1621,12 +1552,6 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     )
     .await;
     seed_live_row(&mut transaction, live_id, class_key, now).await;
-    stamp_leaf_birth(
-        &mut transaction,
-        leaf.leaf_name(),
-        today + Duration::hours(1),
-    )
-    .await;
     StagedLoaderPublisher
         .republish(&mut transaction)
         .await
@@ -1709,8 +1634,8 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     sqlx::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
          RETURNS TABLE (location text, status text, live_result text, failed_reason text,
-                        result_envelope_version smallint, result_codec text,
-                        result_content_type text, result_payload bytea, result_digest bytea)
+                        result_envelope_version smallint, result_payload bytea,
+                        result_digest bytea)
          LANGUAGE plpgsql STABLE AS
          $$ BEGIN PERFORM core_p4_function_that_does_not_exist(); END $$",
     )

@@ -1422,7 +1422,7 @@ mod tests {
         app_config
             .retention
             .queue_retention
-            .insert("bulk".to_owned(), Some(chrono::Duration::hours(36)));
+            .insert("bulk".to_owned(), Some(chrono::Duration::days(2)));
         let slot = Utc::now() - chrono::Duration::seconds(1);
 
         let task_id = enqueue_scheduled_task(&broker, &schedule, &app_config, slot)
@@ -1439,7 +1439,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(row.0, task_id.to_string());
-        assert_eq!(row.1, "q_bulk_36h");
+        assert_eq!(row.1, "standard_2d");
         assert_eq!(row.2, "DECLINED_BY_POLICY");
         assert_eq!(row.3, 32);
         assert!(!row.4);

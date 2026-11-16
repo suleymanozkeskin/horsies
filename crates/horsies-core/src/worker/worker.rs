@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_startup_coverage_in_pool, DeclaredRetentionClass, StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, StartupCoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::task::TaskRegistry;
@@ -322,21 +322,12 @@ impl Worker {
     /// retry.
     async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
-        let declared_classes: Vec<DeclaredRetentionClass> = self
-            .app_config
-            .retention
-            .registrable_classes()
-            .into_iter()
-            .map(|class| DeclaredRetentionClass {
-                class_key: class.key,
-                duration: class.duration,
-            })
-            .collect();
+        let declared_periods = self.app_config.retention.registrable_periods();
         let startup_coverage = ensure_startup_coverage_in_pool(
             self.broker.session_pool(),
             self.app_config.retention.history_leaf_horizon_days,
             self.app_config.retention.heartbeat_leaf_horizon_hours,
-            &declared_classes,
+            &declared_periods,
             &StagedLoaderPublisher,
         )
         .await?;

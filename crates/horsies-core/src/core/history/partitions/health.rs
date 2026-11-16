@@ -4,23 +4,28 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 
 use crate::core::history::commands::CollectPartitionHealth;
-use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_FOREVER, WORKFLOW_PHASE2_PENDING};
+use crate::core::history::names::{
+    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER, WORKFLOW_PHASE2_PENDING,
+};
 use crate::core::history::outcomes::{
     CatalogConflictKind, ClassCoverage, HealthFault, PartitionHealthReport,
 };
 
-use super::catalog::{database_now, pin_utc_timezone, read_retention_class, restore_timezone};
+use super::catalog::{
+    database_now, pin_utc_timezone, read_retention_class, restore_timezone, RetentionClassKind,
+    OPEN_LOWER_BOUND_KIND,
+};
 
 pub const COVERAGE_FLOOR_INTERVALS: i64 = 2;
 
 #[derive(Debug, FromRow)]
 struct LeafSurvey {
     leaf_name: String,
-    lower_anchor: DateTime<Utc>,
+    /// NULL for the `OPEN` lower bound of the static forever leaf.
+    lower_anchor: Option<DateTime<Utc>>,
     upper_anchor: DateTime<Utc>,
-    cataloged_bound: String,
+    expected_bound: String,
     relation_exists: bool,
     actual_bound: Option<String>,
     id_index_exists: bool,
@@ -43,25 +48,10 @@ pub async fn collect_partition_health(
             }],
         });
     };
-    let (duration, parent_name) = match (
-        command.class_key(),
-        retention.duration,
-        retention.finite_parent_name,
-    ) {
-        (FOREVER_CLASS_KEY, None, _) => (None, TASK_HISTORY_FOREVER.to_owned()),
-        (_, None, _) => {
-            return Ok(PartitionHealthReport {
-                class_key: command.class_key().to_owned(),
-                checked_at: now,
-                coverage: None,
-                faults: Vec::new(),
-            });
-        }
-        (_, Some(duration), Some(parent)) => (Some(duration), parent),
-        (_, Some(_), None) => {
-            return Err(HistoryError::contract(
-                "finite retention class has no physical parent",
-            ));
+    let (duration, parent_name) = match retention.kind {
+        RetentionClassKind::Forever => (None, TASK_HISTORY_FOREVER.to_owned()),
+        RetentionClassKind::Period(_) | RetentionClassKind::Heartbeat(_) => {
+            (retention.retention(), retention.parent_name()?)
         }
     };
     let survey = survey_attached_leaves(connection, command.class_key(), &parent_name).await?;
@@ -97,7 +87,7 @@ pub async fn collect_partition_health(
             }
             Some(false) => {}
         }
-        if leaf.actual_bound.as_deref() != Some(leaf.cataloged_bound.as_str())
+        if leaf.actual_bound.as_deref() != Some(leaf.expected_bound.as_str())
             || !leaf.id_index_exists
         {
             faults.push(HealthFault::LeafNonconformant {
@@ -113,7 +103,7 @@ pub async fn collect_partition_health(
                 prior.max(leaf.upper_anchor)
             }),
         );
-        if leaf.lower_anchor >= now {
+        if leaf.lower_anchor.is_some_and(|lower| lower >= now) {
             complete_future += 1;
         }
         if leaf.blocker_count > 0 {
@@ -164,11 +154,21 @@ async fn survey_attached_leaves(
     let prior = pin_utc_timezone(connection).await?;
     let sql = format!(
         "SELECT c.leaf_name, c.lower_anchor, c.upper_anchor,
-                c.partition_bound AS cataloged_bound,
+                format(
+                    'FOR VALUES FROM (%s) TO (%L)',
+                    CASE c.lower_bound_kind
+                        WHEN '{OPEN_LOWER_BOUND_KIND}' THEN 'MINVALUE'
+                        ELSE quote_literal(c.lower_anchor)
+                    END,
+                    c.upper_anchor
+                ) AS expected_bound,
                 to_regclass(c.leaf_name) IS NOT NULL AS relation_exists,
                 (SELECT pg_get_expr(pc.relpartbound, pc.oid) FROM pg_class AS pc
                  WHERE pc.oid = to_regclass(c.leaf_name)) AS actual_bound,
-                to_regclass(c.id_index_name) IS NOT NULL AS id_index_exists,
+                to_regclass(
+                    c.leaf_name || CASE WHEN c.class_key = $3 THEN '_probe_idx'
+                                        ELSE '_task_idx' END
+                ) IS NOT NULL AS id_index_exists,
                 (SELECT i.inhdetachpending FROM pg_inherits AS i
                  WHERE i.inhparent = to_regclass($2)
                    AND i.inhrelid = to_regclass(c.leaf_name)) AS detach_pending,
@@ -179,11 +179,12 @@ async fn survey_attached_leaves(
                    AND p.history_anchor < c.upper_anchor) AS blocker_count
          FROM {LEAF_CATALOG} AS c
          WHERE c.class_key = $1 AND c.detached_at IS NULL AND c.dropped_at IS NULL
-         ORDER BY c.lower_anchor"
+         ORDER BY c.lower_anchor NULLS FIRST"
     );
     let result = sqlx::query_as::<_, LeafSurvey>(&sql)
         .bind(class_key)
         .bind(parent_name)
+        .bind(HEARTBEAT_CLASS_KEY)
         .fetch_all(&mut *connection)
         .await;
     let restored = restore_timezone(connection, &prior).await;
