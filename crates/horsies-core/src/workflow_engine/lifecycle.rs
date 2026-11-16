@@ -10,6 +10,7 @@ use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::CheckoutClass;
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
@@ -17,7 +18,10 @@ use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
 };
-use crate::workflow_engine::steps::{self, CancelOutcome, PauseOutcome};
+use crate::workflow_engine::steps::{
+    self, advance_parents, CancelOutcome, EngineContext, ParentAdvance, PauseOutcome,
+    ResumeDisposition, TransactionStep,
+};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -581,25 +585,25 @@ pub(crate) async fn pause_tree_and_relocate(
     Ok(paused)
 }
 
-/// Resume a paused workflow.
+/// Resumes a workflow tree: `horsies_workflow_resume`, in a transaction (`BEGIN`, the step, `COMMIT`) on the
+/// main core pool as producer work (Python `resume_workflow`, `core/workflows/lifecycle.py:1084-1263`).
 ///
-/// Transitions PAUSED -> RUNNING. Re-evaluates all PENDING tasks
-/// (checking if deps became terminal while paused), enqueues READY
-/// tasks (including sub-workflow READY tasks), and cascades resume
-/// to all paused child workflows.
+/// The function moves the workflow PAUSED -> RUNNING with its PAUSED descendants, promotes their PENDING nodes,
+/// enqueues their READY nodes (task rows minted), runs the completion checks deepest first, and advances the
+/// parent node of a resumed child that ended, when that parent is resumed too.
 ///
-/// Idempotent: if the workflow is already RUNNING (e.g. a crash committed the
-/// parent PAUSED->RUNNING flip but died before cascading resume to children,
-/// leaving them stranded PAUSED), the re-evaluation, child cascade, and
-/// completion check still run — only the status flip is skipped (C8).
+/// Outcomes:
+/// - `Ok(true)`: the tree was resumed. When the step ended the resumed workflow and it has a parent, its parent
+///   node advances after the commit ([`advance_parents`]). Then the tree recovery pass runs as before.
+/// - `Ok(false)`: the workflow exists and is not PAUSED, RUNNING included; nothing was written (Python's rule).
+/// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+/// - `DB_OPERATION_FAILED`, `INTERNAL_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its
+///   `COMMIT` reply was lost.
+/// - `RESUME_RECOVERY_FAILED`, not retryable: the resume committed, and the parent advance or the tree recovery
+///   pass after it failed.
 ///
-/// Returns:
-/// - `true` when the workflow was flipped PAUSED -> RUNNING, or when an
-///   already-RUNNING call actually recovered something (children resumed or
-///   ready nodes re-enqueued).
-/// - `Ok(false)` when there was nothing to do: the workflow is already RUNNING
-///   and consistent, or it is in a terminal state.
-/// - `WorkflowNotFound` when the workflow does not exist.
+/// A step that owes child starts is rolled back and the resume runs on the engine code
+/// (`resume_workflow_inner`) until `horsies_workflow_child_start` replaces that path (#902).
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn resume_workflow(
@@ -610,41 +614,78 @@ pub async fn resume_workflow(
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    let pool = broker.pool();
-    let steps = resume_workflow_inner(pool, workflow_id, registry, payload, retention)
+    let engine = EngineContext {
+        registry,
+        payload,
+        retention,
+    };
+    let step = steps::resume(broker, workflow_id)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))?;
-    match steps {
-        ResumeSteps::NotResumed => Ok(false),
-        ResumeSteps::Ran { changed } => {
-            // Recovery completion pass: a child workflow may have COMPLETED while the
-            // parent was paused, leaving the parent's sub-workflow node stale. Run the
-            // recovery sweep immediately so the parent picks it up now rather than
-            // waiting for the periodic reaper (parity with horsies PR #66). The sweep
-            // is uncapped but restricted to this workflow's tree; resume must recover
-            // the whole tree without scanning or mutating unrelated workflows.
-            // finalizing_grace_ms = 0: resume recovers immediately. The workflow is
-            // RUNNING at this point, so a failure here is RESUME_RECOVERY_FAILED
-            // (Python `core/workflows/lifecycle.py:1234-1262`), not retryable.
-            crate::workflow_engine::recovery::recover_stuck_workflow_tree(
-                pool,
-                registry,
-                workflow_id,
-                0,
-                payload,
-                retention,
-            )
-            .await
-            .map_err(|error| HandleOperationError {
-                code: HandleErrorCode::ResumeRecoveryFailed,
-                message: format!(
-                    "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
-                ),
-                retryable: false,
-                workflow_id,
-            })?;
-            Ok(changed)
+    let changed = match step {
+        TransactionStep::Committed(outcome) => match outcome.disposition {
+            ResumeDisposition::NotFound => {
+                return Err(to_handle_error(
+                    WorkflowError::WorkflowNotFound { workflow_id },
+                    workflow_id,
+                ))
+            }
+            ResumeDisposition::NotPaused => return Ok(false),
+            ResumeDisposition::Resumed => {
+                match outcome.parent_advance {
+                    ParentAdvance::Owed { child_workflow_id } => {
+                        advance_parents(broker, CheckoutClass::Batch, child_workflow_id, engine)
+                            .await
+                            .map_err(|failure| {
+                                resume_recovery_failed(workflow_id, &failure.error)
+                            })?;
+                    }
+                    ParentAdvance::NotOwed => {}
+                }
+                true
+            }
+        },
+        TransactionStep::RolledBackForChildStarts(owed) => {
+            tracing::info!(
+                workflow_id = %workflow_id,
+                owed_child_starts = owed.len(),
+                "resume owes child starts; the engine code resumes the workflow",
+            );
+            match resume_workflow_inner(broker.pool(), workflow_id, registry, payload, retention)
+                .await
+                .map_err(|e| to_handle_error(e, workflow_id))?
+            {
+                ResumeSteps::NotResumed => return Ok(false),
+                ResumeSteps::Ran { changed } => changed,
+            }
         }
+    };
+    // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
+    // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree. finalizing_grace_ms = 0:
+    // resume recovers immediately (Python `core/workflows/lifecycle.py:1234-1262`).
+    crate::workflow_engine::recovery::recover_stuck_workflow_tree(
+        broker.pool(),
+        registry,
+        workflow_id,
+        0,
+        payload,
+        retention,
+    )
+    .await
+    .map_err(|error| resume_recovery_failed(workflow_id, &error))?;
+    Ok(changed)
+}
+
+/// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
+/// retryable (the workflow is RUNNING).
+fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOperationError {
+    HandleOperationError {
+        code: HandleErrorCode::ResumeRecoveryFailed,
+        message: format!(
+            "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
+        ),
+        retryable: false,
+        workflow_id,
     }
 }
 
@@ -1147,9 +1188,8 @@ use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
 
 #[cfg(test)]
 mod resume_idempotency_tests {
-    //! C8: a crash after the parent PAUSED->RUNNING flip but before the child
-    //! cascade leaves children stranded PAUSED under a RUNNING parent. Retrying
-    //! `resume_workflow` must recover them (idempotent), not return early.
+    //! Resume outcomes and the engine-code resume steps (`resume_workflow_inner`,
+    //! `reevaluate_and_enqueue`), which still run a resume that owes a child start.
     use super::*;
     use crate::broker::PostgresBroker;
     use serial_test::serial;
@@ -1223,7 +1263,7 @@ mod resume_idempotency_tests {
 
     #[tokio::test]
     #[serial]
-    async fn resume_on_running_parent_recovers_stranded_paused_child() {
+    async fn resume_of_a_running_workflow_writes_nothing() {
         let broker =
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
@@ -1232,7 +1272,7 @@ mod resume_idempotency_tests {
 
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
-        // Post-crash state: parent already RUNNING, child still PAUSED.
+        // A RUNNING parent with a PAUSED child (the child was paused through its own handle).
         insert_workflow(&pool, &parent, "RUNNING", None).await;
         insert_running_task(&pool, &parent).await;
         insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
@@ -1247,15 +1287,9 @@ mod resume_idempotency_tests {
         )
         .await
         .expect("resume");
-        assert!(
-            resumed,
-            "idempotent resume must report it recovered the child"
-        );
-        assert_eq!(
-            status_of(&pool, &child).await,
-            "RUNNING",
-            "stranded PAUSED child must be resumed, not left PAUSED forever",
-        );
+        // Python's rule: a workflow that is not PAUSED is not resumed, and nothing is written.
+        assert!(!resumed, "a RUNNING workflow is not resumed");
+        assert_eq!(status_of(&pool, &child).await, "PAUSED");
 
         cleanup(&pool, &[&parent, &child]).await;
     }
