@@ -85,11 +85,16 @@ pub enum ErrorCode {
     ConfigInvalidClusterCap,
     ConfigInvalidPrefetch,
     BrokerInvalidUrl,
+    /// A broker config names a pool field that 0.7.0 moved to the worker
+    /// profile.
+    ConfigInvalidBrokerPool,
     ConfigInvalidRecovery,
     ConfigInvalidSchedule,
     CliInvalidArgs,
     WorkerInvalidLocator,
     ConfigInvalidResilience,
+    /// A worker profile that AppConfig validation refuses.
+    ConfigInvalidWorkerProfile,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -139,11 +144,13 @@ impl ErrorCode {
             Self::ConfigInvalidClusterCap => "HRS-201",
             Self::ConfigInvalidPrefetch => "HRS-202",
             Self::BrokerInvalidUrl => "HRS-203",
+            Self::ConfigInvalidBrokerPool => "HRS-213",
             Self::ConfigInvalidRecovery => "HRS-204",
             Self::ConfigInvalidSchedule => "HRS-205",
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
             Self::ConfigInvalidResilience => "HRS-208",
+            Self::ConfigInvalidWorkerProfile => "HRS-218",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -198,11 +205,13 @@ impl ErrorCode {
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
             | Self::BrokerInvalidUrl
+            | Self::ConfigInvalidBrokerPool
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
+            | Self::ConfigInvalidWorkerProfile
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -266,11 +275,13 @@ impl ErrorCode {
                 | Self::ConfigInvalidClusterCap
                 | Self::ConfigInvalidPrefetch
                 | Self::BrokerInvalidUrl
+                | Self::ConfigInvalidBrokerPool
                 | Self::ConfigInvalidRecovery
                 | Self::ConfigInvalidSchedule
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
                 | Self::ConfigInvalidResilience
+                | Self::ConfigInvalidWorkerProfile
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention

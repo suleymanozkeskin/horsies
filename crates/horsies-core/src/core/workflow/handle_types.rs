@@ -16,7 +16,8 @@ use uuid::Uuid;
 ///    `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[code_catalog(module = "workflow_handle", base = "str_enum")]
 pub enum HandleErrorCode {
     /// Workflow ID does not exist in the database.
     WorkflowNotFound,
@@ -30,7 +31,14 @@ pub enum HandleErrorCode {
     ResumeRecoveryFailed,
     /// Internal polling/event-loop runner failed.
     LoopRunnerFailed,
-    /// Internal / unexpected error.
+    /// The broker already holds resource sets for its limit of open event loops, and this call ran on a
+    /// new one. Nothing ran. Python client only; removed before 0.8.0.
+    EventLoopLimit,
+    /// A sync handle method was called on a thread that runs an event loop. Its wait would stall that
+    /// loop, so nothing ran. Python client only.
+    AsyncContext,
+    /// Internal / unexpected error. Not in Python's catalog: the workflow engine still folds some errors
+    /// into it.
     InternalFailed,
 }
 
@@ -42,6 +50,8 @@ impl std::fmt::Display for HandleErrorCode {
             Self::StoredDataInvalid => write!(f, "STORED_DATA_INVALID"),
             Self::ResumeRecoveryFailed => write!(f, "RESUME_RECOVERY_FAILED"),
             Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
+            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
+            Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
             Self::InternalFailed => write!(f, "INTERNAL_FAILED"),
         }
     }

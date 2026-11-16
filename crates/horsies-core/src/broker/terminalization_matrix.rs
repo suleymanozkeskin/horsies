@@ -14,12 +14,11 @@
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
@@ -264,9 +263,12 @@ impl IsolatedTerminalizationTestDatabase {
     async fn create() -> Self {
         let database = Self::create_empty().await;
         let pool = &database.pool;
-        run_horsies_migrations(pool)
-            .await
-            .expect("migrate isolated terminalization database");
+        crate::broker::migrations::install_schema(
+            pool,
+            crate::broker::client_family::ClientFamily::Rust,
+        )
+        .await
+        .expect("migrate isolated terminalization database");
         let mut transaction = pool.begin().await.expect("coverage transaction");
         let coverage =
             ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -341,7 +343,7 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .await
                 .expect("create P5 database");
             let generated_options = base_options.database(&database_name);
-            let database_url = generated_options.to_url_lossy().to_string();
+            let database_url = crate::broker::pools::test_url_of(&generated_options);
             let anchor = PgPoolOptions::new()
                 .min_connections(1)
                 .max_connections(1)
@@ -356,9 +358,12 @@ pub(crate) async fn migrated_pool() -> PgPool {
                     .await
                     .expect("unlock P5 database setup");
             assert!(unlocked, "P5 database setup lock was held");
-            run_horsies_migrations(&anchor)
-                .await
-                .expect("migrate P5 database");
+            crate::broker::migrations::install_schema(
+                &anchor,
+                crate::broker::client_family::ClientFamily::Rust,
+            )
+            .await
+            .expect("migrate P5 database");
             let mut transaction = anchor.begin().await.expect("coverage transaction");
             let coverage =
                 ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -444,6 +449,7 @@ async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
     assert!(!database_exists);
 }
 
+/// The URL of the P5 database, accepted by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
     let pool = migrated_pool().await;
     drop(pool);
@@ -1112,7 +1118,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
                 worker_id: "w1".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: None,
         },
     )
@@ -1128,7 +1134,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
 
     let image = post_image(&pool, &id).await;
     assert_eq!(image.status, "FAILED");
-    assert_eq!(image.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(image.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(
         image.failed_reason, None,
         "the terminal writer owns the final-attempt summary; None clears \
@@ -2947,7 +2953,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
                 worker_id: "w1".to_owned(),
             },
             result_json: "{}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("failed".to_owned()),
         },
     )
@@ -3210,6 +3216,10 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
     }
 }
 
+/// The baseline result rule (`horsies_task_history_result_domain`): an
+/// administrative cancel stores no result and no digest; every other kind
+/// stores the payload it was given and its sha256 digest, and the deferred
+/// record of a workflow task carries the same digest.
 #[tokio::test]
 #[serial]
 async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
@@ -3236,12 +3246,6 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
             if deferred {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
             }
-            sqlx::query("UPDATE horsies_tasks SET result = $2 WHERE id = $1")
-                .bind(id)
-                .bind(&payload)
-                .execute(pool)
-                .await
-                .unwrap();
             let mut tx = pool.begin().await.unwrap();
             sqlx::query("SELECT horsies_move_task_to_history($1,$2,$3,NOW(),$4,NULL,NULL)")
                 .bind(id)
@@ -3257,19 +3261,18 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 .execute(tx.as_mut())
                 .await
                 .unwrap();
-            let (result, prior, digest): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as("SELECT result_payload, prior_result_payload, result_digest FROM horsies_task_history WHERE task_id=$1")
-                .bind(id).fetch_one(tx.as_mut()).await.unwrap();
-            let expected_payload = payload.as_ref().map(|v| v.as_bytes().to_vec());
-            match admin {
-                true => {
-                    assert_eq!(prior, expected_payload);
-                    assert!(result.is_none());
-                }
-                false => {
-                    assert_eq!(result, expected_payload);
-                    assert!(prior.is_none());
-                }
-            }
+            let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT result_payload, result_digest FROM horsies_task_history WHERE task_id=$1",
+            )
+            .bind(id)
+            .fetch_one(tx.as_mut())
+            .await
+            .unwrap();
+            let expected_payload = match admin {
+                true => None,
+                false => payload.as_ref().map(|v| v.as_bytes().to_vec()),
+            };
+            assert_eq!(result, expected_payload);
             let expected_digest: Option<Vec<u8>> = sqlx::query_scalar("SELECT sha256($1::bytea)")
                 .bind(&expected_payload)
                 .fetch_one(tx.as_mut())

@@ -14,6 +14,7 @@ import pytest
 from psycopg import sql
 
 from horsies.core.utils.url import to_psycopg_url
+from tests.session_database import database_name_prefix
 
 
 @dataclass(frozen=True)
@@ -70,9 +71,13 @@ def _admin_url() -> str:
 
 @contextmanager
 def isolated_pgbouncer_database(
-    prefix: str = "horsies_pgbouncer",
+    role: str = "pgbouncer",
 ) -> Generator[PgbouncerUrls, None, None]:
-    '''Create a per-test Postgres database and return URLs for every pool mode.'''
+    '''Create a per-test Postgres database and return URLs for every pool mode.
+
+    The database is named ``<run prefix><role>_<12 hex>``
+    (``tests/session_database.database_name_prefix``).
+    '''
     (
         direct_template,
         tx_template,
@@ -80,7 +85,7 @@ def isolated_pgbouncer_database(
         session_template,
         statement_template,
     ) = _template_urls()
-    db_name = f"{prefix}_{uuid4().hex}"
+    db_name = f"{database_name_prefix()}{role}_{uuid4().hex[:12]}"
     admin_url = to_psycopg_url(_admin_url())
 
     with psycopg.connect(admin_url, autocommit=True) as conn:
