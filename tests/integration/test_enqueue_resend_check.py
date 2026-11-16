@@ -149,3 +149,27 @@ async def test_keyed_send_onto_a_task_id_with_another_sent_at_is_payload_mismatc
         ).one()
     assert reservations == 0
     assert bound_digest is None
+
+
+async def test_exact_id_resend_without_sent_at_is_another_send(
+    broker: PostgresBroker,
+) -> None:
+    """A send without ``sent_at`` stores the time of its own call, so a
+    resend without ``sent_at`` never repeats it, whatever ``enqueue_sha``
+    the caller passes."""
+    task_id = mint_task_id()
+
+    first = await broker.enqueue_async(
+        TASK_NAME, task_id=task_id, enqueue_sha='same-sha', kwargs_json=KWARGS_JSON,
+    )
+    resend = await broker.enqueue_async(
+        TASK_NAME, task_id=task_id, enqueue_sha='same-sha', kwargs_json=KWARGS_JSON,
+    )
+
+    assert first == Ok(task_id)
+    match resend:
+        case Err(err_value=error):
+            assert error.code is BrokerErrorCode.PAYLOAD_MISMATCH
+        case Ok(ok_value=resend_id):
+            raise AssertionError(f'resend without sent_at returned {resend_id}')
+    assert len(await stored_rows(broker, task_id)) == 1
