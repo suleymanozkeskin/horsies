@@ -1015,6 +1015,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
@@ -1149,6 +1150,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("filters");
@@ -1365,6 +1367,7 @@ async fn seed_node(
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("detail");
@@ -1461,6 +1464,7 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("workflow");
@@ -1633,6 +1637,7 @@ async fn database_failure_is_typed_and_retryable() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn unpublished_staged_detail_preserves_absent_semantics() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("unpublished");

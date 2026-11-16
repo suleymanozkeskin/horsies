@@ -55,7 +55,9 @@ use crate::broker::task_lists::{
     bounded_list_from_rows, BoundedTaskList, ListShapeError, StaleMinutes, TASK_LIST_BOUND,
 };
 use crate::broker::wait_limit::WaitLimit;
-use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
+use crate::db::{
+    PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
+};
 
 use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
@@ -723,6 +725,13 @@ static NOTIFY_WORKER_PING: TypedStatement = TypedStatement::new(
     &[ParameterType::Text, ParameterType::Text],
 );
 
+/// The family row of the database, read before the first write of a handle.
+static READ_CLIENT_FAMILY: TypedStatement = TypedStatement::new(
+    "read_client_family",
+    crate::broker::client_family::READ_FAMILY_SQL,
+    &[],
+);
+
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
@@ -968,8 +977,9 @@ pub enum SchemaInitializationMode {
 ///   the web layer, migrations and the listeners, which borrow them through
 ///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`].
 ///
-/// Every LISTEN of the broker goes through its one listener connection on the
-/// session URL.
+/// Every LISTEN of the broker goes through the process listener of its
+/// session URL: one connection, shared with the other brokers of the process
+/// on the same URL.
 pub struct PostgresBroker {
     core: CoreHandle,
     statement_log: StatementLog,
@@ -1010,14 +1020,15 @@ impl PostgresBroker {
     }
 
     /// Construct a test broker on the database of a test's sqlx pool, with
-    /// its listener on `session_url`. The listener opens its own connection
-    /// at the first subscription; the URL is parsed then.
+    /// its listener on `session_url`: the process listener of that URL, which
+    /// opens its connection at the first subscription with the default socket
+    /// settings (`DEFAULT_SOCKET_SETTINGS`). The URL is parsed then.
     #[cfg(test)]
     pub fn from_pool_and_session_url(pool: PgPool, session_url: &str) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::MigrateAndValidate,
-            ProcessListener::on_session_url(session_url),
+            ProcessListener::on_session_url(session_url, DEFAULT_SOCKET_SETTINGS),
         )
     }
 
@@ -1183,7 +1194,10 @@ impl PostgresBroker {
                 IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
             )
             .num_seconds(),
-            listener: ProcessListener::on_session_url(config.effective_session_database_url()),
+            listener: ProcessListener::on_session_url(
+                config.effective_session_database_url(),
+                config.socket_settings(),
+            ),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
@@ -1246,9 +1260,15 @@ impl PostgresBroker {
     pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
         self.client_family_admitted
             .get_or_try_init(|| async {
-                let recorded =
-                    crate::broker::client_family::read_recorded_family(&self.pool).await?;
-                crate::broker::client_family::admit_family(recorded, self.client_family)
+                let rows = self.query_main(&READ_CLIENT_FAMILY.bind().finish()).await?;
+                let stored: Option<String> = match rows.first() {
+                    Some(row) => Some(column(row, &READ_CLIENT_FAMILY, "family")?),
+                    None => None,
+                };
+                crate::broker::client_family::admit_family(
+                    crate::broker::client_family::recorded_family_from(stored),
+                    self.client_family,
+                )
             })
             .await?;
         Ok(())
@@ -1427,8 +1447,9 @@ impl PostgresBroker {
         Ok(outcome)
     }
 
-    /// The broker's listener: the one LISTEN connection of the broker, on the
-    /// session URL, shared by every subscriber.
+    /// The broker's listener: the process listener of the session URL, one
+    /// LISTEN connection shared by every subscriber of every broker of the
+    /// process on that URL.
     pub(crate) fn listener(&self) -> &ProcessListener {
         &self.listener
     }
@@ -6107,6 +6128,8 @@ mod session_settings_tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         }
     }
 
@@ -6536,6 +6559,8 @@ mod result_wait_tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         let broker = PostgresBroker::connect_observe_only(&config)
             .await
@@ -6547,6 +6572,29 @@ mod result_wait_tests {
             .ping_workers(None, Duration::from_millis(200), None)
             .await;
         assert!(pinged.is_ok(), "{:?}", pinged.err());
+    }
+
+    /// Two brokers on one session URL in one process share one listener
+    /// connection.
+    #[tokio::test]
+    #[serial]
+    async fn two_brokers_on_one_session_url_open_one_listener_connection() {
+        let application_name = format!("shared_listener_{}", Uuid::new_v4().simple());
+        let first = listener_broker(&application_name).await;
+        let second = listener_broker(&application_name).await;
+
+        let first_wait = first.result_wait_mode(Uuid::new_v4()).await;
+        let second_wait = second.result_wait_mode(Uuid::new_v4()).await;
+        assert!(matches!(first_wait, ResultWaitMode::Subscribed(_)));
+        assert!(matches!(second_wait, ResultWaitMode::Subscribed(_)));
+
+        let connections: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+                .bind(&application_name)
+                .fetch_one(first.pool())
+                .await
+                .expect("count the listener connections");
+        assert_eq!(connections, 1);
     }
 
     /// Dropping the broker stops its listener. The wait turns into polling,
