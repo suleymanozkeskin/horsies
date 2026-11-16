@@ -415,7 +415,7 @@ class TestProgram:
 
         move = body.index('horsies_move_task_to_history(')
         assert body.index('pg_notify') > move
-        assert 'IF NOT v_ctx.is_workflow_task THEN' in body[move:]
+        assert 'IF NOT v_ctx.is_workflow_task AND p_wake THEN' in body[move:]
 
     def test_installation_has_the_type_before_the_function(self) -> None:
         sql = baseline_sql()

@@ -665,23 +665,22 @@ class TestBatchedFusedCompletion:
     def test_each_row_calls_the_fused_completion_with_its_own_arguments(
         self,
     ) -> None:
+        """Each row passes its own id, claim generation and result; the
+        worker and the wake are those of the batch."""
         assert (
-            f'FROM {COMPLETE_FUSED_FUNCTION}(\n'
-            '            v_item.task_id, v_item.worker_id, v_item.claimed_at,\n'
-            '            v_item.result, v_item.notify_channel, v_item.notify_payload\n'
-            '        );'
+            f'FROM {COMPLETE_FUSED_FUNCTION}(v_item.id, p_worker_id, '
+            'v_item.claimed_at, v_item.result, p_wake) AS c;'
         ) in self.BODY
-        assert 'SELECT * INTO STRICT v_row' in self.BODY
 
     def test_rows_run_in_sorted_task_id_order_at_their_input_ordinality(
         self,
     ) -> None:
         assert 'WITH ORDINALITY' in self.BODY
         loop = self.BODY.index('FOR v_item IN')
-        assert self.BODY.index('ORDER BY u.task_id', loop) < self.BODY.index(
+        assert self.BODY.index('ORDER BY u.id', loop) < self.BODY.index(
             'LOOP', loop
         )
-        assert 'v_row.ordinality := v_item.ordinality;' in self.BODY
+        assert 'SELECT c.task_id, v_item.position,' in self.BODY
 
     def test_the_function_takes_no_lock_and_no_subtransaction_of_its_own(
         self,
@@ -696,9 +695,11 @@ class TestBatchedFusedCompletion:
     def test_the_arrays_are_checked_before_any_row_runs(self) -> None:
         loop = self.BODY.index('FOR v_item IN')
         for check in (
-            "'batch arrays must be non-NULL'",
-            "'batch array lengths differ'",
-            "'batch task ids must be distinct and non-NULL'",
+            'batch arrays, worker and wake must be non-NULL',
+            'a batch holds 1 to 64 rows',
+            'batch array lengths differ',
+            'batch task ids must be distinct and non-NULL',
+            'every row needs its claim generation',
         ):
             assert self.BODY.index(check) < loop
 
@@ -709,9 +710,11 @@ class TestBatchedFusedCompletion:
         assert fused < batched
 
 _LOCKING_READ = re.compile(
-    r'FROM horsies_tasks\n    WHERE (?P<where>.*?)\n    FOR UPDATE;',
+    r'FROM horsies_tasks(?: (?P<alias>\w+))?\n    WHERE (?:(?P=alias)\.)?(?P<where>.*?)\n    FOR UPDATE;',
     re.DOTALL,
 )
+"""A locking read of one live row; ``where`` is its predicate without the
+table alias."""
 
 
 def _function_ddl(name: str) -> str:

@@ -67,8 +67,12 @@ _MOVE_CALL_RE: Final = re.compile(
 )
 """A call of the single-row move, capturing the status it is given."""
 
-_WORKER_FENCE: Final = '= CAST(p_worker_id AS VARCHAR)'
-"""The ownership comparison: the locked row's worker against the caller's."""
+_WORKER_FENCE_RE: Final = re.compile(
+    r'= CAST\(p_worker_id AS VARCHAR\)|\.claimed_by_worker_id = p_worker_id\b',
+)
+"""The ownership comparison: the locked row's worker against the caller's.
+The interim functions cast the parameter; the lifecycle functions compare
+the locked row's column with it."""
 
 _GENERATION_FENCE_RE: Final = re.compile(r'claimed_at = p_claimed_at\b')
 _PAIRWISE_GENERATION_FENCE: Final = '= input.expected_claimed_at'
@@ -78,7 +82,7 @@ _HEARTBEAT_STALE_GUARD: Final = 'secs => p_stale_after_ms::double precision'
 _WORKFLOW_STATUS_GUARD_RE: Final = re.compile(r'\bw\.status\s*(?:=|IN\b)')
 _RUNNABLE_LINK: Final = "wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')"
 _LINK_ABSENT_RE: Final = re.compile(r'\b(?:v_node_status|runnable_link\.found) IS NULL\b')
-_CAPACITY_WAKE: Final = 'pg_notify(p_notify_channel, p_notify_payload)'
+_CAPACITY_WAKE: Final = "pg_notify('task_queue_' || v_ctx.queue_name, 'capacity')"
 _MOVE_EVENTS: Final = (
     "pg_notify('task_done',",
     "pg_notify('horsies_task_status',",
@@ -181,20 +185,20 @@ class TestDeclaredGuardsMatchTheStatements:
         sql = _predicate(row.writer_id)
         match row.fence:
             case Fence.NONE | Fence.CALLER_ROW_LOCK:
-                assert _WORKER_FENCE not in sql, row.writer_id
+                assert _WORKER_FENCE_RE.search(sql) is None, row.writer_id
             case Fence.WORKER:
-                assert _WORKER_FENCE in sql, row.writer_id
+                assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
                 # Deliberately generation-free: the deadline guard makes the
                 # outcome correct for whichever generation holds the row.
                 assert 'p_claimed_at' not in sql, row.writer_id
             case Fence.PRIOR_LOCKED_SELECT:
-                assert _WORKER_FENCE in sql, row.writer_id
+                assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
                 assert 'FOR UPDATE' in sql, row.writer_id
             case Fence.WORKER_AND_GENERATION:
-                assert _WORKER_FENCE in sql, row.writer_id
+                assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
                 assert _GENERATION_FENCE_RE.search(sql) is not None, row.writer_id
             case Fence.WORKER_AND_GENERATION_PAIRWISE:
-                assert _WORKER_FENCE in sql, row.writer_id
+                assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
                 assert 'unnest(' in sql, row.writer_id
                 assert _PAIRWISE_GENERATION_FENCE in sql, row.writer_id
 
