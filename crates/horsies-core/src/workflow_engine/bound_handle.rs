@@ -304,7 +304,7 @@ mod tests {
 mod shared_listener_tests {
     //! P2: many concurrently-waiting `WorkflowHandle`s must share the broker's
     //! one process-wide listener, not pin a session-pool connection each. With
-    //! per-handle listeners, more handles than SESSION_POOL_MAX_CONNECTIONS(4)
+    //! per-handle listeners, more handles than the session pool holds
     //! exhaust the session pool and `get()` folds a broker error; the shared
     //! listener lets all of them time out cleanly instead.
     use super::*;

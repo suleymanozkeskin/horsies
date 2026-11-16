@@ -558,10 +558,11 @@ LIMIT $1";
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
-// Separate session/direct endpoints usually have much tighter connection
-// limits than a transaction pool. Horsies needs only migrations plus a small
-// number of long-lived LISTEN connections.
-const SESSION_POOL_MAX_CONNECTIONS: u32 = 4;
+/// A pooled connection that waited in the pool for longer than this is
+/// pinged before use when `pool_pre_ping` is on (Python
+/// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
+/// again within this time, and a new connection, are used with no ping.
+pub(crate) const PRE_PING_AFTER_IDLE: Duration = Duration::from_secs(1);
 
 /// Connect options for every broker pool, including the runtime pool in
 /// PgBouncer transaction mode.
@@ -625,27 +626,51 @@ fn with_session_settings(options: PgPoolOptions, settings: SessionSettings) -> P
     }
 }
 
-fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(
+/// With `pool_pre_ping` on, ping a pooled connection at checkout when it
+/// waited in the pool for longer than [`PRE_PING_AFTER_IDLE`]. A ping that
+/// fails closes that connection, and the checkout takes another one or opens
+/// a new one (Python `register_idle_ping`, `horsies/core/utils/db.py:165-222`).
+/// With it off, a dead pooled connection shows at its first statement as a
+/// retryable error.
+fn with_idle_ping(options: PgPoolOptions, pool_pre_ping: bool) -> PgPoolOptions {
+    let options = options.test_before_acquire(false);
+    match pool_pre_ping {
+        false => options,
+        true => options.before_acquire(|connection, metadata| {
+            Box::pin(async move {
+                if metadata.idle_for > PRE_PING_AFTER_IDLE {
+                    sqlx::Connection::ping(connection).await?;
+                }
+                Ok(true)
+            })
+        }),
+    }
+}
+
+/// The options shared by the runtime and the session pool, as Python builds
+/// both engines from one engine config (`horsies/core/brokers/postgres.py:
+/// 1343-1376`): `pool_size + max_overflow` connections, `pool_timeout` for a
+/// checkout, `pool_recycle` as the age at which a connection is retired, and
+/// the idle ping.
+fn pooled_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_idle_ping(
         PgPoolOptions::new()
             .max_connections(config.pool_size + config.max_overflow)
             .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping),
-        session_settings(config),
+            .max_lifetime(Duration::from_secs(config.pool_recycle as u64))
+            .idle_timeout(None),
+        config.pool_pre_ping,
     )
 }
 
+fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_session_settings(pooled_options(config), session_settings(config))
+}
+
 /// The session pool's URL is direct or session-capable (it carries LISTEN).
+/// It is sized as the runtime pool, as Python's session engine.
 fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(
-        PgPoolOptions::new()
-            .max_connections(SESSION_POOL_MAX_CONNECTIONS)
-            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping),
-        SessionSettings::Kept,
-    )
+    with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
 fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
@@ -672,6 +697,16 @@ fn prepared_statement_tracking_error(err: sqlx::Error) -> BrokerError {
     ))
 }
 
+/// A claim-pass count as the claim function's `integer` argument.
+fn claim_argument(name: &str, value: u32) -> Result<i32, BrokerError> {
+    i32::try_from(value).map_err(|_| {
+        BrokerError::InvalidClaimArgument(format!(
+            "{name} = {value} is above the claim function's limit of {}",
+            i32::MAX
+        ))
+    })
+}
+
 /// Inputs to one `horsies_claim` pass (parity with horsies PR #160): the
 /// serviced queue set with its priority/cap config, the budget knobs, and the
 /// advisory lock keys the pass must hold.
@@ -692,8 +727,11 @@ pub struct ClaimPassParams {
     pub max_claim_per_worker: u32,
     pub max_claim_batch: u32,
     pub cluster_wide_cap: Option<u32>,
-    /// `None` claims with `claim_expires_at = NULL` (no lease expiry).
-    pub claim_lease_ms: Option<u32>,
+    /// The lease of every claim this pass takes. Every claim has a lease
+    /// (Python `core/worker/claiming.py`; the baseline CHECK requires
+    /// `claim_expires_at` on every CLAIMED row), so a missing or zero lease
+    /// is not representable.
+    pub claim_lease_ms: std::num::NonZeroU32,
     /// Advisory keys for consistent cap accounting; acquired ascending.
     pub lock_keys: Vec<i64>,
 }
@@ -1262,6 +1300,17 @@ impl PostgresBroker {
         &self,
         params: &ClaimPassParams,
     ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
+        // Every count is refused, not clamped, when the claim function's
+        // integer argument cannot hold it.
+        let processes = claim_argument("processes", params.processes)?;
+        let prefetch_buffer = claim_argument("prefetch_buffer", params.prefetch_buffer)?;
+        let max_claim_per_worker =
+            claim_argument("max_claim_per_worker", params.max_claim_per_worker)?;
+        let max_claim_batch = claim_argument("max_claim_batch", params.max_claim_batch)?;
+        let cluster_wide_cap = params
+            .cluster_wide_cap
+            .map(|cap| claim_argument("cluster_wide_cap", cap))
+            .transpose()?;
         let started = std::time::Instant::now();
         let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
         let acquired = std::time::Instant::now();
@@ -1271,16 +1320,12 @@ impl PostgresBroker {
             .bind(sqlx::types::Json(&params.queue_priority))
             .bind(sqlx::types::Json(&params.queue_max_concurrency))
             .bind(params.hard_cap_mode)
-            .bind(i32::try_from(params.processes).unwrap_or(i32::MAX))
-            .bind(i32::try_from(params.prefetch_buffer).unwrap_or(i32::MAX))
-            .bind(i32::try_from(params.max_claim_per_worker).unwrap_or(i32::MAX))
-            .bind(i32::try_from(params.max_claim_batch).unwrap_or(i32::MAX))
-            .bind(
-                params
-                    .cluster_wide_cap
-                    .map(|cap| i32::try_from(cap).unwrap_or(i32::MAX)),
-            )
-            .bind(params.claim_lease_ms.map(i64::from))
+            .bind(processes)
+            .bind(prefetch_buffer)
+            .bind(max_claim_per_worker)
+            .bind(max_claim_batch)
+            .bind(cluster_wide_cap)
+            .bind(i64::from(params.claim_lease_ms.get()))
             .bind(sqlx::types::Json(&params.lock_keys))
             .fetch_all(&mut *connection)
             .await;
@@ -3712,7 +3757,7 @@ mod horsies_claim_tests {
             max_claim_per_worker: 0,
             max_claim_batch: 0,
             cluster_wide_cap: None,
-            claim_lease_ms: Some(60_000),
+            claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
             lock_keys: Vec::new(),
         }
     }
@@ -3939,9 +3984,13 @@ mod horsies_claim_tests {
         cleanup(&pool, &queues).await;
     }
 
+    /// Python `core/worker/claiming.py`: every claim carries a lease. A
+    /// claim pass sets `claim_expires_at` on every row it takes; a pass
+    /// without a lease is not representable (`ClaimPassParams.claim_lease_ms`
+    /// is `NonZeroU32`).
     #[tokio::test]
     #[serial]
-    async fn null_lease_claims_without_expiry_and_lease_sets_it() {
+    async fn every_claim_carries_its_lease() {
         let broker = connect_migrated().await;
         let pool = broker.pool().clone();
         let suffix = Uuid::new_v4().simple().to_string();
@@ -3949,42 +3998,37 @@ mod horsies_claim_tests {
         let qa = format!("pr160_lease_{suffix}");
         let queues = vec![qa.clone()];
 
-        let a = seed(&pool, &qa, "PENDING", 0, None, None).await;
-        let b = seed(&pool, &qa, "PENDING", 0, None, None).await;
+        let _task = seed(&pool, &qa, "PENDING", 0, None, None).await;
 
-        let mut params = base_params(&wid, &queues);
-        params.claim_lease_ms = None;
-        params.max_claim_batch = 1;
+        let params = base_params(&wid, &queues);
         let rows = broker.claim_batch(&params).await.expect("claim");
         assert_eq!(rows.len(), 1);
 
-        params.claim_lease_ms = Some(60_000);
-        let rows2 = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows2.len(), 1);
-
-        let leases: Vec<(Uuid, Option<DateTime<Utc>>)> =
-            sqlx::query_as("SELECT id, claim_expires_at FROM horsies_tasks WHERE id = ANY($1)")
-                .bind(vec![a.clone(), b.clone()])
-                .fetch_all(&pool)
+        let lease: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
+                .bind(rows[0].id)
+                .fetch_one(&pool)
                 .await
-                .expect("read leases");
-        let lease_of = |id: Uuid| {
-            leases
-                .iter()
-                .find(|(row_id, _)| *row_id == id)
-                .map(|(_, lease)| *lease)
-                .expect("row present")
-        };
-        assert!(
-            lease_of(rows[0].id).is_none(),
-            "NULL p_lease_ms claims with claim_expires_at NULL",
-        );
-        assert!(
-            lease_of(rows2[0].id).is_some(),
-            "explicit lease sets claim_expires_at",
-        );
+                .expect("read lease");
+        assert!(lease.is_some(), "every claim sets claim_expires_at");
 
         cleanup(&pool, &queues).await;
+    }
+
+    /// A count that the claim function's integer argument cannot hold is
+    /// refused before any statement, never clamped to `i32::MAX`.
+    #[tokio::test]
+    #[serial]
+    async fn a_claim_count_above_the_integer_range_is_refused() {
+        let broker = connect_migrated().await;
+        let mut params = base_params("w-range", &["range_queue".to_owned()]);
+        params.max_claim_batch = u32::MAX;
+        match broker.claim_batch(&params).await {
+            Err(BrokerError::InvalidClaimArgument(message)) => {
+                assert!(message.contains("max_claim_batch"), "{message}");
+            }
+            other => panic!("expected InvalidClaimArgument, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -5839,5 +5883,124 @@ mod stale_and_expired_list_tests {
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;
+    }
+}
+
+#[cfg(test)]
+mod pool_options_tests {
+    //! Python's pool rules (`horsies/core/brokers/postgres.py:1343-1404`,
+    //! `horsies/core/utils/db.py:165-222`): `pool_recycle` retires a
+    //! connection by age, the session pool is sized as the runtime pool, and
+    //! a connection idle for more than 1 s is pinged at checkout.
+    use super::*;
+    use serial_test::serial;
+
+    fn config(pool_pre_ping: bool) -> PostgresConfig {
+        let mut config = PostgresConfig::from_url("postgresql://horsies@127.0.0.1/horsies");
+        config.pool_size = 3;
+        config.max_overflow = 2;
+        config.pool_timeout = 7;
+        config.pool_recycle = 1_800;
+        config.pool_pre_ping = pool_pre_ping;
+        config
+    }
+
+    #[test]
+    fn pool_recycle_is_the_age_at_which_a_connection_retires() {
+        let options = pg_pool_options(&config(true));
+
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
+        assert_eq!(options.get_idle_timeout(), None);
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_acquire_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn the_session_pool_is_sized_as_the_runtime_pool() {
+        let options = pg_session_pool_options(&config(true));
+
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
+    }
+
+    /// The ping at every checkout is gone in both settings; with
+    /// `pool_pre_ping` on, the idle ping replaces it.
+    #[test]
+    fn no_pool_pings_at_every_checkout() {
+        assert!(!pg_pool_options(&config(true)).get_test_before_acquire());
+        assert!(!pg_pool_options(&config(false)).get_test_before_acquire());
+        assert!(!pg_session_pool_options(&config(true)).get_test_before_acquire());
+    }
+
+    async fn pool_on_test_database(pool_pre_ping: bool) -> PgPool {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let mut config = PostgresConfig::from_url(url.clone());
+        config.pool_size = 1;
+        config.max_overflow = 0;
+        config.pool_pre_ping = pool_pre_ping;
+        pg_pool_options(&config)
+            .connect_with(pg_connect_options(&url, false).expect("parse test URL"))
+            .await
+            .expect("connect test pool")
+    }
+
+    async fn terminate(backend_pid: i32) {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect admin pool");
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(backend_pid)
+            .fetch_one(&admin)
+            .await
+            .expect("terminate the pooled backend");
+        assert!(terminated);
+        admin.close().await;
+    }
+
+    /// Python `test_idle_ping.py`: a pooled connection that died while it
+    /// waited more than 1 s is found by the ping and replaced at checkout,
+    /// so the statement runs on a new connection.
+    #[tokio::test]
+    #[serial]
+    async fn a_dead_connection_idle_over_one_second_is_replaced_at_checkout() {
+        let pool = pool_on_test_database(true).await;
+        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("first statement");
+        terminate(first).await;
+        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
+
+        let second: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("the idle ping replaces the dead connection");
+
+        assert_ne!(second, first);
+        pool.close().await;
+    }
+
+    /// With `pool_pre_ping` off, nothing checks the connection at checkout:
+    /// the first statement on the dead connection fails.
+    #[tokio::test]
+    #[serial]
+    async fn without_the_idle_ping_the_first_statement_meets_the_dead_connection() {
+        let pool = pool_on_test_database(false).await;
+        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("first statement");
+        terminate(first).await;
+        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
+
+        let failed = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await;
+
+        assert!(failed.is_err(), "the dead connection serves the statement");
+        pool.close().await;
     }
 }
