@@ -27,7 +27,7 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-serial_test = "3"
+serial_test = "4"
 
 [lints]
 workspace = true

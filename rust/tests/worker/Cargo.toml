@@ -25,7 +25,7 @@ horsies-test-support = { path = "../support" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-serial_test = "3"
+serial_test = "4"
 tempfile = "3"
 
 [lints]
