@@ -74,6 +74,7 @@ from horsies.core.workflows.sql import (
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
 )
+from tests.dispatch_claim_support import claim_at
 
 pytestmark = [pytest.mark.unit]
 
@@ -874,7 +875,7 @@ class TestRecoveryReaders:
                 task_name='t',
                 queue_name='default',
                 is_workflow_task=False,
-                claimed_at=CLAIMED_AT,
+                claim=claim_at(CLAIMED_AT),
             )
 
         assert outcome == Ok(None)
