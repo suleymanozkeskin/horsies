@@ -19,10 +19,11 @@ use super::support::{
     stored_result, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
     WorkflowSeed,
 };
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::{TaskResult, WorkflowSpecRegistry};
-use crate::worker::execution::{run_phase2, Phase2Work};
+use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
 use crate::workflow_engine::engine::on_subworkflow_complete;
 use crate::workflow_engine::recovery::recover_stuck_workflows;
 
@@ -87,7 +88,7 @@ async fn a_completed_child_advances_and_completes_its_parent() {
         child,
         "COMPLETED",
         Some(&stored),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -140,7 +141,7 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
 
     let report = recover_stuck_workflows(
         &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         0,
         RECOVERY_FAILURE_LIMIT,
         &PayloadPolicy::default(),
@@ -216,16 +217,15 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
     .await;
 
     run_phase2(
-        &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &PostgresBroker::from_pool(db.pool.clone()),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         Phase2Work {
             task_id: child_task,
-            is_success: true,
             queue_name: "default".to_owned(),
             is_workflow_task: true,
             capacity_notified: false,
+            phase_two: PhaseTwoForm::NotKnown,
         },
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await;

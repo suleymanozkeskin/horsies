@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from horsies.core.types.result import Ok, Err
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.finalize import (
     _Phase1Input,
     _PersistedTaskOutcome,
@@ -122,6 +124,10 @@ from tests.broker_resources_support import (
 )
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 
 _POOL = ResolvedPool(min_size=0, max_size=2, check=True)
 
@@ -194,6 +200,8 @@ _CLAIM_COLUMNS = [
     'is_workflow_task',
     'task_options',
     'claimed_at',
+    'retry_count',
+    'max_retries',
     'execution',
     'short_by',
 ]
@@ -210,6 +218,8 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
         True,
         None,
         CLAIMED_AT,
+        0,
+        0,
         'ISOLATED',
         None,
     )
@@ -217,7 +227,7 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
 
 def _short_row(short_by: int) -> tuple[object, ...]:
     """The 'SHORT' row of HORSIES_CLAIM_SQL."""
-    return ('SHORT', None, None, None, None, None, None, None, None, short_by)
+    return ('SHORT', None, None, None, None, None, None, None, None, None, None, short_by)
 
 
 
@@ -234,7 +244,7 @@ def _keep_the_test_process_unfrozen(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _make_worker(
-    dsn: str = 'postgresql+psycopg://u:p@localhost/db',
+    dsn: str = 'postgresql://u:p@localhost/db',
     psycopg_dsn: str = 'postgresql://u:p@localhost/db',
     queues: list[str] | None = None,
     claim_lease_ms: int | None = None,
@@ -419,7 +429,7 @@ class TestAdvisoryKeyGlobal:
         assert w1._advisory_key_global() == w2._advisory_key_global()
 
     def test_key_is_dsn_independent(self) -> None:
-        w1 = _make_worker(psycopg_dsn='', dsn='postgresql+psycopg://u:p@h/mydb')
+        w1 = _make_worker(psycopg_dsn='', dsn='postgresql://u:p@h/mydb')
         w2 = _make_worker(psycopg_dsn='postgresql://other@elsewhere/db')
         assert w1._advisory_key_global() == w2._advisory_key_global()
 
@@ -1196,7 +1206,7 @@ class TestRequeueClaimedTask:
         outcome = await worker._requeue_claimed_task(
             'task-1',
             'test reason',
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome is _RequeueOutcome.REQUEUED
@@ -1221,7 +1231,7 @@ class TestRequeueClaimedTask:
         outcome = await worker._requeue_claimed_task(
             'task-2',
             'owner mismatch',
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
@@ -1236,7 +1246,7 @@ class TestRequeueClaimedTask:
         )
         worker.sf = MagicMock(return_value=session)
 
-        outcome = await worker._requeue_claimed_task('task-3', 'db failure', CLAIMED_AT)
+        outcome = await worker._requeue_claimed_task('task-3', 'db failure', CLAIM)
 
         assert outcome is _RequeueOutcome.DB_ERROR
         # No exception escaped — the method returned cleanly
@@ -1248,7 +1258,7 @@ class TestRequeueClaimedTask:
         session = _make_session_mock(execute_side_effect=RuntimeError('boom'))
         worker.sf = MagicMock(return_value=session)
 
-        await worker._requeue_claimed_task('task-4', 'no commit expected', CLAIMED_AT)
+        await worker._requeue_claimed_task('task-4', 'no commit expected', CLAIM)
 
         session.commit.assert_not_awaited()
 
@@ -1296,7 +1306,7 @@ class TestFinalizeResultPayloadWarn:
                 handle,
                 'task-w',
                 task_name='big_result_task',
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         guard_records = [
@@ -1335,7 +1345,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(_LOST),
             'task-10',
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert isinstance(result, Err)
@@ -1357,12 +1367,12 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(_LOST),
             'task-11',
             task_name='helper_task',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
         await_args = worker._recover_worker_future_failure.await_args
         assert 'signal 9 (SIGKILL)' in await_args.args[1]
-        assert await_args.kwargs['claimed_at'] == claimed_at
+        assert await_args.kwargs['claim'] == replace(CLAIM, claimed_at=claimed_at)
 
     @pytest.mark.asyncio
     async def test_task_that_never_reached_a_child_is_requeued(self) -> None:
@@ -1378,14 +1388,14 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-12',
             task_name='helper_task',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
         assert isinstance(result, Ok)
         worker._requeue_claimed_task.assert_awaited_once_with(
             'task-12',
             NotRunCause.POOL_STOPPING.value,
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
         worker._recover_worker_future_failure.assert_not_awaited()
 
@@ -1401,7 +1411,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-13',
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert isinstance(result, Err)
@@ -1418,7 +1428,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())),
             'task-13',
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
         kwargs = worker._persist_task_terminal_state.await_args.kwargs
@@ -1440,7 +1450,7 @@ class TestAwaitSlotOutcome:
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
 
         waiter = asyncio.ensure_future(
-            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIMED_AT),
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIM),
         )
         await asyncio.sleep(0.05)
 
@@ -1471,7 +1481,7 @@ class TestAwaitSlotOutcome:
             handle,
             'task-1',
             TaskTimeout(ms=1),
-            CLAIMED_AT,
+            CLAIM,
         )
 
         worker._handle_task_timeout.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
@@ -1491,7 +1501,7 @@ class TestAwaitSlotOutcome:
             'task-1',
             timeout=TaskTimeout(ms=1500),
             task_name='t',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
         match result:
@@ -1501,7 +1511,7 @@ class TestAwaitSlotOutcome:
                 assert timeout_retry_write(error.data) == (
                     1500,
                     RetryPlacement.SAME_CLASS,
-                    claimed_at,
+                    replace(CLAIM, claimed_at=claimed_at),
                 )
             case Ok():
                 raise AssertionError(result)
@@ -1524,7 +1534,7 @@ class TestAwaitSlotOutcome:
         )
 
         outcome = await asyncio.wait_for(
-            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIMED_AT),
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIM),
             5.0,
         )
 
@@ -1541,7 +1551,7 @@ class TestAwaitSlotOutcome:
             _finished_handle(done),
             'task-1',
             TaskTimeout(ms=1000),
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome == done
@@ -1568,7 +1578,7 @@ class TestAwaitSlotOutcome:
         done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
-            _finished_handle(done), 'task-1', timeout, CLAIMED_AT,
+            _finished_handle(done), 'task-1', timeout, CLAIM,
         )
 
         assert outcome == done
@@ -1595,7 +1605,7 @@ class TestRequeueDbErrorContainment:
                 _finished_handle(NotDispatched(NotRunCause.QUEUE_FULL)),
                 'task-20',
                 task_name='helper_task',
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1618,7 +1628,7 @@ class TestRequeueDbErrorContainment:
                 _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
                 'task-23',
                 task_name='helper_task',
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
@@ -1645,9 +1655,8 @@ class TestDispatchOne:
             'default',
             True,
             timeout=TaskTimeout(ms=1000),
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
             execution=Execution.ISOLATED,
-            task_options=None,
         )
 
         frame = worker._slots.submit.call_args.args[0]
@@ -1679,9 +1688,8 @@ class TestDispatchOne:
             'other',
             False,
             timeout=TaskTimeout(ms=1000),
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
             execution=Execution.ISOLATED,
-            task_options=None,
         )
 
         worker._finalize_after.assert_called_once_with(
@@ -1691,7 +1699,7 @@ class TestDispatchOne:
             False,
             timeout=TaskTimeout(ms=1000),
             task_name='app.add',
-            claimed_at=claimed_at,
+            claim=replace(CLAIM, claimed_at=claimed_at),
         )
 
 
@@ -2474,7 +2482,7 @@ class TestRetryFinalizeFuture:
             stage=_FINALIZE_STAGE_FUTURE,
             task_id=task_id,
             retryable=True,
-            data={'claimed_at': CLAIMED_AT},
+            data={'claim': CLAIM},
         )
 
     @pytest.mark.asyncio
@@ -2516,7 +2524,7 @@ class TestRetryFinalizeFuture:
         worker._recover_worker_future_failure.assert_awaited_once()
         recovery_args = worker._recover_worker_future_failure.await_args  # pyright: ignore[reportPrivateUsage]
         assert recovery_args is not None
-        assert recovery_args.kwargs['claimed_at'] == CLAIMED_AT
+        assert recovery_args.kwargs['claim'] == CLAIM
         assert key not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
@@ -2570,7 +2578,7 @@ class TestRetryFinalizePhase1:
         task_id: str = 'task-rf-1',
     ) -> _FinalizeError:
         data = (
-            {'outcome': outcome, 'claimed_at': CLAIMED_AT}
+            {'outcome': outcome, 'claim': CLAIM}
             if outcome is not None
             else None
         )
@@ -2668,7 +2676,7 @@ class TestRetryFinalizePhase1:
         worker._persist_task_terminal_state.assert_awaited_once()
         persist_args = worker._persist_task_terminal_state.await_args  # pyright: ignore[reportPrivateUsage]
         assert persist_args is not None
-        assert persist_args.kwargs['claimed_at'] == CLAIMED_AT
+        assert persist_args.kwargs['claim'] == CLAIM
         worker._finalize_workflow_phase.assert_awaited_once_with(
             err.task_id,
             _SENTINEL_TASK_RESULT,
@@ -2704,7 +2712,7 @@ class TestRetryFinalizePhase1:
                 'queue_name': 'critical',
                 'is_workflow_task': False,
                 'task_name': 'ctx_task',
-                'claimed_at': CLAIMED_AT,
+                'claim': CLAIM,
             },
         )
 
@@ -2746,7 +2754,7 @@ class TestRetryFinalizePhase1:
             'queue_name': 'default',
             'is_workflow_task': True,
             'task_name': '',
-            'claimed_at': CLAIMED_AT,
+            'claim': CLAIM,
         }
 
     # --- U-3f: _persist Ok(None) → clears phase1 only ---
@@ -4333,15 +4341,15 @@ class TestReaperMatchArms:
 
     _LOGGER_NAME = 'horsies.worker'
 
-    # --- U-6a: requeue Ok(>0) → resets counter, logs ---
+    # --- U-6a: requeue Ok(>0) → logs ---
 
     @pytest.mark.asyncio
-    async def test_requeue_ok_resets_counter_and_logs(
+    async def test_requeue_ok_logs(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Ok(n>0) from requeue resets permanent failure counter and logs info."""
+        """Ok(n>0) from requeue logs info."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
@@ -4353,15 +4361,15 @@ class TestReaperMatchArms:
 
         assert 'requeued 5 stale' in caplog.text.lower()
 
-    # --- U-6b: requeue transient Err → resets counter ---
+    # --- U-6b: requeue transient Err → logs an error ---
 
     @pytest.mark.asyncio
-    async def test_requeue_transient_err_resets_counter(
+    async def test_requeue_transient_err_logs_an_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Transient Err from requeue resets permanent failure counter."""
+        """Transient Err from requeue logs an error."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
@@ -4373,15 +4381,15 @@ class TestReaperMatchArms:
 
         assert 'transient' in caplog.text.lower()
 
-    # --- U-6c: requeue permanent Err 3x → disables ---
+    # --- U-6c: requeue permanent Err 3x → an error per pass, never stopped ---
 
     @pytest.mark.asyncio
-    async def test_requeue_permanent_err_3x_disables(
+    async def test_requeue_permanent_err_3x_logs_an_error_each_pass(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """3 consecutive permanent errors disables requeue operation."""
+        """3 consecutive permanent errors log 3 errors and stop nothing."""
         perm = _broker_err(retryable=False, message='schema drift')
         worker = _make_reaper_worker(
             monkeypatch,
@@ -4392,9 +4400,12 @@ class TestReaperMatchArms:
         with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
             await worker._reaper_loop()
 
-        assert 'disabled' in caplog.text.lower()
-        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-        assert len(critical_records) >= 1
+        errors = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and 'schema drift' in r.getMessage()
+        ]
+        assert len(errors) == 3
+        assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
 
     # --- U-6d: mark_stale_tasks_as_failed: same three arms ---
 
@@ -4417,12 +4428,12 @@ class TestReaperMatchArms:
         assert 'marked 3 stale running' in caplog.text.lower()
 
     @pytest.mark.asyncio
-    async def test_mark_failed_transient_err_resets_counter(
+    async def test_mark_failed_transient_err_logs_an_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Transient Err from mark_stale_tasks_as_failed resets counter."""
+        """Transient Err from mark_stale_tasks_as_failed logs an error."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_fail=True,
@@ -4435,12 +4446,12 @@ class TestReaperMatchArms:
         assert 'transient' in caplog.text.lower()
 
     @pytest.mark.asyncio
-    async def test_mark_failed_permanent_err_3x_disables(
+    async def test_mark_failed_permanent_err_3x_logs_an_error_each_pass(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """3 consecutive permanent errors disables mark_failed operation."""
+        """3 consecutive permanent errors log 3 errors and stop nothing."""
         perm = _broker_err(retryable=False, message='perm mark')
         worker = _make_reaper_worker(
             monkeypatch,
@@ -4451,9 +4462,12 @@ class TestReaperMatchArms:
         with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
             await worker._reaper_loop()
 
-        assert 'disabled' in caplog.text.lower()
-        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-        assert len(critical_records) >= 1
+        errors = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and 'perm mark' in r.getMessage()
+        ]
+        assert len(errors) == 3
+        assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
 
     # --- U-6d2: terminate-orphaned-workflow-tasks arms ---
 
@@ -4476,12 +4490,12 @@ class TestReaperMatchArms:
         assert 'cancelled 4 orphaned workflow' in caplog.text.lower()
 
     @pytest.mark.asyncio
-    async def test_terminate_orphans_transient_err_resets_counter(
+    async def test_terminate_orphans_transient_err_logs_an_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Transient Err from terminate_orphaned_workflow_tasks resets counter."""
+        """Transient Err from terminate_orphaned_workflow_tasks logs an error."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_terminate=True,
@@ -4496,25 +4510,30 @@ class TestReaperMatchArms:
         assert 'transient' in caplog.text.lower()
 
     @pytest.mark.asyncio
-    async def test_terminate_orphans_permanent_err_3x_disables(
+    async def test_terminate_orphans_permanent_err_logs_an_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """3 consecutive permanent errors disable the terminate-orphans op."""
+        """A permanent error of the orphan audit logs an error, not a stop.
+        test_orphan_audit_permanent_failures_never_stop_the_audit covers
+        the passes that follow."""
         perm = _broker_err(retryable=False, message='perm terminate')
         worker = _make_reaper_worker(
             monkeypatch,
             auto_terminate=True,
-            terminate_results=[perm, perm, perm],
+            terminate_results=[perm],
         )
 
         with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
             await worker._reaper_loop()
 
-        assert 'disabled' in caplog.text.lower()
-        critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-        assert len(critical_records) >= 1
+        errors = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and 'perm terminate' in r.getMessage()
+        ]
+        assert len(errors) == 1
+        assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
 
     # --- U-6e: no worker broker → fallback to temp ---
 
@@ -4926,7 +4945,7 @@ class TestWorkerConfigRecycleValidation:
 
         with pytest.raises(ValueError, match='must be >= 1'):
             WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 max_tasks_per_child=-1,
@@ -4938,7 +4957,7 @@ class TestWorkerConfigRecycleValidation:
 
         with pytest.raises(ValueError, match='drain_timeout_s'):
             WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 drain_timeout_s=value,
@@ -4949,7 +4968,7 @@ class TestWorkerConfigRecycleValidation:
 
         with pytest.raises(ValueError, match='processes'):
             WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 processes=0,
@@ -4959,7 +4978,7 @@ class TestWorkerConfigRecycleValidation:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             max_tasks_per_child=0,
@@ -4970,7 +4989,7 @@ class TestWorkerConfigRecycleValidation:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             max_tasks_per_child=1,
@@ -5458,7 +5477,7 @@ def _make_claim_worker(
 ) -> Worker:
     """Build a Worker pre-configured for claim-and-dispatch testing."""
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=queues or ['default'],
         prefetch_buffer=prefetch_buffer,
@@ -5636,7 +5655,7 @@ class TestReaperGatePoolCapacity:
     @staticmethod
     def _capacity_worker(pool_size: int) -> Worker:
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
@@ -5713,7 +5732,7 @@ class TestReaperResourceSelection:
     def _ungated_reaper_worker() -> Worker:
         """A worker whose reaper runs passes without a gate session."""
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
@@ -5818,7 +5837,7 @@ class TestRecoverDatabaseErrorMapping:
         outcome = await worker._recover_worker_future_failure(
             'task-1',
             'pool broke',
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert outcome is _RequeueOutcome.DB_ERROR
@@ -5882,7 +5901,7 @@ class TestPhase1ErrorReplay:
             queue_name='default',
             is_workflow_task=False,
             task_name='helper_task',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
             return_value=Ok(None),
@@ -5897,7 +5916,7 @@ class TestPhase1ErrorReplay:
         assert kwargs['ok'] is True
         assert kwargs['result_json_str'] == '{"ok": 42}'
         assert kwargs['failed_reason'] is None
-        assert kwargs['claimed_at'] == CLAIMED_AT
+        assert kwargs['claim'] == CLAIM
 
 
 # ---------------------------------------------------------------------------
@@ -5929,11 +5948,6 @@ from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 _OK_WIRE = '{"__h_task_result__":true,"ok":"hello","err":null}'
-_STOPPED_WIRE = (
-    '{"__h_task_result__":true,"ok":null,'
-    '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
-    '"data":null,"message":"stop"}}'
-)
 
 
 def _make_session_worker(
@@ -6004,7 +6018,7 @@ class TestPersistTerminalStateFusedPath:
             task_name='my_task',
             queue_name='q1',
             is_workflow_task=False,
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
     @pytest.mark.asyncio
@@ -6155,7 +6169,7 @@ class TestPersistTerminalStateFusedPath:
                 task_name='my_task',
                 queue_name='q1',
                 is_workflow_task=True,
-                claimed_at=claimed_at,
+                claim=replace(CLAIM, claimed_at=claimed_at),
             )
 
         persisted = result.ok_value
@@ -6187,44 +6201,24 @@ class TestPersistTerminalStateFusedPath:
                 task_name='my_task',
                 queue_name='q1',
                 is_workflow_task=True,
-                claimed_at=CLAIMED_AT,
+                claim=CLAIM,
             )
 
         assert result == Ok(None)
         session.execute.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_workflow_stopped_returns_none_without_sql(self) -> None:
-        """WORKFLOW_STOPPED err result → Ok(None) before any session opens."""
-        worker, session = _make_session_worker(fetchone_results=[])
-
-        result = await worker._persist_task_terminal_state(
-            task_id='task-1',
-            now=datetime.now(timezone.utc),
-            ok=True,
-            result_json_str=_STOPPED_WIRE,
-            failed_reason=None,
-            task_name='my_task',
-            queue_name='q1',
-            is_workflow_task=True,
-            claimed_at=CLAIMED_AT,
-        )
-
-        assert result.ok_value is None
-        worker.sf.assert_not_called()
-        session.execute.assert_not_awaited()
-
 
 # ---------------------------------------------------------------------------
-# Reaper breaker state machine (_run_reaper_pass failure counters)
+# Reaper recovery steps (_run_reaper_pass): no step stops on a live worker
 # ---------------------------------------------------------------------------
 
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
-from horsies.core.worker.runtime import (
-    _REAPER_MAX_PERMANENT_FAILURES,
-    _ReaperPassState,
-)
+from horsies.core.worker.runtime import _ReaperPassState
+
+# More passes than the three permanent failures after which the removed
+# per-step latch stopped a step.
+_FAILING_PASSES = 5
 
 
 def _reaper_err(
@@ -6264,8 +6258,18 @@ def _make_reaper_broker(
 
 def _fresh_reaper_state() -> _ReaperPassState:
     # Retention cleanup is schedule-gated; push it out so passes only
-    # exercise the breaker paths under test.
+    # exercise the recovery steps under test.
     return _ReaperPassState(next_retention_cleanup_at=float('inf'))
+
+
+def _error_records(
+    caplog: pytest.LogCaptureFixture, text: str,
+) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR and text in record.getMessage()
+    ]
 
 
 async def _run_pass(worker: Worker, broker: MagicMock, state: _ReaperPassState) -> None:
@@ -6333,7 +6337,6 @@ async def test_orphan_audit_transient_failure_is_an_error() -> None:
     assert worker._orphan_task_recovery_health['state'] == 'error'
     assert worker._orphan_task_recovery_health['errors'] == 1
     assert worker._orphan_task_recovery_health['refusals'] == 0
-    assert state.terminate_orphans_permanent_failures == 0
 
 
 @pytest.mark.unit
@@ -6359,7 +6362,6 @@ async def test_orphan_audit_lock_failure_is_a_refusal() -> None:
     assert worker._orphan_task_recovery_health['state'] == 'refused'
     assert worker._orphan_task_recovery_health['errors'] == 0
     assert worker._orphan_task_recovery_health['refusals'] == 1
-    assert state.terminate_orphans_permanent_failures == 0
 
 
 @pytest.mark.unit
@@ -6404,34 +6406,48 @@ async def test_workflow_recovery_failure_publishes_partial_health() -> None:
 
 
 @pytest.mark.unit
-class TestReaperRequeueBreaker:
-    """requeue_stale_claimed breaker: transient resets, permanent latches."""
+class TestReaperRequeueNeverStops:
+    """requeue_stale_claimed runs on every pass; each failing pass logs an error."""
 
     @pytest.mark.asyncio
-    async def test_retryable_failure_resets_counter(self) -> None:
+    async def test_permanent_failures_never_stop_the_step(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         worker = _make_worker()
         state = _fresh_reaper_state()
-        state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
-        broker = _make_reaper_broker(_reaper_err(retryable=True))
+        broker = _make_reaper_broker(_reaper_err(retryable=False))
 
-        await _run_pass(worker, broker, state)
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            for _ in range(_FAILING_PASSES):
+                await _run_pass(worker, broker, state)
 
-        assert state.requeue_permanent_failures == 0
-        assert state.requeue_disabled is False
+        assert broker.requeue_stale_claimed.await_count == _FAILING_PASSES
+        records = _error_records(caplog, 'requeue_stale_claimed failed and runs again')
+        assert len(records) == _FAILING_PASSES
 
     @pytest.mark.asyncio
-    async def test_pool_timeout_counts_as_transient(self) -> None:
-        """A pool checkout timeout must never advance the permanent counter.
+    async def test_transient_failure_logs_an_error(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        worker = _make_worker()
+        state = _fresh_reaper_state()
+        broker = _make_reaper_broker(_reaper_err(retryable=True))
 
-        Regression pin: this exact shape, classified non-retryable, latched
-        the breaker off during connection-slot exhaustion and stranded
-        orphaned CLAIMED tasks after the pressure cleared.
-        """
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await _run_pass(worker, broker, state)
+
+        records = _error_records(caplog, 'requeue_stale_claimed failed transiently')
+        assert len(records) == 1
+
+    @pytest.mark.asyncio
+    async def test_pool_timeout_is_logged_as_transient(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pool checkout timeout is a transient failure of the step."""
         from horsies.core.brokers.postgres import _operation_failed
 
         worker = _make_worker()
         state = _fresh_reaper_state()
-        state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
         err = _operation_failed(
             BrokerErrorCode.CLEANUP_FAILED,
             'requeue_stale_claimed failed',
@@ -6439,72 +6455,103 @@ class TestReaperRequeueBreaker:
         )
         broker = _make_reaper_broker(err)
 
-        await _run_pass(worker, broker, state)
-
-        assert state.requeue_permanent_failures == 0
-        assert state.requeue_disabled is False
-
-    @pytest.mark.asyncio
-    async def test_consecutive_permanent_failures_latch(self) -> None:
-        worker = _make_worker()
-        state = _fresh_reaper_state()
-        broker = _make_reaper_broker(_reaper_err(retryable=False))
-
-        for expected in range(1, _REAPER_MAX_PERMANENT_FAILURES + 1):
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
             await _run_pass(worker, broker, state)
-            assert state.requeue_permanent_failures == expected
 
-        assert state.requeue_disabled is True
-
-    @pytest.mark.asyncio
-    async def test_disabled_skips_requeue_call(self) -> None:
-        worker = _make_worker()
-        state = _fresh_reaper_state()
-        state.requeue_disabled = True
-        broker = _make_reaper_broker(Ok(0))
-
-        await _run_pass(worker, broker, state)
-
-        broker.requeue_stale_claimed.assert_not_called()
+        records = _error_records(caplog, 'requeue_stale_claimed failed transiently')
+        assert len(records) == 1
 
     @pytest.mark.asyncio
-    async def test_success_resets_counter(self) -> None:
+    async def test_success_logs_no_error(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         worker = _make_worker()
         state = _fresh_reaper_state()
-        state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
         broker = _make_reaper_broker(Ok(2))
 
-        await _run_pass(worker, broker, state)
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await _run_pass(worker, broker, state)
 
-        assert state.requeue_permanent_failures == 0
-        assert state.requeue_disabled is False
+        broker.requeue_stale_claimed.assert_awaited_once()
+        assert _error_records(caplog, 'requeue_stale_claimed') == []
 
 
 @pytest.mark.unit
-class TestReaperMarkFailedBreaker:
-    """mark_stale_tasks_as_failed breaker mirrors the requeue breaker."""
+class TestReaperMarkFailedNeverStops:
+    """mark_stale_tasks_as_failed runs on every pass; each failing pass logs an error."""
 
     @pytest.mark.asyncio
-    async def test_consecutive_permanent_failures_latch(self) -> None:
+    async def test_permanent_failures_never_stop_the_step(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         worker = _make_worker()
         state = _fresh_reaper_state()
         broker = _make_reaper_broker(Ok(0), _reaper_err(retryable=False))
 
-        for _ in range(_REAPER_MAX_PERMANENT_FAILURES):
-            await _run_pass(worker, broker, state)
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            for _ in range(_FAILING_PASSES):
+                await _run_pass(worker, broker, state)
 
-        assert state.mark_failed_disabled is True
-        # Breakers are independent: requeue stays live.
-        assert state.requeue_disabled is False
+        assert broker.mark_stale_tasks_as_failed.await_count == _FAILING_PASSES
+        records = _error_records(
+            caplog, 'mark_stale_tasks_as_failed failed and runs again',
+        )
+        assert len(records) == _FAILING_PASSES
+        # The requeue step is not affected.
+        assert broker.requeue_stale_claimed.await_count == _FAILING_PASSES
 
     @pytest.mark.asyncio
-    async def test_disabled_skips_mark_failed_call(self) -> None:
+    async def test_transient_failure_logs_an_error(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         worker = _make_worker()
         state = _fresh_reaper_state()
-        state.mark_failed_disabled = True
-        broker = _make_reaper_broker(Ok(0))
+        broker = _make_reaper_broker(Ok(0), _reaper_err(retryable=True))
 
-        await _run_pass(worker, broker, state)
+        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+            await _run_pass(worker, broker, state)
 
-        broker.mark_stale_tasks_as_failed.assert_not_called()
-        broker.requeue_stale_claimed.assert_called_once()
+        records = _error_records(
+            caplog, 'mark_stale_tasks_as_failed failed transiently',
+        )
+        assert len(records) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_orphan_audit_permanent_failures_never_stop_the_audit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The orphan audit runs again on each schedule after permanent failures."""
+    worker = _make_worker()
+    broker = _make_reaper_broker(Ok(0))
+    broker.audit_orphaned_workflow_tasks.return_value = _reaper_err(
+        retryable=False,
+    )
+    state = _fresh_reaper_state()
+    config = RecoveryConfig()
+
+    with (
+        caplog.at_level(logging.ERROR, logger='horsies.worker'),
+        patch(
+            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+            AsyncMock(return_value=_empty_workflow_recovery_report()),
+        ),
+    ):
+        for _ in range(_FAILING_PASSES):
+            # The audit is due: its schedule time has passed.
+            state.next_orphan_task_audit_at = 0.0
+            await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
+                broker,
+                await resources_of(broker),
+                config,
+                RetentionConfig(),
+                state,
+            )
+
+    assert broker.audit_orphaned_workflow_tasks.await_count == _FAILING_PASSES
+    records = _error_records(caplog, 'orphan workflow-task audit failed and runs again')
+    assert len(records) == _FAILING_PASSES
+    health = worker._orphan_task_recovery_health  # pyright: ignore[reportPrivateUsage]
+    assert health is not None
+    assert health['state'] == 'error'

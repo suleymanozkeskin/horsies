@@ -400,7 +400,7 @@ class TestChildInitializer:
         app = Horsies(
             AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                    database_url=SecretStr('postgresql://u:p@localhost/db'),
                     pool_size=30,
                     max_overflow=30,
                 ),
@@ -936,7 +936,7 @@ def _registered_tasks() -> dict[str, Any]:
     """Registered tasks: the worker calls their wrapper, not a mock."""
     app = Horsies(AppConfig(
         broker=PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+            database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         ),
     ))
 

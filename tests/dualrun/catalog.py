@@ -317,6 +317,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('execution', EXACT),
         ('good_until', ORDER),
         ('retention_class_key', EXACT),
+        ('downstream_subworkflow', EXACT),
         ('status', EXACT),
         ('task_id', TASK_ID),
         ('is_subworkflow', EXACT),

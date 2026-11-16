@@ -26,6 +26,7 @@ import pytest_asyncio
 
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import Ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker import slots
 from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
@@ -44,6 +45,10 @@ from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.worker import Worker, WorkerConfig
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 
 # A pid that cannot exist, so the kill of the double reaches no process.
 NO_SUCH_PID = 2**30
@@ -136,7 +141,7 @@ def _worker(
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             recovery_config=recovery,
@@ -153,7 +158,7 @@ async def _finalize(worker: Worker, handle: SlotHandle) -> object:
             handle,
             TASK_ID,
             task_name='hang',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         ),
         TEST_WAIT_S,
     )
@@ -284,7 +289,7 @@ class TestLossWithStaleRecoveryOff:
                     handle,
                     TASK_ID,
                     task_name='hang',
-                    claimed_at=CLAIMED_AT,
+                    claim=CLAIM,
                 ),
             )
             await asyncio.sleep(0.05)
@@ -310,7 +315,7 @@ class TestLossWithStaleRecoveryOff:
                     handle,
                     TASK_ID,
                     task_name='hang',
-                    claimed_at=CLAIMED_AT,
+                    claim=CLAIM,
                 ),
             )
             await asyncio.sleep(0.05)

@@ -90,7 +90,7 @@ STORED_TASK_ERROR = serialize_error_payload(
     TaskResult(err=TaskError(error_code='FIRST_ERROR', message='first')),
 )
 LONE_SURROGATE_TEXT = f'name{chr(0xdc80)}'
-DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
+DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 
 
 class _RefusedOk(BaseModel):

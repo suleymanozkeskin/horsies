@@ -74,6 +74,7 @@ from horsies.core.workflows.sql import (
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
 )
+from tests.dispatch_claim_support import claim_at
 
 pytestmark = [pytest.mark.unit]
 
@@ -151,7 +152,7 @@ def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                database_url=SecretStr('postgresql://u:p@localhost/db'),
             ),
         ),
     )
@@ -162,7 +163,7 @@ def _make_worker() -> Worker:
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
         ),
@@ -874,7 +875,7 @@ class TestRecoveryReaders:
                 task_name='t',
                 queue_name='default',
                 is_workflow_task=False,
-                claimed_at=CLAIMED_AT,
+                claim=claim_at(CLAIMED_AT),
             )
 
         assert outcome == Ok(None)
@@ -910,3 +911,30 @@ class TestRecoveryReaders:
         assert is_err(outcome)
         assert outcome.err_value.retryable is False
         assert cause in outcome.err_value.message
+
+
+class TestStoredWorkflowStoppedCode:
+    """``WORKFLOW_STOPPED`` is a reserved name and no task code: a stored err
+    slot with it does not decode, so a finalize fails the task instead of
+    reading the error as a stop and leaving the row RUNNING."""
+
+    _STORED = (
+        '{"__h_task_result__":true,"ok":null,'
+        '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
+        '"data":null,"message":"stop"}}'
+    )
+
+    def test_the_err_slot_does_not_decode(self) -> None:
+        err_slot: Json = {
+            'exception': None,
+            'error_code': 'WORKFLOW_STOPPED',
+            'data': None,
+            'message': 'stop',
+        }
+        with pytest.raises(ValueValidationError, match='reserved error code name'):
+            decode_task_error(err_slot)
+
+    def test_a_reader_gives_the_stored_data_error(self) -> None:
+        result = _decode_err_only(self._STORED)
+        assert result is not None
+        _assert_stored_data_error(result, 'reserved error code name')

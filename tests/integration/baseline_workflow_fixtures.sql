@@ -34,13 +34,23 @@ BEGIN
 END;
 $$;
 
--- Starts a tree from a JSON description. p_workflows: [{"id", "name", "on_error", "parent", "parent_index", "depth",
--- "output", "policy"}], the top-level row first. p_nodes: [{"wf", "idx", "deps", "args_from", "ctx", "join", "min",
--- "allow", "sub", "params", "input", "node_id", "good_until"}]; "wf" defaults to the top-level id; "params" is the
--- sub_workflow_params of a sub-workflow node (NOT_GIVEN when absent). p_failed: [{"wf", "idx",
--- "result"}].
-CREATE FUNCTION wft_start(p_workflows jsonb, p_nodes jsonb, p_failed jsonb DEFAULT '[]')
-RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
+-- The arguments of a tree, as the arrays of horsies_workflow_start, from a JSON description. p_workflows: [{"id",
+-- "name", "on_error", "parent", "parent_index", "depth", "output", "policy"}], the top row first. p_nodes: [{"wf",
+-- "idx", "deps", "args_from", "ctx", "join", "min", "allow", "sub", "params", "input", "node_id", "good_until"}]; "wf"
+-- defaults to the top row's id; "params" is the sub_workflow_params of a sub-workflow node (NOT_GIVEN when absent).
+-- p_failed: [{"wf", "idx", "result"}].
+CREATE FUNCTION wft_tree(p_workflows jsonb, p_nodes jsonb, p_failed jsonb)
+RETURNS TABLE (
+    workflow_ids uuid[], names text[], definition_keys text[], on_errors text[], output_task_indexes integer[],
+    success_policies text[], parent_workflow_ids uuid[], parent_task_indexes integer[], depths integer[],
+    node_workflow_ids uuid[], node_task_indexes integer[], node_ids text[], node_task_names text[],
+    node_inputs text[], node_queue_names text[], node_priorities integer[], node_dependencies text[],
+    node_args_from text[], node_workflow_ctx_from text[], node_allow_failed_deps boolean[], node_join_types text[],
+    node_min_successes integer[], node_task_options text[], node_max_retries integer[], node_executions text[],
+    node_good_untils timestamp with time zone[], node_retention_class_keys text[], node_is_subworkflow boolean[],
+    node_sub_workflow_names text[], node_sub_definition_keys text[], node_sub_workflow_params text[],
+    failed_workflow_ids uuid[], failed_task_indexes integer[], failed_results text[]
+) LANGUAGE sql AS $$
     WITH w AS (
         SELECT (x ->> 'id')::uuid AS id, coalesce(x ->> 'name', 'wf') AS name, x ->> 'on_error' AS on_error,
                (x ->> 'parent')::uuid AS parent, (x ->> 'parent_index')::integer AS parent_index,
@@ -71,13 +81,12 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
                x ->> 'result' AS result, o AS position
         FROM jsonb_array_elements(p_failed) WITH ORDINALITY AS a(x, o)
     )
-    SELECT * FROM horsies_workflow_start(
+    SELECT
         (SELECT array_agg(id ORDER BY position) FROM w), (SELECT array_agg(name ORDER BY position) FROM w),
         (SELECT array_agg(NULL::text ORDER BY position) FROM w), (SELECT array_agg(on_error ORDER BY position) FROM w),
         (SELECT array_agg(output ORDER BY position) FROM w), (SELECT array_agg(policy ORDER BY position) FROM w),
         (SELECT array_agg(parent ORDER BY position) FROM w), (SELECT array_agg(parent_index ORDER BY position) FROM w),
         (SELECT array_agg(depth ORDER BY position) FROM w),
-        '2030-01-01 00:00:00+00',
         (SELECT array_agg(wf ORDER BY position) FROM n), (SELECT array_agg(idx ORDER BY position) FROM n),
         (SELECT array_agg(node_id ORDER BY position) FROM n), (SELECT array_agg(task_name ORDER BY position) FROM n),
         (SELECT array_agg(input ORDER BY position) FROM n),
@@ -98,6 +107,52 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
         coalesce((SELECT array_agg(wf ORDER BY position) FROM f), ARRAY[]::uuid[]),
         coalesce((SELECT array_agg(idx ORDER BY position) FROM f), ARRAY[]::integer[]),
         coalesce((SELECT array_agg(result ORDER BY position) FROM f), ARRAY[]::text[])
+$$;
+
+-- Starts a tree from a JSON description (wft_tree).
+CREATE FUNCTION wft_start(p_workflows jsonb, p_nodes jsonb, p_failed jsonb DEFAULT '[]')
+RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
+    SELECT s.* FROM wft_tree(p_workflows, p_nodes, p_failed) AS a
+    CROSS JOIN LATERAL horsies_workflow_start(
+        a.workflow_ids, a.names, a.definition_keys, a.on_errors, a.output_task_indexes, a.success_policies,
+        a.parent_workflow_ids, a.parent_task_indexes, a.depths, '2030-01-01 00:00:00+00',
+        a.node_workflow_ids, a.node_task_indexes, a.node_ids, a.node_task_names, a.node_inputs, a.node_queue_names,
+        a.node_priorities, a.node_dependencies, a.node_args_from, a.node_workflow_ctx_from, a.node_allow_failed_deps,
+        a.node_join_types, a.node_min_successes, a.node_task_options, a.node_max_retries, a.node_executions,
+        a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
+        a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
+        a.failed_results
+    ) AS s
+$$;
+
+-- The TREE child start of node p_index of p_parent from a JSON description (wft_tree): the first workflow row is the
+-- child, with "parent", "parent_index" and "depth" set.
+CREATE FUNCTION wft_child_start(p_parent uuid, p_index integer, p_workflows jsonb, p_nodes jsonb,
+                                p_failed jsonb DEFAULT '[]')
+RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
+    SELECT s.* FROM wft_tree(p_workflows, p_nodes, p_failed) AS a
+    CROSS JOIN LATERAL horsies_workflow_child_start(
+        p_parent, p_index, 'TREE', NULL, '2030-01-02 00:00:00+00',
+        a.workflow_ids, a.names, a.definition_keys, a.on_errors, a.output_task_indexes, a.success_policies,
+        a.parent_workflow_ids, a.parent_task_indexes, a.depths,
+        a.node_workflow_ids, a.node_task_indexes, a.node_ids, a.node_task_names, a.node_inputs, a.node_queue_names,
+        a.node_priorities, a.node_dependencies, a.node_args_from, a.node_workflow_ctx_from, a.node_allow_failed_deps,
+        a.node_join_types, a.node_min_successes, a.node_task_options, a.node_max_retries, a.node_executions,
+        a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
+        a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
+        a.failed_results
+    ) AS s
+$$;
+
+-- The FAILURE child start of node p_index of p_parent, with the error envelope p_result.
+CREATE FUNCTION wft_child_fail(p_parent uuid, p_index integer, p_result text)
+RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
+    SELECT * FROM horsies_workflow_child_start(
+        p_parent, p_index, 'FAILURE', p_result, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL
     )
 $$;
 
@@ -168,6 +223,44 @@ BEGIN
     PERFORM wft_phase1(v_task, p_result);
     SELECT disposition INTO v_disposition
     FROM horsies_workflow_node_finish(v_task, TRUE, 'READ') WHERE row_kind = 'OUTCOME';
+    RETURN v_disposition;
+END;
+$$;
+
+-- Claims the task of a node for worker-1 at p_claimed_at, with a live lease, as horsies_claim leaves it.
+CREATE FUNCTION wft_claim(p_task_id uuid, p_claimed_at timestamptz) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE horsies_tasks
+    SET status = 'CLAIMED', claimed_at = p_claimed_at, claimed_by_worker_id = 'worker-1',
+        claim_expires_at = now() + interval '1 minute'
+    WHERE id = p_task_id AND status = 'PENDING';
+    PERFORM wft_check(FOUND, 'claim fixture finds the PENDING task ' || p_task_id);
+END;
+$$;
+
+-- The history row of a task that moved: status and terminalization kind, as 'STATUS:KIND'; NULL when it did not move.
+CREATE FUNCTION wft_moved(p_task_id uuid) RETURNS text LANGUAGE sql AS $$
+    SELECT h.status || ':' || h.terminalization_kind FROM horsies_task_history h WHERE h.task_id = p_task_id
+$$;
+
+-- Phase 2 of the task of node p_index, then, in the same transaction, the TREE child start that it owes: the child
+-- p_child is a one-node workflow. Returns the disposition of the child start. Fails the case when no child start is
+-- owed.
+CREATE FUNCTION wft_finish_with_child(p_workflow uuid, p_index integer, p_child uuid) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_owed horsies_workflow_step_row;
+    v_disposition text;
+BEGIN
+    SELECT * INTO v_owed FROM horsies_workflow_node_finish(wft_task_of(p_workflow, p_index), TRUE, 'READ') AS r
+    WHERE r.row_kind = 'CHILD_START';
+    PERFORM wft_check(v_owed.task_index IS NOT NULL, 'the phase 2 of node ' || p_index || ' owes a child start');
+    SELECT s.disposition INTO v_disposition
+    FROM wft_child_start(p_workflow, v_owed.task_index,
+        jsonb_build_array(jsonb_build_object('id', p_child, 'on_error', 'fail', 'parent', p_workflow,
+                                             'parent_index', v_owed.task_index, 'depth', v_owed.parent_depth + 1)),
+        jsonb_build_array(jsonb_build_object('wf', p_child, 'idx', 0))) AS s
+    WHERE s.row_kind = 'OUTCOME';
     RETURN v_disposition;
 END;
 $$;

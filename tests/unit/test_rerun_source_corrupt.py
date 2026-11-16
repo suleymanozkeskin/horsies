@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -26,7 +27,7 @@ from horsies.core.history.rerun.operations import (
 
 pytestmark = [pytest.mark.unit]
 
-SOURCE_TASK_ID = '0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b'
+SOURCE_TASK_ID = UUID('0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b')
 
 
 def _connection_with_row(row: SimpleNamespace) -> AsyncMock:

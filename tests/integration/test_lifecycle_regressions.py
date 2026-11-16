@@ -35,6 +35,7 @@ from horsies.core.worker.worker import (
     _RequeueOutcome,
 )
 from horsies.core.workflows.lifecycle import pause_workflow
+from tests.dispatch_claim_support import claim_at, row_claim
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
@@ -60,7 +61,7 @@ class _TaskRow(TypedDict):
 def _make_worker(engine: AsyncEngine) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -149,12 +150,12 @@ async def _link_running_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, task_id,
                  is_subworkflow, created_at, started_at,
                  max_retries, execution, retention_class_key)
-            VALUES (:node_id, :workflow_id, 0, 'node-0',
+            VALUES ('NONE', :node_id, :workflow_id, 0, 'node-0',
                     'lifecycle_regression_task', '{}', 'default', 100,
                     ARRAY[]::integer[], FALSE, 'all', 'RUNNING',
                     CAST(:task_id AS uuid), FALSE, NOW(), NOW(),
@@ -247,13 +248,13 @@ async def _insert_retry_window_workflow_task(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, args_from,
                  workflow_ctx_from, allow_failed_deps, join_type, task_options,
                  status, task_id, is_subworkflow, created_at, started_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:workflow_task_id, :workflow_id, 0, 'retry_node',
+                ('NONE', :workflow_task_id, :workflow_id, 0, 'retry_node',
                  'lifecycle_regression_task', '{}', 'default', 100,
                  ARRAY[]::integer[], NULL, NULL, FALSE, 'all', NULL,
                  'RUNNING', :task_id, FALSE, NOW(), NOW(),
@@ -286,7 +287,7 @@ async def test_future_failure_on_non_retryable_running_task_is_terminal_failed(
     outcome = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert outcome is _RequeueOutcome.REQUEUED
@@ -323,13 +324,13 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
     first = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
     worker._finalize_workflow_phase.reset_mock()  # type: ignore[attr-defined]
     replay = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert first is _RequeueOutcome.REQUEUED
@@ -363,12 +364,12 @@ async def test_future_failure_replay_of_a_plain_task_sends_no_second_wake(
     first = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
     replay = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert first is _RequeueOutcome.REQUEUED
@@ -407,7 +408,7 @@ async def test_future_failure_on_retryable_running_task_respects_retry_policy(
     outcome = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        await row_claim(session, task_id),
     )
 
     assert outcome is _RequeueOutcome.REQUEUED
@@ -446,7 +447,7 @@ async def test_future_failure_terminal_phase2_error_schedules_finalize_retry(
     outcome = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert outcome is _RequeueOutcome.REQUEUED
@@ -489,7 +490,7 @@ async def test_finalize_worker_failure_runs_phase2(
         queue_name='default',
         is_workflow_task=True,
         task_name='lifecycle_regression_test',
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -516,7 +517,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
         worker_id=worker.worker_instance_id,
     )
     listener = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     try:
@@ -529,7 +530,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
             queue_name='default',
             is_workflow_task=False,
             task_name='lifecycle_regression_test',
-            claimed_at=CLAIMED_AT,
+            claim=claim_at(CLAIMED_AT),
         )
 
         payloads = [notify.payload async for notify in listener.notifies(timeout=0.5)]

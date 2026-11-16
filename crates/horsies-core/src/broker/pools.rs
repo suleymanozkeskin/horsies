@@ -9,10 +9,11 @@
 //! - The session URL has its own [`PoolRole::Session`] pool when it differs
 //!   from the main URL; otherwise session work uses the main pool.
 //! - Every pool: `pool_size + max_overflow` connections, `pool_timeout` as the
-//!   checkout wait, `pool_recycle` as the connection age limit, and the 1 s
-//!   idle ping when `pool_pre_ping` is on. The main pool sends unnamed
-//!   statements only in PgBouncer transaction mode; the session pool always
-//!   keeps its session.
+//!   checkout wait, `pool_recycle` as the connection age limit, the 1 s idle
+//!   ping when `pool_pre_ping` is on, and the TCP keepalives and TCP user
+//!   timeout of the config ([`PostgresConfig::socket_settings`]) on each
+//!   connection. The main pool sends unnamed statements only in PgBouncer
+//!   transaction mode; the session pool always keeps its session.
 //!
 //! Building the pools connects to nothing: a connection opens at the first
 //! checkout.
@@ -31,8 +32,8 @@ use crate::core::PostgresConfig;
 use crate::db::{
     parse_connection_url, ConnectPlan, ConnectPlanError, ConnectionAge, ConnectionEnvironment,
     CorePool, EnvironmentError, IdlePing, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
-    PoolSizingError, Reserve, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
-    DEFAULT_SOCKET_SETTINGS, WORKER_RESERVED_CONNECTIONS,
+    PoolSizingError, Reserve, SocketSettings, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
+    WORKER_RESERVED_CONNECTIONS,
 };
 use crate::manifest::PoolRecycle;
 
@@ -99,7 +100,8 @@ impl BrokerPools {
     ///
     /// Reads, per URL, the TLS files the URL names, `~/.pgpass` when no
     /// password is given, and the process user name when the URL names no
-    /// user. Connects to nothing.
+    /// user. Connects to nothing. Every pool takes the socket settings of
+    /// `config`.
     ///
     /// Errors: [`PoolSettingsError`]; nothing was built.
     pub(crate) fn open_with_environment(
@@ -107,6 +109,7 @@ impl BrokerPools {
         profile: PoolProfile,
         environment: &ConnectionEnvironment,
     ) -> Result<BrokerPools, PoolSettingsError> {
+        let socket = config.socket_settings();
         let main_shape = main_pool_shape(profile);
         let (main, main_url) = open_pool(
             &config.database_url,
@@ -121,6 +124,7 @@ impl BrokerPools {
                 cause,
             })?,
             environment,
+            &socket,
         )?;
         let session_url = config.effective_session_database_url();
         let session = match session_url == config.database_url {
@@ -139,6 +143,7 @@ impl BrokerPools {
                         cause,
                     })?,
                     environment,
+                    &socket,
                 )?;
                 SessionPool::Separate { pool, masked_url }
             }
@@ -405,17 +410,18 @@ fn connection_age(recycle: PoolRecycle) -> ConnectionAge {
     }
 }
 
-/// Parses one URL, loads its connection plan and builds the pool. Returns
-/// the pool and its URL with the password masked.
+/// Parses one URL, loads its connection plan with `socket` and builds the
+/// pool. Returns the pool and its URL with the password masked.
 fn open_pool(
     url: &str,
     plan: PoolPlan,
     environment: &ConnectionEnvironment,
+    socket: &SocketSettings,
 ) -> Result<(CorePool, MaskedUrl), PoolSettingsError> {
     let role = plan.role;
     let settings = parse_connection_url(url, environment)
         .map_err(|cause| PoolSettingsError::Url { role, cause })?;
-    let connect = ConnectPlan::load(&settings, environment, &DEFAULT_SOCKET_SETTINGS)
+    let connect = ConnectPlan::load(&settings, environment, socket)
         .map_err(|cause| PoolSettingsError::Plan { role, cause })?;
     Ok((
         CorePool::new(plan, Arc::new(connect)),
@@ -460,7 +466,7 @@ pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
 
 /// A main core pool on the database of a test's sqlx pool, for the free
 /// lifecycle writers that tests call with a pool of their own. The same pool
-/// as the main pool of [`pools_for_test_pool`]; connects to nothing until
+/// as the main pool of [`handle_for_test_pool`]; connects to nothing until
 /// the first checkout.
 #[cfg(test)]
 pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
@@ -472,12 +478,40 @@ pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
         runtime_protocol(&config),
     )
     .expect("the size of a test pool is accepted by the statement layer");
-    open_pool(
+    let (core_pool, _masked_url) = open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
+        &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer")
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
+}
+
+/// A worker profile core pool of `size` connections on the database of a
+/// test's sqlx pool: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
+/// checkouts, as the pool of a worker. Connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    config.pool_size = size;
+    config.max_overflow = 0;
+    let plan = pool_plan(
+        &config,
+        PoolRole::WorkerProfile,
+        Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS),
+        runtime_protocol(&config),
+    )
+    .expect("a test worker pool is larger than its reserve");
+    let (core_pool, _masked_url) = open_pool(
+        &config.database_url,
+        plan,
+        &ConnectionEnvironment::isolated(),
+        &config.socket_settings(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
 }
 
 /// The checkout wait of [`unpinged_single_connection_core_pool`].
@@ -486,9 +520,9 @@ const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
 
 /// A core pool of one connection on the URL of `options` that never pings a
 /// pooled connection at checkout (Python's worker pre-ping off) and never
-/// replaces it for its age. Once a statement is prepared on the connection,
-/// the statement is its only round trip. Connects to nothing until the first
-/// checkout.
+/// replaces it for its age, with the default socket settings. Once a
+/// statement is prepared on the connection, the statement is its only round
+/// trip. Connects to nothing until the first checkout.
 #[cfg(test)]
 pub(crate) fn unpinged_single_connection_core_pool(
     options: &sqlx::postgres::PgConnectOptions,
@@ -502,17 +536,23 @@ pub(crate) fn unpinged_single_connection_core_pool(
         max_age: ConnectionAge::Unlimited,
         protocol: StatementProtocol::PreparedPerConnection,
     };
-    open_pool(
+    let (core_pool, _masked_url) = open_pool(
         &test_url_of(options),
         plan,
         &ConnectionEnvironment::isolated(),
+        &crate::db::DEFAULT_SOCKET_SETTINGS,
     )
-    .expect("the URL of a test pool is accepted by the statement layer")
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::socket::{
+        KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig,
+        TcpUserTimeoutMs,
+    };
     use crate::db::{CheckoutClass, CheckoutFailure};
 
     fn config() -> PostgresConfig {
@@ -702,6 +742,89 @@ mod tests {
         ));
     }
 
+    /// [`config`] with a distinct session URL, so the broker has a main and a
+    /// session pool, and the given TCP settings.
+    fn config_with_socket(
+        tcp_keepalives: TcpKeepalivesConfig,
+        tcp_user_timeout: TcpUserTimeoutConfig,
+    ) -> PostgresConfig {
+        let mut config = config();
+        config.session_database_url =
+            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
+        config.tcp_keepalives = tcp_keepalives;
+        config.tcp_user_timeout = tcp_user_timeout;
+        config
+    }
+
+    /// The pools of `config` for each profile.
+    fn pools_of_each_profile(config: &PostgresConfig) -> [BrokerPools; 2] {
+        [PoolProfile::Producer, PoolProfile::Worker].map(|profile| {
+            BrokerPools::open_with_environment(config, profile, &ConnectionEnvironment::isolated())
+                .expect("pools build without I/O")
+        })
+    }
+
+    /// The main pool and the session pool of `pools`.
+    fn main_and_session(pools: &BrokerPools) -> [&CorePool; 2] {
+        let SessionPool::Separate { pool: session, .. } = pools.session() else {
+            panic!("a distinct session URL gets its own pool");
+        };
+        [pools.main(), session]
+    }
+
+    #[test]
+    fn keepalives_off_and_the_system_user_timeout_reach_every_pool() {
+        let config = config_with_socket(
+            TcpKeepalivesConfig::Off,
+            TcpUserTimeoutConfig::SystemDefault,
+        );
+        for pools in pools_of_each_profile(&config) {
+            for pool in main_and_session(&pools) {
+                let driver = pool.connect_plan().first_attempt();
+                let role = pool.role();
+                assert!(!driver.get_keepalives(), "{role} pool");
+                assert_eq!(driver.get_tcp_user_timeout(), None, "{role} pool");
+            }
+        }
+    }
+
+    #[test]
+    fn keepalive_values_and_a_user_timeout_reach_every_pool() {
+        let config = config_with_socket(
+            TcpKeepalivesConfig::On {
+                idle_seconds: KeepaliveSeconds::try_from(45_u32).expect("in bounds"),
+                interval_seconds: KeepaliveSeconds::try_from(7_u32).expect("in bounds"),
+                probes: KeepaliveProbes::try_from(5_u32).expect("in bounds"),
+            },
+            TcpUserTimeoutConfig::After {
+                milliseconds: TcpUserTimeoutMs::try_from(1500_u32).expect("in bounds"),
+            },
+        );
+        for pools in pools_of_each_profile(&config) {
+            for pool in main_and_session(&pools) {
+                let driver = pool.connect_plan().first_attempt();
+                let role = pool.role();
+                assert!(driver.get_keepalives(), "{role} pool");
+                assert_eq!(
+                    driver.get_keepalives_idle(),
+                    Duration::from_secs(45),
+                    "{role} pool"
+                );
+                assert_eq!(
+                    driver.get_keepalives_interval(),
+                    Some(Duration::from_secs(7)),
+                    "{role} pool"
+                );
+                assert_eq!(driver.get_keepalives_retries(), Some(5), "{role} pool");
+                assert_eq!(
+                    driver.get_tcp_user_timeout(),
+                    Some(&Duration::from_millis(1500)),
+                    "{role} pool"
+                );
+            }
+        }
+    }
+
     fn open_handle() -> CoreHandle {
         CoreHandle::open_with_environment(
             &config(),
@@ -748,5 +871,165 @@ mod tests {
         drop(write);
 
         assert_eq!(handle.close().await, CloseOutcome::Closed);
+    }
+}
+
+#[cfg(test)]
+mod kept_session_tests {
+    //! The session setting of the core pools on the test server (Python
+    //! `tests/integration/test_broker_session_settings.py`): a connection that
+    //! keeps its session runs `jit = off`, sent once in autocommit when the
+    //! connection opens, so a rollback of a transaction on it keeps the
+    //! setting. In PgBouncer transaction mode the main pool sets nothing (a
+    //! session `SET` would reach other clients of the server connection), and
+    //! the session pool still runs `jit = off`.
+    //!
+    //! Each read also returns `pg_settings.source`: a `SET` on the connection
+    //! makes it `session`. So the tests hold on a server whose own setting is
+    //! `jit = off`, where the value alone could not tell the two apart.
+
+    use serial_test::serial;
+
+    use super::*;
+    use crate::broker::terminalization_matrix::migrated_database_url;
+    use crate::db::{
+        CheckoutClass, IsolationLevel, PooledConnection, RollbackOutcome, StatementBound,
+        TypedStatement,
+    };
+
+    /// The value of `jit` on the connection and where it comes from.
+    const JIT_SETTING: TypedStatement = TypedStatement::new(
+        "test_jit_setting",
+        "SELECT current_setting('jit') AS jit, \
+                (SELECT source FROM pg_settings WHERE name = 'jit') AS source",
+        &[],
+    );
+
+    /// A statement inside the transaction that the test rolls back.
+    const STATEMENT_IN_TRANSACTION: TypedStatement =
+        TypedStatement::new("test_statement_in_transaction", "SELECT 1", &[]);
+
+    /// `jit` as the connection runs it: its value and its `pg_settings.source`.
+    #[derive(Debug, PartialEq, Eq)]
+    struct JitSetting {
+        value: String,
+        source: String,
+    }
+
+    impl JitSetting {
+        fn set_off_on_the_session() -> JitSetting {
+            JitSetting {
+                value: "off".to_owned(),
+                source: "session".to_owned(),
+            }
+        }
+    }
+
+    async fn jit_setting(connection: &mut PooledConnection) -> JitSetting {
+        let rows = connection
+            .query(
+                &JIT_SETTING.bind().finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("read the jit setting");
+        let [row] = rows.as_slice() else {
+            panic!("expected one row, got {}", rows.len());
+        };
+        JitSetting {
+            value: row.try_get("jit").expect("the jit column"),
+            source: row.try_get("source").expect("the source column"),
+        }
+    }
+
+    /// A config of the test database whose pools hold one connection each.
+    fn one_connection_config(database_url: &str) -> PostgresConfig {
+        let mut config = PostgresConfig::from_url(database_url);
+        config.pool_size = 1;
+        config.max_overflow = 0;
+        config
+    }
+
+    fn open_test_pools(config: &PostgresConfig) -> BrokerPools {
+        BrokerPools::open_with_environment(
+            config,
+            PoolProfile::Producer,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("the pools of the test database build")
+    }
+
+    /// Python `test_broker_session_settings.py::test_setting_survives_a_rollback_of_the_first_transaction`.
+    /// The connection opens at the first checkout, runs the setting, then the
+    /// statement-pooling check; the transaction of the test rolls back after
+    /// both, and the setting stays.
+    #[tokio::test]
+    #[serial]
+    async fn a_kept_session_runs_without_jit_after_a_transaction_rolls_back() {
+        let url = migrated_database_url().await;
+        let pools = open_test_pools(&one_connection_config(&url));
+        let mut connection = pools
+            .main()
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the only connection");
+
+        let mut transaction = connection
+            .begin(IsolationLevel::ServerDefault)
+            .await
+            .expect("begin");
+        transaction
+            .query(
+                &STATEMENT_IN_TRANSACTION.bind().finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("the statement in the transaction");
+        let rollback = transaction.rollback().await;
+        let setting = jit_setting(&mut connection).await;
+        drop(connection);
+        pools.close();
+
+        assert!(
+            matches!(rollback, RollbackOutcome::RolledBack),
+            "{rollback:?}"
+        );
+        assert_eq!(setting, JitSetting::set_off_on_the_session());
+    }
+
+    /// Python `test_broker_session_settings.py::test_transaction_mode_runtime_pool_keeps_the_server_setting`.
+    /// The two URLs reach the same server directly and differ only in
+    /// `application_name`, so the session URL gets a pool of its own.
+    #[tokio::test]
+    #[serial]
+    async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
+        let url = migrated_database_url().await;
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let mut config = one_connection_config(&url);
+        config.session_database_url =
+            Some(format!("{url}{separator}application_name=horsies_session"));
+        config.pgbouncer_transaction_mode = true;
+        let pools = open_test_pools(&config);
+        let SessionPool::Separate { pool: session, .. } = &pools.session else {
+            panic!("a distinct session URL gets a pool of its own");
+        };
+
+        let mut main_connection = pools
+            .main()
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the main pool");
+        let main_setting = jit_setting(&mut main_connection).await;
+        let mut session_connection = session
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the session pool");
+        let session_setting = jit_setting(&mut session_connection).await;
+        drop(main_connection);
+        drop(session_connection);
+        pools.close();
+
+        assert_ne!(main_setting.source, "session", "{main_setting:?}");
+        assert_eq!(session_setting, JitSetting::set_off_on_the_session());
     }
 }

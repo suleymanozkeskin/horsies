@@ -159,16 +159,16 @@ def _answer(read: RerunSourceRead) -> Answer:
         case RerunClassUnregistered(class_key=class_key):
             return ('CLASS_UNREGISTERED', class_key)
         case RerunSourceLive(task_id=task_id):
-            return ('LIVE', task_id)
+            return ('LIVE', str(task_id))
         case RerunSourceAbsent(task_id=task_id, reason=reason):
-            return ('ABSENT', task_id, reason.value)
+            return ('ABSENT', str(task_id), reason.value)
         case RerunSourceCorrupt(task_id=task_id, exception=exception):
-            return ('CORRUPT', task_id, str(exception))
+            return ('CORRUPT', str(task_id), str(exception))
         case RerunSource():
             return ('HISTORY', repr(read))
 
 
-type SourceRead = Callable[[AsyncConnection, str, str], Awaitable[RerunSourceRead]]
+type SourceRead = Callable[[AsyncConnection, uuid.UUID, str], Awaitable[RerunSourceRead]]
 
 
 async def _read_all(
@@ -181,7 +181,7 @@ async def _read_all(
         answers: dict[str, Answer] = {}
         async with engine.connect() as connection:
             for label, source_id, class_key in reads:
-                answers[label] = _answer(await reader(connection, source_id, class_key))
+                answers[label] = _answer(await reader(connection, uuid.UUID(source_id), class_key))
                 await connection.rollback()
         return answers
     finally:

@@ -89,6 +89,7 @@ from horsies.core.workflows.sql import (
     subworkflow_node_kind_params,
     task_node_facts,
     task_node_kind_params,
+    with_downstream_subworkflow,
     workflow_task_row_params,
 )
 from horsies.core.history.identity.uuid7 import mint_task_id
@@ -642,7 +643,7 @@ async def start_workflow_async(
                     )
                     task_id: str | None = None
                     if is_fast_root:
-                        task_id = mint_task_id()
+                        task_id = str(mint_task_id())
                         # Task-row kwargs = node kwargs + workflow_meta
                         # (mirrors enqueue_workflow_task; args_from/ctx
                         # injection is structurally absent on fast roots).
@@ -702,7 +703,8 @@ async def start_workflow_async(
 
                 if node_params:
                     await session.execute(
-                        INSERT_WORKFLOW_TASKS_BULK_SQL, node_params,
+                        INSERT_WORKFLOW_TASKS_BULK_SQL,
+                        with_downstream_subworkflow(node_params),
                     )
                 # Slow-path roots first: subworkflows start child
                 # workflows recursively; args_from/ctx_from roots go

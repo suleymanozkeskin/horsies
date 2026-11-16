@@ -1,8 +1,9 @@
 //! Port of Python `tests/integration/test_workflow_success_finish.py`
 //! (`horsies_finish_workflow_success`).
 //!
-//! The success goes through the worker's client (`finish_workflow_success`),
-//! one statement on the pool, as phase 1 calls it. The refused calls run the
+//! The success goes through the worker's client (`finish_workflow_success`,
+//! called by `support::write_workflow_success`), one statement on a core pool
+//! on the test database, as phase 1 calls it. The refused calls run the
 //! function directly with a NULL claim generation, as the Python test does.
 //!
 //! Rows that a core test already checks in full are not repeated (test map:
@@ -16,8 +17,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
-use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
-use crate::core::lifecycle::{PhaseTwoOwed, WorkflowSuccessOutcome};
+use crate::broker::attempt_writes::FinishWorkflowSuccess;
+use crate::core::lifecycle::{PhaseTwoOwed, PhaseTwoStep, WorkflowSuccessOutcome};
 use crate::core::types::status::TaskStatus;
 
 const QUEUE: &str = "lifecycle_workflow_success";
@@ -74,17 +75,19 @@ async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let (task_id, workflow_id) = seed(&pool, 0, Origin::WorkflowNode).await;
 
-    let outcome = finish_workflow_success(&pool, &success(task_id))
+    let outcome = write_workflow_success(&pool, &success(task_id))
         .await
         .expect("success write");
 
     let WorkflowSuccessOutcome::SuccessApplied {
         task_id: applied,
         observed,
-        phase_two: PhaseTwoOwed {
-            task_name,
-            queue_name,
-        },
+        phase_two:
+            PhaseTwoOwed {
+                task_name,
+                queue_name,
+                step,
+            },
         ..
     } = outcome
     else {
@@ -95,6 +98,7 @@ async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
         (task_name.as_str(), queue_name.as_str()),
         ("lifecycle.test", QUEUE)
     );
+    assert_eq!(step, PhaseTwoStep::NoDependents);
     assert_eq!(observed.status, Some(TaskStatus::Running));
     assert_eq!(observed.worker_id.as_deref(), Some(WORKER));
     assert_eq!(observed.claimed_at, Some(generation()));
@@ -175,7 +179,7 @@ async fn the_attempt_number_follows_the_retry_count() {
     .await
     .expect("record two failed attempts");
 
-    let outcome = finish_workflow_success(&pool, &success(task_id))
+    let outcome = write_workflow_success(&pool, &success(task_id))
         .await
         .expect("success write");
 

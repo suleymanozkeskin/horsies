@@ -53,7 +53,7 @@ def _worker(cfg: WorkerConfig) -> Worker:
 
 def _config(**fields: object) -> WorkerConfig:
     return WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         **fields,  # type: ignore[arg-type]
