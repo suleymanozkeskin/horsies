@@ -21,11 +21,27 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..errors import HistoryContractError
-from ..names import TASK_LOOKUP_MANIFEST
+from ..names import (
+    TASK_DETAIL_FUNCTION,
+    TASK_DUPLICATE_GUARD_FUNCTION,
+    TASK_LOOKUP_MANIFEST,
+    TASK_PROVENANCE_FUNCTION,
+    TASK_RESULT_FUNCTION,
+)
 from ..partitions.publication import LoaderRepublished
 
 PUBLICATION_OUTCOMES: Final = frozenset({'PUBLISHED', 'ALREADY_CURRENT'})
 """The outcomes of ``horsies_publish_history_readers``."""
+
+PUBLISHED_READER_SIGNATURES: Final = (
+    f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
+    f'{TASK_PROVENANCE_FUNCTION}(uuid)',
+    f'{TASK_DETAIL_FUNCTION}(uuid)',
+    f'{TASK_RESULT_FUNCTION}(uuid)',
+)
+"""The readers that ``horsies_publish_history_readers`` publishes, as the
+rows of ``horsies_history_reader_signatures()`` name them. The install reads
+their presence on a database that may not hold that function yet."""
 
 _PUBLISH_READERS_SQL: Final = text(
     'SELECT outcome, absent_leaves FROM horsies_publish_history_readers()'

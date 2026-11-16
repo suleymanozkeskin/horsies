@@ -8,6 +8,7 @@ from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     create_async_engine,
@@ -87,19 +88,24 @@ from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
     ExpirePendingTasks,
-    FailStaleTask,
 )
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
+    RetryScheduled,
     SourceStateConflict,
+    StaleFailureApplied,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import (
-    LOCK_TASK_SQL,
-    apply_async,
-    apply_batch_async,
+from horsies.core.lifecycle.persistence import apply_batch_async
+from horsies.core.brokers.stale_running import (
+    STALE_RUNNING_SCAN_BATCH_SIZE,
+    StaleCandidate,
+    StaleThresholds,
+    crash_result_json,
+    finish_stale_attempt,
+    scan_stale_running,
 )
 from horsies.core.models.class_coverage import (
     ClassCoverage,
@@ -130,13 +136,14 @@ from horsies.core.history.maintenance.database import (
     PartitionMaintenanceDatabase,
 )
 from horsies.core.baseline.install import (
+    CompleteInstall,
     InstallBaseline,
-    RecordFamily,
     RefuseInstall,
     SchemaReady,
     SchemaStatementFailed,
     decide_install,
     install_baseline,
+    publish_history_readers,
     read_database_state,
     record_client_family,
 )
@@ -146,6 +153,7 @@ from horsies.core.baseline.migration import (
 )
 from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
 from horsies.core.utils.db import (
+    autocommit_connection,
     is_retryable_connection_error,
     SessionSettings,
     register_identity_text_reads,
@@ -567,11 +575,6 @@ def _dbapi_sqlstate(exc: BaseException) -> str | None:
     return None
 
 
-from horsies.core.worker.sql import (
-    UPSERT_TASK_ATTEMPT_SQL,
-    SCHEDULE_STALE_TASK_RETRY_SQL,
-)
-
 _SCHEMA_INIT_MAX_ATTEMPTS = 5
 _SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
 _UNDEFINED_FUNCTION_SQLSTATE = '42883'
@@ -722,54 +725,6 @@ GET_EXPIRED_TASKS_SQL = text("""
 
 # ---- Cleanup queries ----
 
-SELECT_STALE_RUNNING_TASKS_SQL = text("""
-    SELECT t2.id, t2.worker_pid, t2.worker_hostname, t2.claimed_by_worker_id,
-           t2.started_at, hb.last_heartbeat,
-           t2.retry_count, t2.worker_process_name,
-           t2.max_retries, t2.task_options, t2.good_until,
-           clock_timestamp() AS db_now
-    FROM horsies_tasks t2
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t2.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t2.status = 'RUNNING'
-      AND t2.started_at IS NOT NULL
-      AND (
-          t2.finalizing_at IS NULL
-          OR t2.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
-      )
-      AND COALESCE(hb.last_heartbeat, t2.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-    FOR UPDATE OF t2 SKIP LOCKED
-""")
-
-SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
-    SELECT t.id, t.worker_pid, t.worker_hostname, t.claimed_by_worker_id,
-           t.started_at, hb.last_heartbeat, t.retry_count, t.worker_process_name,
-           t.max_retries, t.task_options, t.good_until, t.queue_name,
-           clock_timestamp() AS db_now
-    FROM horsies_tasks t
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t.id = :id
-      AND t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
-      )
-      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-    FOR UPDATE OF t
-""")
-
 _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
@@ -802,50 +757,20 @@ GET_TASK_STATUS_NAME_SQL = text("""
 # Sentinel returned by _probe_result_row while the row is non-terminal.
 _STILL_WAITING = object()
 
-REQUEUE_STALE_CLAIMED_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'PENDING',
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = NOW()
-    FROM (
-        -- Staleness predicate sits inside the locking subquery so only
-        -- genuinely stale rows are row-locked; locking every CLAIMED row
-        -- stalled concurrent lease renewals and made the claim path skip
-        -- reclaimable rows for the duration of this scan.
-        SELECT t2.id
-        FROM horsies_tasks t2
-        LEFT JOIN LATERAL (
-            SELECT sent_at AS last_heartbeat
-            FROM horsies_heartbeats h
-            WHERE h.task_id = t2.id AND h.role = 'claimer'
-            ORDER BY sent_at DESC
-            LIMIT 1
-        ) hb ON TRUE
-        WHERE t2.status = 'CLAIMED'
-          AND (
-            (hb.last_heartbeat IS NULL AND t2.claimed_at IS NOT NULL AND t2.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-            OR (hb.last_heartbeat IS NOT NULL AND hb.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-          )
-          -- Never requeue an orphaned workflow task (no workflow_task row in a
-          -- runnable status): re-dispatch can only fail WORKFLOW_CHECK_FAILED
-          -- again, so requeuing is the churn engine. Orphans are cancelled by
-          -- terminate_orphaned_workflow_tasks instead.
-          AND NOT (
-              t2.is_workflow_task = TRUE
-              AND NOT EXISTS (
-                  SELECT 1 FROM horsies_workflow_tasks wt
-                  WHERE wt.task_id = t2.id
-                    AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-              )
-          )
-        FOR UPDATE OF t2 SKIP LOCKED
-    ) s
-    WHERE t.id = s.id
+# One bounded batch of the stale CLAIMED requeue, one statement in autocommit.
+# The function requeues a CLAIMED row with no claimer beat newer than the
+# threshold that was claimed longer ago than the threshold, skips a workflow
+# task with no runnable node and rows another transaction holds, and returns
+# the number of rows it requeued.
+REQUEUE_STALE_CLAIMS_SQL = text("""
+    SELECT horsies_requeue_stale_claims(
+        CAST(:stale_after_ms AS INTEGER), CAST(:batch_size AS INTEGER)
+    )
 """)
+
+REQUEUE_STALE_CLAIMS_BATCH_SIZE: Final = 500
+REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS: Final = 200
+"""Backstop against an unbounded pass; the remainder is requeued next pass."""
 
 # One constant statement for every fresh enqueue. The PostgreSQL dialect
 # Insert construct carries `inherit_cache = False` (SQLAlchemy 2.0.51), so
@@ -1428,16 +1353,21 @@ class PostgresBroker:
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline schema when this broker runs migrations.
 
+        ``engine`` is the session URL's engine: the reader publication runs
+        on it. The state read, the lock and the migration use their own
+        direct session connection.
+
         A broker with migrations off runs no schema statement. Read-only
         consumers such as the monitoring service inspect the schema with their
         own probe and never change it.
         """
-        del engine  # the install uses its own direct session connection
         if self.run_schema_migrations:
-            await self._run_fleet_schema_init()
+            await self._run_fleet_schema_init(engine)
 
-    async def _run_fleet_schema_init(self) -> None:
+    async def _run_fleet_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline into an empty database, or check an installed one.
+
+        Returns after the published history readers exist.
 
         Raises:
             RuntimeError: the database holds something other than an empty
@@ -1454,7 +1384,7 @@ class PostgresBroker:
             case Ok(migration):
                 pass
         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
-            match await self._install_once(migration):
+            match await self._install_once(migration, engine):
                 case Ok():
                     return
                 case Err(failure):
@@ -1478,12 +1408,12 @@ class PostgresBroker:
                     await asyncio.sleep(backoff)
 
     async def _install_once(
-        self, migration: BaselineMigration,
+        self, migration: BaselineMigration, engine: AsyncEngine,
     ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
         """One pass: read the state, and only when a write is due, lock and act.
 
-        A database that already holds this build's baseline and family gets
-        no lock and no write.
+        A database that already holds this build's baseline, its published
+        readers and this client's family gets no lock and no write.
         """
         connection = await psycopg.AsyncConnection.connect(
             to_psycopg_url(self.config.effective_session_database_url),
@@ -1503,20 +1433,26 @@ class PostgresBroker:
                 return Ok(None)
             case RefuseInstall() as refused:
                 return Err(refused)
-            case InstallBaseline() | RecordFamily():
+            case InstallBaseline() | CompleteInstall():
                 pass
         async with self._schema_session_lock() as locked:
-            return await self._install_under_lock(locked, migration)
+            return await self._install_under_lock(locked, migration, engine)
 
     async def _install_under_lock(
         self,
         connection: psycopg.AsyncConnection[Any],
         migration: BaselineMigration,
+        engine: AsyncEngine,
     ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
         """Read the state again under the schema lock and do what it needs.
 
         Another installer may have finished while this one waited for the
         lock; the second read sees its work.
+
+        The migration (with the family row) and the reader publication are
+        two transactions. An install that stops between them leaves a
+        baseline with missing readers; the next install reads that state as
+        ``CompleteInstall`` and publishes them.
         """
         match await read_database_state(connection, migration):
             case Err(failed):
@@ -1532,8 +1468,20 @@ class PostgresBroker:
                 self.logger.info(
                     'Installing the baseline schema (migration %s)', migration.version,
                 )
-                return await install_baseline(connection, migration)
-            case RecordFamily():
+                match await install_baseline(connection, migration):
+                    case Err(failed):
+                        return Err(failed)
+                    case Ok():
+                        pass
+                # The family row committed with the migration, and no other
+                # installer writes while this one holds the lock.
+                return await publish_history_readers(engine)
+            case CompleteInstall():
+                match await publish_history_readers(engine):
+                    case Err(failed):
+                        return Err(failed)
+                    case Ok():
+                        pass
                 match await record_client_family(connection):
                     case Err(failed):
                         return Err(failed)
@@ -1550,9 +1498,9 @@ class PostgresBroker:
                 return Ok(None)
             case RefuseInstall() as refused:
                 return Err(refused)
-            case InstallBaseline() | RecordFamily():
+            case InstallBaseline() | CompleteInstall():
                 raise AssertionError(
-                    f'schema state after recording the client family: {after!r}'
+                    f'schema state after completing the install: {after!r}'
                 )
 
     @contextlib.asynccontextmanager
@@ -3132,296 +3080,130 @@ class PostgresBroker:
         stale_threshold_ms: int = 300_000,
         finalizing_stale_threshold_ms: int = 300_000,
     ) -> BrokerResult[int]:
-        """Clean up crashed worker tasks: retry if policy allows, otherwise mark FAILED.
+        """Recover RUNNING tasks whose runner stopped beating: a crash retry
+        when the task's policy allows it, else the failure.
 
-        Two-phase approach:
-        1. Lightweight scan: identify stale task IDs (no lock hold after scan).
-        2. Per-task processing: take the task advisory lock, then the row
-           lock, re-read fresh state, then upsert attempt + transition — all
-           within one transaction per task. The advisory lock goes first, as
-           in every move function, so this transaction cannot deadlock with
-           a finalize of the same task.
-
-        This avoids holding row locks across the entire batch while still
-        preventing races with concurrent worker finalizers.
+        One ``horsies_stale_running_scan`` reads at most
+        ``STALE_RUNNING_SCAN_BATCH_SIZE`` candidates without a lock; a full
+        batch leaves the rest to the next pass. Each candidate is then one
+        ``horsies_finish_stale_attempt`` statement in autocommit, which
+        judges staleness again under the task advisory lock and the row
+        lock and writes the attempt with the retry or the move. A scheduled
+        retry also wakes its queue (best effort). Returns the number of tasks
+        retried or failed; a refused candidate is not counted, and a
+        candidate whose statement failed is logged and skipped. A failed
+        scan reports ``CLEANUP_FAILED``.
         """
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('mark_stale_tasks_as_failed', loop_limit)
             case Ok(resources):
                 pass
+        thresholds = StaleThresholds(
+            stale_after_ms=stale_threshold_ms,
+            finalizing_stale_after_ms=finalizing_stale_threshold_ms,
+        )
         try:
-            from horsies.core.models.tasks import (
-                TaskResult,
-                TaskError,
-                OperationalErrorCode,
-            )
-            from horsies.core.codec.json_io import dumps_json
-            from horsies.core.codec.typed import encode_task_result
-            from horsies.core.utils.retry import (
-                check_retry_eligibility,
-                calculate_retry_delay,
-                parse_retry_policy,
-            )
-
-            stale_threshold_seconds = stale_threshold_ms / 1000.0
-            finalizing_stale_threshold_seconds = finalizing_stale_threshold_ms / 1000.0
-
-            # Phase 1: lightweight scan to collect candidate task IDs.
-            # FOR UPDATE SKIP LOCKED prevents picking up rows already being finalized,
-            # but we release locks immediately — the IDs are just candidates.
             async with resources.session_factory() as session:
-                stale_tasks_result = await session.execute(
-                    SELECT_STALE_RUNNING_TASKS_SQL,
-                    {
-                        'stale_threshold': stale_threshold_seconds,
-                        'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
-                    },
+                candidates = await scan_stale_running(
+                    await autocommit_connection(session),
+                    thresholds,
+                    STALE_RUNNING_SCAN_BATCH_SIZE,
                 )
-                candidate_ids = [row.id for row in stale_tasks_result.fetchall()]
-                await session.rollback()
-
-            if not candidate_ids:
-                return Ok(0)
-
-            # Phase 2: process each candidate in its own transaction.
-            # Re-acquire FOR UPDATE per task to get fresh state and prevent races.
-            processed = 0
-            for task_id in candidate_ids:
-                try:
-                    async with resources.session_factory() as session:
-                        # Advisory lock, then lock the row and re-read current
-                        # state (fresh db_now). If the row is no longer
-                        # RUNNING, a worker finalized it between scan and now
-                        # — skip it.
-                        await session.execute(LOCK_TASK_SQL, {'task_id': task_id})
-                        ctx_result = await session.execute(
-                            SELECT_STALE_TASK_FOR_UPDATE_SQL,
-                            {
-                                'id': task_id,
-                                'stale_threshold': stale_threshold_seconds,
-                                'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
-                            },
-                        )
-                        ctx_row = ctx_result.fetchone()
-                        if ctx_row is None:
-                            # Task no longer RUNNING — worker or another reaper handled it.
-                            await session.rollback()
-                            continue
-
-                        retry_count = ctx_row.retry_count or 0
-                        max_retries = ctx_row.max_retries or 0
-                        started_at = ctx_row.started_at
-                        worker_pid = ctx_row.worker_pid
-                        worker_hostname = ctx_row.worker_hostname
-                        worker_id = ctx_row.claimed_by_worker_id
-                        worker_process_name = ctx_row.worker_process_name
-                        task_options_json: str | None = ctx_row.task_options
-                        good_until: datetime | None = ctx_row.good_until
-                        db_now: datetime = ctx_row.db_now
-
-                        failed_reason_str = (
-                            f'Worker process crashed (no runner heartbeat '
-                            f'for {stale_threshold_ms}ms = {stale_threshold_ms/1000:.1f}s)'
-                        )
-                        attempt_num = retry_count + 1
-                        now_utc = db_now
-                        attempt_worker = {
-                            'worker_id': worker_id,
-                            'worker_hostname': worker_hostname,
-                            'worker_pid': worker_pid,
-                            'worker_process_name': worker_process_name,
-                        }
-
-                        should_retry = check_retry_eligibility(
-                            retry_count=retry_count,
-                            max_retries=max_retries,
-                            task_options_json=task_options_json,
-                            error_code=OperationalErrorCode.WORKER_CRASHED,
-                            good_until=good_until,
-                            db_now=db_now,
-                        )
-
-                        if should_retry:
-                            retry_policy_data = (
-                                parse_retry_policy(task_options_json) or {}
-                            )
-                            new_retry_count = retry_count + 1
-                            delay_seconds = calculate_retry_delay(
-                                new_retry_count, retry_policy_data
-                            )
-                            next_retry_at = db_now + timedelta(seconds=delay_seconds)
-
-                            # Guard: don't schedule retry past good_until
-                            if good_until is not None:
-                                _gu = (
-                                    good_until.replace(tzinfo=timezone.utc)
-                                    if good_until.tzinfo is None
-                                    else good_until
-                                )
-                                _nra = (
-                                    next_retry_at.replace(tzinfo=timezone.utc)
-                                    if next_retry_at.tzinfo is None
-                                    else next_retry_at
-                                )
-                                if _nra >= _gu:
-                                    should_retry = False
-
-                        if should_retry:
-                            await session.execute(
-                                UPSERT_TASK_ATTEMPT_SQL,
-                                {
-                                    'task_id': task_id,
-                                    'attempt': attempt_num,
-                                    'outcome': 'FAILED',
-                                    'will_retry': True,
-                                    'started_at': started_at or now_utc,
-                                    'finished_at': now_utc,
-                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                                    'error_message': failed_reason_str,
-                                    'failed_reason': failed_reason_str,
-                                    **attempt_worker,
-                                },
-                            )
-                            res = await session.execute(
-                                SCHEDULE_STALE_TASK_RETRY_SQL,
-                                {
-                                    'id': task_id,
-                                    'retry_count': new_retry_count,
-                                    'next_retry_at': next_retry_at,
-                                    'stale_threshold': stale_threshold_seconds,
-                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
-                                },
-                            )
-                            if res.fetchone() is None:
-                                # good_until SQL guard rejected — rollback attempt too.
-                                await session.rollback()
-                                continue
-                            await session.commit()
-                            self.logger.info(
-                                'Reaper scheduled retry #%d for stale task %s at %s',
-                                new_retry_count,
-                                task_id,
-                                next_retry_at,
-                            )
-
-                            # Best-effort: notify workers so they wake at next_retry_at
-                            # rather than waiting for the next poll cycle.
-                            # Reuses the already-open session post-commit — a
-                            # second pool checkout per retried task is real
-                            # churn during mass crash recovery.
-                            queue_name = ctx_row.queue_name or 'default'
-                            try:
-                                await session.execute(
-                                    text('SELECT pg_notify(:ch, :p)'),
-                                    {
-                                        'ch': f'task_queue_{queue_name}',
-                                        'p': f'retry:{task_id}',
-                                    },
-                                )
-                                await session.commit()
-                            except Exception:
-                                pass  # Non-fatal; polling will pick it up
-                        else:
-                            task_error = TaskError(
-                                error_code=OperationalErrorCode.WORKER_CRASHED,
-                                message=failed_reason_str,
-                                data={
-                                    'stale_threshold_ms': stale_threshold_ms,
-                                    'stale_threshold_seconds': stale_threshold_seconds,
-                                    'worker_pid': worker_pid,
-                                    'worker_hostname': worker_hostname,
-                                    'worker_id': worker_id,
-                                    'started_at': started_at.isoformat()
-                                    if started_at
-                                    else None,
-                                    'detected_at': now_utc.isoformat(),
-                                },
-                            )
-                            task_result: TaskResult[None, TaskError] = TaskResult(
-                                err=task_error
-                            )
-                            # Strict-serde phase 7: write the wire envelope so
-                            # downstream readers (worker finalizers, workflow
-                            # decoders) see ``__h_task_result__``. The crashed
-                            # task carries no ok payload (TaskResult[None, ...]),
-                            # so ``type(None)`` is the truthful ok_type.
-                            ser_r = dumps_json(
-                                encode_task_result(task_result, type(None)),
-                            )
-                            if is_err(ser_r):
-                                self.logger.error(
-                                    'Failed to serialize crash result for task %s: %s',
-                                    task_id,
-                                    ser_r.err_value,
-                                )
-                                await session.rollback()
-                                continue
-                            result_json = ser_r.ok_value
-
-                            await session.execute(
-                                UPSERT_TASK_ATTEMPT_SQL,
-                                {
-                                    'task_id': task_id,
-                                    'attempt': attempt_num,
-                                    'outcome': 'FAILED',
-                                    'will_retry': False,
-                                    'started_at': started_at or now_utc,
-                                    'finished_at': now_utc,
-                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                                    'error_message': task_error.message,
-                                    'failed_reason': failed_reason_str,
-                                    **attempt_worker,
-                                },
-                            )
-                            terminalization = await apply_async(
-                                await session.connection(),
-                                FailStaleTask(
-                                    task_id=task_id,
-                                    stale_after_ms=stale_threshold_ms,
-                                    finalizing_stale_after_ms=(
-                                        finalizing_stale_threshold_ms
-                                    ),
-                                    result_json=result_json,
-                                    error_code=(
-                                        OperationalErrorCode.WORKER_CRASHED.value
-                                    ),
-                                    failed_reason=failed_reason_str,
-                                ),
-                            )
-                            match terminalization:
-                                case Applied():
-                                    await session.commit()
-                                case (
-                                    AlreadyApplied()
-                                    | LostClaim()
-                                    | SourceStateConflict()
-                                    | TaskAbsent()
-                                ):
-                                    # The attempt and transition are one unit.
-                                    # A refusal must discard the attempt written
-                                    # immediately above as well.
-                                    await session.rollback()
-                                    continue
-                                case _ as unreachable:
-                                    assert_never(unreachable)
-
-                        processed += 1
-                except Exception as task_exc:
-                    self.logger.error(
-                        'Reaper failed to process stale task %s: %s',
-                        task_id,
-                        task_exc,
-                    )
-                    continue
-
-            return Ok(processed)
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'mark_stale_tasks_as_failed failed: {exc}',
                 exc,
             )
+        if len(candidates) == STALE_RUNNING_SCAN_BATCH_SIZE:
+            self.logger.warning(
+                'mark_stale_tasks_as_failed read a full scan batch of %s '
+                'candidates; the rest is recovered next pass',
+                STALE_RUNNING_SCAN_BATCH_SIZE,
+            )
+        processed = 0
+        for candidate in candidates:
+            try:
+                recovered = await self._finish_stale_candidate(
+                    resources, candidate, thresholds,
+                )
+            except Exception as task_exc:
+                self.logger.error(
+                    'Reaper failed to process stale task %s: %s',
+                    candidate.task_id,
+                    task_exc,
+                )
+                continue
+            if recovered:
+                processed += 1
+        return Ok(processed)
+
+    async def _finish_stale_candidate(
+        self,
+        resources: BrokerResources,
+        candidate: StaleCandidate,
+        thresholds: StaleThresholds,
+    ) -> bool:
+        """Recover one candidate. True when its retry or its failure committed.
+
+        Raises what the database raises; the statement wrote nothing, or
+        committed and its reply was lost.
+        """
+        match crash_result_json(candidate, thresholds):
+            case Err(serialization_error):
+                self.logger.error(
+                    'Failed to serialize crash result for task %s: %s',
+                    candidate.task_id,
+                    serialization_error,
+                )
+                return False
+            case Ok(result_json):
+                pass
+        async with resources.session_factory() as session:
+            connection = await autocommit_connection(session)
+            outcome = await finish_stale_attempt(
+                connection, candidate, thresholds, result_json,
+            )
+            match outcome:
+                case RetryScheduled(
+                    retry_count=retry_count,
+                    next_retry_at=next_retry_at,
+                    queue_name=queue_name,
+                ):
+                    self.logger.info(
+                        'Reaper scheduled retry #%d for stale task %s at %s',
+                        retry_count,
+                        candidate.task_id,
+                        next_retry_at,
+                    )
+                    await self._wake_stale_retry(connection, candidate.task_id, queue_name)
+                    return True
+                case StaleFailureApplied():
+                    return True
+                case AlreadyApplied() | LostClaim() | SourceStateConflict() | TaskAbsent():
+                    self.logger.debug(
+                        'Reaper left stale candidate %s: %r', candidate.task_id, outcome,
+                    )
+                    return False
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+    async def _wake_stale_retry(
+        self,
+        connection: AsyncConnection,
+        task_id: str,
+        queue_name: str,
+    ) -> None:
+        """Wake the queue of a scheduled crash retry. Best effort: a failure is
+        logged at debug level, and the claim poll finds the retry when due."""
+        try:
+            await connection.execute(
+                text('SELECT pg_notify(:ch, :p)'),
+                {'ch': f'task_queue_{queue_name}', 'p': f'retry:{task_id}'},
+            )
+        except _DRIVER_ERRORS as exc:
+            self.logger.debug('Wake of stale retry %s failed: %s', task_id, exc)
 
     async def expire_pending_tasks(self) -> BrokerResult[int]:
         """Transition PENDING tasks whose good_until deadline has passed to EXPIRED.
@@ -3507,28 +3289,52 @@ class PostgresBroker:
         self,
         stale_threshold_ms: int = 120_000,
     ) -> BrokerResult[int]:
-        """Requeue tasks stuck in CLAIMED without recent claimer heartbeat."""
+        """Requeue CLAIMED rows whose worker stopped beating, in bounded batches.
+
+        Each batch is one ``horsies_requeue_stale_claims`` statement in
+        autocommit: a row with no claimer beat newer than the threshold, and
+        claimed longer ago than the threshold, goes back to PENDING (a
+        workflow task with no runnable node stays). Batches repeat until one
+        is short, at most ``REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS``
+        times; past that the remainder waits for the next pass and a warning
+        is logged. Returns the number of rows requeued. A failure reports
+        ``CLEANUP_FAILED``; the batches before it committed.
+        """
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('requeue_stale_claimed', loop_limit)
             case Ok(resources):
                 pass
+        total_requeued = 0
         try:
-            stale_threshold_seconds = stale_threshold_ms / 1000.0
-
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    REQUEUE_STALE_CLAIMED_SQL,
-                    {'stale_threshold': stale_threshold_seconds},
-                )
-                await session.commit()
-                return Ok(getattr(result, 'rowcount', 0))
+                connection = await autocommit_connection(session)
+                for _ in range(REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS):
+                    requeued = (
+                        await connection.execute(
+                            REQUEUE_STALE_CLAIMS_SQL,
+                            {
+                                'stale_after_ms': stale_threshold_ms,
+                                'batch_size': REQUEUE_STALE_CLAIMS_BATCH_SIZE,
+                            },
+                        )
+                    ).scalar_one()
+                    total_requeued += requeued
+                    if requeued < REQUEUE_STALE_CLAIMS_BATCH_SIZE:
+                        return Ok(total_requeued)
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
-                f'requeue_stale_claimed failed: {exc}',
+                f'requeue_stale_claimed failed after requeueing '
+                f'{total_requeued} task(s): {exc}',
                 exc,
             )
+        self.logger.warning(
+            'requeue_stale_claimed reached the per-pass batch cap after '
+            'requeueing %s task(s); the remainder is requeued next pass',
+            total_requeued,
+        )
+        return Ok(total_requeued)
 
     async def audit_orphaned_workflow_tasks(
         self,

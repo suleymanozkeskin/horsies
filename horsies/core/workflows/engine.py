@@ -53,7 +53,6 @@ from horsies.core.codec.typed import (
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 from horsies.core.logging import get_logger
@@ -112,7 +111,10 @@ from horsies.core.workflows.sql import (
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
-    workflow_task_enqueue_stamp,
+    subworkflow_node_kind_params,
+    task_node_kind_params,
+    task_node_facts,
+    workflow_task_row_params,
 )
 from horsies.core.history.identity.uuid7 import mint_task_id
 
@@ -677,8 +679,8 @@ async def enqueue_workflow_task(
         workflow_id,
         task_index,
         task_name=row.task_name,
-        task_args=row.task_args,
-        task_kwargs=row.task_kwargs,
+        node_input=row.input,
+        workflow_sent_at=row.workflow_sent_at,
         queue_name=row.queue_name,
         priority=row.priority,
         args_from=row.args_from,
@@ -714,8 +716,8 @@ async def _build_enqueued_task_params(
     task_index: int,
     *,
     task_name: str,
-    task_args: str | None,
-    task_kwargs: str | None,
+    node_input: str,
+    workflow_sent_at: datetime,
     queue_name: str,
     priority: int,
     args_from: Any,
@@ -730,12 +732,16 @@ async def _build_enqueued_task_params(
 
     Shared by the single-node enqueue path and the batched promotion
     pipeline so the two cannot diverge: retry/good_until parsing,
-    args_from envelope encoding, workflow_ctx injection, meta injection,
-    kwargs serialization, and the enqueue fingerprint all live here.
+    args_from envelope encoding, workflow_ctx injection, meta injection
+    and kwargs serialization all live here.
 
-    Inputs come from the READY→ENQUEUED CAS RETURNING row. Failure means
-    THIS node fails (callers fold into ``_fail_enqueued_task``); the only
-    statements issued here are the workflow_ctx reads for ctx nodes.
+    Inputs come from the READY→ENQUEUED CAS RETURNING row; ``node_input``
+    is the node's stored ``input`` (its static kwargs as a JSON object), and
+    ``workflow_sent_at`` the ``sent_at`` of its workflow row, which the task
+    row stores.
+    Failure means THIS node fails (callers fold into
+    ``_fail_enqueued_task``); the only statements issued here are the
+    workflow_ctx reads for ctx nodes.
 
     Raises:
         SerializationError: the kwargs that this function built do not
@@ -746,7 +752,6 @@ async def _build_enqueued_task_params(
     max_retries = 0
     execution = Execution.ISOLATED
     good_until_str: str | None = None
-    good_until_dt: datetime | None = None
     if task_options_str:
         options_data = _deser_json(task_options_str, 'task_options')
         if options_data is None:
@@ -786,24 +791,12 @@ async def _build_enqueued_task_params(
         execution = execution_r.ok_value
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
+            # The database parses the text into the timestamp column.
             good_until_str = str(good_until_raw)
-            try:
-                good_until_dt = datetime.fromisoformat(good_until_str)
-            except (ValueError, TypeError) as exc:
-                # SHA will use None; good_until_str is still passed to the
-                # DB column. Loud — fingerprint and stored deadline diverge.
-                logger.warning(
-                    'Unparseable good_until for workflow=%s task_index=%s '
-                    '(%r): %s',
-                    workflow_id,
-                    task_index,
-                    good_until_raw,
-                    exc,
-                )
 
     # Start with static kwargs — corrupt kwargs is fatal for this task
-    raw_kwargs = _deser_json(task_kwargs, 'workflow task kwargs')
-    if raw_kwargs is None and task_kwargs:
+    raw_kwargs = _deser_json(node_input, 'workflow task kwargs')
+    if raw_kwargs is None and node_input:
         return Err(_EnqueueBuildError(
                 f'Corrupt kwargs JSON for task {task_index}',
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
@@ -938,46 +931,21 @@ async def _build_enqueued_task_params(
         )
 
     # Create actual task in tasks table
-    task_id = mint_task_id()
-    sent_at = datetime.now(timezone.utc)
-    sha = enqueue_fingerprint(
+    return Ok(workflow_task_row_params(
+        task_id=mint_task_id(),
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
-        args_json=task_args,
-        kwargs_json=kwargs_json,
-        sent_at=sent_at,
-        good_until=good_until_dt,
-        enqueue_delay_seconds=None,
-        task_options=task_options_str,
-    )
-    return Ok({
-        'id': task_id,
-        'name': task_name,
-        'queue': queue_name,
-        'priority': priority,
-        # Compat: new writes store [] for task_args (kwargs-only).
-        # Old persisted rows may still carry non-empty task_args;
-        # passing them through preserves backward compatibility.
-        'args': task_args,
-        'kwargs': kwargs_json,
-        'sent_at': sent_at,
-        'max_retries': max_retries,
-        'task_options': task_options_str,
-        'execution': execution.value,
-        'good_until': good_until_str,
-        'enqueue_sha': sha,
-        **workflow_task_enqueue_stamp(
-            task_name=task_name,
-            queue_name=queue_name,
-            priority=priority,
-            args_json=task_args,
-            kwargs_json=kwargs_json,
-            good_until=good_until_dt,
-            task_options_json=task_options_str,
-            retention_class_key=queue_retention_class(broker, queue_name),
+        input_json=kwargs_json,
+        sent_at=workflow_sent_at,
+        task_options_json=task_options_str,
+        facts=task_node_facts(
+            max_retries=max_retries,
+            execution=execution,
+            good_until=good_until_str,
+            queue_retention_class=queue_retention_class(broker, queue_name),
         ),
-    })
+    ))
 
 
 
@@ -1039,8 +1007,7 @@ async def enqueue_subworkflow_task(
 
     _wt_id = row.id  # Unused but kept for row unpacking clarity
     _sub_workflow_name = row.sub_workflow_name  # Unused but kept for row unpacking clarity
-    task_args_json = row.task_args
-    task_kwargs_json = row.task_kwargs
+    node_input: str = row.input
     args_from_raw = row.args_from
     _node_id = row.node_id  # Unused but kept for row unpacking clarity
     sub_definition_key = row.sub_definition_key
@@ -1079,15 +1046,8 @@ async def enqueue_subworkflow_task(
         return None
 
     # 3. Parse static kwargs and merge args_from
-    # Compat: new writes store [] for task_args (kwargs-only).
-    # Old persisted rows may still carry positional args for build_with();
-    # they are passed through via *task_args to preserve backward compat.
-    raw_args = _deser_json(task_args_json, 'subworkflow args', fallback=[])
-    task_args: tuple[Any, ...] = ()
-    if isinstance(raw_args, list):
-        task_args = tuple(raw_args)
-    raw_kwargs = _deser_json(task_kwargs_json, 'subworkflow kwargs')
-    if raw_kwargs is None and task_kwargs_json:
+    raw_kwargs = _deser_json(node_input, 'subworkflow kwargs')
+    if raw_kwargs is None and node_input:
         await _fail_enqueued_task(
             session,
             workflow_id,
@@ -1222,14 +1182,14 @@ async def enqueue_subworkflow_task(
             '_original_build_with',
             workflow_def.build_with,
         )
-        if (task_args or kwargs) and build_with_fn is default_build_with:
+        if kwargs and build_with_fn is default_build_with:
             raise RuntimeError(
                 f"subworkflow '{workflow_def.name}' received runtime parameters "
                 'but uses default build_with(); override build_with(app, ...) to accept them'
             )
 
         kwargs = fill_build_with_defaults(workflow_def, kwargs)
-        child_spec = workflow_def.build_with(broker.app, *task_args, **kwargs)
+        child_spec = workflow_def.build_with(broker.app, **kwargs)
 
         # Validate that build_with override didn't produce a type mismatch
         validate_workflow_generic_output_match(workflow_def, child_spec)
@@ -1285,12 +1245,13 @@ async def enqueue_subworkflow_task(
     # cannot carry args_from/workflow_ctx_from (spec validation requires
     # both to reference waits_for, and roots have none), so they are
     # inserted directly as ENQUEUED with their task rows. SubWorkflowNode
-    # roots recurse. Task options that do not parse are a defect (they come
-    # from the task function) and raise SerializationError before any
+    # roots recurse. Every TaskNode row carries its typed facts, parsed from
+    # its task options. Task options that do not parse are a defect (they
+    # come from the task function) and raise SerializationError before any
     # INSERT; the caller's transaction rolls back.
     from horsies.core.workflows.lifecycle import (
-        root_execution,
-        root_retry_and_deadline,
+        start_task_node_facts,
+        subworkflow_params_of,
     )
 
     child_node_params: list[dict[str, Any]] = []
@@ -1340,8 +1301,7 @@ async def enqueue_subworkflow_task(
                 'idx': child_sub.index,
                 'node_id': child_sub.node_id,
                 'name': child_sub.name,
-                'args': _ser_or_raise(dumps_json([]), 'positional args'),
-                'kwargs': child_kwargs_json,
+                'input': child_kwargs_json,
                 'queue': 'default',
                 # Bookkeeping row for a SubWorkflowNode (is_subworkflow=True):
                 # not a claimable task. Worker claim SQL reads only
@@ -1361,6 +1321,7 @@ async def enqueue_subworkflow_task(
                 'join_type': child_sub.join,
                 'min_success': child_sub.min_success,
                 'task_options': None,
+                **subworkflow_node_kind_params(subworkflow_params_of(child_sub)),
                 'status': 'PENDING' if child_dep_indices else 'READY',
                 'is_subworkflow': True,
                 'sub_wf_name': child_sub.workflow_def.name,
@@ -1418,7 +1379,14 @@ async def enqueue_subworkflow_task(
                 return None
             child_queue = bound_child.queue
             child_priority = bound_child.priority
-            child_args_json = _ser_or_raise(dumps_json([]), 'positional args')
+            # The options come from the task function, not from a stored
+            # row, so a SerializationError here is a defect and propagates,
+            # as in the workflow start transaction.
+            child_facts = start_task_node_facts(
+                child_task_options_json,
+                child_task.name,
+                queue_retention_class(broker, child_queue),
+            )
 
             is_fast_root = (
                 not child_dep_indices
@@ -1426,22 +1394,7 @@ async def enqueue_subworkflow_task(
                 and not child_ctx_from_ids
             )
             child_task_id: str | None = None
-            max_retries: int = 0
-            good_until_str: str | None = None
-            good_until_dt: datetime | None = None
-            if is_fast_root:
-                # The options come from the task function, not from a
-                # stored row, so a SerializationError here is a defect and
-                # propagates, as in the workflow start transaction.
-                max_retries, good_until_str, good_until_dt = (
-                    root_retry_and_deadline(
-                        child_task_options_json, child_task.name,
-                    )
-                )
             if is_fast_root and child_task.index is not None:
-                child_root_class = root_execution(
-                    child_task_options_json, child_task.name,
-                )
                 child_task_id = mint_task_id()
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
@@ -1456,45 +1409,17 @@ async def enqueue_subworkflow_task(
                     dumps_json(root_task_kwargs),
                     f'task kwargs for child root {child_task.name}',
                 )
-                root_sent_at = datetime.now(timezone.utc)
-                sha = enqueue_fingerprint(
+                child_fast_root_indexes.append(child_task.index)
+                child_root_task_params.append(workflow_task_row_params(
+                    task_id=child_task_id,
                     task_name=child_task.name,
                     queue_name=child_queue,
                     priority=child_priority,
-                    args_json=child_args_json,
-                    kwargs_json=root_kwargs_json,
-                    sent_at=root_sent_at,
-                    good_until=good_until_dt,
-                    enqueue_delay_seconds=None,
-                    task_options=child_task_options_json,
-                )
-                child_fast_root_indexes.append(child_task.index)
-                child_root_task_params.append({
-                    'id': child_task_id,
-                    'name': child_task.name,
-                    'queue': child_queue,
-                    'priority': child_priority,
-                    'args': child_args_json,
-                    'kwargs': root_kwargs_json,
-                    'sent_at': root_sent_at,
-                    'max_retries': max_retries,
-                    'task_options': child_task_options_json,
-                    'execution': child_root_class.value,
-                    'good_until': good_until_str,
-                    'enqueue_sha': sha,
-                    **workflow_task_enqueue_stamp(
-                        task_name=child_task.name,
-                        queue_name=child_queue,
-                        priority=child_priority,
-                        args_json=child_args_json,
-                        kwargs_json=root_kwargs_json,
-                        good_until=good_until_dt,
-                        task_options_json=child_task_options_json,
-                        retention_class_key=queue_retention_class(
-                            broker, child_queue
-                        ),
-                    ),
-                })
+                    input_json=root_kwargs_json,
+                    sent_at=child_sent_at,
+                    task_options_json=child_task_options_json,
+                    facts=child_facts,
+                ))
             elif not child_dep_indices:
                 slow_child_roots.append(child_task)
 
@@ -1504,8 +1429,7 @@ async def enqueue_subworkflow_task(
                 'idx': child_task.index,
                 'node_id': child_task.node_id,
                 'name': child_task.name,
-                'args': child_args_json,
-                'kwargs': child_kwargs_json,
+                'input': child_kwargs_json,
                 'queue': child_queue,
                 'priority': child_priority,
                 'deps': child_dep_indices,
@@ -1520,6 +1444,7 @@ async def enqueue_subworkflow_task(
                 'join_type': child_task.join,
                 'min_success': child_task.min_success,
                 'task_options': child_task_options_json,
+                **task_node_kind_params(child_facts),
                 'status': 'ENQUEUED'
                 if child_task_id is not None
                 else ('PENDING' if child_dep_indices else 'READY'),
@@ -2501,8 +2426,8 @@ async def _build_level_inserts(
             workflow_id,
             cas_row.task_index,
             task_name=cas_row.task_name,
-            task_args=cas_row.task_args,
-            task_kwargs=cas_row.task_kwargs,
+            node_input=cas_row.input,
+            workflow_sent_at=cas_row.workflow_sent_at,
             queue_name=cas_row.queue_name,
             priority=cas_row.priority,
             args_from=cas_row.args_from,

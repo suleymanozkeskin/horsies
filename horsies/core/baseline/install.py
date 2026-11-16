@@ -5,11 +5,18 @@ The install path is:
 1. ``read_database_state``: two catalog reads, no lock, no change.
 2. ``decide_install``: a pure decision over the state.
 3. Under the caller's schema lock, read the state again and act:
-   ``install_baseline`` (empty database) or ``record_client_family`` (a
-   baseline database with no family row).
+   ``install_baseline`` (empty database), then ``publish_history_readers``;
+   or, for a baseline database whose install stopped before it published
+   the readers or wrote the family row, ``publish_history_readers`` and
+   ``record_client_family``.
 
-These functions take a psycopg connection in autocommit mode. They do not
-take or release the schema lock; the caller owns it. A database that holds
+The install returns only after the published history readers exist, so no
+read meets a baseline database without them.
+
+The state read and the writes take a psycopg connection in autocommit mode;
+``publish_history_readers`` takes the SQLAlchemy engine of the session URL,
+because the reader publisher runs on SQLAlchemy connections. None of them
+takes or releases the schema lock; the caller owns it. A database that holds
 anything other than an empty schema or this build's baseline is refused and
 never changed.
 """
@@ -22,8 +29,14 @@ from enum import Enum
 from typing import Any, Final, LiteralString
 
 import psycopg
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from horsies.core.baseline.migration import BASELINE_VERSION, BaselineMigration
+from horsies.core.history.reads.publisher import (
+    PUBLISHED_READER_SIGNATURES,
+    StagedLoaderPublisher,
+)
 from horsies.core.types.result import Err, Ok, Result
 
 CATALOG_NAME_LIMIT: Final = 64
@@ -53,6 +66,23 @@ class FamilyNotRecorded:
 
 
 RecordedFamily = FamilyRecorded | FamilyNotRecorded
+
+
+@dataclass(frozen=True, slots=True)
+class ReadersPublished:
+    """Every published history reader exists (``PUBLISHED_READER_SIGNATURES``)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReadersMissing:
+    """At least one published history reader does not exist.
+
+    An install stopped between the migration and the publication, or a
+    reader was dropped out of band.
+    """
+
+
+ReaderPresence = ReadersPublished | ReadersMissing
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +155,7 @@ class BaselineCurrent:
     """The baseline is installed, recorded as successful, with this build's checksum."""
 
     family: RecordedFamily
+    readers: ReaderPresence
 
 
 DatabaseState = (
@@ -153,8 +184,13 @@ class InstallBaseline:
 
 
 @dataclass(frozen=True, slots=True)
-class RecordFamily:
-    """Write this client's family row."""
+class CompleteInstall:
+    """Publish the history readers, then write this client's family row.
+
+    The baseline is installed, but its install stopped before the
+    publication or the family row, or a reader was dropped. Both steps are
+    idempotent.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,16 +201,17 @@ class RefuseInstall:
     cause: str
 
 
-InstallDecision = SchemaReady | InstallBaseline | RecordFamily | RefuseInstall
+InstallDecision = SchemaReady | InstallBaseline | CompleteInstall | RefuseInstall
 
 
 @dataclass(frozen=True, slots=True)
 class SchemaStatementFailed:
     """A statement of the state read or the install raised a database error.
 
-    After a failure inside ``install_baseline`` the transaction is rolled
-    back: the database is unchanged. ``cause.sqlstate`` tells a deadlock
-    (40P01, the caller may retry) from other errors.
+    After a failure inside ``install_baseline`` or
+    ``publish_history_readers`` that step's transaction is rolled back: the
+    database holds what the earlier steps committed. ``cause.sqlstate``
+    tells a deadlock (40P01, the caller may retry) from other errors.
     """
 
     step: str
@@ -197,6 +234,11 @@ _CATALOG_SQL: Final[LiteralString] = """
               AND c.relname LIKE 'horsies\\_%%'
             ORDER BY 1
             LIMIT %(limit)s
+        ),
+        NOT EXISTS (
+            SELECT 1
+            FROM unnest(CAST(%(readers)s AS text[])) AS reader(signature)
+            WHERE to_regprocedure(reader.signature) IS NULL
         )
 """
 
@@ -248,6 +290,7 @@ def classify_database(
     tables: tuple[str, ...],
     applied: tuple[AppliedMigration, ...],
     family: RecordedFamily,
+    readers: ReaderPresence,
     own_checksum: bytes,
 ) -> DatabaseState:
     """Classify the catalog facts of one database. Pure."""
@@ -272,7 +315,7 @@ def classify_database(
             stored_checksum=baseline.checksum,
             own_checksum=own_checksum,
         )
-    return BaselineCurrent(family=family)
+    return BaselineCurrent(family=family, readers=readers)
 
 
 async def read_database_state(
@@ -284,10 +327,13 @@ async def read_database_state(
     One statement on an empty database, two otherwise. Changes nothing.
     """
     try:
-        cursor = await connection.execute(_CATALOG_SQL, {'limit': CATALOG_NAME_LIMIT})
+        cursor = await connection.execute(
+            _CATALOG_SQL,
+            {'limit': CATALOG_NAME_LIMIT, 'readers': list(PUBLISHED_READER_SIGNATURES)},
+        )
         catalog = await cursor.fetchone()
         assert catalog is not None, 'the catalog read returns one row'
-        migrations_table, schema_version_table, family_table, names = catalog
+        migrations_table, schema_version_table, family_table, names, readers_exist = catalog
         rows: list[tuple[Any, ...]] = []
         if migrations_table:
             query = _MIGRATIONS_WITH_FAMILY_SQL if family_table else _MIGRATIONS_SQL
@@ -307,6 +353,7 @@ async def read_database_state(
             tables=tuple(str(name) for name in names),
             applied=applied,
             family=family,
+            readers=ReadersPublished() if readers_exist else ReadersMissing(),
             own_checksum=migration.checksum,
         ),
     )
@@ -354,14 +401,18 @@ def describe_state(state: DatabaseState) -> str:
                     return 'the baseline schema is installed with no client family row'
 
 
-def _decide_for_family(state: BaselineCurrent, recorded: RecordedFamily) -> InstallDecision:
-    match recorded:
+def _decide_for_baseline(state: BaselineCurrent) -> InstallDecision:
+    match state.family:
         case FamilyNotRecorded():
-            return RecordFamily()
+            return CompleteInstall()
         case FamilyRecorded(family=family):
             match family:
                 case ClientFamily.PYTHON:
-                    return SchemaReady()
+                    match state.readers:
+                        case ReadersPublished():
+                            return SchemaReady()
+                        case ReadersMissing():
+                            return CompleteInstall()
                 case ClientFamily.RUST:
                     return RefuseInstall(
                         state=state,
@@ -377,8 +428,8 @@ def decide_install(state: DatabaseState) -> InstallDecision:
     match state:
         case EmptyDatabase():
             return InstallBaseline()
-        case BaselineCurrent(family=recorded):
-            return _decide_for_family(state, recorded)
+        case BaselineCurrent():
+            return _decide_for_baseline(state)
         case (
             ZeroXPythonDatabase()
             | UnknownHorsiesObjects()
@@ -400,7 +451,8 @@ async def install_baseline(
     """Run the baseline migration, its bookkeeping row and this client's family row.
 
     One transaction: on failure nothing stays. The connection must be in
-    autocommit mode. Does not take the schema lock.
+    autocommit mode. Does not take the schema lock and does not publish the
+    history readers: the caller runs ``publish_history_readers`` next.
     """
     try:
         async with connection.transaction():
@@ -433,4 +485,34 @@ async def record_client_family(
         await connection.execute(_INSERT_FAMILY_SQL, {'family': OWN_CLIENT_FAMILY.value})
     except psycopg.Error as exc:
         return Err(SchemaStatementFailed(step='record the client family', cause=exc))
+    return Ok(None)
+
+
+async def publish_history_readers(
+    engine: AsyncEngine,
+) -> Result[None, SchemaStatementFailed]:
+    """Publish the history readers from the leaf catalog, in one transaction.
+
+    Runs ``StagedLoaderPublisher.republish``: the readers, the duplicate
+    guard, the probe manifest and their stamps commit together. On a fresh
+    baseline the catalog holds the forever leaf only, so the readers probe
+    the live table and that leaf. The worker's coverage pass publishes again
+    when it adds leaves.
+
+    A database error returns ``SchemaStatementFailed`` with the psycopg
+    cause; the publication's transaction is rolled back. A broken history
+    contract (``HistoryContractError``) raises: the catalog and the
+    relations disagree, which no retry fixes. Does not take the schema lock.
+    """
+    try:
+        async with engine.begin() as connection:
+            _ = await StagedLoaderPublisher().republish(connection)
+    except DBAPIError as exc:
+        match exc.orig:
+            case psycopg.Error() as cause:
+                return Err(
+                    SchemaStatementFailed(step='publish the history readers', cause=cause),
+                )
+            case _:
+                raise
     return Ok(None)
