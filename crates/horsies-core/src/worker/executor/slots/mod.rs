@@ -32,6 +32,8 @@ mod boot_tests;
 #[cfg(test)]
 mod isolated_run_tests;
 #[cfg(test)]
+mod isolated_stop_tests;
+#[cfg(test)]
 mod isolated_verdict_tests;
 #[cfg(test)]
 mod scripted;
