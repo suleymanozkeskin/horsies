@@ -196,7 +196,7 @@ class TestDiscoveryBatch:
                 good_until_offset=timedelta(minutes=-10),
             )
             workflow_id = await create_workflow(connection, status='RUNNING')
-            node_row_id = await link_workflow_node(
+            _ = await link_workflow_node(
                 connection, wf_task, workflow_id=workflow_id, node_status='ENQUEUED',
             )
             not_expired = await insert_live_task(
