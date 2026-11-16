@@ -8,7 +8,6 @@ use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
@@ -99,9 +98,12 @@ pub(crate) async fn migrated_pool() -> PgPool {
                     .await
                     .expect("unlock P6 database setup");
             assert!(unlocked, "P6 database setup lock was held");
-            run_horsies_migrations(&anchor)
-                .await
-                .expect("migrate P6 database");
+            crate::broker::migrations::install_schema(
+                &anchor,
+                crate::broker::client_family::ClientFamily::Rust,
+            )
+            .await
+            .expect("migrate P6 database");
             P6TestDatabase {
                 name: database_name,
                 _anchor: anchor,

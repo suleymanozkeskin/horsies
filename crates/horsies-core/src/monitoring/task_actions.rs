@@ -16,7 +16,10 @@ use crate::core::history::reads::detail::{
 use crate::core::lifecycle::{CallerHoldsRowLock, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::types::status::TaskStatus;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "monitoring", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskActionErrorCode {
     TaskNotFound,
@@ -215,6 +218,10 @@ pub async fn cancel_task(
     task_id: Uuid,
     include_running: bool,
 ) -> TaskActionResult<TaskCancelled> {
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(|error| broker_failure(task_id, error))?;
     let mut transaction = broker
         .pool()
         .begin()
