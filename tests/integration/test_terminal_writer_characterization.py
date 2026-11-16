@@ -380,8 +380,6 @@ async def _fused_complete(ctx: Context, eligible: bool) -> str:
             task_id=task.task_id,
             fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=dispatched),
             result_json='{"ok": 1}',
-            notify_channel='task_queue_default',
-            notify_payload=f'capacity:{task.task_id}',
         ),
     )
     await ctx.session.commit()

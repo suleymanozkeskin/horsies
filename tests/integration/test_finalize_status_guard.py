@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -349,8 +350,6 @@ async def _complete_fused(
                 claimed_at=claimed_at,
             ),
             result_json=result_json,
-            notify_channel='task_queue_default',
-            notify_payload=f'capacity:{task_id}',
         ),
     )
 
@@ -785,32 +784,32 @@ async def test_fused_finalize_rejects_stale_claim_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_the_stored_fused_completion_keeps_its_null_fence(
+async def test_the_stored_fused_completion_refuses_a_null_generation(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The stored function keeps its contract: a NULL claimed_at matches a
-    row of any generation on (status, worker_id) alone. The worker never
-    sends one (``OwnedClaim`` requires a claim time), so the statement runs
-    with the claim time replaced by NULL."""
+    """The claim generation is required: a NULL claimed_at is refused
+    (22023) and the row stays RUNNING. The worker never sends one
+    (``OwnedClaim`` requires a claim time), so the statement runs with the
+    claim time replaced by NULL."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    await session.commit()
     statement, parameters = call_for(
         CompleteTaskFused(
             task_id=task_id,
             fence=OwnedClaim(worker_id=OWNER_WORKER_ID, claimed_at=GEN_CURRENT),
             result_json='{"ok": 1}',
-            notify_channel='task_queue_default',
-            notify_payload=f'capacity:{task_id}',
         ),
     )
 
-    result = await session.execute(statement, {**parameters, 'claimed_at': None})
+    with pytest.raises(DBAPIError) as raised:
+        await session.execute(statement, {**parameters, 'claimed_at': None})
+    await session.rollback()
 
-    outcome = decode_outcome_row(
-        {str(key): value for key, value in result.mappings().one().items()},
-    )
-    assert isinstance(outcome, Applied)
-    assert await _get_task_status(session, task_id) == 'COMPLETED'
+    original = raised.value.orig
+    assert isinstance(original, psycopg.Error)
+    assert original.sqlstate == '22023'
+    assert await _get_task_status(session, task_id) == 'RUNNING'
 
 
 @pytest.mark.asyncio(loop_scope='function')

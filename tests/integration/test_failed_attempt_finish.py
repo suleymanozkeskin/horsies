@@ -349,7 +349,7 @@ class TestTerminalFailure:
             4242,
             'child-1',
         )
-        assert await _payloads(wakes) == [f'capacity:{seeded.task_id}']
+        assert await _payloads(wakes) == ['capacity']
 
     async def test_a_workflow_task_failure_owes_phase_two_and_sends_no_wake(
         self,
@@ -524,7 +524,7 @@ class TestRetry:
         assert (await _history_row(engine, seeded.task_id)).status == 'FAILED'
         (attempt,) = await _attempts(engine, seeded.task_id)
         assert attempt.will_retry is False
-        assert await _payloads(wakes) == [f'capacity:{seeded.task_id}']
+        assert await _payloads(wakes) == ['capacity']
 
     async def test_a_retry_before_good_until_is_scheduled(
         self,
@@ -550,7 +550,7 @@ class TestNoWrite:
         seeded = await seed()
         first = await _finish(engine, _command(seeded))
         assert isinstance(first, FailureApplied)
-        assert await _payloads(wakes) == [f'capacity:{seeded.task_id}']
+        assert await _payloads(wakes) == ['capacity']
 
         replay = await _finish(engine, _command(seeded))
 
@@ -696,9 +696,10 @@ class TestNoWrite:
 
 _PARTIAL_RETRY_SQL = """
     SELECT * FROM horsies_finish_failed_attempt(
-        CAST(:id AS uuid), :worker, NULL,
-        CAST(:count AS integer), CAST(:delay AS double precision), :placement,
-        :result, 'BOOM', NULL, :outcome, 'message', NULL
+        CAST(:id AS uuid), :worker,
+        (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)),
+        :kind, CAST(:count AS integer), CAST(:delay AS double precision), :placement,
+        :result, 'BOOM', NULL, :outcome, 'message', NULL, 'REFUSE', TRUE
     )
 """
 
@@ -710,12 +711,12 @@ class TestArguments:
     @pytest.mark.parametrize(
         ('count', 'delay', 'placement', 'result', 'outcome', 'sqlstate'),
         [
-            (0, None, 'same_class', ERROR_RESULT, 'FAILED', '22023'),
+            (0, None, 'SAME_CLASS', ERROR_RESULT, 'FAILED', '22023'),
             (None, 1.0, None, ERROR_RESULT, 'FAILED', '22023'),
             (0, 1.0, 'elsewhere', ERROR_RESULT, 'FAILED', '22023'),
-            (0, -1.0, 'same_class', ERROR_RESULT, 'FAILED', '22023'),
-            (0, math.nan, 'same_class', ERROR_RESULT, 'FAILED', '22023'),
-            (0, math.inf, 'same_class', ERROR_RESULT, 'FAILED', '22023'),
+            (0, -1.0, 'SAME_CLASS', ERROR_RESULT, 'FAILED', '22023'),
+            (0, math.nan, 'SAME_CLASS', ERROR_RESULT, 'FAILED', '22023'),
+            (0, math.inf, 'SAME_CLASS', ERROR_RESULT, 'FAILED', '22023'),
             (None, None, None, ERROR_RESULT, 'COMPLETED', '22023'),
             (None, None, None, None, 'FAILED', '23502'),
         ],
@@ -751,6 +752,12 @@ class TestArguments:
                     {
                         'id': seeded.task_id,
                         'worker': WORKER,
+                        # A retry request names its three values; any other
+                        # call is a call with no retry.
+                        'kind': (
+                            'NONE' if (count, delay, placement) == (None, None, None)
+                            else 'RETRY'
+                        ),
                         'count': count,
                         'delay': delay,
                         'placement': placement,

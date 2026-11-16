@@ -291,8 +291,6 @@ def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused
         task_id=task_id,
         fence=OwnedClaim(worker_id=WORKER, claimed_at=claimed_at),
         result_json='{"ok": 2}',
-        notify_channel='task_queue_default',
-        notify_payload=f'capacity:{task_id}',
     )
 
 

@@ -135,8 +135,6 @@ async def test_a_completion_sends_the_status_event(
             task_id=task_id,
             fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
             result_json=ok_result_json(),
-            notify_channel=f'task_queue_{QUEUE}',
-            notify_payload=f'capacity:{task_id}',
         ),
     )
 

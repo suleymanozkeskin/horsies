@@ -432,8 +432,6 @@ def _fused_invocation(
                     claimed_at=CLAIMED_AT,
                 ),
                 result_json=payload,
-                notify_channel='task_queue_default',
-                notify_payload=f'capacity:{task_id}',
             )
             statement, parameters = call_for(command)
             return Invocation(
