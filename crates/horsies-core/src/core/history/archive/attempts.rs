@@ -155,6 +155,29 @@ pub fn decode_attempt_snapshot(
 ) -> Result<Vec<AttemptRecord>, ArchiveDecodeError> {
     validate_envelope_contract(ArchiveDomain::Attempts, version, codec, content_type)?;
     verify_payload_digest(ArchiveDomain::Attempts, payload, digest)?;
+    decode_attempt_rows(payload)
+}
+
+/// Decodes the attempts of a live task, which the database encodes at read
+/// time in the same version-1 form that history stores
+/// (`horsies_encode_task_attempts`). A live encoding has no stored digest,
+/// so there is none to check; the envelope version is checked as in
+/// [`decode_attempt_snapshot`].
+pub fn decode_live_attempt_snapshot(
+    version: i16,
+    payload: &[u8],
+) -> Result<Vec<AttemptRecord>, ArchiveDecodeError> {
+    validate_envelope_contract(
+        ArchiveDomain::Attempts,
+        version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+    )?;
+    decode_attempt_rows(payload)
+}
+
+/// The attempt records of a version-1 payload, contiguous from 1.
+fn decode_attempt_rows(payload: &[u8]) -> Result<Vec<AttemptRecord>, ArchiveDecodeError> {
     let parsed: Value = serde_json::from_slice(payload)
         .map_err(|_| corrupt(ArchiveDomain::Attempts, "JSONDecodeError"))?;
     let rows = parsed
