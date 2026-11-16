@@ -239,12 +239,8 @@ class HealthMixin:
                         else self.cfg.seat_count(),
                         'cwc': self.cfg.cluster_wide_cap,
                         'queues': self.cfg.queues,
-                        'qp': Jsonb(self.cfg.queue_priorities)
-                        if self.cfg.queue_priorities
-                        else None,
-                        'qmc': Jsonb(self.cfg.queue_max_concurrency)
-                        if self.cfg.queue_max_concurrency
-                        else None,
+                        'qp': Jsonb(self.cfg.queue_priorities),
+                        'qmc': Jsonb(self.cfg.queue_max_concurrency),
                         'recovery': Jsonb(
                             {
                                 **(recovery_dict or {}),
@@ -264,16 +260,16 @@ class HealthMixin:
                                     self._orphan_task_recovery_health
                                 ),
                             }
-                        )
-                        if (
-                            recovery_dict
-                            or self._partition_coverage_health
-                            or self._partition_pruning_health
-                            or self._phase2_recovery_health
-                            or self._workflow_recovery_health
-                            or self._orphan_task_recovery_health
-                        )
-                        else None,
+                            if (
+                                recovery_dict
+                                or self._partition_coverage_health
+                                or self._partition_pruning_health
+                                or self._phase2_recovery_health
+                                or self._workflow_recovery_health
+                                or self._orphan_task_recovery_health
+                            )
+                            else {}
+                        ),
                         'running': running,
                         'claimed': claimed,
                         'mem_mb': rss_mb,

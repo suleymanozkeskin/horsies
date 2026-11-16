@@ -341,7 +341,7 @@ class WorkerStateInfo(BaseModel):
     uptime_s: int | None
     processes: int
     queues: list[str]
-    queue_max_concurrency: dict[str, int] | None
+    queue_max_concurrency: dict[str, int]
     tasks_running: int
     tasks_claimed: int
     cluster_wide_cap: int | None
