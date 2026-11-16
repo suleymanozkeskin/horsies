@@ -570,9 +570,12 @@ def _require_payload(
 # The failed-attempt finish
 # ---------------------------------------------------------------------------
 #
-# ``horsies_finish_failed_attempt`` returns the ten shared columns and seven
-# more. A miss carries the shared classifier's row unchanged and the seven
+# ``horsies_finish_failed_attempt`` returns the ten shared columns and eight
+# more. A miss carries the shared classifier's row unchanged and the eight
 # columns NULL, so it decodes to the shared outcome types.
+# ``node_has_dependents`` is set only on the APPLIED row of a workflow task;
+# phase 2 here reads the nodes itself, so the decoder checks the column and
+# does not carry it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,6 +655,7 @@ _FAILED_ATTEMPT_COLUMNS: frozenset[str] = frozenset(
         'is_workflow_task',
         'queue_name',
         'task_name',
+        'node_has_dependents',
     }
 )
 
@@ -701,6 +705,7 @@ def _decode_failure_applied(
     shared: Mapping[str, Any],
 ) -> FailureApplied:
     _require_null_columns(row, frozenset({'retry_count'}))
+    _require_dependents_fact(row, is_workflow_task=row['is_workflow_task'] is True)
     match decode_outcome_row(shared):
         case Applied(
             task_id=task_id, terminal_at=terminal_at, kind=kind, observed=observed
@@ -768,6 +773,7 @@ def _decode_retry_scheduled(
                 'good_until',
                 'is_workflow_task',
                 'task_name',
+                'node_has_dependents',
             }
         ),
     )
@@ -788,10 +794,11 @@ def _decode_retry_scheduled(
 # The success of a workflow task
 # ---------------------------------------------------------------------------
 #
-# ``horsies_finish_workflow_success`` returns the ten shared columns and two
-# more, the routing facts of phase 2. A miss carries the shared classifier's
-# row unchanged and the two columns NULL, so it decodes to the shared outcome
-# types.
+# ``horsies_finish_workflow_success`` returns the ten shared columns and
+# three more: the routing facts of phase 2 and ``node_has_dependents``. A miss
+# carries the shared classifier's row unchanged and the three columns NULL, so
+# it decodes to the shared outcome types. Phase 2 here reads the nodes itself,
+# so the decoder checks ``node_has_dependents`` and does not carry it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,7 +816,9 @@ type WorkflowSuccessOutcome = (
     SuccessApplied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent
 )
 
-_WORKFLOW_SUCCESS_COLUMNS: frozenset[str] = frozenset({'queue_name', 'task_name'})
+_WORKFLOW_SUCCESS_COLUMNS: frozenset[str] = frozenset(
+    {'queue_name', 'task_name', 'node_has_dependents'}
+)
 
 
 def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcome:
@@ -839,6 +848,7 @@ def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcom
                     f'workflow-success APPLIED carries kind {kind.value}, '
                     f'not COMPLETE_LOCKED'
                 )
+            _require_dependents_fact(row, is_workflow_task=True)
             return SuccessApplied(
                 task_id=task_id,
                 terminal_at=terminal_at,
@@ -858,6 +868,24 @@ def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcom
             return refused
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _require_dependents_fact(row: Mapping[str, Any], *, is_workflow_task: bool) -> None:
+    """``node_has_dependents`` is a boolean after the move of a workflow task
+    and NULL after the move of a plain task."""
+    value = row['node_has_dependents']
+    match is_workflow_task:
+        case True:
+            if not isinstance(value, bool):
+                raise OutcomeDecodeError(
+                    f'an applied workflow task needs node_has_dependents as a '
+                    f'boolean, got {type(value).__name__}'
+                )
+        case False:
+            if value is not None:
+                raise OutcomeDecodeError(
+                    'an applied plain task carries node_has_dependents'
+                )
 
 
 def _require_null_columns(row: Mapping[str, Any], columns: frozenset[str]) -> None:

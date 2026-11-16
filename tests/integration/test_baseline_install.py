@@ -249,7 +249,7 @@ async def test_install_holds_the_objects_of_the_0_7_0_schema_checks(database_url
                 (SELECT attnotnull FROM pg_attribute
                  WHERE attrelid = 'horsies_worker_states'::regclass AND attname = 'class_capacity'),
                 to_regprocedure(
-                    'horsies_complete_tasks_fused(uuid[], text[], timestamptz[], text[], text[], text[])'
+                    'horsies_complete_tasks_fused(uuid[], timestamptz[], text[], text, boolean)'
                 ) IS NOT NULL
             """,
         )
