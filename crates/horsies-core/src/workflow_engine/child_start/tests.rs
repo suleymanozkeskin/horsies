@@ -326,11 +326,14 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
         retention: &retention,
     };
 
-    let missing = child_start_kind(&owed(workflow_id, 0, "tests.child_start.missing.v1"), build)
-        .expect("host build");
+    let missing = failure_error(
+        child_start_kind(&owed(workflow_id, 0, "tests.child_start.missing.v1"), build)
+            .expect("host build"),
+    );
+    assert_eq!(missing.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
     assert_eq!(
-        failure_error(missing).error_code.to_string(),
-        "SUBWORKFLOW_LOAD_FAILED"
+        missing.data,
+        Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
     );
     let too_deep = child_start_kind(
         &owed(
@@ -341,9 +344,14 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
         build,
     )
     .expect("host build");
+    let too_deep = failure_error(too_deep);
     assert_eq!(
-        failure_error(too_deep).error_code.to_string(),
+        too_deep.error_code.to_string(),
         "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
+    );
+    assert_eq!(
+        too_deep.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
 
