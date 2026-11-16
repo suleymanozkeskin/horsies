@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{mask_database_url, PostgresConfig};
+use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
 
 /// The one manifest version this core reads.
 pub const PRODUCER_MANIFEST_VERSION: u32 = 1;
@@ -20,15 +21,17 @@ pub const PRODUCER_MANIFEST_VERSION: u32 = 1;
 /// Largest connection count of one pool (`pool_size` and `max_overflow`).
 pub const MAX_POOL_CONNECTIONS: u32 = 10_000;
 
-/// Largest idempotency key reservation window: 30 days, in seconds
+/// Largest idempotency key reservation window: 30 days, in microseconds
 /// (Python `core/history/identity/keys.py`, "greater than 0, at most 30 days").
-pub const MAX_RESERVATION_WINDOW_SECONDS: u32 = 30 * 24 * 60 * 60;
+/// A microsecond is the resolution of Python's `timedelta` and of
+/// PostgreSQL's `interval`, so every window that Python accepts has a form.
+pub const MAX_RESERVATION_WINDOW_MICROS: u64 = 30 * 24 * 60 * 60 * 1_000_000;
 
 /// The manifest of a process that sends tasks and reads their state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProducerManifest {
-    /// Always [`PRODUCER_MANIFEST_VERSION`].
+    /// Always `PRODUCER_MANIFEST_VERSION`, the one version this core reads.
     pub manifest_version: ManifestVersion,
     pub database: DatabaseManifest,
     pub schema: SchemaMode,
@@ -70,8 +73,16 @@ impl From<ManifestVersion> for u32 {
     }
 }
 
+impl ManifestValue for ManifestVersion {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "MANIFEST_VERSION",
+        min: PRODUCER_MANIFEST_VERSION as u64,
+        max: PRODUCER_MANIFEST_VERSION as u64,
+    });
+}
+
 /// Connection settings of the main pool and the session pool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseManifest {
     pub database_url: DatabaseUrl,
@@ -81,16 +92,23 @@ pub struct DatabaseManifest {
     /// Ping a pooled connection before use (Python's rule: only after it
     /// waited in the pool for more than 1 s).
     pub pool_pre_ping: bool,
-    pub pool_size: PoolConnections,
+    /// Connections the pool keeps. Always a number: the core bounds its
+    /// connections, so SQLAlchemy's `pool_size=0` (no limit) has no form here.
+    pub pool_size: PoolSize,
+    /// Connections past `pool_size`. Always a number: SQLAlchemy's
+    /// `max_overflow=-1` (no limit) has no form here.
     pub max_overflow: PoolConnections,
+    /// The longest a checkout waits for a free connection. 0 means a checkout
+    /// does not wait: it fails at once when no connection is free, as
+    /// SQLAlchemy's `pool_timeout=0`.
     pub pool_timeout: WholeSeconds,
-    pub pool_recycle: WholeSeconds,
+    pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
 }
 
 /// Where the session pool (schema work, LISTEN/NOTIFY) connects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SessionDatabase {
     /// The session pool uses `database_url`.
@@ -111,6 +129,10 @@ impl DatabaseUrl {
     }
 }
 
+impl ManifestValue for DatabaseUrl {
+    const PYTHON: PythonValue = PythonValue::Str;
+}
+
 impl std::fmt::Debug for DatabaseUrl {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -118,6 +140,45 @@ impl std::fmt::Debug for DatabaseUrl {
             .field(&mask_database_url(&self.0))
             .finish()
     }
+}
+
+/// The size of a pool: 1 to [`MAX_POOL_CONNECTIONS`] connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct PoolSize(u32);
+
+impl PoolSize {
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for PoolSize {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1..=MAX_POOL_CONNECTIONS => Ok(Self(value)),
+            _ => Err(format!(
+                "a pool size must be from 1 to {MAX_POOL_CONNECTIONS}; the core always bounds its \
+                 connections"
+            )),
+        }
+    }
+}
+
+impl From<PoolSize> for u32 {
+    fn from(size: PoolSize) -> Self {
+        size.0
+    }
+}
+
+impl ManifestValue for PoolSize {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "POOL_SIZE",
+        min: 1,
+        max: MAX_POOL_CONNECTIONS as u64,
+    });
 }
 
 /// A connection count from 0 to [`MAX_POOL_CONNECTIONS`].
@@ -150,19 +211,69 @@ impl From<PoolConnections> for u32 {
     }
 }
 
+impl ManifestValue for PoolConnections {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "POOL_CONNECTIONS",
+        min: 0,
+        max: MAX_POOL_CONNECTIONS as u64,
+    });
+}
+
 /// A duration in whole seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WholeSeconds(u32);
 
 impl WholeSeconds {
+    /// Every `u32` is a duration in whole seconds.
+    pub const fn from_secs(seconds: u32) -> Self {
+        Self(seconds)
+    }
+
     pub const fn get(self) -> u32 {
         self.0
     }
 }
 
+/// When the pool replaces a connection by its age (SQLAlchemy's
+/// `pool_recycle`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum PoolRecycle {
+    /// A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`).
+    Never,
+    /// A connection older than `seconds` is replaced at its next checkout; 0
+    /// replaces it at every checkout.
+    AfterSeconds { seconds: WholeSeconds },
+}
+
+impl PoolRecycle {
+    pub const fn after_seconds(seconds: u32) -> Self {
+        Self::AfterSeconds {
+            seconds: WholeSeconds::from_secs(seconds),
+        }
+    }
+}
+
+impl ManifestValue for WholeSeconds {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "WHOLE_SECONDS",
+        min: 0,
+        max: u32::MAX as u64,
+    });
+}
+
 /// Schema behaviour of a handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The Python broker flags map to it: `assume_initialized=True` is
+/// `ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
+/// `run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
+/// `OBSERVE_ONLY`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SchemaMode {
     /// The first operation applies the migrations and checks the schema
@@ -170,55 +281,79 @@ pub enum SchemaMode {
     MigrateAndValidate,
     /// The handle never runs schema DDL (monitoring reads).
     ObserveOnly,
+    /// The handle never runs schema DDL and uses no listener: an operation
+    /// that needs the listener answers `LISTENER_DISABLED`.
+    AssumeInitialized,
 }
 
 /// Send policy of a handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct SendManifest {
     /// Keep the rerun input at enqueue when the task does not choose.
     pub retain_rerun_input_default: bool,
-    pub idempotency_reservation_window: ReservationWindowSeconds,
+    /// The reservation window of a keyed send, in microseconds.
+    pub idempotency_reservation_window: ReservationWindowMicros,
 }
 
-/// The idempotency key reservation window, 1 s to 30 days.
+/// The idempotency key reservation window, 1 microsecond to 30 days, in
+/// microseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "u32", into = "u32")]
-pub struct ReservationWindowSeconds(u32);
+#[serde(try_from = "u64", into = "u64")]
+pub struct ReservationWindowMicros(u64);
 
-impl ReservationWindowSeconds {
-    pub const fn get(self) -> u32 {
+impl ReservationWindowMicros {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
-    /// The window as the duration type of the broker.
+    /// The window as the duration type of the broker, exact to the
+    /// microsecond.
     pub fn as_duration(self) -> chrono::Duration {
-        chrono::Duration::seconds(i64::from(self.0))
+        let micros = i64::try_from(self.0)
+            .expect("a window of at most 30 days fits an i64 count of microseconds");
+        chrono::Duration::microseconds(micros)
     }
 }
 
-impl TryFrom<u32> for ReservationWindowSeconds {
+impl TryFrom<u64> for ReservationWindowMicros {
     type Error = String;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            1..=MAX_RESERVATION_WINDOW_SECONDS => Ok(Self(value)),
+            1..=MAX_RESERVATION_WINDOW_MICROS => Ok(Self(value)),
             _ => Err(format!(
-                "the reservation window must be from 1 to {MAX_RESERVATION_WINDOW_SECONDS} seconds"
+                "the reservation window must be from 1 to {MAX_RESERVATION_WINDOW_MICROS} \
+                 microseconds"
             )),
         }
     }
 }
 
-impl From<ReservationWindowSeconds> for u32 {
-    fn from(window: ReservationWindowSeconds) -> Self {
+impl From<ReservationWindowMicros> for u64 {
+    fn from(window: ReservationWindowMicros) -> Self {
         window.0
     }
+}
+
+impl ManifestValue for ReservationWindowMicros {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "RESERVATION_WINDOW_MICROS",
+        min: 1,
+        max: MAX_RESERVATION_WINDOW_MICROS,
+    });
 }
 
 impl DatabaseManifest {
     /// The broker config of these settings. `retain_rerun_input_default`
     /// comes from the send section of the same manifest.
+    ///
+    /// The manifest holds the resolved settings of one process, so
+    /// `pool_pre_ping` is already the value of that process. Both pre-ping
+    /// fields of the config take it: the pool reads `pool_pre_ping`, and
+    /// [`PostgresConfig::worker_process_config`] reads `worker_pool_pre_ping`.
     pub fn to_postgres_config(&self, retain_rerun_input_default: bool) -> PostgresConfig {
         let session_database_url = match &self.session_database {
             SessionDatabase::SameAsDatabaseUrl => None,
@@ -229,11 +364,12 @@ impl DatabaseManifest {
             session_database_url,
             pgbouncer_transaction_mode: self.pgbouncer_transaction_mode,
             pool_pre_ping: self.pool_pre_ping,
+            worker_pool_pre_ping: self.pool_pre_ping,
             pool_size: self.pool_size.get(),
             max_overflow: self.max_overflow.get(),
             retain_rerun_input_default,
             pool_timeout: self.pool_timeout.get(),
-            pool_recycle: self.pool_recycle.get(),
+            pool_recycle: self.pool_recycle,
             echo: self.echo,
         }
     }
@@ -287,7 +423,11 @@ fn refusal_cause(error: &serde_json::Error) -> String {
 mod tests {
     use super::*;
 
-    fn manifest_text(session: &str, window: u32) -> String {
+    /// One day and one minute, in microseconds.
+    const DAY_MICROS: u64 = 86_400_000_000;
+    const MINUTE_MICROS: u64 = 60_000_000;
+
+    fn manifest_text(session: &str, window: u64) -> String {
         format!(
             r#"{{
                 "manifest_version": 1,
@@ -299,7 +439,7 @@ mod tests {
                     "pool_size": 30,
                     "max_overflow": 30,
                     "pool_timeout": 30,
-                    "pool_recycle": 1800,
+                    "pool_recycle": {{"kind": "AFTER_SECONDS", "seconds": 1800}},
                     "echo": false
                 }},
                 "schema": "MIGRATE_AND_VALIDATE",
@@ -313,11 +453,14 @@ mod tests {
 
     #[test]
     fn a_complete_manifest_parses() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 86_400);
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, DAY_MICROS);
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         assert_eq!(manifest.manifest_version, ManifestVersion::CURRENT);
         assert_eq!(manifest.schema, SchemaMode::MigrateAndValidate);
-        assert_eq!(manifest.send.idempotency_reservation_window.get(), 86_400);
+        assert_eq!(
+            manifest.send.idempotency_reservation_window.get(),
+            DAY_MICROS
+        );
         let config = manifest.database.to_postgres_config(false);
         assert_eq!(config.session_database_url, None);
         assert_eq!(config.pool_size, 30);
@@ -327,7 +470,7 @@ mod tests {
     fn a_separate_session_url_reaches_the_broker_config() {
         let text = manifest_text(
             r#"{"kind": "SEPARATE", "url": "postgresql://user:secret@direct:5432/db"}"#,
-            60,
+            MINUTE_MICROS,
         );
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         let config = manifest.database.to_postgres_config(true);
@@ -338,9 +481,26 @@ mod tests {
         assert!(config.retain_rerun_input_default);
     }
 
+    /// The manifest's `pool_pre_ping` is the resolved value of its process;
+    /// both pre-ping fields of the broker config take it.
+    #[test]
+    fn both_pre_ping_fields_take_the_resolved_pre_ping() {
+        for (text_value, resolved) in [("true", true), ("false", false)] {
+            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+                "\"pool_pre_ping\": true",
+                &format!("\"pool_pre_ping\": {text_value}"),
+                1,
+            );
+            let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
+            let config = manifest.database.to_postgres_config(false);
+            assert_eq!(config.pool_pre_ping, resolved);
+            assert_eq!(config.worker_pool_pre_ping, resolved);
+        }
+    }
+
     #[test]
     fn an_unknown_field_is_refused_with_its_path() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"echo\": false",
             "\"echo\": false, \"extra\": 1",
             1,
@@ -351,8 +511,8 @@ mod tests {
 
     #[test]
     fn a_missing_field_is_refused() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
-            "\"pool_recycle\": 1800,",
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
+            "\"pool_recycle\": {\"kind\": \"AFTER_SECONDS\", \"seconds\": 1800},",
             "",
             1,
         );
@@ -360,9 +520,114 @@ mod tests {
         assert!(refused.field_path.starts_with("database"));
     }
 
+    /// The manifest text with one database field set to `value`.
+    fn with_database_field(field: &str, value: &str) -> String {
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS);
+        let start = text
+            .find(&format!("\"{field}\": "))
+            .unwrap_or_else(|| panic!("{field} is in the manifest text"));
+        let value_start = start + field.len() + 4;
+        let line_end = value_start
+            + text[value_start..]
+                .find('\n')
+                .expect("each field ends its line");
+        let comma = match text[value_start..line_end].trim_end().ends_with(',') {
+            true => ",",
+            false => "",
+        };
+        format!(
+            "{}{value}{comma}{}",
+            &text[..value_start],
+            &text[line_end..]
+        )
+    }
+
+    fn database_config(field: &str, value: &str) -> PostgresConfig {
+        let text = with_database_field(field, value);
+        parse_producer_manifest(&text)
+            .unwrap_or_else(|refused| panic!("{field} = {value} is accepted: {refused}"))
+            .database
+            .to_postgres_config(false)
+    }
+
+    fn refused_path(field: &str, value: &str) -> String {
+        parse_producer_manifest(&with_database_field(field, value))
+            .expect_err("the value is refused")
+            .field_path
+    }
+
+    #[test]
+    fn a_pool_size_is_a_number_of_connections() {
+        assert_eq!(database_config("pool_size", "1").pool_size, 1);
+        assert_eq!(
+            database_config("pool_size", &MAX_POOL_CONNECTIONS.to_string()).pool_size,
+            MAX_POOL_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn a_pool_size_of_zero_is_refused_because_the_core_bounds_its_connections() {
+        assert_eq!(refused_path("pool_size", "0"), "database.pool_size");
+    }
+
+    #[test]
+    fn a_pool_size_past_its_bound_or_below_zero_is_refused() {
+        let past = (MAX_POOL_CONNECTIONS + 1).to_string();
+        assert_eq!(refused_path("pool_size", &past), "database.pool_size");
+        assert_eq!(refused_path("pool_size", "-1"), "database.pool_size");
+    }
+
+    #[test]
+    fn an_overflow_of_zero_means_no_overflow() {
+        assert_eq!(database_config("max_overflow", "0").max_overflow, 0);
+    }
+
+    #[test]
+    fn an_unlimited_overflow_is_refused() {
+        assert_eq!(refused_path("max_overflow", "-1"), "database.max_overflow");
+    }
+
+    #[test]
+    fn a_pool_timeout_of_zero_means_a_checkout_does_not_wait() {
+        assert_eq!(database_config("pool_timeout", "0").pool_timeout, 0);
+    }
+
+    #[test]
+    fn a_negative_pool_timeout_is_refused() {
+        assert_eq!(refused_path("pool_timeout", "-1"), "database.pool_timeout");
+    }
+
+    #[test]
+    fn a_pool_that_never_recycles_reaches_the_broker_config() {
+        assert_eq!(
+            database_config("pool_recycle", r#"{"kind": "NEVER"}"#).pool_recycle,
+            PoolRecycle::Never
+        );
+    }
+
+    #[test]
+    fn a_recycle_age_of_zero_replaces_a_connection_at_every_checkout() {
+        assert_eq!(
+            database_config("pool_recycle", r#"{"kind": "AFTER_SECONDS", "seconds": 0}"#)
+                .pool_recycle,
+            PoolRecycle::after_seconds(0)
+        );
+    }
+
+    #[test]
+    fn a_recycle_age_without_meaning_is_refused() {
+        assert!(refused_path(
+            "pool_recycle",
+            r#"{"kind": "AFTER_SECONDS", "seconds": -5}"#
+        )
+        .starts_with("database.pool_recycle"));
+        // The bare number of SQLAlchemy is not a manifest form.
+        assert!(refused_path("pool_recycle", "-1").starts_with("database.pool_recycle"));
+    }
+
     #[test]
     fn another_manifest_version_is_refused() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"manifest_version\": 1",
             "\"manifest_version\": 2",
             1,
@@ -373,7 +638,7 @@ mod tests {
 
     #[test]
     fn a_window_outside_its_bound_is_refused() {
-        for window in [0, MAX_RESERVATION_WINDOW_SECONDS + 1] {
+        for window in [0, MAX_RESERVATION_WINDOW_MICROS + 1] {
             let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, window);
             let refused = parse_producer_manifest(&text).expect_err("a window outside 1..=30 days");
             assert_eq!(refused.field_path, "send.idempotency_reservation_window");
@@ -381,8 +646,45 @@ mod tests {
     }
 
     #[test]
+    fn a_window_keeps_its_microseconds() {
+        // Python's window is a `timedelta`; 1.5 s and 1 microsecond are valid
+        // windows (`validate_reservation_window`).
+        for (window, duration) in [
+            (1, chrono::Duration::microseconds(1)),
+            (1_500_000, chrono::Duration::milliseconds(1_500)),
+            (MAX_RESERVATION_WINDOW_MICROS, chrono::Duration::days(30)),
+        ] {
+            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, window);
+            let manifest = parse_producer_manifest(&text).expect("a window inside its bound");
+            assert_eq!(manifest.send.idempotency_reservation_window.get(), window);
+            assert_eq!(
+                manifest.send.idempotency_reservation_window.as_duration(),
+                duration
+            );
+        }
+    }
+
+    #[test]
+    fn every_schema_mode_parses_from_its_wire_name() {
+        for (wire, mode) in [
+            ("MIGRATE_AND_VALIDATE", SchemaMode::MigrateAndValidate),
+            ("OBSERVE_ONLY", SchemaMode::ObserveOnly),
+            ("ASSUME_INITIALIZED", SchemaMode::AssumeInitialized),
+        ] {
+            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS)
+                .replacen(
+                    "\"schema\": \"MIGRATE_AND_VALIDATE\"",
+                    &format!("\"schema\": \"{wire}\""),
+                    1,
+                );
+            let manifest = parse_producer_manifest(&text).expect("a known schema mode");
+            assert_eq!(manifest.schema, mode);
+        }
+    }
+
+    #[test]
     fn a_refusal_never_holds_the_url_password() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS).replacen(
             "\"pool_size\": 30",
             "\"pool_size\": \"postgresql://u:secret@h/d\"",
             1,
@@ -396,7 +698,7 @@ mod tests {
     fn trailing_text_after_the_manifest_is_refused() {
         let text = format!(
             "{} []",
-            manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60)
+            manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS)
         );
         let refused = parse_producer_manifest(&text).expect_err("trailing text is refused");
         assert_eq!(refused.field_path, ".");
@@ -404,7 +706,7 @@ mod tests {
 
     #[test]
     fn the_debug_form_masks_the_password() {
-        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60);
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, MINUTE_MICROS);
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         assert!(!format!("{manifest:?}").contains("secret"));
     }

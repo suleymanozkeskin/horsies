@@ -9,7 +9,7 @@
 //! `NOW()` in SQL, as the Python tests do, so the worker clock never enters a
 //! comparison.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
@@ -19,14 +19,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
+use crate::broker::attempt_writes::{
+    finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, FinishFailedAttempt,
+    FinishWorkflowSuccess,
+};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization::terminalize;
-use crate::core::history::archive::attempts::{decode_attempt_snapshot, encode_attempt_snapshot};
+use crate::core::history::archive::attempts::{
+    decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
+};
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
 };
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::lifecycle::{
-    BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    BatchSize, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 
 /// The worker that holds the seeded claims.
@@ -146,6 +156,9 @@ pub(super) struct TaskSeed {
     pub(super) holder: Holder,
     pub(super) origin: Origin,
     pub(super) queue_name: &'static str,
+    pub(super) execution: &'static str,
+    pub(super) input: &'static str,
+    pub(super) retention_class_key: &'static str,
     pub(super) task_options: Option<String>,
     pub(super) retry_count: i32,
     pub(super) max_retries: i32,
@@ -161,6 +174,9 @@ impl TaskSeed {
             holder: Holder::this_worker(),
             origin: Origin::Send,
             queue_name: "default",
+            execution: "ISOLATED",
+            input: "{}",
+            retention_class_key: "forever",
             task_options: None,
             retry_count: 0,
             max_retries: 0,
@@ -207,8 +223,8 @@ pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'lifecycle.test', $2, 100, '{}', $3, 'ISOLATED',
-            'forever', NOW(), NOW(),
+            $1, 'lifecycle.test', $2, 100, $14, $3, $13,
+            $15, NOW(), NOW(),
             $4, $5, NULL,
             $6, NOW(), $7, $8,
             CASE WHEN $6 = 'CLAIMED' THEN NOW() + interval '5 minutes' END,
@@ -232,6 +248,9 @@ pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
     .bind(seed.max_retries)
     .bind(is_workflow_task)
     .bind(seed.retain_rerun_input)
+    .bind(seed.execution)
+    .bind(seed.input)
+    .bind(seed.retention_class_key)
     .execute(pool)
     .await
     .expect("seed live task row");
@@ -506,6 +525,22 @@ pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<Attem
         .collect()
 }
 
+/// The attempts that the history row archived, with every field.
+pub(super) async fn archived_attempt_records(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
+    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
+        sqlx::query_as(
+            "SELECT attempt_archive_version, attempt_snapshot_codec,
+                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
+             FROM horsies_task_history WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
+        .expect("decode the archived attempt snapshot")
+}
+
 /// The attempt rows still in the live attempt table.
 pub(super) async fn live_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptSummary> {
     sqlx::query_as(
@@ -550,6 +585,18 @@ pub(super) async fn seed_node(
     task_id: Option<Uuid>,
     node_status: &str,
 ) -> Uuid {
+    try_seed_node(pool, workflow_id, task_id, node_status)
+        .await
+        .expect("seed workflow node")
+}
+
+/// `seed_node`, with the database's answer, so a test can assert a refusal.
+pub(super) async fn try_seed_node(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_id: Option<Uuid>,
+    node_status: &str,
+) -> Result<Uuid, sqlx::Error> {
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
@@ -576,9 +623,8 @@ pub(super) async fn seed_node(
     .bind(node_status)
     .bind(task_id)
     .execute(pool)
-    .await
-    .expect("seed workflow node");
-    node_row_id
+    .await?;
+    Ok(node_row_id)
 }
 
 /// A workflow with `workflow_status` and one task node linked to
@@ -862,10 +908,37 @@ const BACKEND_EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::fro
 const IDLE_POLLS: u32 = 100;
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// The failed-attempt write of a task whose child reported a result
+/// (claimed-row rule `REFUSE`), on a core pool on the test database.
+pub(super) async fn write_failed_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<FailedAttemptOutcome, BrokerError> {
+    finish_failed_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The failed-attempt write of a task whose child ended without a report
+/// (claimed-row rule `RELEASE`), on a core pool on the test database.
+pub(super) async fn write_unreported_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<UnreportedAttemptOutcome, BrokerError> {
+    finish_unreported_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The success write of a workflow task, on a core pool on the test
+/// database.
+pub(super) async fn write_workflow_success(
+    pool: &PgPool,
+    command: &FinishWorkflowSuccess,
+) -> Result<WorkflowSuccessOutcome, BrokerError> {
+    finish_workflow_success(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
 /// A pool of one connection that does not ping a connection at checkout, so
 /// a dead pooled connection shows at its first statement (Python's worker
 /// pre-ping off).
-pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
+pub(crate) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
     PgPoolOptions::new()
         .max_connections(1)
         .test_before_acquire(false)
@@ -875,13 +948,13 @@ pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -
 }
 
 /// The connect options of the shared test database.
-pub(super) fn database_options(pool: &PgPool) -> PgConnectOptions {
+pub(crate) fn database_options(pool: &PgPool) -> PgConnectOptions {
     (*pool.connect_options()).clone()
 }
 
 /// Wait until the one connection of `pool` is back in the pool; the release
 /// check of the pool runs in the background after a query.
-pub(super) async fn wait_until_idle(pool: &PgPool) {
+pub(crate) async fn wait_until_idle(pool: &PgPool) {
     for _ in 0..IDLE_POLLS {
         if pool.num_idle() == 1 {
             return;
@@ -934,58 +1007,83 @@ const PROXY_BUFFER_BYTES: usize = 16 * 1024;
 /// dropped, before the client's connection ends.
 const REPLY_DROP_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// A TCP proxy to the test database that can drop the reply of the next
-/// request (Python's `RoundTripProxy.drop_next_execute_reply`). The server
-/// receives and runs the request; the client gets no reply and then a
-/// closed connection.
-pub(super) struct ReplyDroppingProxy {
+/// A TCP proxy to the test database (Python's `RoundTripProxy`). It counts
+/// round trips, and it can drop the reply of the next request: the server
+/// receives and runs the request; the client gets no reply and then a closed
+/// connection.
+pub(crate) struct WireProxy {
     port: u16,
     armed: Arc<AtomicBool>,
     dropped: Arc<AtomicBool>,
+    round_trips: Arc<AtomicU32>,
     accept_loop: tokio::task::JoinHandle<()>,
 }
 
-impl ReplyDroppingProxy {
+impl WireProxy {
     /// Listen on a free local port and relay to the server of `upstream`.
-    pub(super) async fn start(upstream: &PgConnectOptions) -> Self {
+    pub(crate) async fn start(upstream: &PgConnectOptions) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind the proxy");
         let port = listener.local_addr().expect("proxy address").port();
         let armed = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));
+        let round_trips = Arc::new(AtomicU32::new(0));
         let accept_loop = tokio::spawn(accept_connections(
             listener,
             upstream.get_host().to_owned(),
             upstream.get_port(),
-            Arc::clone(&armed),
-            Arc::clone(&dropped),
+            RelayState {
+                armed: Arc::clone(&armed),
+                dropped: Arc::clone(&dropped),
+                round_trips: Arc::clone(&round_trips),
+            },
         ));
         Self {
             port,
             armed,
             dropped,
+            round_trips,
             accept_loop,
         }
     }
 
     /// Connect options that reach the database through this proxy.
-    pub(super) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
+    pub(crate) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
         upstream.clone().host("127.0.0.1").port(self.port)
     }
 
     /// Drop the reply to the next request that a client sends.
-    pub(super) fn drop_next_reply(&self) {
+    pub(crate) fn drop_next_reply(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
 
     /// Whether a reply was dropped.
-    pub(super) fn reply_was_dropped(&self) -> bool {
+    pub(crate) fn reply_was_dropped(&self) -> bool {
         self.dropped.load(Ordering::SeqCst)
+    }
+
+    /// Start a new count of round trips.
+    pub(super) fn reset_round_trips(&self) {
+        self.round_trips.store(0, Ordering::SeqCst);
+    }
+
+    /// Round trips since the last reset: requests of a client that the
+    /// server answered or still has to answer.
+    pub(super) fn round_trips(&self) -> u32 {
+        self.round_trips.load(Ordering::SeqCst)
     }
 }
 
-impl Drop for ReplyDroppingProxy {
+/// The state that every relay of one proxy shares.
+#[derive(Debug, Clone)]
+struct RelayState {
+    armed: Arc<AtomicBool>,
+    dropped: Arc<AtomicBool>,
+    round_trips: Arc<AtomicU32>,
+}
+
+impl Drop for WireProxy {
     fn drop(&mut self) {
         self.accept_loop.abort();
     }
@@ -995,8 +1093,7 @@ async fn accept_connections(
     listener: TcpListener,
     upstream_host: String,
     upstream_port: u16,
-    armed: Arc<AtomicBool>,
-    dropped: Arc<AtomicBool>,
+    state: RelayState,
 ) {
     for _ in 0..PROXY_CONNECTION_LIMIT {
         let Ok((client, _)) = listener.accept().await else {
@@ -1005,28 +1102,26 @@ async fn accept_connections(
         let Ok(upstream) = TcpStream::connect((upstream_host.as_str(), upstream_port)).await else {
             return;
         };
-        let _relay = tokio::spawn(relay(
-            client,
-            upstream,
-            Arc::clone(&armed),
-            Arc::clone(&dropped),
-        ));
+        let _relay = tokio::spawn(relay(client, upstream, state.clone()));
     }
 }
 
-/// Relay one client connection. When the proxy is armed, the next request
-/// of the client marks the connection; the reply to it is not relayed, and
-/// the client's connection ends after `REPLY_DROP_SETTLE`.
-async fn relay(
-    client: TcpStream,
-    upstream: TcpStream,
-    armed: Arc<AtomicBool>,
-    dropped: Arc<AtomicBool>,
-) {
+/// Relay one client connection. A client request that follows a server
+/// reply starts a round trip. When the proxy is armed, the next request of
+/// the client marks the connection; the reply to it is not relayed, and the
+/// client's connection ends after `REPLY_DROP_SETTLE`.
+async fn relay(client: TcpStream, upstream: TcpStream, state: RelayState) {
     let (mut client_read, mut client_write) = client.into_split();
     let (mut upstream_read, mut upstream_write) = upstream.into_split();
     let cut = Arc::new(AtomicBool::new(false));
+    let request_open = Arc::new(AtomicBool::new(false));
     let cut_by_request = Arc::clone(&cut);
+    let opened_by_request = Arc::clone(&request_open);
+    let RelayState {
+        armed,
+        dropped,
+        round_trips,
+    } = state;
     let requests = tokio::spawn(async move {
         let mut buffer = vec![0_u8; PROXY_BUFFER_BYTES];
         for _ in 0..PROXY_READ_LIMIT {
@@ -1034,6 +1129,9 @@ async fn relay(
                 Ok(0) | Err(_) => return,
                 Ok(read) => read,
             };
+            if !opened_by_request.swap(true, Ordering::SeqCst) {
+                round_trips.fetch_add(1, Ordering::SeqCst);
+            }
             if armed.swap(false, Ordering::SeqCst) {
                 cut_by_request.store(true, Ordering::SeqCst);
             }
@@ -1048,6 +1146,7 @@ async fn relay(
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
+        request_open.store(false, Ordering::SeqCst);
         if cut.load(Ordering::SeqCst) {
             dropped.store(true, Ordering::SeqCst);
             tokio::time::sleep(REPLY_DROP_SETTLE).await;
@@ -1100,5 +1199,180 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
         cluster_wide_cap: None,
         claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
         lock_keys: Vec::new(),
+    }
+}
+
+/// The request of one 0004 claim pass of `WORKER` over `queue`, with no
+/// cap: one `ISOLATED` budget of 10 that every class routes to.
+pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
+/// Bound of the wait for the sentinel wake.
+const WAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Bound of the wakes read before the sentinel.
+const WAKE_LIMIT: u32 = 100;
+
+/// A listener on one wake channel (Python's `wakes` fixture).
+pub(super) struct Wakes {
+    channel: String,
+    listener: sqlx::postgres::PgListener,
+}
+
+impl Wakes {
+    /// Listen on `channel`.
+    pub(super) async fn listen(pool: &PgPool, channel: &str) -> Self {
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+            .await
+            .expect("connect the wake listener");
+        listener.listen(channel).await.expect("listen");
+        Self {
+            channel: channel.to_owned(),
+            listener,
+        }
+    }
+
+    /// Every payload on the channel committed before a sentinel wake that
+    /// this call commits. Postgres delivers notifications in commit order.
+    pub(super) async fn payloads(&mut self, pool: &PgPool) -> Vec<String> {
+        let sentinel = format!("sentinel:{}", Uuid::new_v4());
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&self.channel)
+            .bind(&sentinel)
+            .execute(pool)
+            .await
+            .expect("send the sentinel wake");
+        let mut payloads = Vec::new();
+        for _ in 0..WAKE_LIMIT {
+            let notification = tokio::time::timeout(WAKE_WAIT, self.listener.recv())
+                .await
+                .expect("a wake within the wait")
+                .expect("receive a wake");
+            if notification.payload() == sentinel {
+                return payloads;
+            }
+            payloads.push(notification.payload().to_owned());
+        }
+        panic!("sentinel wake not seen; payloads {payloads:?}");
+    }
+}
+
+/// The rerun-input columns of a history row.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(super) struct RerunInputImage {
+    pub(super) rerun_input_disposition: String,
+    pub(super) rerun_input_version: Option<i16>,
+    pub(super) rerun_input_digest: Option<Vec<u8>>,
+    pub(super) rerun_input_inline: Option<Vec<u8>>,
+}
+
+/// The rerun-input columns of the history row of a task.
+pub(super) async fn rerun_input_of(pool: &PgPool, task_id: Uuid) -> RerunInputImage {
+    sqlx::query_as(
+        "SELECT rerun_input_disposition::text AS rerun_input_disposition,
+                rerun_input_version, rerun_input_digest, rerun_input_inline
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the rerun input columns")
+}
+
+/// The phase-2 record that a deferred terminalization wrote.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(super) struct Phase2Record {
+    pub(super) workflow_id: Uuid,
+    pub(super) workflow_node_row_id: Uuid,
+    pub(super) recovery_source: String,
+    pub(super) history_class: Option<String>,
+    pub(super) history_anchor: Option<DateTime<Utc>>,
+    pub(super) result_digest: Vec<u8>,
+    pub(super) terminalization_kind: String,
+}
+
+/// The phase-2 record of a task.
+pub(super) async fn phase2_record_of(pool: &PgPool, task_id: Uuid) -> Phase2Record {
+    sqlx::query_as(
+        "SELECT workflow_id, workflow_node_row_id, recovery_source::text AS recovery_source,
+                history_class::text AS history_class, history_anchor, result_digest,
+                terminalization_kind::text AS terminalization_kind
+         FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the phase-2 record")
+}
+
+/// The `terminal_at` of the history row of a task.
+pub(super) async fn terminal_at_of(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
+    sqlx::query_scalar("SELECT terminal_at FROM horsies_task_history WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read terminal_at")
+}
+
+/// The SHA-256 digest of `bytes`.
+pub(super) fn sha256_of(bytes: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).to_vec()
+}
+
+/// Call the internal move of a live task directly, as the deferred guard
+/// of every deferring family sees it.
+pub(super) async fn move_to_history(
+    pool: &PgPool,
+    task_id: Uuid,
+    status: &str,
+    kind: &str,
+    result: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query("SELECT horsies_move_task_to_history($1, $2, $3, NOW(), $4, NULL, NULL)")
+        .bind(task_id)
+        .bind(status)
+        .bind(kind)
+        .bind(result)
+        .execute(pool)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+/// Assert that the database refused a statement with `sqlstate` and a
+/// message that contains `fragment`.
+pub(super) fn assert_refused_with_message<T: std::fmt::Debug>(
+    result: Result<T, sqlx::Error>,
+    sqlstate: &str,
+    fragment: &str,
+) {
+    match result {
+        Err(sqlx::Error::Database(error)) => {
+            assert_eq!(error.code().as_deref(), Some(sqlstate), "{error}");
+            assert!(error.message().contains(fragment), "{error}");
+        }
+        other => panic!("expected SQLSTATE {sqlstate}, got {other:?}"),
     }
 }

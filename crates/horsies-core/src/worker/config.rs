@@ -35,9 +35,10 @@ pub struct WorkerConfig {
     /// Optional per-queue concurrency limits.
     pub queue_max_concurrency: HashMap<String, u32>,
 
-    /// Number of queued NOTIFY messages to drain after waking up,
-    /// preventing thundering herd on burst inserts.
-    /// Mirrors Python's `WorkerConfig.coalesce_notifies` (default 100).
+    /// Most pending queue wakes to take after waking up, so one claim pass
+    /// answers a burst on several queues. Each queue holds at most one
+    /// pending wake. Mirrors Python's `WorkerConfig.coalesce_notifies`
+    /// (default 100).
     pub coalesce_notifies: u32,
 
     /// Log level for this worker. Stored in the config so that it can be
@@ -179,11 +180,12 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -193,6 +195,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -272,11 +275,12 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -286,6 +290,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
