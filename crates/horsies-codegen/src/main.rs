@@ -2,6 +2,9 @@
 //!
 //! - `_catalog/<module>.py`: the code catalogs (`str, Enum` or `Enum`
 //!   classes) of `horsies_core::catalog::CODE_CATALOGS`.
+//! - `_catalog/manifest.py`: the producer manifest
+//!   (`horsies_core::manifest_schema::PRODUCER_MANIFEST`) as frozen
+//!   dataclasses, its integer bounds and its dump function.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:
@@ -16,6 +19,7 @@
 
 mod catalogs;
 mod core_stub;
+mod manifest;
 mod output;
 mod python_text;
 mod surface;

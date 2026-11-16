@@ -90,6 +90,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | The engine did not start a child workflow, because its depth would pass 32 |
 | `TASK_BLOCKED_LOOP` | The task held the event loop of its shared async child past the block limit, before its `timeout_ms`; the worker killed the child |
 | `NEIGHBOUR_BLOCKED_LOOP` | Another task held the event loop of this task's shared async child past the block limit, before this task's `timeout_ms`; the worker killed the child |
+| `WORKFLOW_START_INCOMPLETE` | A RUNNING workflow has no node rows: its start did not finish, and recovery failed it |
 
 ### ContractCode
 
