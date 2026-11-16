@@ -36,8 +36,8 @@
 --   step), advance_child_workflow_id (a workflow that this step ended and that has a parent: the caller advances its
 --   parent node after the commit with horsies_workflow_child_finish), detail.
 -- - CHILD_START (one per owed child start): workflow_id (the parent workflow), task_index (the sub-workflow node),
---   node_input, args_from (JSON text or NULL), sub_workflow_name, sub_definition_key, parent_depth,
---   root_workflow_id.
+--   node_input, args_from (JSON text or NULL), sub_workflow_name, sub_definition_key, sub_workflow_params (GIVEN or
+--   NOT_GIVEN), parent_depth, root_workflow_id.
 -- - SOURCE (one per terminal dependency of a CHILD_START node): workflow_id, task_index (the CHILD_START node),
 --   source_task_index, source_node_id, source_status, source_task_name, source_definition_key, source_result (the
 --   stored text, copied), source_summary (the stored child summary text of a sub-workflow source).
@@ -55,6 +55,7 @@ CREATE TYPE horsies_workflow_step_row AS (
     args_from text,
     sub_workflow_name text,
     sub_definition_key text,
+    sub_workflow_params text,
     parent_depth integer,
     root_workflow_id uuid,
     source_task_index integer,
@@ -669,7 +670,7 @@ CREATE FUNCTION horsies_workflow_child_start_rows(p_workflow_id uuid, p_task_ind
 AS $$
     SELECT 'CHILD_START'::text, NULL::text, p_workflow_id, NULL::text, NULL::uuid, NULL::text,
            n.task_index, n.input, n.args_from::text, n.sub_workflow_name::text, n.sub_definition_key::text,
-           w.depth, coalesce(w.root_workflow_id, w.id),
+           n.sub_workflow_params::text, w.depth, coalesce(w.root_workflow_id, w.id),
            NULL::integer, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
     FROM horsies_workflow_tasks n
     JOIN horsies_workflows w ON w.id = n.workflow_id
@@ -680,7 +681,7 @@ AS $$
       AND n.sub_workflow_id IS NULL
     UNION ALL
     SELECT 'SOURCE'::text, NULL::text, p_workflow_id, NULL::text, NULL::uuid, NULL::text,
-           n.task_index, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer, NULL::uuid,
+           n.task_index, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer, NULL::uuid,
            s.task_index, s.node_id::text, s.status::text, s.task_name::text, s.sub_definition_key::text,
            s.result, s.sub_workflow_summary
     FROM horsies_workflow_tasks n
@@ -1108,7 +1109,7 @@ AS $$
         CASE WHEN p_ended_check AND w.status IN ('COMPLETED', 'FAILED') AND w.parent_workflow_id IS NOT NULL
              THEN w.id END,
         p_detail,
-        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     )::horsies_workflow_step_row
     FROM (SELECT 1) AS one
     LEFT JOIN horsies_workflows w ON w.id = p_workflow_id
@@ -1393,8 +1394,12 @@ $$;
 -- the node write, the delete of the phase-2 record, the capacity wake of the task's queue (p_wake), the failure
 -- policy, the paused guard, promotion with the task rows of promoted task nodes, and the completion check.
 -- p_dependents: 'NONE' when phase 1 reported that no node depends on this node (no dependents read), 'READ'
--- otherwise (a replay or a retry, which do not know it). A promoted sub-workflow node is owed work: the caller runs
--- this call inside BEGIN, then horsies_workflow_child_start per CHILD_START row, then COMMIT.
+-- otherwise (a replay or a retry, which do not know it). A promoted sub-workflow node is owed work, so the form of
+-- the call follows the phase-1 outcome: node_has_dependents FALSE, or downstream_subworkflow NONE, is one statement
+-- in autocommit; downstream_subworkflow REACHABLE runs BEGIN, this call, horsies_workflow_child_start per
+-- CHILD_START row, COMMIT. A replay or a retry, which have no phase-1 outcome, runs the transaction form. The fact
+-- is computed at start from the static graph, so a NONE node can never owe a child start: if one does, the call
+-- raises (data_corrupted) and nothing commits.
 -- Returns the OUTCOME row (the disposition of horsies_workflow_node_apply; advance_child_workflow_id when this step
 -- ended a child workflow) and the CHILD_START and SOURCE rows. A retaining disposition writes nothing: the worker
 -- treats it as a phase-2 error, and phase-2 recovery counts it.
@@ -1409,16 +1414,29 @@ CREATE FUNCTION horsies_workflow_node_finish(p_task_id uuid, p_wake boolean, p_d
 AS $$
 DECLARE
     v_apply record;
+    v_row horsies_workflow_step_row;
+    v_owes_child_start boolean := FALSE;
 BEGIN
     PERFORM horsies_workflow_require(p_task_id IS NOT NULL, 'task id must not be NULL');
     PERFORM horsies_workflow_require(p_dependents IN ('NONE', 'READ'), 'dependents must be NONE or READ');
     SELECT * INTO v_apply FROM horsies_workflow_node_apply(p_task_id, p_wake);
-    IF v_apply.disposition = 'APPLIED' THEN
-        RETURN QUERY SELECT * FROM horsies_workflow_progress(v_apply.workflow_id, v_apply.task_index, p_dependents);
-        RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_apply.workflow_id, TRUE, NULL);
+    IF v_apply.disposition <> 'APPLIED' THEN
+        RETURN NEXT horsies_workflow_outcome_row(v_apply.disposition, v_apply.workflow_id, FALSE, NULL);
         RETURN;
     END IF;
-    RETURN NEXT horsies_workflow_outcome_row(v_apply.disposition, v_apply.workflow_id, FALSE, NULL);
+    FOR v_row IN SELECT * FROM horsies_workflow_progress(v_apply.workflow_id, v_apply.task_index, p_dependents) LOOP
+        v_owes_child_start := v_owes_child_start OR v_row.row_kind = 'CHILD_START';
+        RETURN NEXT v_row;
+    END LOOP;
+    IF v_owes_child_start AND EXISTS (
+        SELECT 1 FROM horsies_workflow_tasks n
+        WHERE n.workflow_id = v_apply.workflow_id AND n.task_index = v_apply.task_index
+          AND n.downstream_subworkflow = 'NONE'
+    ) THEN
+        RAISE EXCEPTION 'workflow % node % has downstream_subworkflow NONE and its phase 2 owes a child start',
+            v_apply.workflow_id, v_apply.task_index USING ERRCODE = 'data_corrupted';
+    END IF;
+    RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_apply.workflow_id, TRUE, NULL);
 END;
 $$;
 
@@ -1869,8 +1887,12 @@ $$;
 -- parent pair names the node) goes in RUNNING, linked to the child, with started_at; any other node without
 -- dependencies goes in READY; the rest PENDING. dependencies is a JSON array of indexes, workflow_ctx_from a JSON
 -- array of node ids, args_from a JSON object of key to index. sub_workflow_params is the params choice of a
--- sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the table CHECK refuses another pairing). Refuses
--- (22023) a child workflow row that names no sub-workflow root node.
+-- sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the table CHECK refuses another pairing).
+-- downstream_subworkflow is computed here, once, from the static graph: REACHABLE for every node from which a
+-- sub-workflow node of the same workflow is reachable along the dependency edges (an ancestor of one), NONE for the
+-- rest. The walk goes up from each sub-workflow node through the dependencies; UNION keeps each node once, so it
+-- ends after at most the node count of steps. Refuses (22023) a child workflow row that names no sub-workflow
+-- root node.
 -- Locks: the new node rows. Returns nothing. Python: INSERT_WORKFLOW_TASKS_BULK_SQL (core/workflows/sql.py:46-58;
 -- core/workflows/lifecycle.py:699) and LINK_SUB_WORKFLOW_SQL (core/workflows/sql.py:271-276).
 CREATE FUNCTION horsies_workflow_start_nodes(
@@ -1887,43 +1909,62 @@ CREATE FUNCTION horsies_workflow_start_nodes(
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 BEGIN
+    WITH RECURSIVE n AS MATERIALIZED (
+        SELECT u.*, ARRAY(
+            SELECT e.value::integer
+            FROM jsonb_array_elements_text(u.dependencies_json::jsonb) WITH ORDINALITY AS e(value, position)
+            ORDER BY e.position
+        ) AS dependencies
+        FROM unnest(
+                p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
+                p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
+                p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,
+                p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils,
+                p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                p_node_sub_definition_keys, p_node_sub_workflow_params
+             ) AS u(workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies_json,
+                    args_from, ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries,
+                    execution, good_until, retention_class_key, is_subworkflow, sub_workflow_name,
+                    sub_definition_key, sub_workflow_params)
+    ),
+    edge AS MATERIALIZED (
+        SELECT n.workflow_id, n.task_index, d.dependency
+        FROM n, unnest(n.dependencies) AS d(dependency)
+    ),
+    upstream(workflow_id, task_index) AS (
+        SELECT e.workflow_id, e.dependency
+        FROM edge e
+        JOIN n ON n.workflow_id = e.workflow_id AND n.task_index = e.task_index
+        WHERE n.is_subworkflow
+        UNION
+        SELECT e.workflow_id, e.dependency
+        FROM upstream r
+        JOIN edge e ON e.workflow_id = r.workflow_id AND e.task_index = r.task_index
+    )
     INSERT INTO horsies_workflow_tasks (
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-        good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-        sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
-        completed_at
+        good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+        sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error,
+        created_at, started_at, completed_at
     )
     SELECT horsies_uuidv7(), n.workflow_id, n.task_index, n.node_id, n.task_name, n.input, n.queue_name, n.priority,
-           d.dependencies, n.args_from::jsonb,
+           n.dependencies, n.args_from::jsonb,
            CASE WHEN n.ctx_from IS NULL THEN NULL ELSE ARRAY(
                SELECT x.value FROM jsonb_array_elements_text(n.ctx_from::jsonb) WITH ORDINALITY AS x(value, position)
                ORDER BY x.position
            ) END,
            n.allow_failed_deps, n.join_type, n.min_success, n.task_options, n.max_retries, n.execution,
            n.good_until, n.retention_class_key,
-           CASE WHEN c.id IS NOT NULL THEN 'RUNNING' WHEN cardinality(d.dependencies) = 0 THEN 'READY'
+           CASE WHEN EXISTS (
+               SELECT 1 FROM upstream r WHERE r.workflow_id = n.workflow_id AND r.task_index = n.task_index
+           ) THEN 'REACHABLE' ELSE 'NONE' END,
+           CASE WHEN c.id IS NOT NULL THEN 'RUNNING' WHEN cardinality(n.dependencies) = 0 THEN 'READY'
                 ELSE 'PENDING' END,
            NULL, n.is_subworkflow, c.id, n.sub_workflow_name, n.sub_definition_key, n.sub_workflow_params,
            NULL, NULL, NULL, now(),
            CASE WHEN c.id IS NOT NULL THEN now() END, NULL
-    FROM unnest(
-            p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
-            p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
-            p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options,
-            p_node_max_retries, p_node_executions, p_node_good_untils, p_node_retention_class_keys,
-            p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params
-         ) AS n(workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
-                ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-                good_until, retention_class_key, is_subworkflow, sub_workflow_name, sub_definition_key,
-                sub_workflow_params)
-    CROSS JOIN LATERAL (
-        SELECT ARRAY(
-            SELECT e.value::integer
-            FROM jsonb_array_elements_text(n.dependencies::jsonb) WITH ORDINALITY AS e(value, position)
-            ORDER BY e.position
-        ) AS dependencies
-    ) d
+    FROM n
     LEFT JOIN unnest(p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes) AS c(id, parent_id, parent_index)
       ON c.parent_id = n.workflow_id AND c.parent_index = n.task_index
     ORDER BY n.workflow_id, n.task_index;
@@ -2073,7 +2114,8 @@ $$;
 --    WORKFLOW_ID_CONFLICT). The unique key makes a concurrent second start wait for the first commit.
 -- 2. Insert the child workflow rows (RUNNING, root id of the tree) and every node row: a sub-workflow node with a
 --    pre-built child goes in RUNNING, linked, with started_at; any other node without dependencies goes in READY;
---    the rest PENDING. Node row ids come from horsies_uuidv7().
+--    the rest PENDING. Node row ids come from horsies_uuidv7(). Each node gets downstream_subworkflow from the
+--    static graph (horsies_workflow_start_nodes).
 -- 3. Each failed-node record, deepest workflow first: the node goes FAILED with its envelope, then progression (the
 --    failure policy, promotion of its dependents, completion).
 -- 4. Each workflow of the tree that is still RUNNING: its READY nodes are enqueued, with their task rows minted

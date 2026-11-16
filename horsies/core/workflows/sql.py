@@ -45,7 +45,9 @@ INSERT_WORKFLOW_SQL = text("""
 # - the node-kind parameters (the typed task facts :max_retries, :execution,
 #   :good_until, :retention_class_key, and :sub_workflow_params) come from
 #   task_node_kind_params for a TaskNode and from
-#   subworkflow_node_kind_params for a SubWorkflowNode.
+#   subworkflow_node_kind_params for a SubWorkflowNode;
+# - :downstream_subworkflow is the fact of the static graph that
+#   with_downstream_subworkflow adds to the parameters of one workflow.
 INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
     INSERT INTO horsies_workflow_tasks
     (id, workflow_id, task_index, node_id, task_name, input,
@@ -53,12 +55,13 @@ INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
      allow_failed_deps, join_type, min_success, task_options,
      max_retries, execution, good_until, retention_class_key, status,
      is_subworkflow, sub_workflow_name, sub_definition_key,
-     sub_workflow_params, task_id, started_at, created_at)
+     sub_workflow_params, downstream_subworkflow, task_id, started_at,
+     created_at)
     VALUES (:id, :wf_id, :idx, :node_id, :name, :input, :queue, :priority,
             :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
             :task_options, :max_retries, :execution, :good_until,
             :retention_class_key, :status, :is_subworkflow, :sub_wf_name,
-            :sub_def_key, :sub_workflow_params, :task_id,
+            :sub_def_key, :sub_workflow_params, :downstream_subworkflow, :task_id,
             CASE WHEN :is_enqueued THEN NOW() END, NOW())
 """)
 # -- SQL constants for pause_workflow --
@@ -219,6 +222,63 @@ class SubWorkflowParams(Enum):
 
     GIVEN = 'GIVEN'
     """The node definition carries params for the child's build."""
+
+
+class DownstreamSubworkflow(Enum):
+    """Whether a sub-workflow node is reachable below a node along the
+    dependency edges of its workflow.
+
+    Stored in ``horsies_workflow_tasks.downstream_subworkflow``
+    (``horsies_workflow_tasks_downstream_subworkflow_known``). The core's
+    phase 2 of a REACHABLE node runs in a transaction, because its promotion
+    can owe a child start.
+    """
+
+    NONE = 'NONE'
+    """No sub-workflow node depends on this node, directly or through others."""
+
+    REACHABLE = 'REACHABLE'
+    """The node is an ancestor of a sub-workflow node."""
+
+
+def with_downstream_subworkflow(
+    node_params: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The node parameters of one workflow with ``downstream_subworkflow``
+    added to each, from the static graph: ``idx``, ``deps`` and
+    ``is_subworkflow`` of the given parameters.
+
+    The walk goes up from each sub-workflow node through the dependencies and
+    visits each index once, so it ends after at most the node count of steps.
+    Does no I/O.
+    """
+    dependencies: dict[int, list[int]] = {
+        params['idx']: list(params['deps']) for params in node_params
+    }
+    pending: list[int] = [
+        dependency
+        for params in node_params
+        if params['is_subworkflow']
+        for dependency in params['deps']
+    ]
+    reachable: set[int] = set()
+    while pending:
+        index = pending.pop()
+        if index in reachable:
+            continue
+        reachable.add(index)
+        pending.extend(dependencies.get(index, []))
+    return [
+        {
+            **params,
+            'downstream_subworkflow': (
+                DownstreamSubworkflow.REACHABLE
+                if params['idx'] in reachable
+                else DownstreamSubworkflow.NONE
+            ).value,
+        }
+        for params in node_params
+    ]
 
 
 def task_node_kind_params(facts: TaskNodeFacts) -> dict[str, Any]:

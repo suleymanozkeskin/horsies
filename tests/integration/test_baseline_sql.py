@@ -69,13 +69,8 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_cancel_owned_node',
         'horsies_cancel_owned_nodes',
         'horsies_cancel_owned_orphan',
-        'horsies_claim',
-        'horsies_claim_candidates',
-        'horsies_claim_in_flight',
         'horsies_claim_plan',
         'horsies_complete_locked_task',
-        'horsies_complete_task_fused',
-        'horsies_complete_tasks_fused',
         'horsies_encode_rerun_input',
         'horsies_encode_task_attempts',
         'horsies_expire_owned_claim',
@@ -83,8 +78,6 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_fail_locked_task',
         'horsies_fail_stale_task',
         'horsies_find_non_runnable_workflow_tasks',
-        'horsies_finish_failed_attempt',
-        'horsies_finish_workflow_success',
         'horsies_key_reservation_claim',
         'horsies_key_reservation_cleanup',
         'horsies_key_reservation_terminalize',
@@ -96,6 +89,24 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_task_history_leaf_lock_key',
         'horsies_terminalization_miss',
         'horsies_uuid7_birth',
+        # 0004_lifecycle_functions.sql.
+        'horsies_cancel_task',
+        'horsies_claim',
+        'horsies_claim_candidates',
+        'horsies_claim_in_flight',
+        'horsies_complete_task_fused',
+        'horsies_complete_tasks_fused',
+        'horsies_enqueue_task',
+        'horsies_finish_failed_attempt',
+        'horsies_finish_stale_attempt',
+        'horsies_finish_workflow_success',
+        'horsies_insert_task_rows',
+        'horsies_node_has_dependents',
+        'horsies_node_downstream_subworkflow',
+        'horsies_release_claims',
+        'horsies_requeue_stale_claims',
+        'horsies_stale_running_scan',
+        'horsies_start_attempt',
         # 0005_workflow_functions.sql.
         'horsies_task_error_envelope',
         'horsies_task_error_object',
@@ -136,6 +147,15 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_workflow_task_input',
         'horsies_workflow_try_complete',
         'horsies_workflow_unbuildable_nodes',
+        # 0006_history_functions.sql.
+        'horsies_begin_leaf_detach',
+        'horsies_drop_detached_leaf',
+        'horsies_inspect_history_leaf',
+        'horsies_move_tasks_to_history',
+        'horsies_prune_candidates',
+        'horsies_record_leaf_detached',
+        'horsies_rerun_source_read',
+        'horsies_task_absence_reason',
         # 0007_scheduler_monitoring_functions.sql.
         'horsies_fire_schedule',
         'horsies_list_expired_tasks',
@@ -341,11 +361,11 @@ _WORKFLOW_ROW_SQL: Final = """
 """
 
 _NODE_ROW_SQL: Final = """
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
         allow_failed_deps, join_type, max_retries, execution, retention_class_key, status,
         is_subworkflow, sub_workflow_params, created_at
-    ) VALUES (
+    ) VALUES ('NONE',
         '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
         'params.case', '{}', 'default', 100, '{}', FALSE, 'all', %(max_retries)s, %(execution)s,
         %(retention_class_key)s, 'PENDING', %(is_subworkflow)s, %(sub_workflow_params)s, now()
@@ -389,6 +409,48 @@ async def test_sub_workflow_params_are_set_exactly_on_sub_workflow_nodes(
                 with pytest.raises(psycopg.errors.CheckViolation) as raised:
                     await installed.execute(_NODE_ROW_SQL, params)
                 assert raised.value.diag.constraint_name == constraint
+
+
+_DOWNSTREAM_NODE_SQL: Final = """
+    INSERT INTO horsies_workflow_tasks (
+        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
+        allow_failed_deps, join_type, max_retries, execution, retention_class_key, downstream_subworkflow,
+        status, is_subworkflow, created_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
+        'downstream.case', '{}', 'default', 100, '{}', FALSE, 'all', 0, 'ISOLATED', 'forever',
+        %(downstream_subworkflow)s, 'PENDING', FALSE, now()
+    )
+"""
+
+
+@pytest.mark.parametrize(
+    ('downstream_subworkflow', 'violation'),
+    [
+        ('NONE', None),
+        ('REACHABLE', None),
+        ('SOME', psycopg.errors.CheckViolation),
+        (None, psycopg.errors.NotNullViolation),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_downstream_subworkflow_is_one_of_two_named_values(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    downstream_subworkflow: str | None,
+    violation: type[psycopg.errors.IntegrityError] | None,
+) -> None:
+    async with installed.transaction(force_rollback=True):
+        await installed.execute(_WORKFLOW_ROW_SQL)
+        match violation:
+            case None:
+                await installed.execute(
+                    _DOWNSTREAM_NODE_SQL, {'downstream_subworkflow': downstream_subworkflow}
+                )
+            case error:
+                with pytest.raises(error):
+                    await installed.execute(
+                        _DOWNSTREAM_NODE_SQL, {'downstream_subworkflow': downstream_subworkflow}
+                    )
 
 
 @pytest.mark.asyncio(loop_scope='function')

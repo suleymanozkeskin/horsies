@@ -73,6 +73,8 @@ from horsies.core.baseline.install import (
     ClientFamily,
     EmptyDatabase,
     FamilyRecorded,
+    ReadersMissing,
+    ReadersPublished,
     SchemaNewer,
     SchemaStatementFailed,
 )
@@ -475,6 +477,10 @@ class TestPostgresBrokerPgBouncerWiring:
                 'horsies.core.brokers.postgres.install_baseline',
                 new=AsyncMock(return_value=Ok(None)),
             ),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
         ):
             config = PostgresConfig(
                 database_url=database_url,
@@ -513,6 +519,10 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch(
                 'horsies.core.brokers.postgres.install_baseline',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
                 new=AsyncMock(return_value=Ok(None)),
             ),
         ):
@@ -3500,7 +3510,21 @@ class TestBaselineInstall:
 
     @staticmethod
     def _current() -> Any:
-        return Ok(BaselineCurrent(family=FamilyRecorded(family=ClientFamily.PYTHON)))
+        return Ok(
+            BaselineCurrent(
+                family=FamilyRecorded(family=ClientFamily.PYTHON),
+                readers=ReadersPublished(),
+            )
+        )
+
+    @staticmethod
+    def _readers_missing() -> Any:
+        return Ok(
+            BaselineCurrent(
+                family=FamilyRecorded(family=ClientFamily.PYTHON),
+                readers=ReadersMissing(),
+            )
+        )
 
     @pytest.mark.asyncio
     async def test_current_database_takes_no_lock_and_writes_nothing(self) -> None:
@@ -3526,10 +3550,12 @@ class TestBaselineInstall:
         connection.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_empty_database_is_installed_under_the_lock(self) -> None:
+    async def test_empty_database_is_installed_and_published_under_the_lock(self) -> None:
         broker = _make_broker()
         connection = _schema_lock_connection()
+        engine = MagicMock()
         install = AsyncMock(return_value=Ok(None))
+        publish = AsyncMock(return_value=Ok(None))
         with (
             patch(
                 'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
@@ -3540,14 +3566,85 @@ class TestBaselineInstall:
                 new=AsyncMock(side_effect=[Ok(EmptyDatabase()), Ok(EmptyDatabase())]),
             ) as read_state,
             patch('horsies.core.brokers.postgres.install_baseline', new=install),
+            patch('horsies.core.brokers.postgres.publish_history_readers', new=publish),
         ):
-            await broker._maybe_run_schema_init(MagicMock())
+            await broker._maybe_run_schema_init(engine)
 
         assert read_state.await_count == 2
         install.assert_awaited_once()
+        publish.assert_awaited_once_with(engine)
         statements = [call.args[0] for call in connection.execute.await_args_list]
         assert statements.count('SELECT pg_try_advisory_lock(%s)') == 1
         assert statements.count('SELECT pg_advisory_unlock(%s)') == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_readers_are_published_without_a_second_migration(
+        self,
+    ) -> None:
+        broker = _make_broker()
+        engine = MagicMock()
+        install = AsyncMock(return_value=Ok(None))
+        publish = AsyncMock(return_value=Ok(None))
+        record_family = AsyncMock(return_value=Ok(None))
+        with (
+            patch(
+                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+                new=AsyncMock(return_value=_schema_lock_connection()),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.read_database_state',
+                new=AsyncMock(
+                    side_effect=[
+                        self._readers_missing(),
+                        self._readers_missing(),
+                        self._current(),
+                    ]
+                ),
+            ) as read_state,
+            patch('horsies.core.brokers.postgres.install_baseline', new=install),
+            patch('horsies.core.brokers.postgres.publish_history_readers', new=publish),
+            patch(
+                'horsies.core.brokers.postgres.record_client_family', new=record_family
+            ),
+        ):
+            await broker._maybe_run_schema_init(engine)
+
+        assert read_state.await_count == 3
+        install.assert_not_awaited()
+        publish.assert_awaited_once_with(engine)
+        record_family.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_publication_raises_its_cause_with_the_step(self) -> None:
+        broker = _make_broker()
+        failure = SchemaStatementFailed(
+            step='publish the history readers',
+            cause=psycopg.errors.InsufficientPrivilege('permission denied'),
+        )
+        with (
+            patch(
+                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+                new=AsyncMock(return_value=_schema_lock_connection()),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.read_database_state',
+                new=AsyncMock(side_effect=[Ok(EmptyDatabase()), Ok(EmptyDatabase())]),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.install_baseline',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
+                new=AsyncMock(return_value=Err(failure)),
+            ),
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege) as raised:
+                await broker._maybe_run_schema_init(MagicMock())
+
+        assert raised.value.__notes__ == [
+            'schema install step: publish the history readers',
+        ]
 
     @pytest.mark.asyncio
     async def test_install_finished_by_another_broker_while_waiting_is_not_repeated(
@@ -3621,6 +3718,10 @@ class TestBaselineInstall:
                 new=AsyncMock(return_value=Ok(EmptyDatabase())),
             ),
             patch('horsies.core.brokers.postgres.install_baseline', new=install),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
             patch(
                 'horsies.core.brokers.postgres.random.uniform',
                 return_value=0,
