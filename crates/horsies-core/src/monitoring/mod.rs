@@ -50,4 +50,8 @@ pub use task_actions::{
 #[cfg(test)]
 mod action_tests;
 #[cfg(test)]
+mod aggregate_spec_tests;
+#[cfg(test)]
+mod spec_support;
+#[cfg(test)]
 mod tests;
