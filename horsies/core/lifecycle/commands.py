@@ -69,14 +69,13 @@ class CompleteTaskFused:
     the locking read ahead of the update, not in the update's predicate, and a
     reimplementation must keep that structure: restating the guard as an update
     predicate preserves the semantics and loses the single-statement property
-    the fusion exists for.
+    the fusion exists for. The function builds the capacity wake from the
+    locked row: channel ``task_queue_<queue>``, payload ``capacity``.
     """
 
     task_id: str
     fence: OwnedClaim
     result_json: str
-    notify_channel: str
-    notify_payload: str
 
 
 # ---------------------------------------------------------------------------

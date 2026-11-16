@@ -381,7 +381,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
 #[test]
 fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(
             &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),
@@ -390,7 +390,7 @@ fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     );
     let write = task_error_write(&claimed, "worker-1", &error, &envelope);
     assert_eq!(write.result_json, envelope.as_str());
-    assert_eq!(write.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(write.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
 }
 
