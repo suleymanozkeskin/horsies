@@ -4,7 +4,6 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
@@ -12,7 +11,6 @@ use uuid::Uuid;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
@@ -898,7 +896,11 @@ async fn reevaluate_and_enqueue(
                 crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
                     WorkflowError::Validation(format!("task identity mint failed: {error}"))
                 })?;
-            let max_retries = parse_max_retries(task.task_options.as_deref());
+            let max_retries = crate::workflow_engine::node_max_retries(
+                task.task_index,
+                &task.task_name,
+                task.task_options.as_deref(),
+            )?;
 
             // Merge args_from if present. A key that the static input also sets fails the node
             // (Python `core/workflows/engine.py:834-839`); the resume counts it as a handled node.
@@ -942,7 +944,11 @@ async fn reevaluate_and_enqueue(
             )
             .await?;
 
-            let good_until = parse_good_until_from_options(task.task_options.as_deref());
+            let good_until = crate::workflow_engine::node_good_until(
+                task.task_index,
+                &task.task_name,
+                task.task_options.as_deref(),
+            )?;
             let retention_class_key = retention.resolve_queue_class(&task.queue_name);
             let facts = prepare_workflow_task_facts(
                 &merged_input,
