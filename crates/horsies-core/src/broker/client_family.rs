@@ -10,7 +10,10 @@
 
 use sqlx::PgPool;
 
+use crate::broker::core_rows::RowDecodeError;
 use crate::broker::error::BrokerError;
+use crate::broker::pools::PoolSettingsError;
+use crate::db::{StatementFailure, Transience};
 
 /// The client library that installed a database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,73 @@ impl std::fmt::Display for RecordedFamily {
     }
 }
 
+/// The database records another client family than the handle's, or none.
+/// Not retryable: the database stays of its family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyMismatch {
+    /// What the database records.
+    pub stored: RecordedFamily,
+    /// The family of the handle.
+    pub own: ClientFamily,
+}
+
+impl From<FamilyMismatch> for BrokerError {
+    fn from(mismatch: FamilyMismatch) -> Self {
+        BrokerError::ClientFamilyMismatch {
+            stored: mismatch.stored,
+            own: mismatch.own,
+        }
+    }
+}
+
+/// Why the family check before a handle's first write could not read the
+/// family row. Nothing was written. The check keeps no answer after a
+/// failure, so the next write reads the row again.
+#[derive(Debug, thiserror::Error)]
+pub enum FamilyCheckFailure {
+    /// The read of the family row failed on the main core pool. Retryable
+    /// when its cause may clear ([`StatementFailure::transience`]).
+    #[error("the client-family read failed: {0}")]
+    Statement(StatementFailure),
+    /// The handle was closed, and its core pools could not be built again:
+    /// the connection settings were refused. Not retryable: the same
+    /// settings are refused again.
+    #[error("the core pools could not be opened again: {0}")]
+    PoolsNotReopened(PoolSettingsError),
+    /// The `family` column of the row does not decode as text. Not
+    /// retryable: the same row meets the same refusal.
+    #[error("the client-family row does not decode: {0}")]
+    FamilyColumnUndecodable(RowDecodeError),
+}
+
+impl FamilyCheckFailure {
+    /// Whether the cause may clear, so a repeat of the check can pass.
+    pub fn transience(&self) -> Transience {
+        match self {
+            Self::Statement(failure) => failure.transience(),
+            Self::PoolsNotReopened(_) | Self::FamilyColumnUndecodable(_) => Transience::Permanent,
+        }
+    }
+}
+
+impl From<FamilyCheckFailure> for BrokerError {
+    fn from(failure: FamilyCheckFailure) -> Self {
+        match failure {
+            FamilyCheckFailure::Statement(failure) => BrokerError::Statement(failure),
+            FamilyCheckFailure::PoolsNotReopened(error) => BrokerError::PoolSettings(error),
+            FamilyCheckFailure::FamilyColumnUndecodable(error) => BrokerError::RowDecode(error),
+        }
+    }
+}
+
+/// Why a handle may not write: the database is of another family, or the
+/// family row could not be read.
+#[derive(Debug)]
+pub(crate) enum FamilyCheckError {
+    Mismatch(FamilyMismatch),
+    ReadFailed(FamilyCheckFailure),
+}
+
 pub(crate) const READ_FAMILY_SQL: &str = "SELECT family FROM horsies_client_family";
 
 const INSERT_FAMILY_SQL: &str = "INSERT INTO horsies_client_family (only_row, family, recorded_at)
@@ -93,15 +163,16 @@ pub(crate) fn recorded_family_from(stored: Option<String>) -> RecordedFamily {
 }
 
 /// The answer to a recorded family for a handle of family `own`.
-pub(crate) fn admit_family(recorded: RecordedFamily, own: ClientFamily) -> Result<(), BrokerError> {
+pub(crate) fn admit_family(
+    recorded: RecordedFamily,
+    own: ClientFamily,
+) -> Result<(), FamilyMismatch> {
     match recorded {
         RecordedFamily::Recorded(stored) if stored == own => Ok(()),
-        RecordedFamily::Recorded(_) | RecordedFamily::NotRecorded => {
-            Err(BrokerError::ClientFamilyMismatch {
-                stored: recorded,
-                own,
-            })
-        }
+        RecordedFamily::Recorded(_) | RecordedFamily::NotRecorded => Err(FamilyMismatch {
+            stored: recorded,
+            own,
+        }),
     }
 }
 
@@ -113,13 +184,13 @@ pub(crate) async fn record_client_family(
     own: ClientFamily,
 ) -> Result<(), BrokerError> {
     if let RecordedFamily::Recorded(stored) = read_recorded_family(pool).await? {
-        return admit_family(RecordedFamily::Recorded(stored), own);
+        return Ok(admit_family(RecordedFamily::Recorded(stored), own)?);
     }
     sqlx::query(INSERT_FAMILY_SQL)
         .bind(own.as_str())
         .execute(pool)
         .await?;
-    admit_family(read_recorded_family(pool).await?, own)
+    Ok(admit_family(read_recorded_family(pool).await?, own)?)
 }
 
 #[cfg(test)]
@@ -146,11 +217,81 @@ mod tests {
             RecordedFamily::NotRecorded,
         ] {
             let refused = admit_family(recorded, ClientFamily::Rust).unwrap_err();
-            assert!(matches!(
+            assert_eq!(
                 refused,
+                FamilyMismatch {
+                    stored: recorded,
+                    own: ClientFamily::Rust,
+                }
+            );
+            let broker_error = BrokerError::from(refused);
+            assert!(matches!(
+                broker_error,
                 BrokerError::ClientFamilyMismatch { stored, own: ClientFamily::Rust } if stored == recorded
             ));
-            assert!(!refused.is_retryable());
+            assert!(!broker_error.is_retryable());
         }
+    }
+
+    fn statement_failure(cause: crate::db::NotSentCause) -> StatementFailure {
+        StatementFailure::NotSent {
+            statement: "read_client_family",
+            cause,
+        }
+    }
+
+    fn pools_not_reopened() -> FamilyCheckFailure {
+        FamilyCheckFailure::PoolsNotReopened(PoolSettingsError::Environment(
+            crate::db::EnvironmentError::NotUnicode { name: "PGPASSWORD" },
+        ))
+    }
+
+    fn family_column_undecodable() -> FamilyCheckFailure {
+        FamilyCheckFailure::FamilyColumnUndecodable(RowDecodeError::NoRow {
+            statement: "read_client_family",
+        })
+    }
+
+    /// A lost connection may clear; a closed pool does not.
+    #[test]
+    fn a_failed_family_read_keeps_the_transience_of_its_statement() {
+        let lost = FamilyCheckFailure::Statement(statement_failure(
+            crate::db::NotSentCause::ConnectionClosed,
+        ));
+        assert_eq!(lost.transience(), Transience::Transient);
+        let closed = FamilyCheckFailure::Statement(statement_failure(
+            crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::PoolClosed {
+                role: crate::db::PoolRole::Main,
+            }),
+        ));
+        assert_eq!(closed.transience(), Transience::Permanent);
+    }
+
+    #[test]
+    fn refused_pool_settings_and_an_undecodable_family_column_do_not_clear() {
+        assert_eq!(pools_not_reopened().transience(), Transience::Permanent);
+        assert_eq!(
+            family_column_undecodable().transience(),
+            Transience::Permanent
+        );
+    }
+
+    /// The write paths keep the broker error each failure had before.
+    #[test]
+    fn each_failure_keeps_its_broker_error() {
+        let lost = FamilyCheckFailure::Statement(statement_failure(
+            crate::db::NotSentCause::ConnectionClosed,
+        ));
+        let lost = BrokerError::from(lost);
+        assert!(matches!(lost, BrokerError::Statement(_)));
+        assert!(lost.is_retryable());
+        assert!(matches!(
+            BrokerError::from(pools_not_reopened()),
+            BrokerError::PoolSettings(PoolSettingsError::Environment(_))
+        ));
+        assert!(matches!(
+            BrokerError::from(family_column_undecodable()),
+            BrokerError::RowDecode(RowDecodeError::NoRow { .. })
+        ));
     }
 }
