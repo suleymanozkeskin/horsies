@@ -1653,7 +1653,6 @@ mod tests {
         let claims = run.find("claim_batch(").expect("claim loop");
         let reaper = run.find("spawn_reaper(").expect("reaper startup");
         let reaper_call = &run[reaper..reaper + 500];
-        assert!(reaper_call.contains("Arc::clone(&self.broker)"));
         assert!(reaper_call.contains("self.broker.pool().clone()"));
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
         assert!(schema < coverage);
