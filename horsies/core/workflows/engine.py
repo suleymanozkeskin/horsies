@@ -165,6 +165,36 @@ def _is_outputless_workflow_envelope(value: Any) -> bool:
     )
 
 
+def _missing_result_entry(
+    *,
+    task_index: int,
+    node_id: str | None,
+    task_name: str,
+    status: str,
+) -> 'TaskResult[Any, TaskError]':
+    """The entry of a COMPLETED or FAILED dependency with no stored result.
+
+    No library writer leaves such a node, so it is stored data that does not
+    parse: ``RESULT_DESERIALIZATION_ERROR`` naming the source node (its id,
+    or ``-`` when it has none, its index and its task) and its status. The
+    baseline function ``horsies_workflow_source_value`` builds the same
+    entry.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    node_label = node_id if node_id is not None else '-'
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=(
+                f'Dependency node {node_label} (index {task_index}, task '
+                f'{task_name}) is {status} with no stored result'
+            ),
+            data={'dependency_index': task_index},
+        ),
+    )
+
+
 def _decode_stored_task_result(
     stored_result: str,
     *,
@@ -2715,6 +2745,8 @@ async def get_dependency_results(
             each recovery pass as one unit.
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
+    - COMPLETED/FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
+      naming the node (``_missing_result_entry``)
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
     Strict-serde phase 6: decode each row's stored result via
@@ -2753,6 +2785,7 @@ async def get_dependency_results(
     for row in result.fetchall():
         task_index = row.task_index
         task_name = row.task_name
+        node_id = row.node_id
         status = row.status
         stored_result = row.result
         sub_definition_key = row.sub_definition_key
@@ -2781,6 +2814,13 @@ async def get_dependency_results(
                 sub_definition_key=sub_definition_key,
             )
             results[task_index] = decoded_tr
+        else:
+            results[task_index] = _missing_result_entry(
+                task_index=task_index,
+                node_id=node_id,
+                task_name=task_name,
+                status=status,
+            )
 
     return (results, task_names_by_index, definition_keys_by_index)
 
@@ -2803,6 +2843,8 @@ async def get_dependency_results_with_names(
             whose callers own the typed recovery seams.
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
+    - COMPLETED/FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
+      naming the node (``_missing_result_entry``)
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
 
     Strict-serde phase 6: each stored result is decoded via
@@ -2857,7 +2899,12 @@ async def get_dependency_results_with_names(
                 sub_definition_key=sub_definition_key,
             )
         else:
-            continue  # No result to include
+            task_result = _missing_result_entry(
+                task_index=task_index,
+                node_id=node_id,
+                task_name=task_name,
+                status=status,
+            )
 
         dep_results.by_index[task_index] = task_result
         if node_id is not None:
