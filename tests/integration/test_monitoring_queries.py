@@ -417,6 +417,30 @@ class TestTaskStats:
         assert is_ok(result)
         assert sum(row.count for row in result.ok_value) == expected_total
 
+    async def test_a_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(status=TaskStatus.FAILED)
+        await insert_rows(session, task, make_task(status=TaskStatus.PENDING))
+
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
+            result = await task_stats(
+                broker,
+                window=_test_window(),
+                task_names=[],
+                queues=[],
+                workers=[],
+                error_codes=[],
+                error_categories=[],
+                retried_only=False,
+            )
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert "'NOT_KNOWN'" in error.message
+
 
 # --------------------------------------------------------------------------- #
 # task_facets

@@ -10,8 +10,9 @@ states:
 * ``MonitoringQueryDbOperationFailed``: a ``SQLAlchemyError`` at the
   session boundary.
 * ``MonitoringQueryHistoryContractViolation``: a ``HistoryContractError``
-  from the history reads of ``list_tasks``, ``get_task_detail`` and
-  ``get_workflow_node``: stored history data that does not decode.
+  from the history reads of ``task_stats``, ``list_tasks``,
+  ``get_task_detail`` and ``get_workflow_node``: stored history data that
+  does not decode.
 
 Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
 error. ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the
@@ -219,6 +220,9 @@ _STATUS_ORDER: tuple[TaskStatus, ...] = (
     TaskStatus.CANCELLED,
     TaskStatus.EXPIRED,
 )
+
+# Every stored status text that is a task status.
+_STATUS_BY_VALUE: dict[str, TaskStatus] = {status.value: status for status in TaskStatus}
 
 # Statuses in which a task is still waiting to start, so its queue wait is an
 # open span that counts up.
@@ -956,7 +960,9 @@ async def task_stats(
     moves finished rows there). Scoped by every filter except status,
     because the cards are the status selector. Always returns all
     seven statuses in a fixed order, including zeros, so cards never
-    appear, disappear, or reorder between polls.
+    appear, disappear, or reorder between polls. A history row in the
+    window whose status is not a task status answers
+    ``MonitoringQueryHistoryContractViolation`` and no count.
     """
     scope = _scope_conditions(
         statuses=[],
@@ -1001,8 +1007,18 @@ async def task_stats(
     counts = {status: count for status, count in rows}
     merged: dict[TaskStatus, int] = dict(counts)
     for row in history_rows:
-        status = TaskStatus(str(row.status))
-        merged[status] = merged.get(status, 0) + int(row.terminal_count)
+        stored = str(row.status)
+        match _STATUS_BY_VALUE.get(stored):
+            case TaskStatus() as status:
+                merged[status] = merged.get(status, 0) + int(row.terminal_count)
+            case None:
+                return _contract_err(
+                    'task stats query',
+                    HistoryContractError(
+                        f'{int(row.terminal_count)} history row(s) in the window '
+                        f'hold status {stored!r}, which is not a task status'
+                    ),
+                )
     return Ok(
         [
             StatusCount(status=status.value, count=merged.get(status, 0))
