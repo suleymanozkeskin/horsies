@@ -1438,12 +1438,12 @@ impl Worker {
     /// Check the pools and the session URL, then subscribe the claim wakes of
     /// every queue and the ping channel on the broker's listener.
     ///
-    /// The checks run at every worker boot, with or without PgBouncer mode
-    /// (Python `validate_worker_database_paths`): the pool checks
-    /// ([`PostgresBroker::check_worker_session`]), then the session check
-    /// ([`PostgresBroker::check_session_delivery`]). A statement-pooled URL
-    /// or a URL that does not keep session state is refused, not retryable; a
-    /// database that cannot be reached is retryable.
+    /// The check runs at every worker boot, with or without PgBouncer mode
+    /// (Python `validate_worker_database_paths`): one session check on the
+    /// statement layer ([`PostgresBroker::check_worker_session`]). A
+    /// statement-pooled URL or a URL that does not keep session state is
+    /// refused, not retryable; a database that cannot be reached is
+    /// retryable.
     async fn try_connect_listener(&self) -> Result<WorkerSubscriptions, WorkerError> {
         let channels = self
             .worker_config
@@ -1453,10 +1453,6 @@ impl Worker {
             .collect::<Result<Vec<ChannelName>, WorkerError>>()?;
         self.broker
             .check_worker_session()
-            .await
-            .map_err(WorkerError::Broker)?;
-        self.broker
-            .check_session_delivery()
             .await
             .map_err(WorkerError::SessionCheck)?;
         let listener = self.broker.listener();
@@ -1964,11 +1960,11 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
                 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -4196,3 +4192,6 @@ mod tests {
 
 #[cfg(test)]
 mod live_worker_tests;
+
+#[cfg(test)]
+mod start_tests;

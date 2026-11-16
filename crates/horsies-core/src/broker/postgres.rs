@@ -761,6 +761,14 @@ static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH
 /// `SELECT 1` on the session pool in the worker boot check.
 static SESSION_CHECK: TypedStatement = TypedStatement::new("session_check", HEALTH_CHECK_SQL, &[]);
 
+/// The NOTIFY of the worker boot's session check, on the main core pool:
+/// `$1` the check channel.
+static SESSION_CHECK_NOTIFY: TypedStatement = TypedStatement::new(
+    "session_check_notify",
+    "SELECT pg_notify($1, 'ok')",
+    &[ParameterType::Text],
+);
+
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
 /// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
@@ -1387,10 +1395,11 @@ impl PostgresBroker {
     }
 
     /// The open core pools, for a lifecycle writer that runs on the main
-    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
-    /// write: [`PostgresBroker::close`] waits for the write while the token
-    /// lives. In a worker the main core pool is the worker profile pool. An
-    /// `Idle` handle opens its pools first.
+    /// core pool ([`crate::broker::attempt_writes`]) or a workflow step
+    /// (`workflow_engine::steps`), and the token of its write:
+    /// [`PostgresBroker::close`] waits for the write while the token lives.
+    /// In a worker the main core pool is the worker profile pool. An `Idle`
+    /// handle opens its pools first.
     ///
     /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
     pub(crate) fn core_pools_for_write(
@@ -1473,7 +1482,10 @@ impl PostgresBroker {
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
-    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
+    /// `RerunError::ClientFamilyMismatch`, and nothing is written. A family
+    /// read that fails on the core statement layer is
+    /// `RerunError::FamilyCheckStatement`, `FamilyCheckPoolSettings` or
+    /// `FamilyCheckRowDecode`, and nothing is written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
@@ -2774,8 +2786,7 @@ impl PostgresBroker {
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
     ///
     /// This does not check LISTEN/NOTIFY. Workers run
-    /// [`check_session_delivery`](Self::check_session_delivery) at every
-    /// boot.
+    /// [`check_worker_session`](Self::check_worker_session) at every boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
         let _row = one_row(rows, &HEALTH_CHECK)?;
@@ -2922,53 +2933,37 @@ impl PostgresBroker {
         Ok(pongs)
     }
 
-    /// The pool checks of a worker boot, before the session check
-    /// ([`PostgresBroker::check_session_delivery`]):
+    /// The session check of a worker boot, on the statement layer: both core
+    /// pools keep a transaction, and the session URL keeps session state (a
+    /// LISTEN on it receives a NOTIFY). Runs at every worker boot, with or
+    /// without PgBouncer mode (Python `validate_worker_database_paths`,
+    /// `horsies/core/brokers/postgres.py:1383-1412`).
     ///
-    /// 1. `SELECT 1` on the main core pool. Its first checkout runs the
-    ///    statement-pooling check: a URL that does not keep a transaction is
-    ///    `StatementPooledUrl`, not retryable.
-    /// 2. `SELECT 1` on the session core pool when the session URL differs
-    ///    (its first checkout runs the statement-pooling check too).
+    /// Steps:
+    /// 1. `SELECT 1` on the session core pool when the session URL differs
+    ///    from the main URL. Its first checkout runs the statement-pooling
+    ///    check of that pool.
+    /// 2. Subscribe a wake on `horsies_check_<32 hex>` on the broker's
+    ///    listener, the connection that carries the claim wakes and the pings.
+    /// 3. One autocommit `SELECT pg_notify($1, 'ok')` on the main core pool.
+    ///    Its first checkout runs the statement-pooling check of the main
+    ///    pool.
+    /// 4. Wait at most [`SESSION_CAPABILITY_TIMEOUT`] for the NOTIFY.
     ///
-    /// A database that cannot be reached fails with its retryable error, so
-    /// the worker's start resilience retries it.
-    pub async fn check_worker_session(&self) -> Result<(), BrokerError> {
-        self.health_check().await?;
-        let open = self.core.pools()?;
-        match open.pools().session() {
-            SessionPool::SameAsMain => {}
-            SessionPool::Separate { pool, .. } => {
-                self.log_statement(&SESSION_CHECK);
-                let rows = pool
-                    .query(
-                        CheckoutClass::Batch,
-                        &SESSION_CHECK.bind().finish(),
-                        StatementBound::ConnectionTimeouts,
-                    )
-                    .await?;
-                let _row = one_row(rows, &SESSION_CHECK)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The session check of a worker boot: the session URL keeps session
-    /// state when a LISTEN on it receives a NOTIFY. Runs at every worker boot,
-    /// with or without PgBouncer mode (Python `validate_worker_database_paths`,
-    /// `horsies/core/brokers/postgres.py:1436-1460`).
+    /// The subscription is dropped at the end, and the listener UNLISTENs the
+    /// channel. Nothing is written.
     ///
-    /// Steps: subscribe a wake on `horsies_check_<32 hex>` on the broker's
-    /// listener, the connection that carries the claim wakes and the pings;
-    /// one autocommit `SELECT pg_notify($1, 'ok')` on the main pool; wait at
-    /// most [`SESSION_CAPABILITY_TIMEOUT`]. The subscription is dropped at the
-    /// end, and the listener UNLISTENs the channel.
-    ///
-    /// Outcomes: `Ok` when the NOTIFY arrives; `NotCapable` (not retryable)
-    /// when it does not arrive in time; `Subscribe`, `Notify` and
-    /// `Interrupted` carry their retry rule (a database that cannot be
-    /// reached is retryable).
-    pub async fn check_session_delivery(&self) -> Result<(), SessionCheckFailure> {
+    /// Outcomes: `Ok` when the NOTIFY arrives. Not retryable: `NotCapable`
+    /// (no NOTIFY in time), `PoolSettings`, and `SessionPool` or `Notify`
+    /// with a permanent failure (a statement-pooled URL). `Subscribe`,
+    /// `SessionPool`, `Notify` and `Interrupted` otherwise carry their retry
+    /// rule (a database that cannot be reached is retryable).
+    pub async fn check_worker_session(&self) -> Result<(), SessionCheckFailure> {
+        let open = self
+            .core
+            .pools()
+            .map_err(SessionCheckFailure::PoolSettings)?;
+        self.check_session_pool(open.pools().session()).await?;
         let listener = self
             .listener
             .start()
@@ -2982,9 +2977,15 @@ impl PostgresBroker {
             .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
             .await
             .map_err(SessionCheckFailure::Subscribe)?;
-        sqlx::query("SELECT pg_notify($1, 'ok')")
-            .bind(channel.as_str())
-            .execute(&self.pool)
+        let channel_name: &str = channel.as_str();
+        self.log_statement(&SESSION_CHECK_NOTIFY);
+        let _notified = open
+            .main()
+            .execute(
+                CheckoutClass::Batch,
+                &SESSION_CHECK_NOTIFY.bind().value(&channel_name).finish(),
+                StatementBound::ConnectionTimeouts,
+            )
             .await
             .map_err(SessionCheckFailure::Notify)?;
         match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
@@ -2999,6 +3000,27 @@ impl PostgresBroker {
                 session_url: listener.masked_url().clone(),
                 waited: SESSION_CAPABILITY_TIMEOUT,
             }),
+        }
+    }
+
+    /// Step 1 of [`PostgresBroker::check_worker_session`]: `SELECT 1` on the
+    /// session core pool when the session URL differs from the main URL;
+    /// nothing when it does not (the main pool's check runs at the NOTIFY).
+    async fn check_session_pool(&self, session: &SessionPool) -> Result<(), SessionCheckFailure> {
+        match session {
+            SessionPool::SameAsMain => Ok(()),
+            SessionPool::Separate { pool, .. } => {
+                self.log_statement(&SESSION_CHECK);
+                let _selected = pool
+                    .execute(
+                        CheckoutClass::Batch,
+                        &SESSION_CHECK.bind().finish(),
+                        StatementBound::ConnectionTimeouts,
+                    )
+                    .await
+                    .map_err(SessionCheckFailure::SessionPool)?;
+                Ok(())
+            }
         }
     }
 
@@ -3323,17 +3345,20 @@ fn idempotency_reservation_window_seconds(
 ///
 /// # Panics
 ///
-/// `ensure_client_family_for_write` fails only with a database error or a
-/// family mismatch; any other error is a defect of that function.
+/// `ensure_client_family_for_write` fails only with a family mismatch, a
+/// statement failure, a pool settings refusal or an unreadable family row;
+/// any other error is a defect of that function.
 fn rerun_family_error(error: BrokerError) -> RerunError {
     match error {
         BrokerError::ClientFamilyMismatch { stored, own } => {
             RerunError::ClientFamilyMismatch { stored, own }
         }
-        BrokerError::Database(database) => RerunError::Database(database),
+        BrokerError::Statement(failure) => RerunError::FamilyCheckStatement(failure),
+        BrokerError::PoolSettings(refused) => RerunError::FamilyCheckPoolSettings(refused),
+        BrokerError::RowDecode(unreadable) => RerunError::FamilyCheckRowDecode(unreadable),
         other => panic!(
-            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
-             error nor a family mismatch"
+            "ensure_client_family_for_write failed with {other:?}, which is none of a family \
+             mismatch, a statement failure, a pool settings refusal or an unreadable family row"
         ),
     }
 }
@@ -5051,8 +5076,6 @@ mod fused_finalize_tests {
                     claimed_at,
                 },
                 result_json: result_json.to_owned(),
-                notify_channel: "task_queue_default".to_owned(),
-                notify_payload: format!("capacity:{task_id}"),
             },
         )
         .await
@@ -5794,7 +5817,7 @@ mod filter_non_runnable_tests {
             for index in 0..2 {
                 let task_id = Uuid::new_v4();
                 ids.push(task_id);
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES($1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
+                sqlx::query("INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES('NONE', $1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
                     .bind(Uuid::new_v4()).bind(workflow_id).bind(index)
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
@@ -5893,11 +5916,11 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
                 status, is_subworkflow, max_retries, execution, retention_class_key,
                 task_id, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', 'null',
+            ) VALUES ('NONE', $1, $2, 0, 'node_0', 'c15_task', 'null',
                       'default', 100, '{}', FALSE, 'all',
                       'ENQUEUED', FALSE, 3, 'ISOLATED', 'standard_30d',
                       $3, NOW())",
@@ -6104,8 +6127,6 @@ mod terminal_at_stamp_tests {
                     claimed_at: generation,
                 },
                 result_json: "{\"Ok\":1}".to_owned(),
-                notify_channel: "task_queue_default".to_owned(),
-                notify_payload: format!("capacity:{id}"),
             },
         )
         .await

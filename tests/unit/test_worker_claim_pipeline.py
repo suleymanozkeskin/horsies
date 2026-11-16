@@ -24,10 +24,6 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.schemas.terminalization import (
-    CREATE_ABANDON_OWNED_NODES_SQL,
-    CREATE_CANCEL_OWNED_NODES_SQL,
-)
 from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
@@ -41,6 +37,7 @@ from horsies.core.worker.sql import (
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
 )
+from tests.baseline_sql import baseline_function
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
@@ -472,35 +469,33 @@ class TestUnclaimSqlClearsLeaseExpiry:
     lease timestamp persists on a re-queued task.
     """
 
-    def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
-        """Paused-task cleanup must SET claim_expires_at = NULL."""
-        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-        assert "status = 'CANCELLED'" in normalised
-        assert "error_code = 'TASK_CANCELLED'" in normalised
+    def test_paused_task_cleanup_ends_the_claim(self) -> None:
+        """Paused-task cleanup moves the claimed row to history as CANCELLED
+        with TASK_CANCELLED and deletes the live row with its lease."""
+        normalised = ' '.join(
+            baseline_function('horsies_abandon_owned_nodes').split()
+        )
+        assert "t.command_fingerprint, 'CANCELLED'," in normalised
+        assert "'TASK_CANCELLED'," in normalised
+        assert 'DELETE FROM horsies_tasks WHERE id = ANY(v_applied_ids)' in normalised
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "ctx.status = 'CLAIMED'" in normalised
+        normalised = ' '.join(baseline_function('horsies_abandon_owned_nodes').split())
+        assert "t.status = 'CLAIMED'" in normalised
         assert (
-            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
             in normalised
         )
-        assert 'RETURNING t.id' in normalised
 
     def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
         """Cancelled workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CREATE_CANCEL_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "ctx.status = 'CLAIMED'" in normalised
+        normalised = ' '.join(baseline_function('horsies_cancel_owned_nodes').split())
+        assert "t.status = 'CLAIMED'" in normalised
         assert (
-            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
             in normalised
         )
-        assert 'RETURNING t.id' in normalised
 
     def test_post_claim_guards_fence_on_the_claim_generation(self) -> None:
         """Both post-claim guards carry a pairwise claim-generation fence.
@@ -508,18 +503,19 @@ class TestUnclaimSqlClearsLeaseExpiry:
         The guard runs in its own transaction after the claim committed, so a
         lapsed-and-re-claimed row is CLAIMED by this worker again and the
         (status, worker) pair alone cannot reject it. Generations travel
-        alongside ids because one batch can span claim transactions.
+        alongside ids because one batch can span claim transactions. A NULL
+        generation is refused before any row is read, so the fence has no
+        NULL arm.
         """
-        for statement in (
-            CREATE_ABANDON_OWNED_NODES_SQL,
-            CREATE_CANCEL_OWNED_NODES_SQL,
-        ):
-            normalised = ' '.join(statement.text.split())
+        for name in ('horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'):
+            normalised = ' '.join(baseline_function(name).split())
             assert 'unnest(' in normalised
-            assert 'unnest(p_ids, p_claimed_ats) WITH ORDINALITY' in normalised
-            assert 'AS g(task_id, claimed_at, ordinality)' in normalised
             assert (
-                'ctx.expected_claimed_at IS NULL '
-                'OR ctx.claimed_at = ctx.expected_claimed_at'
-                in normalised
+                'FROM unnest(p_ids, p_claimed_ats) '
+                'AS input(task_id, expected_claimed_at)' in normalised
+            )
+            assert 'AND t.claimed_at = input.expected_claimed_at' in normalised
+            assert 'expected_claimed_at IS NULL' not in normalised
+            assert normalised.index('batch claim generations must be non-NULL') < (
+                normalised.index('FOR UPDATE')
             )

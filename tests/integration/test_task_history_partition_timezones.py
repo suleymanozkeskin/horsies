@@ -190,20 +190,7 @@ class TestConformanceIsSessionIndependent:
             finalizing_stale_after=timedelta(minutes=30),
             safety_factor=4,
         )
-        from horsies.core.history.heartbeats.partitioning import (
-            HEARTBEATS_PARTITIONED_DDL,
-        )
-
         async with history_schema.engine.begin() as connection:
-            parent_missing = (
-                await connection.execute(
-                    text(
-                        "SELECT to_regclass('horsies_heartbeats') IS NULL"
-                    )
-                )
-            ).scalar_one()
-            if parent_missing:
-                await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             await set_session_timezone(connection, creating_timezone)
             await register_heartbeat_class(connection, horizon=horizon)
             now = await database_now(connection)

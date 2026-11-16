@@ -12,6 +12,8 @@ pub mod client_family;
 pub mod core_rows;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
+#[cfg(test)]
+mod enqueue_identity_ports;
 pub mod error;
 pub mod health;
 pub(crate) mod history_reads;
