@@ -84,8 +84,8 @@ RESERVATION_REGISTRY_EXPIRY_INDEX: Final = f'{KEY_RESERVATIONS}_expiry_idx'
 HEARTBEAT_CLASS_KEY: Final = 'heartbeats'
 HEARTBEATS_TABLE: Final = 'horsies_heartbeats'
 
-# Owned by the staged lookup loader.
-TASK_LOOKUP_FUNCTION: Final = 'horsies_task_lookup_staged'
+# The published readers (horsies_publish_history_readers, 0008). The two
+# composite type names are kept for the static DDL of the 0.7.0 schema program.
 TASK_LOOKUP_TYPE: Final = 'horsies_task_lookup'
 TASK_LOOKUP_MANIFEST: Final = 'horsies_task_lookup_manifest'
 TASK_PROVENANCE_FUNCTION: Final = 'horsies_task_provenance_staged'

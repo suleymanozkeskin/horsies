@@ -10,10 +10,13 @@
 -- - each single terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...), and
 --   each batch terminal write calls the batch move stage horsies_move_tasks_to_history
 --   (0006_history_functions.sql);
+-- - each terminal write that misses passes its own kind to horsies_terminalization_miss(uuid, text, text,
+--   timestamptz) (0008_history_maintenance_functions.sql), which owns the equivalence classes of the kinds;
 -- - the owned-claim functions require the claim generation (22023 on NULL, or on a NULL element of a batch) and
---   fence on it with no NULL arm; horsies_terminalization_miss takes the caller's fence as a closed kind (NONE,
---   OWNER, OWNER_AND_GENERATION).
--- The trigger functions are in 0001_tables.sql. The published history readers are rendered at run time.
+--   fence on it with no NULL arm.
+-- The trigger functions are in 0001_tables.sql. The published history readers are rendered by
+-- horsies_publish_history_readers (0008_history_maintenance_functions.sql);
+-- horsies_task_history_duplicate_staged here is the first version that the first publication replaces.
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
@@ -90,23 +93,6 @@ CREATE TYPE horsies_phase2_disposition AS (
 CREATE TYPE horsies_phase2_quarantine_verdict AS (
 	verdict text,
 	detail text
-);
-
-CREATE TYPE horsies_task_lookup AS (
-	found boolean,
-	location text,
-	task_id uuid,
-	fingerprint_version smallint,
-	command_fingerprint bytea
-);
-
-CREATE TYPE horsies_task_provenance AS (
-	found boolean,
-	location text,
-	task_id uuid,
-	status text,
-	terminal_at timestamp with time zone,
-	terminalization_kind text
 );
 
 -- Functions
@@ -202,8 +188,8 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+            p_task_id, 'PAUSE_ABANDON_CLAIM',
+            p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -375,8 +361,8 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
+        input.task_id, 'PAUSE_ABANDON_CLAIM_BATCH',
+        p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -407,8 +393,8 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['CANCEL_ADMIN']::text[],
-            'NONE', NULL::text, NULL::timestamptz
+            p_task_id, 'CANCEL_ADMIN',
+            NULL::text, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -663,8 +649,8 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+            p_task_id, 'WORKFLOW_CANCEL_CLAIM',
+            p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -769,8 +755,8 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
-        input.task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
+        input.task_id, 'WORKFLOW_CANCEL_CLAIM_BATCH',
+        p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -845,8 +831,8 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['CANCEL_ORPHAN', 'CANCEL_ORPHAN_SWEEP']::text[],
-        'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+        p_task_id, 'CANCEL_ORPHAN',
+        p_worker_id, p_claimed_at
     );
 END
 $$;
@@ -977,8 +963,8 @@ BEGIN
         AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
-            'OWNER', p_worker_id, NULL::timestamptz
+            p_task_id, 'COMPLETE_LOCKED',
+            p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -1103,8 +1089,8 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[],
-        'OWNER', p_worker_id, NULL::timestamptz
+        p_task_id, 'EXPIRE_CLAIMED',
+        p_worker_id, NULL::timestamptz
     );
 END
 $$;
@@ -1187,8 +1173,8 @@ BEGIN
         AND v_task.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[],
-            'OWNER', p_worker_id, NULL::timestamptz
+            p_task_id, 'FAIL_RUNNING',
+            p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -1302,8 +1288,8 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id, ARRAY['FAIL_STALE']::text[],
-        'NONE', NULL::text, NULL::timestamptz
+        p_task_id, 'FAIL_STALE',
+        NULL::text, NULL::timestamptz
     );
 END
 $$;
@@ -1784,9 +1770,8 @@ CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid) RETURNS bo
     LANGUAGE plpgsql STABLE
     AS $$
             BEGIN
-                RETURN (
-                    SELECT prov.found
-                    FROM horsies_task_provenance_staged(p_task_id, FALSE) AS prov
+                RETURN EXISTS (
+                    SELECT 1 FROM horsies_task_provenance_staged(p_task_id)
                 ) OR EXISTS (
                     SELECT 1 FROM horsies_task_history_clock_exceptions
                     WHERE task_id = p_task_id
@@ -1803,102 +1788,6 @@ CREATE FUNCTION horsies_task_history_leaf_lock_key(p_class_key text, p_anchor ti
             ::bigint::text,
         1601
     )
-$$;
-
--- The miss classifier of every fenced terminal write. p_fence_kind names the caller's fence, a closed set:
--- - NONE: the caller fences on no claim (worker and generation NULL);
--- - OWNER: the caller fences on the worker only (generation NULL);
--- - OWNER_AND_GENERATION: the caller fences on the worker and the claim generation (both required).
--- Any other kind, or a worker or generation that does not fit the kind, is refused with 22023. A live row that the
--- fence does not hold is LOST_CLAIM; a fence that holds is SOURCE_STATE_CONFLICT.
-CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_row horsies_tasks%ROWTYPE;
-    v_provenance record;
-    v_held boolean;
-BEGIN
-    CASE p_fence_kind
-        WHEN 'NONE' THEN
-            IF num_nulls(p_worker_id, p_claimed_at) <> 2 THEN
-                RAISE EXCEPTION 'fence NONE takes no worker and no claim generation'
-                    USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-        WHEN 'OWNER' THEN
-            IF p_worker_id IS NULL OR p_claimed_at IS NOT NULL THEN
-                RAISE EXCEPTION 'fence OWNER takes a worker and no claim generation'
-                    USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-        WHEN 'OWNER_AND_GENERATION' THEN
-            IF num_nulls(p_worker_id, p_claimed_at) <> 0 THEN
-                RAISE EXCEPTION 'fence OWNER_AND_GENERATION takes a worker and a claim generation'
-                    USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-        ELSE
-            RAISE EXCEPTION 'unknown fence kind'
-                USING ERRCODE = 'invalid_parameter_value';
-    END CASE;
-
-    SELECT * INTO v_row
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        SELECT * INTO v_provenance
-        FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF NOT v_provenance.found THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'TASK_ABSENT'::text,
-                NULL::timestamptz, NULL::text,
-                NULL::text, NULL::varchar, NULL::timestamptz,
-                NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        IF v_provenance.location <> 'HISTORY' THEN
-            RAISE EXCEPTION
-                'provenance reported % after a live miss', v_provenance.location
-                USING ERRCODE = 'data_corrupted';
-        END IF;
-        IF v_provenance.terminalization_kind = ANY(p_equivalent_kinds) THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'ALREADY_APPLIED'::text,
-                v_provenance.terminal_at, v_provenance.terminalization_kind,
-                v_provenance.status, NULL::varchar, NULL::timestamptz,
-                NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-            v_provenance.terminal_at, v_provenance.terminalization_kind,
-            v_provenance.status, NULL::varchar, NULL::timestamptz,
-            'FOREIGN_TERMINALIZATION'::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    v_held := CASE p_fence_kind
-        WHEN 'NONE' THEN TRUE
-        WHEN 'OWNER' THEN v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-        WHEN 'OWNER_AND_GENERATION' THEN
-            v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-            AND v_row.claimed_at IS NOT DISTINCT FROM p_claimed_at
-    END;
-    IF NOT v_held THEN
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'LOST_CLAIM'::text,
-            NULL::timestamptz, NULL::text,
-            v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
-            NULL::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    RETURN QUERY SELECT
-        p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-        NULL::timestamptz, NULL::text,
-        v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
-        NULL::text, NULL::jsonb;
-END
 $$;
 
 CREATE FUNCTION horsies_uuid7_birth(p_id uuid) RETURNS timestamp with time zone

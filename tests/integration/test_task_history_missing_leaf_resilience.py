@@ -3,8 +3,8 @@
 PostgreSQL does not validate PL/pgSQL bodies at CREATE, so a staged
 reader generated over a catalog row whose relation was dropped out of
 band builds happily and dies at execution — with `undefined_table`,
-inside the provenance probe that terminalization runs (`move.py` calls
-`horsies_task_provenance_staged(p_task_id, FALSE)`). One such leaf
+inside the provenance probe that terminalization runs (the miss
+classifier calls `horsies_task_provenance_staged(p_task_id)`). One such leaf
 therefore fails every finalize, in every queue and every retention
 class, until something regenerates the readers.
 
@@ -32,7 +32,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
-from horsies.core.history.errors import HistoryParentAbsent
 from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
 from horsies.core.history.maintenance.coverage import (
     CoverageEnsureFailed,
@@ -46,13 +45,12 @@ from horsies.core.history.names import (
     LEAF_CATALOG,
     RETENTION_CLASSES,
     TASK_HISTORY_FOREVER,
-    TASK_PROVENANCE_FUNCTION,
 )
 from horsies.core.history.outcomes import LeafCreated
 from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
     database_now,
-    read_manifest_leaf_rows,
+    read_all_attached_leaf_rows,
 )
 from horsies.core.history.partitions.manager import create_daily_leaf
 from horsies.core.history.reads.detail import (
@@ -120,16 +118,27 @@ async def _probe_provenance(
     connection: AsyncConnection,
     task_id: str,
 ) -> object:
-    """Call the provenance function exactly as terminalization calls it."""
+    """Call the provenance reader as the miss classifier calls it: one row when history holds the id."""
     return (
         await connection.execute(
             text(
-                f'SELECT found FROM {TASK_PROVENANCE_FUNCTION}('
-                'CAST(:task_id AS uuid), FALSE)'
+                'SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged('
+                'CAST(:task_id AS uuid)))'
             ),
             {'task_id': task_id},
         )
     ).scalar_one()
+
+
+async def _attached_and_absent(
+    connection: AsyncConnection,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """The attached catalog leaves, and the attached history leaves whose relation is gone."""
+    rows = await read_all_attached_leaf_rows(connection)
+    absent: list[str] = (
+        await connection.execute(text('SELECT horsies_history_absent_leaves()'))
+    ).scalar_one()
+    return frozenset(row.leaf_name for row in rows), frozenset(absent)
 
 
 class TestMissingLeafBreaksAndHeals:
@@ -205,12 +214,12 @@ class TestMissingLeafBreaksAndHeals:
         async with history_schema.engine.connect() as connection:
             # The catalog is untouched: the row is still attached, which
             # is the operator's evidence that a drop happened.
-            selection = await read_manifest_leaf_rows(connection)
-            assert gone in {row.leaf_name for row in selection.attached}
-            assert selection.absent_relations == frozenset({gone})
+            attached, absent = await _attached_and_absent(connection)
+            assert gone in attached
+            assert absent == frozenset({gone})
             # The surviving leaf is still probed -- exclusion is scoped
             # to the missing relation, not to the class.
-            assert kept not in selection.absent_relations
+            assert kept not in absent
             # And the probe that died now answers.
             assert await _probe_provenance(connection, task_id) is False
             assert await published_manifest_absent_leaves(connection) == ()
@@ -414,9 +423,10 @@ class TestMissingLeafBreaksAndHeals:
                 text(f'DROP TABLE {parent}, {TASK_HISTORY_FOREVER} CASCADE')
             )
 
-        async with history_schema.engine.connect() as connection:
-            with pytest.raises(HistoryParentAbsent, match='cannot see'):
-                await read_manifest_leaf_rows(connection)
+        async with history_schema.engine.begin() as connection:
+            with pytest.raises(DBAPIError, match='cannot see') as raised:
+                await StagedLoaderPublisher().republish(connection)
+        assert getattr(raised.value.orig, 'sqlstate', None) == '42P01'
 
     @pytest.mark.asyncio
     async def test_heartbeat_rows_are_never_consulted_by_the_guard(
@@ -461,15 +471,13 @@ class TestMissingLeafBreaksAndHeals:
             )
 
         async with history_schema.engine.connect() as connection:
-            selection = await read_manifest_leaf_rows(connection)
+            attached, absent = await _attached_and_absent(connection)
         # Present in the attached set, absent from the probe accounting:
-        # the reader keeps the catalog's whole memory and consults only
-        # what the manifest will use.
-        assert 'horsies_heartbeats_2026_08_07_00' in {
-            row.leaf_name for row in selection.attached
-        }
-        assert selection.absent_relations == frozenset()
-        assert kept in {row.leaf_name for row in selection.attached}
+        # the catalog keeps its whole memory and the publication consults
+        # only what the manifest will use.
+        assert 'horsies_heartbeats_2026_08_07_00' in attached
+        assert absent == frozenset()
+        assert kept in attached
 
         async with history_schema.engine.begin() as connection:
             republication = await StagedLoaderPublisher().republish(connection)
@@ -515,9 +523,9 @@ class TestMissingLeafBreaksAndHeals:
             )
 
         async with history_schema.engine.connect() as connection:
-            selection = await read_manifest_leaf_rows(connection)
-        assert selection.absent_relations == frozenset({lost})
-        assert kept in {row.leaf_name for row in selection.attached}
+            attached, absent = await _attached_and_absent(connection)
+        assert absent == frozenset({lost})
+        assert kept in attached
 
         async with history_schema.engine.begin() as connection:
             republication = await StagedLoaderPublisher().republish(connection)

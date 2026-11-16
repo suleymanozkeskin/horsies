@@ -6,8 +6,8 @@ a client sends. Such a switch is checked with the function-call script
 function of the baseline. The script runs twice, each time on a fresh
 database with the baseline:
 
-- reference side: the definitions before the switch, from a SQL file in
-  ``tests/dualrun/reference/``, installed over the baseline;
+- reference side: the definitions before the switch, from SQL files in
+  ``tests/dualrun/reference/``, installed over the baseline in order;
 - candidate side: the baseline as it is.
 
 The two normalized snapshots must compare equal.
@@ -52,9 +52,9 @@ class BaselineAsInstalled:
 
 @dataclass(frozen=True, slots=True)
 class FrozenDefinitions:
-    """The reference side: the SQL file at ``path`` runs after the baseline install."""
+    """The reference side: the SQL files of ``paths`` run in order after the baseline install, in one transaction."""
 
-    path: Path
+    paths: tuple[Path, ...]
 
 
 type Definitions = BaselineAsInstalled | FrozenDefinitions
@@ -70,16 +70,20 @@ def _install_definitions(
     match definitions:
         case BaselineAsInstalled():
             return Ok(None)
-        case FrozenDefinitions(path=path):
-            try:
-                text = path.read_text(encoding='utf-8')
-            except OSError as exc:
-                return _failed(f'read the definitions {path.name}', exc)
+        case FrozenDefinitions(paths=paths):
+            texts: list[tuple[str, str]] = []
+            for path in paths:
+                try:
+                    texts.append((path.name, path.read_text(encoding='utf-8')))
+                except OSError as exc:
+                    return _failed(f'read the definitions {path.name}', exc)
+            installing = ''
             try:
                 with connection.transaction():
-                    _ = connection.execute(text.encode('utf-8'))
+                    for installing, text in texts:
+                        _ = connection.execute(text.encode('utf-8'))
             except psycopg.Error as exc:
-                return _failed(f'install the definitions {path.name}', exc)
+                return _failed(f'install the definitions {installing}', exc)
             return Ok(None)
 
 

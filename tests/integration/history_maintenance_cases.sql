@@ -239,13 +239,13 @@ SELECT fixture_check(
     AND pg_get_function_result(to_regprocedure('horsies_task_provenance_staged(uuid)'))
         = 'TABLE(task_id uuid, status text, terminal_at timestamp with time zone, terminalization_kind text, '
           'is_workflow_task boolean)'
-    AND to_regprocedure('horsies_task_provenance_staged(uuid, boolean)') IS NULL
+    AND (SELECT count(*) FROM pg_proc AS p WHERE p.proname = 'horsies_task_provenance_staged') = 1
     AND to_regprocedure('horsies_task_lookup_staged(uuid)') IS NULL
 );
 SELECT fixture_check(
-    'publication: the result reader returns the columns of the Python publisher''s result reader',
+    'publication: the result reader returns the location, the status, the stored result columns and the task name',
     pg_get_function_result(to_regprocedure('horsies_task_result_staged(uuid)'))
-        = 'TABLE(location text, status text, live_result text, failed_reason text, '
+        = 'TABLE(location text, status text, failed_reason text, '
           'result_envelope_version smallint, result_payload bytea, result_digest bytea, task_name text)'
 );
 SELECT fixture_check(
@@ -841,14 +841,13 @@ SELECT fixture_check(
 SELECT fixture_check(
     'result: LIVE with status and task name only; HISTORY with the stored result; no row when absent',
     (SELECT location || ':' || status || ':' || task_name || ':' ||
-            (live_result IS NULL AND failed_reason IS NULL AND result_envelope_version IS NULL
+            (failed_reason IS NULL AND result_envelope_version IS NULL
              AND result_payload IS NULL AND result_digest IS NULL)::text
      FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'live'))) = 'LIVE:RUNNING:fixture.task:true'
     AND (SELECT location || ':' || status || ':' || failed_reason || ':' || result_envelope_version || ':'
                 || convert_from(result_payload, 'UTF8') || ':' || (result_digest = sha256(result_payload))::text
          FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'moved')))
         = 'HISTORY:FAILED:reason:1:{"e":1}:true'
-    AND (SELECT live_result IS NULL FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'moved')))
     AND NOT EXISTS (SELECT 1 FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'unknown')))
 );
 SELECT fixture_check(
@@ -928,7 +927,7 @@ SELECT fixture_expect_error('miss: a NULL task id is refused',
 SELECT fixture_expect_error('miss: a kind outside the 15 kinds is refused',
     $sql$SELECT * FROM horsies_terminalization_miss(gen_random_uuid(), 'LEGACY_TERMINAL', NULL, NULL)$sql$, '22023');
 SELECT fixture_check(
-    'miss: the kind overload and the interim array overload are two functions',
-    to_regprocedure('horsies_terminalization_miss(uuid, text, text, timestamp with time zone)') IS NOT NULL
-    AND to_regprocedure('horsies_terminalization_miss(uuid, text[], text, text, timestamp with time zone)') IS NOT NULL
+    'miss: pg_proc holds one horsies_terminalization_miss, the overload that takes the kind',
+    (SELECT array_agg(p.oid::regprocedure::text) FROM pg_proc AS p WHERE p.proname = 'horsies_terminalization_miss')
+        = ARRAY['horsies_terminalization_miss(uuid,text,text,timestamp with time zone)']
 );

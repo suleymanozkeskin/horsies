@@ -2,16 +2,14 @@
 --
 -- Each function is the one statement of a history maintenance operation in the core design: the coverage probe,
 -- retention class registration, the creation of one history leaf or one heartbeat leaf, the reader publication,
--- and the miss classification of a terminal write. No client calls them yet. Each function names the Python code it
--- replaces (paths at the 0.7.0 tag, under horsies/core/).
+-- and the miss classification of a terminal write. Each function names the Python code it replaces (paths at the
+-- 0.7.0 tag, under horsies/core/).
 --
 -- The published readers. horsies_publish_history_readers renders four functions from the leaf catalog:
 -- horsies_task_history_duplicate_staged(uuid), horsies_task_provenance_staged(uuid), horsies_task_detail_staged(uuid)
--- and horsies_task_result_staged(uuid). Until the callers switch, the Python publisher renders the readers instead,
--- with the two-argument provenance reader horsies_task_provenance_staged(uuid, boolean) and the composite type
--- horsies_task_provenance of 0003_interim_functions.sql, which the interim functions call. The rendered provenance
--- reader here is a one-argument overload with plain columns. The miss classifier horsies_terminalization_miss gains
--- an overload that takes the kind; the array overload of 0003 stays until its callers switch.
+-- and horsies_task_result_staged(uuid). It is the one renderer: the Python client publishes through it, and the
+-- terminal writes of 0003_interim_functions.sql pass their kind to horsies_terminalization_miss, which reads
+-- history through the provenance reader.
 --
 -- Results are plain rows of built-in types. Closed sets of values are text columns; each function lists its values.
 -- Leaf names and bounds are UTC in any session time zone.
@@ -329,11 +327,9 @@ $$;
 --   terminalization_kind, is_workflow_task): one row when history holds the id, no row otherwise. No live probe.
 -- - DETAIL: horsies_task_detail_staged(uuid) RETURNS TABLE(location, task_row horsies_task_history): LIVE with a
 --   NULL row when the live table holds the id, HISTORY with the full row, no row when absent.
--- - RESULT: horsies_task_result_staged(uuid) RETURNS TABLE(location, status, live_result, failed_reason,
---   result_envelope_version, result_payload, result_digest, task_name): LIVE with the status and task name (the live
---   row has no result), HISTORY with the stored result columns, no row when absent. live_result is NULL in both
---   locations; the columns are those that the Python publisher renders, so either renderer can replace the other's
---   reader (CREATE OR REPLACE keeps a function's return type) and the core's result read needs no change.
+-- - RESULT: horsies_task_result_staged(uuid) RETURNS TABLE(location, status, failed_reason, result_envelope_version,
+--   result_payload, result_digest, task_name): LIVE with the status and task name (the live row has no result),
+--   HISTORY with the stored result columns, no row when absent.
 -- A change of any rendered text needs a new renderer version in horsies_history_reader_stamp.
 -- Refusals: 22023 invalid_parameter_value for another p_reader. Reads: the manifest table. Changes nothing.
 -- Returns: the statement text.
@@ -399,17 +395,17 @@ BEGIN
             v_with_fallback := TRUE;
         WHEN 'RESULT' THEN
             v_header := 'horsies_task_result_staged(p_task_id uuid) RETURNS TABLE(location text, status text, '
-                || 'live_result text, failed_reason text, result_envelope_version smallint, result_payload bytea, '
+                || 'failed_reason text, result_envelope_version smallint, result_payload bytea, '
                 || 'result_digest bytea, task_name text)';
             v_live_probe := $probe$
-    RETURN QUERY SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::text, NULL::smallint, NULL::bytea,
-        NULL::bytea, t.task_name::text
+    RETURN QUERY SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea,
+        t.task_name::text
     FROM horsies_tasks AS t WHERE t.id = p_task_id;
     IF FOUND THEN
         RETURN;
     END IF;$probe$;
             v_probe := $probe$
-            RETURN QUERY SELECT 'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason,
+            RETURN QUERY SELECT 'HISTORY'::text, h.status::text, h.final_failed_reason,
                 h.result_envelope_version, h.result_payload, h.result_digest, h.task_name::text
             FROM %1$I AS h WHERE h.task_id = p_task_id;
             IF FOUND THEN
@@ -1143,8 +1139,7 @@ $$;
 -- Replaces: history/terminalization/outcome.py:43-114 (MISS_CLASSIFIER_DDL). Changes from it: the caller passes its
 -- kind and this function owns the equivalence classes, instead of each caller writing the class as an array
 -- literal; the provenance reader takes no include_live argument and has no live probe, so the LIVE-after-miss
--- refusal has nothing to check. The array overload horsies_terminalization_miss(uuid, text[], text, timestamptz)
--- of 0003_interim_functions.sql stays until its callers switch.
+-- refusal has nothing to check.
 CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
