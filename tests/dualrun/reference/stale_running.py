@@ -23,12 +23,12 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
-from horsies.core.utils.retry import (
+from tests.dualrun.capture import Connection
+from tests.dualrun.reference.retry_rules import (
     calculate_retry_delay,
     check_retry_eligibility,
     parse_retry_policy,
 )
-from tests.dualrun.capture import Connection
 
 SELECT_STALE_RUNNING_TASKS_SQL: Final[LiteralString] = """
     SELECT t2.id, t2.worker_pid, t2.worker_hostname, t2.claimed_by_worker_id,

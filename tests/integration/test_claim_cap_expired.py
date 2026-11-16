@@ -8,7 +8,6 @@ cluster_wide_cap or per-worker limits are otherwise saturated.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,6 +18,7 @@ from horsies.core.models.tasks import Execution
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -334,13 +334,12 @@ class TestReclaimUnderCap:
             queue_name: str = 'default',
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
-            claimed_at: datetime | None = None,
             *,
+            claim: DispatchClaim,
             execution: Execution,
-            task_options: str | None,
         ) -> None:
-            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task, timeout, claimed_at)
-            _ = (execution, task_options)
+            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task, timeout, claim)
+            _ = execution
             dispatched_ids.append(task_id)
 
         worker._dispatch_one = AsyncMock(side_effect=_fake_dispatch)  # type: ignore[method-assign]

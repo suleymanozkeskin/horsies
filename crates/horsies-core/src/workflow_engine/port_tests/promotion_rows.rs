@@ -20,6 +20,7 @@ use super::support::{
     task_node, try_finish_task, workflow_status, IsolatedDatabase, NodeSeed, Notifications,
     WorkflowSeed, PORT_QUEUE,
 };
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::JoinType;
@@ -41,7 +42,12 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(pool, workflow_spec, &WorkflowSpecRegistry::new()).await
+    start(
+        pool,
+        workflow_spec,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await
 }
 
 async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
@@ -50,7 +56,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
         workflow_id,
         index,
         &ok(value),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 }
@@ -189,7 +195,7 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
         .await
         .task_id
         .expect("the root has a task");
-    let result_json = finish_phase1(&db.pool, root_task, &ok(serde_json::json!(0))).await;
+    let _ = finish_phase1(&db.pool, root_task, &ok(serde_json::json!(0))).await;
     let queue_channel = format!("task_queue_{PORT_QUEUE}");
     let mut listener = Notifications::listen(
         &db.pool,
@@ -204,12 +210,9 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     .await;
 
     on_workflow_task_complete(
-        &db.pool,
+        &PostgresBroker::from_pool(db.pool.clone()),
         root_task,
-        &result_json,
-        true,
-        &WorkflowSpecRegistry::new(),
-        &PayloadPolicy::default(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .await
@@ -275,7 +278,7 @@ async fn the_promotion_moves_only_pending_nodes() {
         workflow_id,
         4,
         &err("PROMOTION_WRITE_FAIL", "forced"),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -360,7 +363,7 @@ async fn a_pause_after_the_dependents_read_leaves_the_promoted_nodes_ready_with_
 
     let _report = recover_stuck_workflows(
         &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         0,
         RECOVERY_FAILURE_LIMIT,
         &PayloadPolicy::default(),
@@ -528,7 +531,7 @@ async fn complete_the_root(pool: &PgPool, workflow_id: Uuid) {
         pool,
         root_task,
         &ok(serde_json::json!(0)),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
     .expect("phase 2 of the root applies; the bad node fails alone");
@@ -589,7 +592,7 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
     let resumed = resume_workflow(
         &broker(&db.pool),
         workflow_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -609,7 +612,6 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
 /// never gets a task without its deadline.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1018"]
 async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
     let db = IsolatedDatabase::create().await;
     for stored_options in [r#"{"good_until":"not-a-date"}"#, r#"{"good_until":12345}"#] {
@@ -642,7 +644,7 @@ async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
             &db.pool,
             root_task,
             &ok(serde_json::json!(0)),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )
         .await;
 

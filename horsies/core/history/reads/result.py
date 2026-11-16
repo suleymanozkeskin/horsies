@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -73,7 +74,7 @@ type TaskResultRead = LiveTaskResult | HistoryTaskResult | TaskResultAbsent
 async def read_task_result(
     connection: AsyncConnection,
     *,
-    task_id: str,
+    task_id: UUID,
 ) -> TaskResultRead:
     """Read the result columns of one task in one statement.
 
@@ -83,7 +84,9 @@ async def read_task_result(
     `HistoryContractError`.
     """
     row = (
-        await connection.execute(_READ_TASK_RESULT_SQL, {'task_id': task_id})
+        await connection.execute(
+            _READ_TASK_RESULT_SQL, {'task_id': str(task_id)},
+        )
     ).one_or_none()
     if row is None:
         return TaskResultAbsent()
@@ -128,7 +131,7 @@ def _history_payload(row: Any) -> HistoryResultPayload:
     )
 
 
-def _required_text(value: Any, column: str, task_id: str) -> str:
+def _required_text(value: Any, column: str, task_id: UUID) -> str:
     if not isinstance(value, str):
         raise HistoryContractError(
             f'staged result for task {task_id} has no {column}'

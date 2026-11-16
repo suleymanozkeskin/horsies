@@ -2,6 +2,7 @@
 from __future__ import annotations
 import datetime
 from dataclasses import dataclass
+from uuid import UUID
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -38,7 +39,11 @@ from horsies._catalog.task_codes import OutcomeCode as OutcomeCode
 from horsies._catalog.task_codes import RetrievalCode as RetrievalCode
 from horsies.core.types.json_value import JsonInput, JsonValue
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
-from horsies.core.exception_mapper import validate_error_code_string
+from horsies.core.exception_mapper import (
+    RESERVED_NON_TASK_CODES,
+    reserved_code_message,
+    validate_error_code_string,
+)
 
 T = TypeVar('T')  # success payload
 E = TypeVar('E')  # error payload (TaskError )
@@ -182,6 +187,7 @@ class TaskError(BaseModel):
         - ``None``, with one cause: the union below would give one entry per
           family
         - Plain ``str`` matching a reserved built-in code
+        - Plain ``str`` in ``RESERVED_NON_TASK_CODES`` (``WORKFLOW_STOPPED``)
         - Foreign ``str, Enum`` types (user enums must use ``.value``)
         """
         if isinstance(value, _BUILTIN_FAMILIES):
@@ -218,6 +224,10 @@ class TaskError(BaseModel):
                     f"'{value}' is a reserved built-in error code "
                     f'({type(builtin).__name__}.{builtin.name}). '
                     f'Pass the enum member directly.',
+                )
+            if value in RESERVED_NON_TASK_CODES:
+                raise ValueError(
+                    reserved_code_message(value, field_name='error_code'),
                 )
             return value
         return value
@@ -386,7 +396,7 @@ class TaskResult(Generic[T, E]):
 class TaskAttemptInfo:
     """Metadata for a single task execution attempt."""
 
-    task_id: str
+    task_id: UUID
     attempt: int
     outcome: TaskAttemptOutcome
     will_retry: bool
@@ -422,9 +432,12 @@ class TaskInfo:
 
     ``execution`` is the stored ``Execution`` of a live task. It is ``None``
     for a task read from the history archive, which does not keep the class.
+
+    ``attempts`` lists the attempts newest first (highest attempt number
+    first), for a live task and for a task read from the history archive.
     """
 
-    task_id: str
+    task_id: UUID
     task_name: str
     status: TaskStatus
     queue_name: str
