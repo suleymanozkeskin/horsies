@@ -127,7 +127,8 @@ mod terminal_at_invariant {
             sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
                 .bind(task_id)
                 .execute(&pool)
-                .await;
+                .await
+                .map(|done| done.rows_affected());
         assert_refused(
             terminal_in_live_table,
             "23514",
