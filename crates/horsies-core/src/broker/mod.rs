@@ -23,12 +23,18 @@ pub mod migrations;
 mod monitoring_schema_tests;
 #[cfg(test)]
 pub(crate) mod monitoring_test_database;
+#[cfg(test)]
+mod pgbouncer_contract_tests;
 pub mod pools;
 pub mod postgres;
 pub mod result_types;
 pub mod row;
+#[cfg(test)]
+mod send_path_tests;
 pub mod shared_listener;
 pub mod slot_health;
+#[cfg(test)]
+mod start_deadline_tests;
 pub mod task_lists;
 pub mod terminalization;
 #[cfg(test)]
