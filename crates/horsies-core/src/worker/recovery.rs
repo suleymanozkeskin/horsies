@@ -1057,22 +1057,29 @@ async fn run_reaper_pass(
     // scan, then one statement per candidate.
     if config.auto_fail_stale_running {
         match stale_running_thresholds(config) {
-            Ok(thresholds) => match mark_stale_running_as_failed(
-                broker.core_main_pool(),
-                broker.statement_log(),
-                thresholds,
-                STALE_RUNNING_SCAN_BATCH,
-            )
-            .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
+            Ok(thresholds) => {
+                let recovered = match broker.core_pools_for_write() {
+                    Ok((open, _write)) => {
+                        mark_stale_running_as_failed(
+                            open.main(),
+                            broker.statement_log(),
+                            thresholds,
+                            STALE_RUNNING_SCAN_BATCH,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match recovered {
+                    Ok(count) if count > 0 => {
+                        tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
-                }
-                _ => {}
-            },
+            }
             Err(error) => {
                 tracing::error!(%error, "reaper: the stale RUNNING thresholds are out of range");
             }
