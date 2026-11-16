@@ -33,8 +33,8 @@ pub struct WorkflowTaskRow {
     pub task_index: i32,
     pub node_id: Option<String>,
     pub task_name: String,
-    pub task_args: Option<String>,
-    pub task_kwargs: Option<String>,
+    /// The node's input as one JSON value (`null` when it sets no static input).
+    pub input: String,
     pub queue_name: String,
     pub priority: i32,
     pub dependencies: Vec<i32>,
@@ -44,6 +44,12 @@ pub struct WorkflowTaskRow {
     pub join_type: String,
     pub min_success: Option<i32>,
     pub task_options: Option<String>,
+    /// Typed facts of a task node, parsed at workflow start; `None` on a
+    /// sub-workflow node.
+    pub max_retries: Option<i32>,
+    pub execution: Option<String>,
+    pub good_until: Option<DateTime<Utc>>,
+    pub retention_class_key: Option<String>,
     pub status: String,
     pub task_id: Option<Uuid>,
     pub is_subworkflow: bool,
