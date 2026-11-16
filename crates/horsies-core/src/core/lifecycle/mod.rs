@@ -16,9 +16,9 @@ pub mod operations;
 pub mod outcomes;
 
 pub use attempt_outcomes::{
-    decode_failed_attempt_row, decode_workflow_success_row, AfterFailure, AttemptWriteRefusal,
-    FailedAttemptOutcome, PhaseTwoOwed, ReleasedClaim, RetryRefusal, UnreportedAttemptOutcome,
-    WorkflowSuccessOutcome,
+    decode_failed_attempt_row, decode_stale_attempt_row, decode_workflow_success_row, AfterFailure,
+    AfterStaleFailure, AttemptWriteRefusal, FailedAttemptOutcome, PhaseTwoOwed, ReleasedClaim,
+    RetryRefusal, StaleAttemptOutcome, UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 pub use commands::{BatchSize, TerminalizationCommand};
 pub use fences::{
