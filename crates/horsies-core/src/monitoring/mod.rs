@@ -6,6 +6,7 @@
 
 mod actions;
 mod errors;
+mod execution_classes;
 mod history_window;
 mod models;
 mod queries;
@@ -20,6 +21,7 @@ pub use actions::{
 pub use errors::{
     MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
 };
+pub use execution_classes::{class_report_info, slot_health_info};
 pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
@@ -28,6 +30,10 @@ pub use models::{
     GroupRow, LeafTaskInfo, LivenessReport, ScheduleStateInfo, StatusCount, TaskAttemptInfo,
     TaskDetail, TaskListPage, TaskSummary, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
     WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+};
+pub use models::{
+    BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,
+    StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
 pub use queries::{
     categorize_error_code, elapsed_s, get_task_detail, get_workflow_node, get_workflow_run,

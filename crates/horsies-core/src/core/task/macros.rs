@@ -26,7 +26,7 @@ where
     T::deserialize(&candidate).map_err(|e| crate::core::task::TaskError {
         exception: None,
         error_code: crate::core::task::TaskErrorCode::from(
-            crate::core::task::ContractCode::ArgumentTypeMismatch,
+            crate::core::task::OperationalErrorCode::WorkerSerializationError,
         ),
         // The error names the type and the cause, never the value (Python
         // `core/task_decorator.py:1856-1914`).
@@ -355,7 +355,7 @@ mod tests {
         // unit input reads only `null`, its own encoding.
         decode_task_input::<()>(b"null").unwrap();
         let mismatch = crate::core::task::TaskErrorCode::from(
-            crate::core::task::ContractCode::ArgumentTypeMismatch,
+            crate::core::task::OperationalErrorCode::WorkerSerializationError,
         );
         let unit = decode_task_input::<()>(b"{}").unwrap_err();
         assert_eq!(unit.error_code, mismatch);
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_args_mismatch_returns_argument_type_mismatch() {
+    fn typed_args_mismatch_returns_worker_serialization_error() {
         let task = blocking_task_fn!(multiply, AddArgs);
         let args = serde_json::to_vec(&serde_json::json!({"a": "oops", "b": 7})).unwrap();
 
@@ -516,7 +516,7 @@ mod tests {
                 assert_eq!(
                     err.error_code,
                     crate::core::task::TaskErrorCode::from(
-                        crate::core::task::ContractCode::ArgumentTypeMismatch,
+                        crate::core::task::OperationalErrorCode::WorkerSerializationError,
                     ),
                 );
                 let data = err.data.expect("expected mismatch diagnostics");
@@ -606,7 +606,7 @@ mod tests {
                 assert_eq!(
                     err.error_code,
                     crate::core::task::TaskErrorCode::from(
-                        crate::core::task::ContractCode::ArgumentTypeMismatch,
+                        crate::core::task::OperationalErrorCode::WorkerSerializationError,
                     ),
                 );
             }

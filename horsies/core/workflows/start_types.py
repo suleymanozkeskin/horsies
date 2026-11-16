@@ -17,40 +17,17 @@ The retry methods ``WorkflowSpec.retry_start`` / ``retry_start_async`` take a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
+from horsies._catalog.workflow_start import (
+    WorkflowStartErrorCode as WorkflowStartErrorCode,
+)
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
 
 
 if TYPE_CHECKING:
     from horsies.core.brokers.resources import EventLoopLimit
-
-
-class WorkflowStartErrorCode(str, Enum):
-    """Categorized workflow start failure codes.
-
-    Each member names one variant of ``WorkflowStartError``.
-    """
-
-    BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
-    VALIDATION_FAILED = 'VALIDATION_FAILED'
-    # The workflow id exists for another workflow name; nothing was written.
-    WORKFLOW_ID_CONFLICT = 'WORKFLOW_ID_CONFLICT'
-    ENQUEUE_FAILED = 'ENQUEUE_FAILED'
-    # Sync ``start()`` could not run the call on the broker's sync runner
-    # (the runner is stopped, its thread did not start, or scheduling
-    # failed); nothing ran. A stopped runner does not start again
-    # (``broker.close()`` and ``close_async()`` stop it).
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    # The broker already holds resource sets for its limit of open event
-    # loops, and this call ran on a new one; nothing was written. It clears
-    # when one of those loops closes.
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    # Sync ``start()`` was called on a thread that runs an event loop; its
-    # wait would stall that loop, so nothing was written.
-    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 
 
 @dataclass(slots=True, frozen=True)
