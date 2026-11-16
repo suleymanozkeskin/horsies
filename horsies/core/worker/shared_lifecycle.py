@@ -4,8 +4,9 @@ A shared async child runs many tasks on one event loop, so no write of the
 child may block that loop. These functions are the async form of the writes
 that an isolated child makes on a sync connection in ``child_runner``:
 
-- the RUNNING transition with the first runner heartbeat, and its miss path
-  (expiry before start, a paused or cancelled workflow, a lost claim);
+- the RUNNING transition with the first runner heartbeat
+  (``horsies_start_attempt``), and its miss path (expiry before start, a
+  paused or cancelled workflow, a lost claim);
 - the finalizing marker after the task body.
 
 They run the same SQL text, from the constants in ``child_runner``, on a
@@ -49,17 +50,19 @@ from horsies.core.worker.child_pool import SHARED_POOL_CONNECTION_WAIT_S
 from horsies.core.worker.child_protocol import WireResult
 from horsies.core.worker.child_runner import (
     BEGIN_SQL,
-    CLAIM_STILL_STARTABLE_SQL,
     MARK_FINALIZING_SQL,
     RESET_PAUSED_NODE_SQL,
     SKIP_CANCELLED_NODE_SQL,
-    START_WORKFLOW_NODE_SQL,
-    WORKFLOW_STATUS_OF_TASK_SQL,
+    START_ATTEMPT_SQL,
     _PRE_START_CONFIRM_ATTEMPTS,
+    AttemptMissed,
+    AttemptStarted,
+    StartMiss,
+    _claim_lost,
     _WorkflowResumedBeforeStart,
     mark_finalizing_params,
-    set_running_params,
-    set_running_sql,
+    read_start_outcome,
+    start_attempt_params,
 )
 
 logger = get_logger('worker')
@@ -71,9 +74,9 @@ runner heartbeat of the task ends when the parent reads that end."""
 
 RUNNING_STATEMENTS_TIMEOUT_S: Final = 10.0
 """The longest time that the statements of one attempt of the RUNNING
-transition take once the attempt holds its connection: the UPDATE and, when
-it matched no row, the statements that find which guard fired. An UPDATE
-that waits on a row lock, or a server that does not answer, ends here."""
+transition take once the attempt holds its connection: the start and, when
+it missed, the statements of its miss path. A start that waits on a row
+lock, or a server that does not answer, ends here."""
 
 RUNNING_ATTEMPT_TIMEOUT_S: Final = (
     SHARED_POOL_CONNECTION_WAIT_S + RUNNING_STATEMENTS_TIMEOUT_S
@@ -96,37 +99,6 @@ REFUSAL_WRITES_BOUND_S: Final = (
 before it reports a refusal: each attempt of the RUNNING transition and the
 finalizing marker, each with the end of a cancelled write. The refusal
 backstop of the parent (``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
-
-
-async def _get_workflow_status_for_task(
-    cursor: AsyncCursor[Any],
-    task_id: str,
-) -> str | None:
-    """Read the owning workflow's status for a task (None if not in one)."""
-    await cursor.execute(WORKFLOW_STATUS_OF_TASK_SQL, (task_id,))
-    row = await cursor.fetchone()
-    if row is None:
-        return None
-    status = row.status
-    if isinstance(status, str):
-        return status
-    return None
-
-
-async def _claim_still_startable(
-    cursor: AsyncCursor[Any],
-    task_id: str,
-    worker_id: str,
-    claimed_at: datetime,
-) -> bool:
-    """Whether every guard of the RUNNING transition but the workflow holds."""
-    await cursor.execute(
-        CLAIM_STILL_STARTABLE_SQL,
-        (task_id, worker_id, claimed_at),
-    )
-    row = await cursor.fetchone()
-    assert row is not None, 'SELECT EXISTS returns one row'
-    return bool(row[0])
 
 
 async def _abandon_paused_node(
@@ -263,94 +235,36 @@ async def _after_missed_start(
     conn: AsyncConnection[Any],
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
+    reason: StartMiss,
     claimed_at: datetime,
 ) -> WireResult | _WorkflowResumedBeforeStart:
-    """The RUNNING transition matched no row: find which guard fired."""
-    expired_result = await _expire_claimed_task_before_start(
-        cursor,
-        conn,
-        task_id,
-        worker_id,
-    )
-    if expired_result is not None:
-        return expired_result
-    if is_workflow_task:
-        await _begin_workflow_stop(cursor)
-        workflow_status = await _get_workflow_status_for_task(cursor, task_id)
-        match workflow_status:
-            case 'PAUSED' | 'CANCELLED':
-                return await _handle_workflow_stop_before_start(
-                    cursor,
-                    conn,
-                    task_id,
-                    workflow_status,
-                    worker_id,
-                    claimed_at,
-                )
-            case 'RUNNING' if await _claim_still_startable(
-                cursor,
-                task_id,
-                worker_id,
-                claimed_at,
-            ):
-                # The transition missed on the paused guard, and a resume
-                # committed before this read.
-                await conn.rollback()
-                return _WorkflowResumedBeforeStart(workflow_status=workflow_status)
-            case _:
-                pass
-    await conn.rollback()
-    logger.warning(
-        f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
-        f'Aborting execution to prevent double-execution.'
-    )
-    return (False, '', 'CLAIM_LOST')
-
-
-async def _start_workflow_node(
-    cursor: AsyncCursor[Any],
-    conn: AsyncConnection[Any],
-    task_id: str,
-) -> WireResult | None:
-    """Set the workflow node RUNNING, unless it is already. None: done."""
-    await cursor.execute(START_WORKFLOW_NODE_SQL, (task_id,))
-    handoff_row = await cursor.fetchone()
-    assert handoff_row is not None, 'SELECT EXISTS returns one row'
-    if bool(handoff_row[0]):
-        return None
-    await conn.rollback()
-    logger.error(f'Failed to update workflow_tasks to RUNNING for task {task_id}')
-    return (False, '', 'WORKFLOW_CHECK_FAILED')
-
-
-async def _begin_when_workflow(
-    cursor: AsyncCursor[Any],
-    is_workflow_task: bool,
-) -> None:
-    """Open the transaction of the RUNNING transition of a workflow task.
-    Same contract as the sync function of this name in ``child_runner``: a
-    start that returns no row ends this transaction before its miss path
-    (``_end_start_when_workflow``)."""
-    match is_workflow_task:
-        case True:
-            await cursor.execute(BEGIN_SQL)
-        case False:
-            pass
-
-
-async def _end_start_when_workflow(
-    conn: AsyncConnection[Any],
-    is_workflow_task: bool,
-) -> None:
-    """End the transaction of a workflow start that returned no row, so the
-    expiry of the miss path runs alone in autocommit. Same contract as the
+    """The path of a start that missed, by its reason. Same contract as the
     sync function of this name in ``child_runner``."""
-    match is_workflow_task:
-        case True:
-            await conn.rollback()
-        case False:
-            pass
+    match reason:
+        case StartMiss.DEADLINE_PASSED:
+            expired = await _expire_claimed_task_before_start(
+                cursor, conn, task_id, worker_id,
+            )
+            if expired is not None:
+                return expired
+            return _claim_lost(task_id)
+        case StartMiss.NOT_HELD | StartMiss.LEASE_EXPIRED:
+            return _claim_lost(task_id)
+        case StartMiss.WORKFLOW_PAUSED:
+            await _begin_workflow_stop(cursor)
+            return await _handle_workflow_stop_before_start(
+                cursor, conn, task_id, 'PAUSED', worker_id, claimed_at,
+            )
+        case StartMiss.WORKFLOW_CANCELLED:
+            await _begin_workflow_stop(cursor)
+            return await _handle_workflow_stop_before_start(
+                cursor, conn, task_id, 'CANCELLED', worker_id, claimed_at,
+            )
+        case StartMiss.NODE_NOT_LINKED:
+            logger.error(f'Failed to update workflow_tasks to RUNNING for task {task_id}')
+            return (False, '', 'WORKFLOW_CHECK_FAILED')
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 async def _begin_workflow_stop(cursor: AsyncCursor[Any]) -> None:
@@ -405,31 +319,25 @@ async def _set_running_on_a_connection(
     is_workflow_task: bool,
     claimed_at: datetime,
 ) -> WireResult | None | _WorkflowResumedBeforeStart:
-    """One attempt of ``_confirm_ownership_and_set_running``, unbounded.
-    Raises what the pool and the statements raise."""
+    """One attempt of ``_confirm_ownership_and_set_running``, unbounded: one
+    ``horsies_start_attempt`` statement in autocommit, then the miss path.
+    ``is_workflow_task`` is not sent: the function reads it from the locked
+    row. Raises what the pool and the statements raise."""
     async with pool.connection() as conn:
         cursor = conn.cursor(row_factory=namedtuple_row)
-        await _begin_when_workflow(cursor, is_workflow_task)
         await cursor.execute(
-            set_running_sql(is_workflow_task),
-            set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
+            START_ATTEMPT_SQL,
+            start_attempt_params(task_id, worker_id, claimed_at),
         )
-        if await cursor.fetchone() is None:
-            await _end_start_when_workflow(conn, is_workflow_task)
-            return await _after_missed_start(
-                cursor,
-                conn,
-                task_id,
-                worker_id,
-                is_workflow_task,
-                claimed_at,
-            )
-        if is_workflow_task:
-            node_refused = await _start_workflow_node(cursor, conn, task_id)
-            if node_refused is not None:
-                return node_refused
-        await conn.commit()
-    return None
+        match read_start_outcome(await cursor.fetchone(), task_id):
+            case AttemptStarted():
+                return None
+            case AttemptMissed(reason=reason):
+                return await _after_missed_start(
+                    cursor, conn, task_id, worker_id, reason, claimed_at,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 async def confirm_until_not_resumed(

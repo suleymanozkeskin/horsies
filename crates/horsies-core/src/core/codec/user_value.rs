@@ -124,6 +124,55 @@ fn integer_is_too_long(number: &serde_json::Number) -> bool {
     is_integer_text && text.trim_start_matches('-').len() > MAX_INT_DIGITS
 }
 
+/// Why a task input is refused: the position and the rule (Python `encode_kwargs` and `decode_kwargs`,
+/// `core/codec/kwargs.py:496-551`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InputRefused {
+    /// A positional value breaks a rule of a user value.
+    #[error("positional argument {index}: {refusal}")]
+    Arg {
+        index: usize,
+        refusal: UserValueRefused,
+    },
+    /// A kwarg has a name that only the engine writes.
+    #[error("reserved key {name:?} in user-originated data")]
+    KwargName { name: String },
+    /// A kwarg value breaks a rule of a user value.
+    #[error("kwarg '{name}': {refusal}")]
+    Kwarg {
+        name: String,
+        refusal: UserValueRefused,
+    },
+}
+
+/// Check the user positions of a task input: each positional value, and each kwarg value whose name is not in
+/// `engine_kwargs`, follows the rules of a user value with [`MAX_VALUE_JSON_DEPTH`] levels, and no kwarg name
+/// is an engine key. A client's send passes no engine kwargs; the worker passes the `args_from` kwargs, whose
+/// result envelopes the receiving field reads under the result rules. Pure.
+pub fn check_task_input(
+    args: &[serde_json::Value],
+    kwargs: &serde_json::Map<String, serde_json::Value>,
+    engine_kwargs: &std::collections::HashSet<String>,
+) -> Result<(), InputRefused> {
+    for (index, value) in args.iter().enumerate() {
+        check_user_value(value, MAX_VALUE_JSON_DEPTH)
+            .map_err(|refusal| InputRefused::Arg { index, refusal })?;
+    }
+    for (name, value) in kwargs {
+        if is_engine_key(name) {
+            return Err(InputRefused::KwargName { name: name.clone() });
+        }
+        if engine_kwargs.contains(name) {
+            continue;
+        }
+        check_user_value(value, MAX_VALUE_JSON_DEPTH).map_err(|refusal| InputRefused::Kwarg {
+            name: name.clone(),
+            refusal,
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +256,44 @@ mod tests {
                 key: "__h_x".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn a_task_input_follows_the_user_value_rules() {
+        let no_engine = std::collections::HashSet::new();
+        let kwargs = |value: serde_json::Value| value.as_object().unwrap().clone();
+        assert_eq!(
+            check_task_input(&[json!(1)], &kwargs(json!({"a": {"b": [1]}})), &no_engine),
+            Ok(())
+        );
+        assert_eq!(
+            check_task_input(&[json!({"__h_x": 1})], &serde_json::Map::new(), &no_engine),
+            Err(InputRefused::Arg {
+                index: 0,
+                refusal: UserValueRefused::EngineKey {
+                    key: "__h_x".to_owned()
+                }
+            })
+        );
+        assert_eq!(
+            check_task_input(&[], &kwargs(json!({"__h_workflow_ctx__": {}})), &no_engine),
+            Err(InputRefused::KwargName {
+                name: "__h_workflow_ctx__".to_owned()
+            })
+        );
+        assert_eq!(
+            check_task_input(&[], &kwargs(json!({"a": nested_list(201)})), &no_engine),
+            Err(InputRefused::Kwarg {
+                name: "a".to_owned(),
+                refusal: UserValueRefused::DeeperThanValueBound {
+                    limit: MAX_VALUE_JSON_DEPTH
+                }
+            })
+        );
+        let dep = kwargs(json!({"dep": {"__h_task_result__": true, "ok": 1, "err": null}}));
+        let engine: std::collections::HashSet<String> = ["dep".to_owned()].into_iter().collect();
+        assert_eq!(check_task_input(&[], &dep, &engine), Ok(()));
+        assert!(check_task_input(&[], &dep, &no_engine).is_err());
     }
 
     #[test]
