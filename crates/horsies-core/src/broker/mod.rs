@@ -35,7 +35,7 @@ pub use health::{
     WORKER_PING_CHANNEL,
 };
 pub use listener::NotifyListener;
-pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
+pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,

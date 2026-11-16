@@ -159,6 +159,17 @@ impl BrokerPools {
         &self.session
     }
 
+    /// The pool that session work checks out from: the session pool, or the
+    /// main pool when both URLs are the same. Either keeps its session: the
+    /// config refuses PgBouncer transaction mode without a separate session
+    /// URL.
+    pub(crate) fn session_work(&self) -> &CorePool {
+        match &self.session {
+            SessionPool::SameAsMain => &self.main,
+            SessionPool::Separate { pool, .. } => pool,
+        }
+    }
+
     /// The session URL with its password masked (the main URL when both are
     /// the same).
     pub(crate) fn session_masked_url(&self) -> &MaskedUrl {
@@ -581,6 +592,28 @@ mod tests {
         .expect("pools build without I/O");
         assert!(matches!(pools.session, SessionPool::SameAsMain));
         assert_eq!(pools.main().role(), PoolRole::Main);
+    }
+
+    #[test]
+    fn session_work_uses_the_main_pool_when_the_urls_are_equal() {
+        let pools = BrokerPools::open_with_environment(
+            &config(),
+            PoolProfile::Worker,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("pools build without I/O");
+        assert_eq!(pools.session_work().role(), PoolRole::WorkerProfile);
+
+        let mut separate = config();
+        separate.session_database_url =
+            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
+        let pools = BrokerPools::open_with_environment(
+            &separate,
+            PoolProfile::Worker,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("pools build without I/O");
+        assert_eq!(pools.session_work().role(), PoolRole::Session);
     }
 
     #[test]

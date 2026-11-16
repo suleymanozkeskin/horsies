@@ -15,6 +15,7 @@ The schema is one migration, version 1000: the SQL files in
 | `0001_tables.sql` | Tables, constraints, seed rows, `horsies_uuidv7()`, the notification triggers |
 | `0002_indexes.sql` | The indexes that no constraint creates |
 | `0003_interim_functions.sql` | The SQL functions the client calls, and their composite types |
+| `0007_scheduler_monitoring_functions.sql` | The scheduler and monitoring functions: each replaces a sequence of client statements with one call |
 
 The broker installs the schema at its first initialization (`ensure_schema_initialized`, or the first
 enqueue, result wait, task info read, workflow start or scheduler start):

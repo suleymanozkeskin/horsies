@@ -18,7 +18,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, Row};
 use uuid::Uuid;
 
-use horsies_core::run_horsies_migrations;
+use horsies_core::PostgresBroker;
 
 const TERMINAL_SET_MARKERS: [&str; 4] = [
     "status = 'COMPLETED'",
@@ -136,6 +136,24 @@ fn production_rust_has_no_inline_live_terminal_writers() {
     );
 }
 
+/// The URL of `options` in the form the core reads: sqlx's rendering
+/// without its `statement-cache-capacity` parameter, which only sqlx reads.
+fn core_url(options: &PgConnectOptions) -> String {
+    use sqlx::ConnectOptions;
+
+    let mut url = options.to_url_lossy();
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(name, _)| *name != "statement-cache-capacity")
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !kept.is_empty() {
+        url.query_pairs_mut().extend_pairs(kept);
+    }
+    url.to_string()
+}
+
 fn database_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         return url;
@@ -166,14 +184,20 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
         .execute(&mut admin)
         .await
         .expect("create writer-inventory database");
+    let database_options = base_options.database(&database_name);
     let pool = PgPoolOptions::new()
         .max_connections(3)
-        .connect_with(base_options.database(&database_name))
+        .connect_with(database_options.clone())
         .await
         .expect("connect writer-inventory database");
-    run_horsies_migrations(&pool)
+    let broker = PostgresBroker::connect(&core_url(&database_options))
+        .await
+        .expect("connect the writer-inventory broker");
+    broker
+        .migrate()
         .await
         .expect("migrate writer-inventory database");
+    broker.close().await;
 
     // (catalog identity, delegates to shared move, directly inserts history
     // and deletes live). Any other function with one of those properties, or
