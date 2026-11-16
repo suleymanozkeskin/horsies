@@ -1,8 +1,9 @@
 //! The connection plan of one URL, and opening one connection from it.
 //!
 //! [`ConnectPlan::load`] does the file and user-database reads once: TLS
-//! files, `~/.pgpass` when the password comes from it, and the process user
-//! name when the URL names no user. [`open_connection`] then only connects.
+//! files (named, or libpq's defaults under `~/.postgresql/`), `~/.pgpass`
+//! when the password comes from it, and the process user name when the URL
+//! names no user. [`open_connection`] then only connects.
 
 use std::fmt;
 use std::time::Duration;
@@ -19,8 +20,8 @@ use super::environment::{
     EnvironmentPassword, HomeDirectory, PasswordFileEntry, PasswordFileError, PasswordFileMatch,
     PasswordFileRead, PasswordLookup,
 };
-use super::failure::{ConnectError, ConnectFailure};
-use super::tls::{load_tls_connector, TlsLoadError, TlsNegotiation, TlsPolicy};
+use super::failure::{ConnectError, ConnectFailure, PlainRetry};
+use super::tls::{load_tls, TlsLoadError, TlsNegotiation, TlsPolicy};
 use super::url::{
     ChannelBindingPolicy, ConnectionSettings, DatabaseName, DatabasePassword, Endpoint,
     HostAddress, HostOrder, MaskedUrl, TargetSession, UrlPassword, UserName,
@@ -97,6 +98,12 @@ enum ConnectAttempts {
         plain: Config,
         tls: Config,
     },
+    /// `sslmode=prefer`: TLS when the server offers it; plain when the TLS
+    /// handshake fails or the server refuses the session.
+    TlsThenPlain {
+        tls: Config,
+        plain: Config,
+    },
 }
 
 /// Everything needed to open connections to one URL. Built once by
@@ -158,9 +165,9 @@ impl ConnectPlan {
             DatabaseName::SameAsUser => user.clone(),
         };
         let password = resolve_password(settings, environment, &user, &database)?;
-        let tls = load_tls_connector(settings.tls()).map_err(ConnectPlanError::Tls)?;
+        let loaded = load_tls(settings.tls(), environment.home()).map_err(ConnectPlanError::Tls)?;
         let base = base_config(settings, &user, &database, &password, socket);
-        let attempts = match settings.tls().policy() {
+        let attempts = match &loaded.policy {
             TlsPolicy::Disabled => {
                 ConnectAttempts::Single(with_ssl_mode(&base, DriverSslMode::Disable))
             }
@@ -168,9 +175,10 @@ impl ConnectPlan {
                 plain: with_ssl_mode(&base, DriverSslMode::Disable),
                 tls: with_ssl_mode(&base, DriverSslMode::Require),
             },
-            TlsPolicy::TlsThenPlain(_) => {
-                ConnectAttempts::Single(with_ssl_mode(&base, DriverSslMode::Prefer))
-            }
+            TlsPolicy::TlsThenPlain(_) => ConnectAttempts::TlsThenPlain {
+                tls: with_ssl_mode(&base, DriverSslMode::Prefer),
+                plain: with_ssl_mode(&base, DriverSslMode::Disable),
+            },
             TlsPolicy::TlsOnly(_) => {
                 ConnectAttempts::Single(with_ssl_mode(&base, DriverSslMode::Require))
             }
@@ -178,7 +186,7 @@ impl ConnectPlan {
         let host_count = u32::try_from(settings.endpoints().len()).unwrap_or(u32::MAX);
         Ok(ConnectPlan {
             attempts,
-            tls,
+            tls: loaded.connector,
             masked_url: settings.masked_url().clone(),
             attempt_bound: settings.connect_timeout().saturating_mul(host_count),
         })
@@ -203,10 +211,16 @@ impl ConnectPlan {
 
 /// Opens one connection.
 ///
-/// Each attempt is bounded by [`ConnectPlan::attempt_bound`]. With
-/// `sslmode=allow`, a server refusal of the plain attempt (an error response
-/// during startup) is followed by one TLS attempt; any other failure is
-/// returned as it is. The caller must poll the returned driver connection.
+/// Each attempt is bounded by [`ConnectPlan::attempt_bound`]. As libpq:
+/// - `sslmode=allow`: a server refusal of the plain attempt (an error
+///   response during startup) is followed by one TLS attempt.
+/// - `sslmode=prefer`: a failed TLS handshake, or a server refusal of the
+///   session, is followed by one plain attempt. The driver does not tell
+///   whether a refused session used TLS, so a server that offers no TLS and
+///   refuses the session gets the same plain attempt a second time.
+///
+/// Any other failure is returned as it is. The caller must poll the returned
+/// driver connection.
 pub async fn open_connection(
     plan: &ConnectPlan,
 ) -> Result<(Client, DriverConnection), ConnectError> {
@@ -219,6 +233,13 @@ pub async fn open_connection(
                 ..
             }) => connect_once(plan, tls).await,
             Err(other) => Err(other),
+        },
+        ConnectAttempts::TlsThenPlain { tls, plain } => match connect_once(plan, tls).await {
+            Ok(pair) => Ok(pair),
+            Err(error) => match error.plain_retry() {
+                PlainRetry::Allowed => connect_once(plan, plain).await,
+                PlainRetry::NotAllowed => Err(error),
+            },
         },
     }
 }
@@ -250,7 +271,8 @@ fn resolve_user(user: &UserName) -> Result<String, ConnectPlanError> {
     }
 }
 
-/// libpq's order: the URL, then `PGPASSWORD`, then `~/.pgpass`.
+/// libpq's order: the URL, then `PGPASSWORD`, then `~/.pgpass`. An empty
+/// `password=` in the query skips `PGPASSWORD`, as in libpq.
 fn resolve_password(
     settings: &ConnectionSettings,
     environment: &ConnectionEnvironment,
@@ -262,7 +284,7 @@ fn resolve_password(
         (UrlPassword::NotGiven, EnvironmentPassword::Set(password)) => {
             Ok(ResolvedPassword::Given(password.clone()))
         }
-        (UrlPassword::NotGiven, EnvironmentPassword::NotSet) => {
+        (UrlPassword::GivenEmpty, _) | (UrlPassword::NotGiven, EnvironmentPassword::NotSet) => {
             password_from_file(settings, environment.home(), user, database)
         }
     }
@@ -424,10 +446,12 @@ mod tests {
         .expect("plan loads")
     }
 
+    /// The configuration of the first attempt.
     fn single_config(plan: &ConnectPlan) -> &Config {
         match &plan.attempts {
-            ConnectAttempts::Single(config) => config,
-            ConnectAttempts::PlainThenTls { .. } => panic!("expected one attempt"),
+            ConnectAttempts::Single(config)
+            | ConnectAttempts::PlainThenTls { plain: config, .. }
+            | ConnectAttempts::TlsThenPlain { tls: config, .. } => config,
         }
     }
 
@@ -472,7 +496,23 @@ mod tests {
                 assert_eq!(plain.get_ssl_mode(), DriverSslMode::Disable);
                 assert_eq!(tls.get_ssl_mode(), DriverSslMode::Require);
             }
-            ConnectAttempts::Single(_) => panic!("expected two attempts"),
+            ConnectAttempts::Single(_) | ConnectAttempts::TlsThenPlain { .. } => {
+                panic!("expected plain, then TLS")
+            }
+        }
+    }
+
+    #[test]
+    fn prefer_tries_tls_then_plain() {
+        let plan = plan("postgresql://u@h/d?sslmode=prefer");
+        match &plan.attempts {
+            ConnectAttempts::TlsThenPlain { tls, plain } => {
+                assert_eq!(tls.get_ssl_mode(), DriverSslMode::Prefer);
+                assert_eq!(plain.get_ssl_mode(), DriverSslMode::Disable);
+            }
+            ConnectAttempts::Single(_) | ConnectAttempts::PlainThenTls { .. } => {
+                panic!("expected TLS, then plain")
+            }
         }
     }
 
@@ -480,7 +520,6 @@ mod tests {
     fn each_policy_maps_to_its_driver_mode() {
         for (sslmode, expected) in [
             ("disable", DriverSslMode::Disable),
-            ("prefer", DriverSslMode::Prefer),
             ("require", DriverSslMode::Require),
         ] {
             let plan = plan(&format!("postgresql://u@h/d?sslmode={sslmode}"));

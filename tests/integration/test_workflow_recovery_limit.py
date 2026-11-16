@@ -43,10 +43,7 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import TaskNode, WorkflowDefinition
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_err
-from horsies.core.worker.sql import (
-    DELETE_EXPIRED_WORKFLOWS_SQL,
-    DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
-)
+from horsies.core.worker.sql import DELETE_EXPIRED_WORKFLOWS_SQL
 from horsies.core.workflows.engine import (
     on_workflow_task_complete,
     start_workflow_async,
@@ -100,15 +97,17 @@ INSERT_WORKFLOW_SQL = text("""
 
 INSERT_NODE_SQL = text("""
     INSERT INTO horsies_workflow_tasks (
-        id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+        id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps, join_type,
         task_options, status, is_subworkflow, sub_workflow_id,
-        sub_definition_key, task_id, created_at
+        sub_definition_key, task_id, created_at,
+        max_retries, execution, retention_class_key
     ) VALUES (
-        :id, :workflow_id, :index, :node_id, :task_name, '[]', '{}',
+        :id, :workflow_id, :index, :node_id, :task_name, '{}',
         'default', 100, :dependencies, FALSE, 'all',
         :options, :status, :is_subworkflow, :sub_workflow_id,
-        :sub_definition_key, :task_id, NOW()
+        :sub_definition_key, :task_id, NOW(),
+        :max_retries, :execution, :retention_class_key
     )
 """)
 
@@ -202,6 +201,7 @@ async def _seed_node(
     is_subworkflow: bool = False,
     task_id: str | None = None,
 ) -> None:
+    subworkflow_node = is_subworkflow or sub_workflow_id is not None
     async with harness.sessions() as session:
         await session.execute(
             INSERT_NODE_SQL,
@@ -214,10 +214,14 @@ async def _seed_node(
                 'dependencies': list(dependencies),
                 'options': options,
                 'status': status,
-                'is_subworkflow': is_subworkflow or sub_workflow_id is not None,
+                'is_subworkflow': subworkflow_node,
                 'sub_workflow_id': sub_workflow_id,
                 'sub_definition_key': sub_definition_key,
                 'task_id': task_id,
+                # A task node carries its typed facts; a sub-workflow node has none.
+                'max_retries': None if subworkflow_node else 0,
+                'execution': None if subworkflow_node else 'ISOLATED',
+                'retention_class_key': None if subworkflow_node else 'standard_30d',
             },
         )
         await session.commit()
@@ -1193,7 +1197,8 @@ class TestRetention:
         self, harness: Harness,
     ) -> None:
         """A parent delete cascades to its child, so the statement that
-        deletes workflows cannot name the child."""
+        deletes workflows cannot name the child. The foreign key of the
+        count removes it in the same statement."""
         parent = await _seed_workflow(harness, status='FAILED')
         child = await _seed_workflow(
             harness, status='FAILED', parent=parent, parent_index=0,
@@ -1214,10 +1219,10 @@ class TestRetention:
                         INSERT INTO horsies_workflow_recovery_failures (
                             workflow_id, failed_passes, last_pass_id,
                             first_failed_at, last_failed_at, last_case,
-                            last_exception_type
+                            last_task_index, last_error_type
                         ) VALUES (
                             :id, 1, gen_random_uuid(), NOW(), NOW(),
-                            'ready_not_enqueued', 'DataError'
+                            'ready_not_enqueued', 0, 'DataError'
                         )
                     """),
                     {'id': workflow_id},
@@ -1228,10 +1233,6 @@ class TestRetention:
             await session.execute(
                 DELETE_EXPIRED_WORKFLOWS_SQL,
                 {'retention_hours': 24, 'batch_size': 100},
-            )
-            await session.execute(
-                DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
-                {'batch_size': 100},
             )
             await session.commit()
 

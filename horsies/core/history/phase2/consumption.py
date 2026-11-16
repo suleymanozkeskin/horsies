@@ -292,7 +292,6 @@ class Phase2Disposition:
     root_workflow_id: str | None
     on_error: str | None
     node_status: str | None
-    terminal_status: str | None
     detail: str | None
 
 
@@ -364,6 +363,5 @@ def decode_phase2_row(row: Any) -> Phase2Disposition:
         ),
         on_error=row.on_error,
         node_status=row.node_status,
-        terminal_status=row.terminal_status,
         detail=row.detail,
     )

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/horsies",
+    "crates/horsies-codegen",
     "crates/horsies-core",
     "crates/horsies-macros",
     "crates/horsies-python",

@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
-import os
 from typing import Any, AsyncGenerator, Generator
+
 import pytest
 import pytest_asyncio
+
+from tests.session_database import suite_database_url
+
+DB_URL = suite_database_url()
+"""The one database of this e2e process and of every subprocess it starts.
+
+Bound here, before the task modules below are imported. A task module reads
+``HORSES_E2E_DB_URL`` at import and builds its broker from it, and every
+scheduler or worker subprocess inherits the variable. ``suite_database_url``
+creates the session database and writes its URL to that variable, so the
+in-process brokers and the subprocesses get the same URL. pytest imports this
+conftest before ``pytest_configure`` when the run names a path under
+``tests/e2e``, so the database cannot wait for that hook.
+"""
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +30,13 @@ from horsies.core.app import Horsies
 from horsies.core.types.result import is_ok
 
 from tests.e2e.helpers.db import cleanup_tables
-from tests.e2e.helpers.worker import kill_stale_workers
+from tests.e2e.helpers.env import (
+    TASK_MODULE_URL_ENV_NAME,
+    database_url_mismatches,
+    e2e_database_url_in,
+)
+from tests.e2e.helpers.session_broker import initialize_session_broker
+from tests.e2e.helpers.worker import kill_stale_workers, scheduler_env, worker_env
 from tests.e2e.tasks import instance as default_instance
 from tests.e2e.tasks import instance_child_isolation
 from tests.e2e.tasks import instance_child_isolation_prefetch
@@ -30,45 +51,48 @@ from tests.e2e.tasks import instance_retry_precedence
 from tests.e2e.tasks import instance_priority_binding
 
 
-from tests.e2e.helpers.env import e2e_database_url
-from tests.broker_resources_support import current_resources, listener_of
+from tests.broker_resources_support import current_resources
 
-DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
+PGBOUNCER_TOPOLOGY_MODULES = frozenset({'tests.e2e.tasks.instance_pgbouncer'})
+"""Task modules whose URLs come from the PgBouncer fixture variables, not
+from the session database."""
 
 
-async def _initialize_session_broker(
-    brk: PostgresBroker,
-    *,
-    seed_history: bool = False,
-) -> None:
-    """Initialize the schema and start the session loop's listener.
+def _observed_database_urls() -> dict[str, str]:
+    """The URL of each source that must use ``DB_URL``: every loaded e2e
+    module with a module-level ``DB_URL``, and the URL that a scheduler or a
+    worker subprocess resolves from the environment these helpers give it."""
+    observed = {
+        'scheduler subprocess': e2e_database_url_in(scheduler_env(), TASK_MODULE_URL_ENV_NAME),
+        'worker subprocess': e2e_database_url_in(worker_env(), TASK_MODULE_URL_ENV_NAME),
+    }
+    for name, module in tuple(sys.modules.items()):
+        if not name.startswith('tests.e2e.') or name in PGBOUNCER_TOPOLOGY_MODULES:
+            continue
+        url = getattr(module, 'DB_URL', None)
+        if isinstance(url, str):
+            observed[name] = url
+    return observed
 
-    The broker keeps one resource set per event loop: session-loop tests use
-    this set and its listener, and each function-loop test gets its own set,
-    released at the next call after its loop closes.
 
-    The PgBouncer-only lane has no default PostgreSQL service on port 5432.
-    Its marked smoke test constructs and initializes a dedicated split-URL
-    broker, so the default-topology singletons must remain untouched there.
-    """
-    if os.environ.get('HORSIES_PGBOUNCER_TEST') == '1':
-        return
-    schema = await brk.ensure_schema_initialized()
-    assert schema.is_ok(), schema
-    listener = await listener_of(brk).start()
-    assert listener.is_ok(), listener
-    if seed_history:
-        from tests.integration.history_seeding import ensure_history_seedable
-
-        async with current_resources(brk).engine.begin() as connection:
-            await ensure_history_seedable(connection)
+@pytest.fixture(scope='session', autouse=True)
+def one_database_for_test_process_and_subprocesses() -> None:
+    """Fail the session when a source would use another database than
+    ``DB_URL``."""
+    mismatches = database_url_mismatches(DB_URL, _observed_database_urls())
+    assert mismatches == [], (
+        'e2e sources resolve another database than the session database:\n'
+        + '\n'.join(mismatches)
+    )
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session', autouse=True)
-async def broker() -> AsyncGenerator[PostgresBroker, None]:
+async def broker(
+    one_database_for_test_process_and_subprocesses: None,  # noqa: ARG001 - checked before any broker connects
+) -> AsyncGenerator[PostgresBroker, None]:
     """Broker used by e2e tasks, bound before any sync test can claim it."""
     brk = default_instance.broker
-    await _initialize_session_broker(brk, seed_history=True)
+    await initialize_session_broker(brk, seed_history=True)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -78,7 +102,7 @@ async def broker() -> AsyncGenerator[PostgresBroker, None]:
 async def custom_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Custom-queue broker instance for e2e tasks."""
     brk = instance_custom.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -88,7 +112,7 @@ async def custom_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def priority_binding_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for the subworkflow priority-binding claim-order e2e."""
     brk = instance_priority_binding.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -98,7 +122,7 @@ async def priority_binding_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with cluster_wide_cap for e2e tasks."""
     brk = instance_cluster_cap.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -108,7 +132,7 @@ async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with fast recovery thresholds for crash-detection tests."""
     brk = instance_recovery.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -119,7 +143,7 @@ async def left_work_marker_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with small recovery thresholds for the finalizing
     marker of an isolated async task that leaves work."""
     brk = instance_left_work_marker.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -129,7 +153,7 @@ async def left_work_marker_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with soft cap (prefetch_buffer > 0) for lease contention tests."""
     brk = instance_softcap.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -139,7 +163,7 @@ async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def isolation_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for child isolation e2e tests."""
     brk = instance_child_isolation.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -149,7 +173,7 @@ async def isolation_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def isolation_prefetch_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for child isolation e2e tests with a prefetch buffer."""
     brk = instance_child_isolation_prefetch.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -159,7 +183,7 @@ async def isolation_prefetch_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def requeue_guard_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for requeue-guard age-guard e2e tests."""
     brk = instance_requeue_guard.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -169,7 +193,7 @@ async def requeue_guard_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def scheduler_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance for scheduler e2e tests."""
     brk = instance_scheduler.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -179,7 +203,7 @@ async def scheduler_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def retry_precedence_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance for retry-precedence e2e tests."""
     brk = instance_retry_precedence.broker
-    await _initialize_session_broker(brk)
+    await initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()
     assert is_ok(closed), closed
@@ -255,38 +279,43 @@ def clean_stale_workers_session() -> Generator[None, None, None]:
 
 
 # =============================================================================
-# Enqueue SHA helper
+# Send identity helper
 # =============================================================================
 
 
-def compute_test_enqueue_sha(
+def compute_test_command_fingerprint(
     task_name: str,
     queue_name: str = 'default',
     priority: int = 100,
-    args_json: str = '[]',
-    kwargs_json: str = '{}',
+    input_json: str = '{}',
     sent_at: datetime | None = None,
     good_until: datetime | None = None,
     task_options: str | None = None,
-) -> tuple[datetime, str]:
-    """Compute (sent_at, enqueue_sha) pair for test task insertion.
+    retention_class_key: str = 'standard_30d',
+    retain_rerun_input: bool = False,
+) -> tuple[datetime, bytes]:
+    """Compute (sent_at, command_fingerprint) for test task insertion.
 
-    Returns a consistent pair: the sent_at used in the hash matches
-    the one to be stored in the row.
+    The fingerprint is the version-1 command fingerprint that a send of
+    these values stores, with the stored ``input`` text in its kwargs
+    element. The returned sent_at is the one to store in the row.
     """
-    from horsies.core.utils.fingerprint import enqueue_fingerprint
+    from horsies.core.history.identity.fingerprint import EnqueueCommandV1
 
     if sent_at is None:
         sent_at = datetime.now(timezone.utc)
-    sha = enqueue_fingerprint(
+    fingerprint = EnqueueCommandV1(
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        sent_at=sent_at,
+        args_json=None,
+        kwargs_json=input_json,
         good_until=good_until,
         enqueue_delay_seconds=None,
-        task_options=task_options,
-    )
-    return sent_at, sha
+        task_options_json=task_options,
+        retention_class_key=retention_class_key,
+        retain_rerun_input=retain_rerun_input,
+        rerun_of_task_id=None,
+        rerun_root_task_id=None,
+    ).fingerprint
+    return sent_at, fingerprint
