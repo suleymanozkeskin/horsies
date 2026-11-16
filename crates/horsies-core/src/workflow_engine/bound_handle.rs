@@ -40,10 +40,9 @@ pub struct WorkflowHandle<T> {
 impl<T> WorkflowHandle<T> {
     /// Create a new workflow handle for a known workflow ID.
     ///
-    /// Queries run on the broker's main pool; result waits (`get`) reuse the
-    /// broker's process-wide `workflow_done_listener`, so many concurrently
-    /// waiting handles share one LISTEN connection instead of pinning one each
-    /// (P2).
+    /// Queries run on the broker's main pool; result waits (`get`) subscribe
+    /// on the broker's listener, so many concurrently waiting handles share
+    /// one LISTEN connection instead of pinning one each.
     pub fn new(
         workflow_id: Uuid,
         broker: Arc<PostgresBroker>,
@@ -83,16 +82,10 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// }
     /// ```
     pub async fn get(&self, timeout: Option<Duration>) -> TaskResult<T> {
-        // Reuse the broker's process-wide shared listener instead of pinning a
-        // per-handle LISTEN connection (P2).
-        let listener = match self.broker.workflow_done_listener().await {
-            Ok(listener) => listener,
-            Err(e) => return self.fold_task_result_error(&WorkflowError::Broker(e)),
-        };
-
+        // The wait subscribes on the broker's listener instead of pinning a
+        // per-handle LISTEN connection; with no listener it polls.
         match crate::workflow_engine::query::get_workflow_result::<T>(
-            self.broker.pool(),
-            listener,
+            &self.broker,
             self.workflow_id,
             timeout,
         )
@@ -293,11 +286,11 @@ mod tests {
 
 #[cfg(test)]
 mod shared_listener_tests {
-    //! P2: many concurrently-waiting `WorkflowHandle`s must share the broker's
-    //! one process-wide listener, not pin a session-pool connection each. With
-    //! per-handle listeners, more handles than the session pool holds
-    //! exhaust the session pool and `get()` folds a broker error; the shared
-    //! listener lets all of them time out cleanly instead.
+    //! Many concurrently-waiting `WorkflowHandle`s must share the broker's
+    //! one listener connection, not pin a connection each. With per-handle
+    //! listeners, more handles than the session pool holds exhaust the
+    //! session pool and `get()` folds a broker error; the shared listener lets
+    //! all of them time out cleanly instead.
     use super::*;
     use crate::broker::PostgresBroker;
     use crate::core::task::{BuiltInTaskCode, TaskErrorCode};
@@ -307,8 +300,9 @@ mod shared_listener_tests {
     #[tokio::test]
     #[serial]
     async fn many_waiting_handles_share_one_listener() {
-        let broker = Arc::new(PostgresBroker::from_pool(
+        let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
             crate::broker::terminalization_matrix::migrated_pool().await,
+            &crate::broker::terminalization_matrix::migrated_database_url().await,
         ));
         let pool = broker.pool().clone();
         let registry = Arc::new(WorkflowSpecRegistry::new(

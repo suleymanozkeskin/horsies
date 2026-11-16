@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::TerminalizationCommand;
 
 const CLAIM_QUEUE: &str = "lifecycle_claim_fence";

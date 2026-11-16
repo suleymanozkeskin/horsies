@@ -14,6 +14,7 @@ from typing import (
     Annotated,
     Final,
     Union,
+    cast,
     overload,
 )
 from pydantic import (
@@ -31,9 +32,17 @@ from enum import Enum
 if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
+from horsies._catalog.task_codes import ContractCode as ContractCode
+from horsies._catalog.task_codes import OperationalErrorCode as OperationalErrorCode
+from horsies._catalog.task_codes import OutcomeCode as OutcomeCode
+from horsies._catalog.task_codes import RetrievalCode as RetrievalCode
 from horsies.core.types.json_value import JsonInput, JsonValue
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
-from horsies.core.exception_mapper import validate_error_code_string
+from horsies.core.exception_mapper import (
+    RESERVED_NON_TASK_CODES,
+    reserved_code_message,
+    validate_error_code_string,
+)
 
 T = TypeVar('T')  # success payload
 E = TypeVar('E')  # error payload (TaskError )
@@ -43,100 +52,6 @@ class _Unset:
     """Sentinel type for distinguishing 'not provided' from None."""
 
     __slots__ = ()
-
-
-class OperationalErrorCode(str, Enum):
-    """Something actually broke in execution.
-
-    Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
-    """
-
-    UNHANDLED_EXCEPTION = 'UNHANDLED_EXCEPTION'
-    TASK_EXCEPTION = 'TASK_EXCEPTION'
-    WORKER_CRASHED = 'WORKER_CRASHED'
-    BROKER_ERROR = 'BROKER_ERROR'
-    WORKER_RESOLUTION_ERROR = 'WORKER_RESOLUTION_ERROR'
-    WORKER_SERIALIZATION_ERROR = 'WORKER_SERIALIZATION_ERROR'
-    RESULT_DESERIALIZATION_ERROR = 'RESULT_DESERIALIZATION_ERROR'
-    WORKFLOW_ENQUEUE_FAILED = 'WORKFLOW_ENQUEUE_FAILED'
-    SUBWORKFLOW_LOAD_FAILED = 'SUBWORKFLOW_LOAD_FAILED'
-    WORKFLOW_RECOVERY_LIMIT_REACHED = 'WORKFLOW_RECOVERY_LIMIT_REACHED'
-    # The engine did not start a child workflow, because its depth would
-    # pass MAX_SUBWORKFLOW_DEPTH (horsies.core.models.workflow.limits).
-    SUBWORKFLOW_DEPTH_LIMIT_REACHED = 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
-    # This task held the event loop of its shared async child past the block
-    # limit, before its timeout_ms. The worker killed the child; a retry
-    # (only when auto_retry_for names this code) runs in an isolated child.
-    TASK_BLOCKED_LOOP = 'TASK_BLOCKED_LOOP'
-    # Another task held the event loop of this task's shared async child
-    # past the block limit, before this task's timeout_ms. The worker killed
-    # the child. A retry runs only when auto_retry_for names this code.
-    NEIGHBOUR_BLOCKED_LOOP = 'NEIGHBOUR_BLOCKED_LOOP'
-
-
-class ContractCode(str, Enum):
-    """A code/typing/usage contract was violated.
-
-    Typical caller behavior: fix code or type assumptions, do not blindly retry.
-    """
-
-    RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
-    WORKFLOW_CTX_MISSING_ID = 'WORKFLOW_CTX_MISSING_ID'
-    # Strict-serde (design §8). Surfaces inside ``TaskError`` for
-    # handle-level APIs (``TaskHandle.get`` / ``WorkflowHandle.get``)
-    # when typed decode is requested but the OkT cannot be obtained
-    # — e.g. handle reconstructed by id without local task / workflow
-    # registration. The Result-returning sibling lives at
-    # ``BrokerErrorCode.NO_TYPE_AVAILABLE``.
-    NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
-
-
-class RetrievalCode(str, Enum):
-    """The caller cannot get the value right now or cannot locate it.
-
-    Typical caller behavior: wait, poll again, handle missing value as normal flow.
-    """
-
-    WAIT_TIMEOUT = 'WAIT_TIMEOUT'
-    TASK_NOT_FOUND = 'TASK_NOT_FOUND'
-    WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND'
-    RESULT_NOT_AVAILABLE = 'RESULT_NOT_AVAILABLE'
-    RESULT_NOT_READY = 'RESULT_NOT_READY'
-    # The broker already holds resource sets for its limit of open event
-    # loops, so this new loop cannot read the value now. Never cached: it
-    # clears when one of those loops closes.
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    # A sync get() was called on a thread that runs an event loop, so this
-    # call site cannot wait for the value. Never cached: the ``*_async``
-    # form, or a sync call from a thread without a running loop, reads it.
-    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    # An argument of the get call was refused before anything ran, for
-    # example a timeout_ms outside 0 to MAX_TASK_TIMEOUT_MS. Never cached:
-    # a call with a valid argument reads the value.
-    INVALID_INPUT = 'INVALID_INPUT'
-    # A result wait was called in a process that runs task bodies, so it
-    # returns at once and waits for nothing. Never cached: a task composes
-    # with other tasks through a workflow, not through a wait.
-    WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'
-
-
-class OutcomeCode(str, Enum):
-    """A non-bug execution outcome or control-flow result.
-
-    Typical caller behavior: branch on outcome, continue control flow.
-    """
-
-    TASK_CANCELLED = 'TASK_CANCELLED'
-    TASK_EXPIRED = 'TASK_EXPIRED'
-    TASK_TIMEOUT = 'TASK_TIMEOUT'
-    WORKFLOW_PAUSED = 'WORKFLOW_PAUSED'
-    WORKFLOW_EXPIRED = 'WORKFLOW_EXPIRED'
-    WORKFLOW_FAILED = 'WORKFLOW_FAILED'
-    WORKFLOW_CANCELLED = 'WORKFLOW_CANCELLED'
-    UPSTREAM_SKIPPED = 'UPSTREAM_SKIPPED'
-    SUBWORKFLOW_FAILED = 'SUBWORKFLOW_FAILED'
-    WORKFLOW_SUCCESS_CASE_NOT_MET = 'WORKFLOW_SUCCESS_CASE_NOT_MET'
-    WORKFLOW_OUTPUT_SKIPPED = 'WORKFLOW_OUTPUT_SKIPPED'
 
 
 type BuiltInTaskCode = (
@@ -271,6 +186,7 @@ class TaskError(BaseModel):
         - ``None``, with one cause: the union below would give one entry per
           family
         - Plain ``str`` matching a reserved built-in code
+        - Plain ``str`` in ``RESERVED_NON_TASK_CODES`` (``WORKFLOW_STOPPED``)
         - Foreign ``str, Enum`` types (user enums must use ``.value``)
         """
         if isinstance(value, _BUILTIN_FAMILIES):
@@ -282,7 +198,7 @@ class TaskError(BaseModel):
                 raise ValueError(
                     'error_code dict must contain "__builtin_task_code__" key',
                 )
-            raw = value['__builtin_task_code__']
+            raw = cast('dict[str, object]', value)['__builtin_task_code__']
             if not isinstance(raw, str):
                 raise ValueError(
                     f'"__builtin_task_code__" must be str, got {type(raw).__name__}',
@@ -307,6 +223,10 @@ class TaskError(BaseModel):
                     f"'{value}' is a reserved built-in error code "
                     f'({type(builtin).__name__}.{builtin.name}). '
                     f'Pass the enum member directly.',
+                )
+            if value in RESERVED_NON_TASK_CODES:
+                raise ValueError(
+                    reserved_code_message(value, field_name='error_code'),
                 )
             return value
         return value

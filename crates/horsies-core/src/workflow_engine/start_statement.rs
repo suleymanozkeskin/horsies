@@ -25,7 +25,7 @@ use crate::core::{
     WorkflowSpecRegistry,
 };
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
-use crate::workflow_engine::args_merge::ChildBuildInput;
+use crate::workflow_engine::args_merge::{child_build_input, ChildBuildInput};
 use crate::workflow_engine::engine::subworkflow_load_failed_error;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
@@ -287,10 +287,17 @@ fn tree_arguments(
                     parent_depth: workflow.depth,
                     definition_key: node.sub_definition_key.as_deref(),
                 },
+                // A root node has no dependencies, so it has no `args_from`.
                 || {
-                    Ok(NodeInput::Input(ChildBuildInput::without_args_from(
-                        node.input_json.clone(),
-                    )))
+                    Ok(match child_build_input(node.input_json.clone(), None) {
+                        Ok(input) => NodeInput::Input(input),
+                        Err(refused) => NodeInput::NodeFails(build_failed_error(
+                            workflow.workflow_id,
+                            &workflow.spec.name,
+                            task_index,
+                            &ChildSpecError::of_stored_input(refused),
+                        )),
+                    })
                 },
                 node.sub_workflow_params,
                 registry,
@@ -480,7 +487,6 @@ pub(crate) fn build_failed_error(
     task_index: i32,
     error: &ChildSpecError,
 ) -> TaskError {
-    let text: String = error.text.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
     TaskError {
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
@@ -489,11 +495,18 @@ pub(crate) fn build_failed_error(
         ..TaskError::builtin(
             OperationalErrorCode::WorkflowEnqueueFailed,
             format!(
-                "Subworkflow build failed: {}: {text} (workflow {workflow_name}:{task_index})",
-                error.error_type.as_str(),
+                "Subworkflow build failed: {} (workflow {workflow_name}:{task_index})",
+                child_spec_failure_text(error),
             ),
         )
     }
+}
+
+/// The text of a registered child that gave no spec: `<class>: <text, 200 characters>` (Python
+/// `f'{type(exc).__name__}: {str(exc)[:200]}'`, `core/workflows/engine.py:1246`). Pure.
+pub(crate) fn child_spec_failure_text(error: &ChildSpecError) -> String {
+    let text: String = error.text.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
+    format!("{}: {text}", error.error_type.as_str())
 }
 
 /// The stored result of a node that fails with `error`: the error in its
@@ -573,8 +586,12 @@ impl StartArguments {
         retention: &RetentionConfig,
     ) -> Result<(), WorkflowError> {
         let (queue, priority) = stored_queue_and_priority(node)?;
-        let merged_task_options =
-            merge_good_until_into_options(node.good_until, node.task_options_json.as_deref());
+        let merged_task_options = merge_good_until_into_options(
+            node.index,
+            &node.task_name,
+            node.good_until,
+            node.task_options_json.as_deref(),
+        )?;
         let task_facts = match node.is_subworkflow {
             true => None,
             false => Some(node_task_facts(

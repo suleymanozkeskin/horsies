@@ -6,7 +6,9 @@
 extern crate self as horsies;
 
 // `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
-// which this crate reaches through its own name.
+// and `#[derive(horsies_macros::ManifestSchema)]` names
+// `::horsies_core::manifest_schema`; this crate reaches both through its own
+// name.
 extern crate self as horsies_core;
 
 // Internal modules (merged from formerly separate crates).
@@ -19,10 +21,12 @@ pub mod catalog;
 pub mod core;
 pub mod db;
 pub mod manifest;
+pub mod manifest_schema;
 pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;
 pub(crate) mod worker;
+pub mod worker_manifest;
 pub(crate) mod workflow_engine;
 
 // ---------------------------------------------------------------------------
@@ -62,13 +66,22 @@ pub use crate::core::{AppConfig, HorsiesError};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, run_horsies_migrations, BrokerError, BrokerErrorCode,
-    BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow,
-    NotifyListener, PostgresBroker, RawResultRecord, SchemaInitializationMode,
-    SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
-    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    BrokerOperationError, BrokerResult, CheckInterruption, ClaimedTaskRow, DatabasePing,
+    ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError, PostgresBroker, RawResultRecord,
+    SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle,
+    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+
+// Child mode of a Rust worker binary: the entry checks `child_mode` first
+// and, in child mode, exits with the code of `run_child_host`. Task bodies
+// start work that belongs to their run with `spawn_in_run`.
+pub use crate::worker::executor::child_host::{
+    child_mode, run_child_host, spawn_in_run, ChildApp, ChildArgs, ChildArgsError, ChildHostExit,
+    ChildMode, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
+};
 
 // worker re-exports
 pub use crate::worker::{
@@ -77,6 +90,18 @@ pub use crate::worker::{
     scheduler::service::{spawn_scheduler, SchedulerStartError},
     worker::Worker,
     WorkerError,
+};
+
+// worker state snapshot values
+pub use crate::broker::{
+    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+
+// fleet check and class report
+pub use crate::broker::{
+    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
+    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
 pub use crate::broker::client_family::ClientFamily;

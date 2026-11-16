@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::pools::PoolSettingsError;
-use crate::db::{MaskedUrl, StatementFailure, Transience};
+use crate::db::{StatementFailure, Transience};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
@@ -106,8 +106,8 @@ pub enum BrokerError {
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
 
-    /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
-    #[error("shared listener closed")]
+    /// The broker's listener stopped while a wait used it.
+    #[error("the broker's listener stopped")]
     ListenerClosed,
 
     /// A terminalization operation violated its wire contract: an undecodable
@@ -126,6 +126,12 @@ pub enum BrokerError {
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
 
+    /// A row of the claim, the start or the release breaks its function's
+    /// row contract (`broker::claims`). Not retryable: the same call meets
+    /// it again.
+    #[error("claim contract violation: {0}")]
+    ClaimContract(String),
+
     /// A statement on a core pool failed with one of the statement layer's
     /// three outcomes. Retryable when its cause may clear
     /// ([`Transience::Transient`]); a closed pool and a statement-pooled URL
@@ -142,19 +148,6 @@ pub enum BrokerError {
     /// requires. Not retryable.
     #[error("{0}")]
     RowDecode(#[from] RowDecodeError),
-
-    /// The worker boot check: a LISTEN on the session URL received no NOTIFY
-    /// within `waited`, so the URL does not keep session state (PgBouncer
-    /// transaction or statement pooling). Not retryable: the same URL fails
-    /// again.
-    #[error(
-        "{masked_url} delivered no NOTIFY to a LISTEN within {waited:?}; session_database_url \
-         must be a direct URL or a PgBouncer session-pooled URL"
-    )]
-    SessionNotCapable {
-        masked_url: MaskedUrl,
-        waited: std::time::Duration,
-    },
 }
 
 impl BrokerError {
@@ -201,9 +194,9 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_)
+            | Self::ClaimContract(_)
             | Self::PoolSettings(_)
-            | Self::RowDecode(_)
-            | Self::SessionNotCapable { .. } => false,
+            | Self::RowDecode(_) => false,
         }
     }
 }
@@ -440,20 +433,6 @@ mod tests {
             }
         ))
         .is_retryable());
-    }
-
-    #[test]
-    fn a_session_url_that_does_not_deliver_is_not_retryable() {
-        let error = BrokerError::SessionNotCapable {
-            masked_url: crate::db::MaskedUrl::for_tests(
-                "postgresql://horsies:***@pgbouncer:6432/app",
-            ),
-            waited: std::time::Duration::from_secs(2),
-        };
-        assert!(!error.is_retryable());
-        assert!(error
-            .to_string()
-            .contains("postgresql://horsies:***@pgbouncer:6432/app"));
     }
 
     #[test]

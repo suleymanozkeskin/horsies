@@ -124,8 +124,10 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -134,6 +136,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -261,7 +264,24 @@ mod tests {
             WorkerConfig::default(),
             test_app_config(),
             new_reaper_health(),
-            Arc::new(tokio::sync::Semaphore::new(1)),
+            crate::worker::children::ChildrenView::new(
+                Arc::new(crate::worker::executor::slots::PoolBoard::new(
+                    crate::worker::executor::slots::ChildLayout {
+                        isolated: 1,
+                        shared_async: 0,
+                        shared_thread: 0,
+                    },
+                )),
+                crate::worker::children::SeatsPerChild {
+                    shared_async: 0,
+                    shared_thread: 0,
+                },
+            ),
+            crate::worker::worker_state::ClaimColumns {
+                processes: 1,
+                max_claim_batch: 0,
+                max_claim_per_worker: 1,
+            },
             Utc::now(),
             cancel.clone(),
         );

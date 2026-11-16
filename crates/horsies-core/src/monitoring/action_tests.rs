@@ -4,7 +4,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -122,7 +122,7 @@ async fn fail_task(pool: &PgPool, task_id: Uuid) {
                 worker_id: "w3-worker".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("W3 failure".to_owned()),
         },
     )
@@ -266,6 +266,11 @@ fn action_models_and_task_mapping_serialize_exactly() {
             error(TaskActionErrorCode::DbOperationFailed, None, "database"),
             503,
             r#"{"detail":"database"}"#,
+        ),
+        (
+            error(TaskActionErrorCode::EventLoopLimit, None, "loop limit"),
+            503,
+            r#"{"detail":"loop limit"}"#,
         ),
         (
             error(TaskActionErrorCode::StoredDataInvalid, None, "stored"),

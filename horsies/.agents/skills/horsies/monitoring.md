@@ -103,7 +103,7 @@ error changes stored data. HTTP is the status of the web read routes.
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The database operation failed |
 | `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -119,6 +119,10 @@ get_workflow_node(broker, workflow_id, task_index)
 list_schedules(broker)
 ```
 
+- `task_breakdown` groups: each `GroupRow.group` is `BreakdownValueGroup(value)`
+  or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (tasks no worker
+  claimed). A worker whose id is `'unknown'` is a value group of its own.
+  `Breakdown.total` is a `BreakdownCounts` over every group.
 - Filter lists: OR within a dimension, AND across dimensions; empty = no filter.
 - `error_categories` (`ErrorCategory`: OPERATIONAL / CONTRACT / RETRIEVAL /
   OUTCOME / DOMAIN) expands server-side from the library's own code registry —
@@ -230,12 +234,13 @@ cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, 
 | `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id, or the id is not a UUID; nothing changed |
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
-| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The transaction failed: it rolled back, or at the commit the commit outcome is unknown. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
 | `EVENT_LOOP_LIMIT` | `TaskActionEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `HistoryContractError` or `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: a history row that does not decode, for example a history status that is not a `TaskStatus` member, or a cancel outcome row that does not decode; nothing changed |
+| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
 `cancel_task` raises `RuntimeError` when the cancel outcome contradicts the
-row lock that the call holds. That is a defect, not an outcome.
+cancel function (a lost claim, or no observed status). That is a defect, not
+an outcome.
 
 ## Live Updates
 
@@ -281,6 +286,7 @@ from horsies.monitoring import (
     # Response models (unstable pre-1.0)
     TaskSummary, TaskListPage, TaskDetail, LeafTaskInfo, TaskAttemptInfo,
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
+    BreakdownCounts, BreakdownGroup, BreakdownValueGroup, BreakdownUnclaimedGroup,
     WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
     WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
     ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
