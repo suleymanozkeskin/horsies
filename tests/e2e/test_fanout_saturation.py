@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import pytest
 from psycopg import Notify
@@ -108,6 +109,7 @@ class TestTaskDoneFanout:
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )).unwrap()
 
         # Complete it via direct SQL (fires NOTIFY task_done, <task_id>)
@@ -163,6 +165,7 @@ class TestTaskDoneFanout:
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )).unwrap()
 
         # Patch put_nowait on every queue to count deliveries
@@ -247,6 +250,7 @@ class TestTaskDoneFanout:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
             task_ids.append(tid)
 
@@ -335,6 +339,7 @@ class TestTaskDoneFanout:
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
+                    sent_at=datetime.now(timezone.utc),
                 )).unwrap()
                 task_ids.append(tid)
 
@@ -412,6 +417,7 @@ class TestFanoutBoundary:
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )).unwrap()
         # Post-split, completion moves the row to history; what these
         # tests exercise is the task_done fan-out, so fire the exact
@@ -431,6 +437,7 @@ class TestFanoutBoundary:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
             await session.execute(
                 text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
@@ -457,6 +464,7 @@ class TestFanoutBoundary:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
             await session.execute(
                 text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
@@ -503,6 +511,7 @@ class TestFanoutBoundary:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
             pre_ids.append(tid)
 
@@ -512,6 +521,7 @@ class TestFanoutBoundary:
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )).unwrap()
 
         async def _complete_inflight(ids: list[str]) -> None:
@@ -662,6 +672,7 @@ class TestFanoutErrorPaths:
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
+                    sent_at=datetime.now(timezone.utc),
                 )).unwrap()
                 task_ids.append(tid)
 
@@ -709,6 +720,7 @@ class TestFanoutContracts:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
             await session.execute(
                 text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
@@ -746,6 +758,7 @@ class TestFanoutContracts:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
 
             # Drain any task_new notifications from the enqueue itself
@@ -795,6 +808,7 @@ class TestFanoutContracts:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                sent_at=datetime.now(timezone.utc),
             )).unwrap()
             await session.execute(
                 text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
