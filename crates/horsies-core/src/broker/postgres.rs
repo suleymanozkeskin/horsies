@@ -43,6 +43,7 @@ use crate::broker::row::task::{
     TaskInfoRow, TaskResultRow, TaskRunningContextRow,
 };
 
+use crate::broker::client_family::ClientFamily;
 use crate::broker::shared_listener::{SharedNotifyListener, Subscription};
 use crate::broker::task_lists::{
     BoundedTaskList, StaleMinutes, TASK_LIST_BOUND, TASK_LIST_READ_LIMIT,
@@ -763,6 +764,12 @@ pub struct PostgresBroker {
     listener_delivery_checked: tokio::sync::OnceCell<()>,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
+    /// The client family of this handle. The constructors of this type serve
+    /// the Rust client; the Python bridge sets `Python` with
+    /// [`PostgresBroker::with_client_family`].
+    client_family: ClientFamily,
+    /// Set once the family check before the first write passed.
+    client_family_admitted: tokio::sync::OnceCell<()>,
 }
 
 impl PostgresBroker {
@@ -801,6 +808,8 @@ impl PostgresBroker {
             listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
+            client_family: ClientFamily::Rust,
+            client_family_admitted: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -890,6 +899,8 @@ impl PostgresBroker {
             listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
+            client_family: ClientFamily::Rust,
+            client_family_admitted: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -913,7 +924,31 @@ impl PostgresBroker {
         if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
             return Ok(());
         }
-        crate::broker::migrations::run_horsies_migrations(&self.session_pool).await
+        crate::broker::migrations::install_schema(&self.session_pool, self.client_family).await
+    }
+
+    /// The same handle for a client of `family`. The install records it, and
+    /// every write checks it once.
+    pub fn with_client_family(mut self, family: ClientFamily) -> Self {
+        self.client_family = family;
+        self
+    }
+
+    /// Check once, before the first write of this handle, that the database
+    /// records this handle's client family. Reads never call it. A handle
+    /// whose install ran in this process has passed it already. A database of
+    /// the other family, or with no family row, is
+    /// `BrokerError::ClientFamilyMismatch`, not retryable; a database failure
+    /// is not kept, so the next write checks again. One statement, once.
+    pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
+        self.client_family_admitted
+            .get_or_try_init(|| async {
+                let recorded =
+                    crate::broker::client_family::read_recorded_family(&self.pool).await?;
+                crate::broker::client_family::admit_family(recorded, self.client_family)
+            })
+            .await?;
+        Ok(())
     }
 
     /// Ensure the embedded schema is initialized exactly once for this broker.
@@ -945,6 +980,9 @@ impl PostgresBroker {
                 if actual != Some(expected) {
                     return Err(BrokerError::SchemaVersionMismatch { expected, actual });
                 }
+                // The install recorded or checked the family: writes of this
+                // handle need no second read.
+                let _already_admitted = self.client_family_admitted.set(());
                 Ok::<(), BrokerError>(())
             })
             .await?;
@@ -1070,6 +1108,7 @@ impl PostgresBroker {
             EnqueueInputEligibility::Ordinary,
         )
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        self.ensure_client_family_for_write().await?;
         let mut transaction = self.pool.begin().await.map_err(BrokerError::Database)?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
@@ -6002,5 +6041,57 @@ mod pool_options_tests {
 
         assert!(failed.is_err(), "the dead connection serves the statement");
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod client_family_tests {
+    //! The client family at install and before the first write: a handle
+    //! writes only into a database of its own family, and reads are not
+    //! checked.
+    use super::*;
+    use serial_test::serial;
+
+    async fn family_row(pool: &PgPool) -> Option<String> {
+        sqlx::query_scalar("SELECT family FROM horsies_client_family")
+            .fetch_optional(pool)
+            .await
+            .expect("read the family row")
+    }
+
+    /// The shared test database is installed for the Rust client.
+    #[tokio::test]
+    #[serial]
+    async fn the_install_records_the_family_and_a_rust_handle_may_write() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
+
+        let broker = PostgresBroker::from_pool(pool);
+        broker
+            .ensure_client_family_for_write()
+            .await
+            .expect("a Rust handle writes into a Rust database");
+    }
+
+    /// A handle of the other family is refused before it writes, and the
+    /// refusal is not retryable. The check reads only.
+    #[tokio::test]
+    #[serial]
+    async fn a_handle_of_the_other_family_is_refused_before_its_first_write() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let broker =
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+
+        let refused = broker.ensure_client_family_for_write().await.unwrap_err();
+
+        assert!(matches!(
+            refused,
+            BrokerError::ClientFamilyMismatch {
+                stored: crate::broker::client_family::RecordedFamily::Recorded(ClientFamily::Rust),
+                own: ClientFamily::Python,
+            }
+        ));
+        assert!(!refused.is_retryable());
+        assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
     }
 }
