@@ -5,8 +5,7 @@ use sqlx::{FromRow, PgConnection};
 
 use super::coverage::registered_periods;
 use crate::core::history::commands::{
-    open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf, LeafBounds, LeafRef,
-    OPEN_END_ANCHOR_SQL,
+    CreateDailyHistoryLeaf, LeafBounds, LeafRef, OPEN_END_ANCHOR_SQL,
 };
 use crate::core::history::ddl::classes::{
     finite_class_parent_name, FOREVER_CLASS_KEY, PERIOD_CLASS_KIND,
@@ -139,18 +138,14 @@ fn decode_leaf_fault(row: &CoverageProbeRaw) -> Result<ProbedLeafFault, HistoryE
         LeafBounds::new(lower, upper).map_err(|error| HistoryError::contract(error.to_string()))?;
     let leaf = LeafRef::new(leaf_name, class_key, bounds)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let repair = match (row.leaf_kind.as_deref(), upper == open_end_anchor()) {
-        (Some("history"), true) => CoverageLeafRepair::History(PlannedLeaf::OpenEnded(
-            CreateOpenEndedHistoryLeaf::new(leaf)
-                .map_err(|error| HistoryError::contract(error.to_string()))?,
-        )),
-        (Some("history"), false) => CoverageLeafRepair::History(PlannedLeaf::Daily(
+    // Every expected leaf with an `AT` bound is a daily history leaf or an
+    // hourly heartbeat leaf; the commands refuse any other span.
+    let repair = match row.leaf_kind.as_deref() {
+        Some("history") => CoverageLeafRepair::History(PlannedLeaf::Daily(
             CreateDailyHistoryLeaf::new(leaf)
                 .map_err(|error| HistoryError::contract(error.to_string()))?,
         )),
-        (Some("heartbeat"), _) => {
-            CoverageLeafRepair::Heartbeat(CreateHourlyHeartbeatLeaf::new(leaf)?)
-        }
+        Some("heartbeat") => CoverageLeafRepair::Heartbeat(CreateHourlyHeartbeatLeaf::new(leaf)?),
         _ => {
             return Err(HistoryError::contract(
                 "coverage leaf fault has an unknown leaf kind",

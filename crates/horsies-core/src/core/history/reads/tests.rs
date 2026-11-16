@@ -1288,7 +1288,45 @@ fn duplicate_guard_renders_pruned_and_legacy_probes_without_fallback_or_live() {
         assert_eq!(guard.matches(&probe).count(), 2, "{}", leaf.relation_name());
     }
     assert!(guard.trim_end().ends_with("$function$"));
-    assert!(guard.contains("RETURN FALSE;"));
+    assert!(guard.contains(
+        "RETURN EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions WHERE task_id = p_task_id);"
+    ));
+}
+
+#[tokio::test]
+#[serial]
+async fn duplicate_guard_finds_a_recorded_clock_exception() {
+    let database = TestDatabase::create().await;
+    let mut transaction = database.pool.begin().await.expect("begin exception setup");
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .expect("publish the readers");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let now = database_now(&mut transaction).await.expect("database now");
+    // Born an hour after its terminal time: a client clock ahead of the
+    // database. The move records such an id; the guard finds it there.
+    let recorded = v7_with_birth(now + Duration::hours(1));
+    let unrecorded = v7_with_birth(now + Duration::hours(2));
+    sqlx::query(
+        "INSERT INTO horsies_task_history_clock_exceptions (
+             task_id, retention_class_key, terminal_at
+         ) VALUES ($1, 'standard_30d', $2)",
+    )
+    .bind(recorded)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .expect("record a clock exception");
+    assert!(duplicate_guard(&mut transaction, recorded).await);
+    assert!(!duplicate_guard(&mut transaction, unrecorded).await);
+    transaction
+        .rollback()
+        .await
+        .expect("rollback exception setup");
+    database.drop().await;
 }
 
 async fn duplicate_guard(connection: &mut PgConnection, task_id: Uuid) -> bool {
