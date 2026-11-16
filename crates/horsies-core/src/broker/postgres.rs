@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -29,12 +28,8 @@ use crate::core::history::reads::result::{
 use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
-use crate::core::{
-    OutcomeCode, PostgresConfig, ResolvedEnqueue, RetrievalCode, TaskError, TaskInfo, TaskOptions,
-    TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
-};
+use crate::core::{OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult};
 
-use crate::broker::bound_handle::TaskHandle;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
@@ -1206,6 +1201,9 @@ impl PostgresBroker {
                 .map_err(BrokerError::Database)?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
+        // The task id is bound to another key: the same command with a changed
+        // key is a payload mismatch, not a key conflict that names the task
+        // itself (Python `horsies/core/brokers/postgres.py:2838-2848`).
         if bound_digest
             .as_deref()
             .is_some_and(|digest| digest != key_digest.as_slice())
@@ -1214,10 +1212,7 @@ impl PostgresBroker {
                 .rollback()
                 .await
                 .map_err(BrokerError::Database)?;
-            return Err(BrokerError::IdempotencyKeyConflict {
-                task_name: task_name.to_owned(),
-                task_id,
-            });
+            return Err(BrokerError::PayloadMismatch { task_id });
         }
         if bound_digest.is_none() {
             sqlx::query("UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2")
@@ -1229,293 +1224,6 @@ impl PostgresBroker {
         }
         transaction.commit().await.map_err(BrokerError::Database)?;
         Ok(task_id)
-    }
-
-    /// Send a task using pre-resolved enqueue parameters.
-    ///
-    /// This is the high-level enqueue API. Use [`Horsies::resolve_enqueue()`]
-    /// to get a [`ResolvedEnqueue`], then pass it here along with serialized
-    /// args.
-    ///
-    /// If `task_options` contains a `good_until` value, it is forwarded to the
-    /// underlying `enqueue()` call so the broker can skip expired tasks.
-    ///
-    /// Returns a typed [`TaskHandle`] for result retrieval.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let resolved = app.resolve_enqueue("process_image", None, None)?;
-    /// let args = serde_json::to_string(&my_args)?;
-    /// let handle: TaskHandle<String> = broker.send_task(&resolved, Some(&args), None, None).await?;
-    /// ```
-    pub async fn send_task<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
-        task_options: Option<&TaskOptions>,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        let task_options_json = task_options
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::ValidationFailed,
-                message: format!("task_options serialization failed: {}", e),
-                retryable: false,
-                task_id: None,
-                payload: None,
-            })?;
-
-        let good_until = task_options.and_then(|opts| opts.good_until);
-        let sent_at = Utc::now();
-        let pre_task_id =
-            crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                TaskSendError {
-                    code: TaskSendErrorCode::ValidationFailed,
-                    message: format!("failed to mint task identity: {error}"),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                }
-            })?;
-
-        let enqueue_sha = compute_enqueue_sha(
-            &resolved.task_name,
-            &resolved.queue_name,
-            resolved.priority as i32,
-            args,
-            kwargs,
-            sent_at,
-            good_until,
-            None, // enqueue_delay_seconds
-            task_options_json.as_deref(),
-        );
-
-        let payload = TaskSendPayload {
-            task_name: resolved.task_name.clone(),
-            queue_name: resolved.queue_name.clone(),
-            priority: resolved.priority as i32,
-            args_json: args.map(|s| s.to_owned()),
-            kwargs_json: kwargs.map(|s| s.to_owned()),
-            sent_at,
-            good_until,
-            enqueue_delay_seconds: None,
-            task_options: task_options_json.clone(),
-            enqueue_sha: enqueue_sha.clone(),
-            idempotency_key: None,
-            retention_class_key: resolved.retention_class_key.clone(),
-        };
-
-        let task_id = self
-            .enqueue(
-                &resolved.task_name,
-                args,
-                kwargs,
-                &resolved.queue_name,
-                resolved.priority as i32,
-                Some(sent_at),
-                None, // enqueued_at — DB default NOW()
-                good_until,
-                task_options_json.as_deref(),
-                &enqueue_sha,
-                Some(pre_task_id),
-                None,
-                None,
-                resolved.retention_class_key.as_deref(),
-                None,
-            )
-            .await
-            .map_err(|e| TaskSendError {
-                code: task_send_error_code(&e),
-                message: format!("{}", e),
-                retryable: e.is_retryable(),
-                task_id: Some(pre_task_id.clone()),
-                payload: Some(payload.clone()),
-            })?;
-
-        Ok(TaskHandle::new(task_id, Arc::clone(self)))
-    }
-
-    /// Send a task with automatic retry on transient broker errors.
-    ///
-    /// When `resend_on_transient_err` is `true`, retries up to 3 times with
-    /// exponential backoff (200ms, 400ms, 800ms) on retryable errors.
-    /// Mirrors Python's `resend_on_transient_err` behavior.
-    pub async fn send_task_with_retry<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
-        task_options: Option<&TaskOptions>,
-        resend_on_transient_err: bool,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        if !resend_on_transient_err {
-            return self.send_task(resolved, args, kwargs, task_options).await;
-        }
-        retry_send(|| self.send_task(resolved, args, kwargs, task_options)).await
-    }
-
-    /// Send a task with a delay (scheduled for future execution).
-    ///
-    /// Identical to [`send_task`](Self::send_task) but sets `enqueued_at` to
-    /// `now() + delay`, so the task will not become eligible for claiming until
-    /// that time.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    ///
-    /// let resolved = app.resolve_enqueue("send_reminder", None, None)?;
-    /// let handle: TaskHandle<()> = broker
-    ///     .schedule_task(&resolved, None, None, Duration::from_secs(3600), None)
-    ///     .await?;
-    /// ```
-    pub async fn schedule_task<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
-        delay: Duration,
-        task_options: Option<&TaskOptions>,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        let task_options_json = task_options
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::ValidationFailed,
-                message: format!("task_options serialization failed: {}", e),
-                retryable: false,
-                task_id: None,
-                payload: None,
-            })?;
-
-        let good_until = task_options.and_then(|opts| opts.good_until);
-        let sent_at = Utc::now();
-        let delay_secs = delay.as_secs() as i64;
-        let pre_task_id =
-            crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                TaskSendError {
-                    code: TaskSendErrorCode::ValidationFailed,
-                    message: format!("failed to mint task identity: {error}"),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                }
-            })?;
-
-        let enqueue_sha = compute_enqueue_sha(
-            &resolved.task_name,
-            &resolved.queue_name,
-            resolved.priority as i32,
-            args,
-            kwargs,
-            sent_at,
-            good_until,
-            Some(delay_secs),
-            task_options_json.as_deref(),
-        );
-
-        let payload = TaskSendPayload {
-            task_name: resolved.task_name.clone(),
-            queue_name: resolved.queue_name.clone(),
-            priority: resolved.priority as i32,
-            args_json: args.map(|s| s.to_owned()),
-            kwargs_json: kwargs.map(|s| s.to_owned()),
-            sent_at,
-            good_until,
-            enqueue_delay_seconds: Some(delay_secs),
-            task_options: task_options_json.clone(),
-            enqueue_sha: enqueue_sha.clone(),
-            idempotency_key: None,
-            retention_class_key: resolved.retention_class_key.clone(),
-        };
-
-        let task_id = self
-            .enqueue(
-                &resolved.task_name,
-                args,
-                kwargs,
-                &resolved.queue_name,
-                resolved.priority as i32,
-                Some(sent_at),
-                None,
-                good_until,
-                task_options_json.as_deref(),
-                &enqueue_sha,
-                Some(pre_task_id),
-                Some(delay_secs),
-                None,
-                resolved.retention_class_key.as_deref(),
-                None,
-            )
-            .await
-            .map_err(|e| TaskSendError {
-                code: task_send_error_code(&e),
-                message: format!("{}", e),
-                retryable: e.is_retryable(),
-                task_id: Some(pre_task_id.clone()),
-                payload: Some(payload.clone()),
-            })?;
-
-        Ok(TaskHandle::new(task_id, Arc::clone(self)))
-    }
-
-    /// Schedule a task with automatic retry on transient broker errors.
-    ///
-    /// When `resend_on_transient_err` is `true`, retries up to 3 times with
-    /// exponential backoff (200ms, 400ms, 800ms) on retryable errors.
-    pub async fn schedule_task_with_retry<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
-        delay: Duration,
-        task_options: Option<&TaskOptions>,
-        resend_on_transient_err: bool,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        if !resend_on_transient_err {
-            return self
-                .schedule_task(resolved, args, kwargs, delay, task_options)
-                .await;
-        }
-        retry_send(|| self.schedule_task(resolved, args, kwargs, delay, task_options)).await
-    }
-
-    /// Replay a failed send from its stored payload.
-    ///
-    /// Only `TaskSendErrorCode::EnqueueFailed` errors are retryable.
-    /// The payload contains all pre-serialized fields including the
-    /// `enqueue_sha` for idempotent delivery.
-    ///
-    /// Mirrors Python's `TaskFunction.retry_send(error)`.
-    pub async fn retry_send<T>(
-        self: &Arc<Self>,
-        payload: &TaskSendPayload,
-        original_task_id: Option<Uuid>,
-    ) -> Result<TaskHandle<T>, BrokerError> {
-        let task_id = self
-            .enqueue(
-                &payload.task_name,
-                payload.args_json.as_deref(),
-                payload.kwargs_json.as_deref(),
-                &payload.queue_name,
-                payload.priority,
-                Some(payload.sent_at),
-                None,
-                payload.good_until,
-                payload.task_options.as_deref(),
-                &payload.enqueue_sha,
-                original_task_id,
-                payload.enqueue_delay_seconds,
-                payload.idempotency_key.as_deref(),
-                payload.retention_class_key.as_deref(),
-                None,
-            )
-            .await?;
-
-        Ok(TaskHandle::new(task_id, Arc::clone(self)))
     }
 
     /// Claim up to `limit` tasks from the given queue.
@@ -3239,13 +2947,6 @@ fn parse_task_attempt_outcome(value: &str) -> Result<crate::core::TaskAttemptOut
     }
 }
 
-fn task_send_error_code(error: &BrokerError) -> TaskSendErrorCode {
-    match error {
-        BrokerError::PayloadMismatch { .. } => TaskSendErrorCode::PayloadMismatch,
-        _ => TaskSendErrorCode::EnqueueFailed,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
@@ -3358,7 +3059,7 @@ fn parse_task_result_row<T: DeserializeOwned>(
 use crate::core::task::retry_utils::parse_max_retries;
 
 // ---------------------------------------------------------------------------
-// Transient retry helper
+// Result wait
 // ---------------------------------------------------------------------------
 
 /// Re-poll interval of the workflow result wait (`get_workflow_result`),
@@ -3413,53 +3114,6 @@ impl ResultWaitMode {
             Self::Polling => tokio::time::sleep(wait).await,
         }
     }
-}
-
-/// Retry count for `resend_on_transient_err` (1 initial + 3 retries = 4 total).
-const SEND_RETRY_COUNT: u32 = 3;
-/// Initial retry delay in ms.
-const SEND_RETRY_INITIAL_MS: u64 = 200;
-/// Maximum retry delay in ms.
-const SEND_RETRY_MAX_MS: u64 = 2000;
-
-/// Retry a send operation on transient errors with exponential backoff.
-///
-/// Matches Python's retry loop in `task_decorator.py`:
-/// - Up to 3 retries (4 total attempts)
-/// - Exponential backoff: 200ms, 400ms, 800ms (capped at 2000ms)
-/// - Only retries when `TaskSendError.retryable` is `true`
-async fn retry_send<T, F, Fut>(mut op: F) -> TaskSendResult<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = TaskSendResult<T>>,
-{
-    let max_attempts = 1 + SEND_RETRY_COUNT;
-    let mut last_err: Option<TaskSendError> = None;
-
-    for attempt in 0..max_attempts {
-        if attempt > 0 {
-            let delay_ms = std::cmp::min(
-                SEND_RETRY_INITIAL_MS * 2u64.pow(attempt - 1),
-                SEND_RETRY_MAX_MS,
-            );
-            tracing::debug!(attempt, delay_ms, "retrying send after transient error",);
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-
-        match op().await {
-            Ok(val) => return Ok(val),
-            Err(err) => {
-                if err.retryable && attempt < max_attempts - 1 {
-                    last_err = Some(err);
-                    continue;
-                }
-                return Err(err);
-            }
-        }
-    }
-
-    // Exhausted all attempts — return the last error.
-    Err(last_err.expect("retry loop should have set last_err"))
 }
 
 #[cfg(test)]
@@ -3832,73 +3486,6 @@ mod tests {
         assert!(is_terminal_status("EXPIRED"));
     }
 
-    // -----------------------------------------------------------------------
-    // send_task / schedule_task compile-time contract checks
-    // -----------------------------------------------------------------------
-
-    /// Verify that send_task returns TaskHandle<T> (compile-time check).
-    #[test]
-    fn send_task_return_type_contract() {
-        // This function will never run but must compile, verifying
-        // that send_task returns Result<TaskHandle<T>, BrokerError>.
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &Arc<PostgresBroker>) {
-            let resolved = ResolvedEnqueue {
-                task_name: "my_task".to_owned(),
-                queue_name: "default".to_owned(),
-                priority: 0,
-                retention_class_key: Some("standard_30d".to_owned()),
-            };
-            let _handle: TaskHandle<i32> =
-                broker.send_task(&resolved, None, None, None).await.unwrap();
-        }
-    }
-
-    /// Verify that schedule_task returns TaskHandle<T> and accepts Duration.
-    #[test]
-    fn schedule_task_return_type_contract() {
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &Arc<PostgresBroker>) {
-            let resolved = ResolvedEnqueue {
-                task_name: "delayed_task".to_owned(),
-                queue_name: "default".to_owned(),
-                priority: 5,
-                retention_class_key: Some("standard_30d".to_owned()),
-            };
-            let delay = Duration::from_secs(60);
-            let _handle: TaskHandle<String> = broker
-                .schedule_task(&resolved, None, None, delay, None)
-                .await
-                .unwrap();
-        }
-    }
-
-    /// Verify that send_task accepts TaskOptions.
-    #[test]
-    fn send_task_accepts_task_options() {
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &Arc<PostgresBroker>) {
-            let resolved = ResolvedEnqueue {
-                task_name: "opts_task".to_owned(),
-                queue_name: "default".to_owned(),
-                priority: 0,
-                retention_class_key: Some("standard_30d".to_owned()),
-            };
-            let opts = TaskOptions {
-                task_name: "opts_task".to_owned(),
-                queue_name: None,
-                good_until: None,
-                auto_retry_for: None,
-                retry_policy: None,
-                timeout_ms: None,
-            };
-            let _handle: TaskHandle<()> = broker
-                .send_task(&resolved, Some("{}"), None, Some(&opts))
-                .await
-                .unwrap();
-        }
-    }
-
     /// Verify that get_result returns Result<TaskResult<T>, BrokerError>.
     #[test]
     fn get_result_return_type_contract() {
@@ -3932,89 +3519,6 @@ mod tests {
         async fn _check(broker: &PostgresBroker) {
             let _result: BrokerResult<DatabasePing> = broker.ping_database().await;
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // retry_send tests
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn retry_send_succeeds_on_first_attempt() {
-        let result: TaskSendResult<String> = retry_send(|| async { Ok("done".to_owned()) }).await;
-        assert_eq!(result.unwrap(), "done");
-    }
-
-    #[tokio::test]
-    async fn retry_send_retries_on_retryable_error() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let attempts = AtomicU32::new(0);
-
-        let result: TaskSendResult<String> = retry_send(|| {
-            let a = attempts.fetch_add(1, Ordering::SeqCst);
-            async move {
-                if a < 2 {
-                    Err(TaskSendError {
-                        code: TaskSendErrorCode::EnqueueFailed,
-                        message: "transient".to_owned(),
-                        retryable: true,
-                        task_id: None,
-                        payload: None,
-                    })
-                } else {
-                    Ok("recovered".to_owned())
-                }
-            }
-        })
-        .await;
-
-        assert_eq!(result.unwrap(), "recovered");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3); // 2 failures + 1 success
-    }
-
-    #[tokio::test]
-    async fn retry_send_does_not_retry_non_retryable() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let attempts = AtomicU32::new(0);
-
-        let result: TaskSendResult<String> = retry_send(|| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err(TaskSendError {
-                    code: TaskSendErrorCode::ValidationFailed,
-                    message: "permanent".to_owned(),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                })
-            }
-        })
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 1); // no retries
-    }
-
-    #[tokio::test]
-    async fn retry_send_exhausts_attempts() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let attempts = AtomicU32::new(0);
-
-        let result: TaskSendResult<String> = retry_send(|| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err(TaskSendError {
-                    code: TaskSendErrorCode::EnqueueFailed,
-                    message: "always fails".to_owned(),
-                    retryable: true,
-                    task_id: None,
-                    payload: None,
-                })
-            }
-        })
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 4); // 1 initial + 3 retries
     }
 
     // -----------------------------------------------------------------------

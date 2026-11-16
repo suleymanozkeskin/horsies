@@ -411,11 +411,12 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
         )
         .await
         .expect_err("matching command cannot replace its bound idempotency key");
+    // Python `test_send_idempotency_conflict.py::TestTaskIdBoundToAnotherKey::
+    // test_changed_key_on_retry_is_payload_mismatch`.
     assert!(matches!(
         different_key,
-        BrokerError::IdempotencyKeyConflict {
+        BrokerError::PayloadMismatch {
             task_id: conflicting_task_id,
-            ..
         } if conflicting_task_id == task_id
     ));
     let reservations_after_key_conflict: i64 =
