@@ -193,8 +193,10 @@ if TYPE_CHECKING:
 
 logger = get_logger('worker')
 
-GET_TASK_STATUS_RESULT_SQL = text("""
-    SELECT status, task_name, queue_name, is_workflow_task, result
+# A live row holds no result: the result is stored with the terminal
+# record in history.
+GET_TASK_STATUS_SQL = text("""
+    SELECT status, task_name, queue_name, is_workflow_task
     FROM horsies_tasks
     WHERE id = CAST(:id AS uuid)
 """)
@@ -1743,7 +1745,7 @@ class FinalizeMixin:
         therefore the expected shape on replay, not an absent task: the
         record answers from history, where its result payload also lives.
         """
-        res = await session.execute(GET_TASK_STATUS_RESULT_SQL, {'id': task_id})
+        res = await session.execute(GET_TASK_STATUS_SQL, {'id': task_id})
         live_row = res.fetchone()
         if live_row is not None:
             return _PersistedTaskRow(
@@ -1751,7 +1753,7 @@ class FinalizeMixin:
                 task_name=live_row.task_name,
                 queue_name=live_row.queue_name,
                 is_workflow_task=bool(live_row.is_workflow_task),
-                result=live_row.result,
+                result=None,
             )
         try:
             UUID(task_id)

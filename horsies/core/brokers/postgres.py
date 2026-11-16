@@ -70,7 +70,11 @@ from horsies.core.models.workflow_pg import (
     WorkflowTaskModel as _WorkflowTaskModel,
 )
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
+from horsies.core.types.status import (
+    TASK_TERMINAL_STATES,
+    TaskAttemptOutcome,
+    TaskStatus,
+)
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
@@ -742,17 +746,11 @@ SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
 """)
 
 # Slim status probe for result-wait polling: the full row drags the
-# (potentially TOASTed) args/kwargs/result payload columns along on every
-# poll iteration; status+name is all the loop needs until terminal.
+# (potentially TOASTed) input column along on every poll iteration;
+# status+name is all the loop needs. A live row holds no result: the result
+# is stored with the terminal record in history.
 GET_TASK_STATUS_NAME_SQL = text("""
     SELECT status, task_name FROM horsies_tasks WHERE id = :id
-""")
-
-# Terminal fetch for the result-wait loop: exactly the columns
-# RawResultRecord consumes. The full entity would also ship args/kwargs —
-# multi-MB for payload-heavy tasks — to read a result envelope.
-GET_TASK_RESULT_RECORD_SQL = text("""
-    SELECT task_name, status, result FROM horsies_tasks WHERE id = :id
 """)
 
 # Sentinel returned by _probe_result_row while the row is non-terminal.
@@ -2459,12 +2457,12 @@ class PostgresBroker:
     ) -> 'BrokerResult[RawResultRecord | None] | object':
         """Slim status probe for the result-wait loop.
 
-        Polls status+name only; the full row (with potentially TOASTed
-        payload columns) is fetched once, when a terminal status is
-        observed. A live row that is absent — or that vanishes between
-        the status probe and the record fetch — falls through to the
-        history side, because terminalization DELETES the live row as
-        it records the terminal fact.
+        Polls status+name only. A live row holds no result: the result is
+        stored with the terminal record in history, so a live row that is
+        absent falls through to the history side, because terminalization
+        DELETES the live row as it records the terminal fact. A live row
+        with a terminal status has no result to read and gives a
+        payload-less record.
 
         Returns the loop's final ``BrokerResult`` when the wait is over,
         or the ``_STILL_WAITING`` sentinel to keep polling. With
@@ -2478,27 +2476,7 @@ class PostgresBroker:
         if probe_row is None:
             return await self._history_result_record(session, task_id)
         status = TaskStatus(str(probe_row.status))
-        if status in (
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.EXPIRED,
-        ):
-            record_row = (await session.execute(
-                GET_TASK_RESULT_RECORD_SQL, {'id': task_id},
-            )).fetchone()
-            if record_row is None:
-                # The ruled boundary: the row moved between the live
-                # poll and this fetch.
-                return await self._history_result_record(
-                    session, task_id
-                )
-            return self._build_raw_result_record(
-                task_id,
-                str(record_row.task_name),
-                TaskStatus(str(record_row.status)),
-                cast('str | None', record_row.result),
-            )
-        if status == TaskStatus.CANCELLED or non_terminal_snapshot:
+        if status in TASK_TERMINAL_STATES or non_terminal_snapshot:
             return Ok(RawResultRecord(
                 task_id=task_id,
                 task_name=str(probe_row.task_name),

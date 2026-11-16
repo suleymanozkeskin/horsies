@@ -204,20 +204,17 @@ def _stale_applied(task_id: str, terminal_at: datetime) -> Applied:
 def _make_result_session(row: Any) -> AsyncMock:
     """Mock session for get_raw_result_record_async.
 
-    The broker polls a slim status/name SELECT first and, once a terminal
-    status is observed, fetches only the columns RawResultRecord consumes
-    (task_name, status, result) — never the full entity, whose args/kwargs
-    payload columns can be multi-MB. ``session.get`` is a tripwire: the
-    result path regressing to a full-entity load fails loudly here.
+    The broker polls a slim status/name SELECT of the live row; a live row
+    holds no result. ``session.get`` is a tripwire: the result path
+    regressing to a full-entity load fails loudly here.
     """
-    from horsies.core.brokers.postgres import GET_TASK_RESULT_RECORD_SQL
+    from horsies.core.brokers.postgres import GET_TASK_STATUS_NAME_SQL
 
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     if row is None:
         probe_row = None
-        record_row = None
     else:
         probe_row = MagicMock()
         status = row.status
@@ -225,24 +222,18 @@ def _make_result_session(row: Any) -> AsyncMock:
             status.value if isinstance(status, TaskStatus) else status
         )
         probe_row.task_name = row.task_name
-        record_row = MagicMock()
-        record_row.status = probe_row.status
-        record_row.task_name = row.task_name
-        record_row.result = row.result
 
     async def _execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        assert statement is GET_TASK_STATUS_NAME_SQL, statement
         result = MagicMock()
-        if statement is GET_TASK_RESULT_RECORD_SQL:
-            result.fetchone = MagicMock(return_value=record_row)
-        else:
-            result.fetchone = MagicMock(return_value=probe_row)
+        result.fetchone = MagicMock(return_value=probe_row)
         return result
 
     session.execute = AsyncMock(side_effect=_execute)
     session.get = AsyncMock(
         side_effect=AssertionError(
             'result path must not full-entity load TaskModel; '
-            'use GET_TASK_RESULT_RECORD_SQL'
+            'use GET_TASK_STATUS_NAME_SQL'
         ),
     )
     # The history fallback probes for the staged detail function on
@@ -267,14 +258,10 @@ def _make_task_row(**overrides: Any) -> MagicMock:
         'status': TaskStatus.PENDING,
         'args': None,
         'kwargs': None,
-        'result': None,
-        'failed_reason': None,
         'sent_at': datetime.now(timezone.utc),
         'enqueued_at': datetime.now(timezone.utc),
         'claimed_at': None,
         'started_at': None,
-        'completed_at': None,
-        'failed_at': None,
         'retry_count': 0,
         'max_retries': 0,
         'next_retry_at': None,
@@ -1381,16 +1368,19 @@ class TestGetRawResultRecordAsync:
         assert result.unwrap() is None
 
     @pytest.mark.asyncio
-    async def test_terminal_row_with_valid_envelope_returns_record(self) -> None:
-        """COMPLETED row with parseable envelope → Ok(RawResultRecord)."""
+    @pytest.mark.parametrize(
+        'status',
+        [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EXPIRED],
+    )
+    async def test_live_row_with_a_terminal_status_returns_record_with_none_payload(
+        self, status: TaskStatus,
+    ) -> None:
+        """A live row holds no result: a terminal status read from it gives
+        Ok(RawResultRecord(raw_result=None)), and only the status probe runs."""
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        row = _make_task_row(
-            status=TaskStatus.COMPLETED,
-            result='{"__h_task_result__":true,"ok":42,"err":null}',
-        )
-        session = _make_result_session(row)
+        session = _make_result_session(_make_task_row(status=status))
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('task-123')
@@ -1400,12 +1390,9 @@ class TestGetRawResultRecordAsync:
         assert isinstance(record, RawResultRecord)
         assert record.task_id == 'task-123'
         assert record.task_name == 'my_task'
-        assert record.status == TaskStatus.COMPLETED
-        assert record.raw_result == {
-            '__h_task_result__': True,
-            'ok': 42,
-            'err': None,
-        }
+        assert record.status == status
+        assert record.raw_result is None
+        assert session.execute.await_count == 1
 
     @pytest.mark.asyncio
     async def test_cancelled_row_returns_record_with_none_payload(self) -> None:
@@ -1413,7 +1400,7 @@ class TestGetRawResultRecordAsync:
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        row = _make_task_row(status=TaskStatus.CANCELLED, result=None)
+        row = _make_task_row(status=TaskStatus.CANCELLED)
         session = _make_result_session(row)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
@@ -1439,7 +1426,7 @@ class TestGetRawResultRecordAsync:
         _listener_of(broker).listen = AsyncMock(
             side_effect=RuntimeError('listener down; force polling'),
         )
-        running_row = _make_task_row(status=TaskStatus.RUNNING, result=None)
+        running_row = _make_task_row(status=TaskStatus.RUNNING)
         session = _make_result_session(running_row)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
@@ -1455,45 +1442,6 @@ class TestGetRawResultRecordAsync:
         assert isinstance(record, RawResultRecord)
         assert record.status == TaskStatus.RUNNING
         assert record.raw_result is None
-
-    @pytest.mark.asyncio
-    async def test_malformed_json_returns_invalid_json_payload(self) -> None:
-        """Result column with malformed JSON → Err(INVALID_JSON_PAYLOAD)."""
-        broker = _make_broker()
-        row = _make_task_row(
-            status=TaskStatus.COMPLETED,
-            result='{not valid json',
-        )
-        session = _make_result_session(row)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.get_raw_result_record_async('task-123')
-
-        assert is_err(result)
-        err = result.unwrap_err()
-        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
-        assert err.retryable is False
-        assert 'task-123' in err.message
-
-    @pytest.mark.asyncio
-    async def test_non_object_envelope_returns_invalid_json_payload(self) -> None:
-        """Result column parses to a non-object JSON value → Err(INVALID_JSON_PAYLOAD).
-
-        Envelope grammar requires a JSON object at the top level; a bare
-        scalar (e.g. ``42``) is a contract violation distinct from a
-        parse failure.
-        """
-        broker = _make_broker()
-        row = _make_task_row(status=TaskStatus.COMPLETED, result='42')
-        session = _make_result_session(row)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.get_raw_result_record_async('task-123')
-
-        assert is_err(result)
-        err = result.unwrap_err()
-        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
-        assert 'not a JSON object' in err.message
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self) -> None:
