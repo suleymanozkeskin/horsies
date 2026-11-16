@@ -476,6 +476,17 @@ impl PoolBoard {
         self.failed.cancel();
     }
 
+    /// Wait until the pools fail, and return the failure that won (Python
+    /// `SlotPool.wait_failed`). Waits forever on pools that never fail.
+    pub async fn wait_failed(&self) -> PoolFailure {
+        self.failed.cancelled().await;
+        match &self.lock().condition {
+            Condition::Failed(failure) => failure.clone(),
+            // `fail` records the failure before it fires the token.
+            Condition::Serving => unreachable!("the pools were failed with no failure recorded"),
+        }
+    }
+
     pub fn health(&self) -> PoolHealth {
         let condition = self.lock().condition.clone();
         match (condition, self.stop.is_cancelled()) {

@@ -13,6 +13,7 @@ mod finalize_status_guard;
 mod fresh_schema_rules;
 mod lifecycle_regressions;
 mod status_events;
+mod success_batch_write;
 pub(crate) mod support;
 mod task_attempt_history;
 mod task_history_terminalization_cancellation;
