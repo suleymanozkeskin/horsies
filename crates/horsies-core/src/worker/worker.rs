@@ -1642,9 +1642,6 @@ mod tests {
         let schema = database
             .find("ensure_schema_initialized().await")
             .expect("schema authorization");
-        let family = database
-            .find("self.broker.ensure_client_family_for_write().await?")
-            .expect("client family check");
         let coverage = database
             .find("ensure_startup_coverage_in_pool(")
             .expect("startup partition coverage");
@@ -1664,8 +1661,7 @@ mod tests {
         let reaper_call = &run[reaper..reaper + 500];
         assert!(reaper_call.contains("self.broker.pool().clone()"));
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
-        assert!(schema < family);
-        assert!(family < coverage);
+        assert!(schema < coverage);
         assert!(coverage < session_pool);
         assert!(start < banner);
         assert!(start < listener);
@@ -2874,6 +2870,139 @@ mod tests {
     /// listener has its own pool: closing only the main pool lets the loop start
     /// (background loops spawn), then makes every claim fail with `PoolClosed`,
     /// which is not retryable, so the loop breaks fatally at the first claim.
+    /// Rows of the partition catalog and of the retention classes: the
+    /// facts the startup coverage writes.
+    async fn maintenance_row_counts(pool: &PgPool) -> (i64, i64) {
+        use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES};
+        let leaves: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {LEAF_CATALOG}"))
+            .fetch_one(pool)
+            .await
+            .expect("count catalog rows");
+        let classes: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {RETENTION_CLASSES}"))
+            .fetch_one(pool)
+            .await
+            .expect("count retention classes");
+        (leaves, classes)
+    }
+
+    /// A worker on a database with no family row, then on one recorded by
+    /// the Python client, fails its start with the family error before the
+    /// startup coverage writes anything. The handle runs with the install
+    /// off, so only the family check can refuse it.
+    #[tokio::test]
+    #[serial]
+    async fn worker_start_refuses_a_database_of_another_client_family() {
+        use std::str::FromStr;
+
+        use sqlx::Connection;
+
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let base_options =
+            sqlx::postgres::PgConnectOptions::from_str(&main_url).expect("test database URL");
+        let mut admin =
+            sqlx::PgConnection::connect_with(&base_options.clone().database("postgres"))
+                .await
+                .expect("connect admin database");
+        let name = format!("core_worker_family_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+            .execute(&mut admin)
+            .await
+            .expect("create family test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(base_options.database(&name))
+            .await
+            .expect("connect family test database");
+        // Migrations without the install's family record: no family row.
+        crate::broker::migrations::run_horsies_migrations(&pool)
+            .await
+            .expect("migrate family test database");
+        let before = maintenance_row_counts(&pool).await;
+
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let pg_config = PostgresConfig {
+            database_url: main_url,
+            session_database_url: None,
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            pool_size: 30,
+            max_overflow: 30,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        };
+        let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: pg_config,
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: None,
+            max_claim_renew_age_ms: 180_000,
+            recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
+            resilience: WorkerResilienceConfig::default(),
+            schedule: None,
+            resend_on_transient_err: false,
+        };
+        let worker = Worker::new(
+            broker,
+            Arc::new(TaskRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new()),
+            app_config,
+            WorkerConfig::default(),
+        )
+        .expect("worker");
+
+        let not_recorded = worker
+            .start_database()
+            .await
+            .expect_err("a database with no family row must refuse the start");
+        assert!(matches!(
+            not_recorded,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::NotRecorded,
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert!(!not_recorded.is_retryable());
+        assert_eq!(maintenance_row_counts(&pool).await, before);
+
+        sqlx::query(
+            "INSERT INTO horsies_client_family (only_row, family, recorded_at)
+             VALUES (TRUE, 'PYTHON', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("record the Python family");
+        let python = worker
+            .start_database()
+            .await
+            .expect_err("a database of the Python family must refuse the start");
+        assert!(matches!(
+            python,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Python),
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert!(!python.is_retryable());
+        assert_eq!(maintenance_row_counts(&pool).await, before);
+
+        drop(worker);
+        pool.close().await;
+        sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .expect("drop family test database");
+    }
+
     #[tokio::test]
     #[serial]
     async fn run_fires_cancel_on_fatal_claim_exit() {
