@@ -9,8 +9,14 @@ from typing_extensions import Self
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.types.result import Err, Ok, Result
 
-# Length of the `queue_name` database columns (tasks and workflow tasks).
-QUEUE_NAME_MAX_LENGTH = 100
+QUEUE_NAME_MAX_BYTES = 52
+"""The longest queue name, in bytes of its UTF-8 text.
+
+The insert trigger of a task sends ``pg_notify('task_queue_' || queue_name)``.
+PostgreSQL refuses a channel name over 63 bytes, and the prefix takes 11, so
+a longer name fails every send to that queue. The schema checks the same
+bound (``octet_length(queue_name) <= 52``).
+"""
 
 
 class QueueMode(Enum):
@@ -31,8 +37,9 @@ class CustomQueueConfig(BaseModel):
         ``cluster_wide_cap=None``. ``0`` is valid and pauses claiming from
         the queue. Negative values are rejected.
 
-    The name must not be empty, must not start or end with whitespace, and
-    must not be longer than ``QUEUE_NAME_MAX_LENGTH`` characters.
+    The name must not be empty, must not start or end with whitespace, must
+    be valid UTF-8 text, and must not be longer than ``QUEUE_NAME_MAX_BYTES``
+    bytes of that text.
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -57,7 +64,8 @@ class CustomQueueConfig(BaseModel):
                     notes=[f'CustomQueueConfig(name={self.name!r})'],
                     help_text=(
                         'use a non-empty name without leading or trailing '
-                        f'whitespace, at most {QUEUE_NAME_MAX_LENGTH} characters'
+                        f'whitespace, at most {QUEUE_NAME_MAX_BYTES} bytes '
+                        'of UTF-8 text'
                     ),
                 )
             case _ as unreachable:
@@ -75,27 +83,38 @@ class QueueNameEdgeWhitespace:
 
 
 @dataclass(frozen=True, slots=True)
+class QueueNameNotUtf8:
+    """The queue name holds a lone surrogate, so it has no UTF-8 text."""
+
+
+@dataclass(frozen=True, slots=True)
 class QueueNameTooLong:
-    """The queue name is longer than ``QUEUE_NAME_MAX_LENGTH``."""
+    """The UTF-8 text of the queue name is longer than ``QUEUE_NAME_MAX_BYTES``."""
 
-    length: int
+    byte_length: int
 
 
-type QueueNameRefusal = QueueNameEmpty | QueueNameEdgeWhitespace | QueueNameTooLong
+type QueueNameRefusal = (
+    QueueNameEmpty | QueueNameEdgeWhitespace | QueueNameNotUtf8 | QueueNameTooLong
+)
 
 
 def check_queue_name(name: str) -> Result[str, QueueNameRefusal]:
     """Accept a usable queue name, or name the one rule that it breaks.
 
-    It checks the rules in this order: empty, edge whitespace, length. It
-    does not read the app config.
+    It checks the rules in this order: empty, edge whitespace, UTF-8 text,
+    byte length. It does not read the app config.
     """
     if name == '':
         return Err(QueueNameEmpty())
     if name != name.strip():
         return Err(QueueNameEdgeWhitespace())
-    if len(name) > QUEUE_NAME_MAX_LENGTH:
-        return Err(QueueNameTooLong(length=len(name)))
+    try:
+        byte_length = len(name.encode('utf-8'))
+    except UnicodeEncodeError:
+        return Err(QueueNameNotUtf8())
+    if byte_length > QUEUE_NAME_MAX_BYTES:
+        return Err(QueueNameTooLong(byte_length=byte_length))
     return Ok(name)
 
 
@@ -105,10 +124,12 @@ def _describe_refusal(refusal: QueueNameRefusal) -> str:
             return 'the name is empty'
         case QueueNameEdgeWhitespace():
             return 'the name has whitespace at the start or the end'
-        case QueueNameTooLong(length=length):
+        case QueueNameNotUtf8():
+            return 'the name holds a lone surrogate and has no UTF-8 text'
+        case QueueNameTooLong(byte_length=byte_length):
             return (
-                f'the name has {length} characters; '
-                f'the maximum is {QUEUE_NAME_MAX_LENGTH}'
+                f'the name has {byte_length} bytes of UTF-8 text; '
+                f'the maximum is {QUEUE_NAME_MAX_BYTES}'
             )
         case _ as unreachable:
             assert_never(unreachable)

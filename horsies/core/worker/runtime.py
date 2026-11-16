@@ -36,7 +36,6 @@ __all__ = [
     '_FINALIZE_PARENT_MAX_RETRIES',
     '_FINALIZE_RETRY_BASE_DELAY_S',
     '_FINALIZE_RETRY_MAX_DELAY_S',
-    '_REAPER_MAX_PERMANENT_FAILURES',
     'ChildHookFailedError',
     'ChildStartFailedError',
     '_RetryBackoff',
@@ -152,21 +151,10 @@ class _AttemptEndUnknown:
 _TimeoutOutcome: TypeAlias = _TimeoutSettled | _TimeoutWriteFailed | _AttemptEndUnknown
 
 
-# After this many consecutive permanent failures, a reaper operation is
-# disabled for the process lifetime to avoid spamming logs every interval.
-_REAPER_MAX_PERMANENT_FAILURES = 3
-
-
 @dataclass
 class _ReaperPassState:
-    """Per-process reaper failure counters, schedules and log bounds."""
+    """Per-process reaper schedules and log bounds."""
 
-    requeue_permanent_failures: int = 0
-    requeue_disabled: bool = False
-    mark_failed_permanent_failures: int = 0
-    mark_failed_disabled: bool = False
-    terminate_orphans_permanent_failures: int = 0
-    terminate_orphans_disabled: bool = False
     next_orphan_task_audit_at: float = 0.0
     next_retention_cleanup_at: float = 0.0
     next_partition_maintenance_at: float = 0.0

@@ -26,10 +26,11 @@ use super::pool::{
 };
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     ChildKind, DispatchNumber, InitFrame, SharedRunFrame, SharedWork, TaskInputText,
 };
-use crate::worker::executor::supervisor::{ChildCommand, SpawnerHandle};
+use crate::worker::executor::supervisor::{ChildCommand, ChildSource, SpawnerHandle};
 use crate::worker::runner_beats::LiveDispatches;
 
 /// The fixed facts of a shared pool. The number of its slots is on the
@@ -50,6 +51,13 @@ pub struct SharedPoolConfig {
     pub tasks_per_seat: TaskLimit,
     pub memory_per_child: MemoryLimit,
     pub exit_not_seen: ExitNotSeen,
+    /// The CPUs of each child, set before its init frame.
+    pub child_cpus: ChildCpus,
+    /// The longest wait for the exit of a child after a `SIGKILL`:
+    /// [`CHILD_KILL_WAIT`] in a worker.
+    ///
+    /// [`CHILD_KILL_WAIT`]: crate::worker::executor::supervisor::CHILD_KILL_WAIT
+    pub kill_wait: Duration,
 }
 
 /// The kind of the shared children of an init frame. An isolated init
@@ -142,6 +150,8 @@ pub(super) struct SharedPoolShared {
     pub(super) kind: SharedChildKind,
     pub(super) class: ExecutionClass,
     pub(super) seats: NonZeroUsize,
+    /// Where the children come from: the spawner in a worker.
+    pub(super) source: Arc<dyn ChildSource>,
     pub(super) spawner: SpawnerHandle,
     pub(super) live: LiveDispatches,
     pub(super) board: Arc<PoolBoard>,
@@ -232,6 +242,30 @@ impl SharedPool {
         spawner: SpawnerHandle,
         live: LiveDispatches,
     ) -> Self {
+        let source: Arc<dyn ChildSource> = Arc::new(spawner.clone());
+        Self::start_with(config, board, spawner, source, live)
+    }
+
+    /// Start the pool with its children from `source`, a source over
+    /// `spawner` that a test builds.
+    #[cfg(test)]
+    pub(super) fn start_from_source(
+        config: SharedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        source: Arc<dyn ChildSource>,
+        live: LiveDispatches,
+    ) -> Self {
+        Self::start_with(config, board, spawner, source, live)
+    }
+
+    fn start_with(
+        config: SharedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        source: Arc<dyn ChildSource>,
+        live: LiveDispatches,
+    ) -> Self {
         let (kind, class, seats) = shared_kind_of(&config.init);
         let indices = board.slots_of(class);
         let count = indices.len();
@@ -240,6 +274,7 @@ impl SharedPool {
             kind,
             class,
             seats,
+            source,
             spawner,
             live,
             first: indices.start,

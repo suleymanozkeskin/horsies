@@ -28,6 +28,7 @@ from horsies.core.lifecycle.classify import (
     FinalizeDecision,
     FinalizeNoOpReason,
     NoTerminalAction,
+    ReleaseUnconfirmedClaim,
     ReplayWorkflowPhase2,
     ResultProduced,
     ResultUndecodable,
@@ -114,10 +115,6 @@ class TestAbortsThatWriteNothing:
         'reason,expected',
         [
             (AbortReason.CLAIM_LOST, FinalizeNoOpReason.CLAIM_LOST),
-            (
-                AbortReason.OWNERSHIP_UNCONFIRMED,
-                FinalizeNoOpReason.OWNERSHIP_UNCONFIRMED,
-            ),
             (AbortReason.WORKFLOW_STOPPED, FinalizeNoOpReason.WORKFLOW_STOPPED),
         ],
     )
@@ -130,15 +127,25 @@ class TestAbortsThatWriteNothing:
         decision = classify(AbortedBeforeResult(reason=reason), _context())
         assert decision == NoTerminalAction(reason=expected)
 
-    def test_workflow_stopped_inside_a_payload_is_also_a_no_op(self) -> None:
-        """The same sentinel travels two ways and must mean one thing."""
-        error = TaskError(
-            error_code='WORKFLOW_STOPPED', message='stopped', data={},
+    def test_an_unconfirmed_start_releases_the_claim_of_its_generation(
+        self,
+    ) -> None:
+        """The start did not confirm and no task code ran: the claim goes
+        back at once, fenced on the generation of this dispatch. It used to
+        be a no-op that waited for the claim lease."""
+        decision = classify(
+            AbortedBeforeResult(reason=AbortReason.OWNERSHIP_UNCONFIRMED),
+            _context(),
         )
-        decision = classify(ErrorProduced(error=error), _context())
-        assert decision == NoTerminalAction(
-            reason=FinalizeNoOpReason.WORKFLOW_STOPPED,
+        assert decision == ReleaseUnconfirmedClaim(
+            task_id='t1', claimed_at=_GENERATION,
         )
+
+    def test_workflow_stopped_travels_only_as_an_abort_reason(self) -> None:
+        """No task error carries the stop code, so no returned error reads as a
+        stop: a finalize that took one for a stop left the row RUNNING."""
+        with pytest.raises(ValueError, match='reserved error code name'):
+            TaskError(error_code='WORKFLOW_STOPPED', message='stopped', data={})
 
 
 class TestExpiryRoutesByTaskKind:

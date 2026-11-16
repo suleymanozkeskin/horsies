@@ -235,9 +235,12 @@ mod tests {
             ..RecoveryConfig::default()
         };
         let handle = spawn_reaper(
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
             pool.clone(),
             pool,
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             config,
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
@@ -261,7 +264,24 @@ mod tests {
             WorkerConfig::default(),
             test_app_config(),
             new_reaper_health(),
-            Arc::new(tokio::sync::Semaphore::new(1)),
+            crate::worker::children::ChildrenView::new(
+                Arc::new(crate::worker::executor::slots::PoolBoard::new(
+                    crate::worker::executor::slots::ChildLayout {
+                        isolated: 1,
+                        shared_async: 0,
+                        shared_thread: 0,
+                    },
+                )),
+                crate::worker::children::SeatsPerChild {
+                    shared_async: 0,
+                    shared_thread: 0,
+                },
+            ),
+            crate::worker::worker_state::ClaimColumns {
+                processes: 1,
+                max_claim_batch: 0,
+                max_claim_per_worker: 1,
+            },
             Utc::now(),
             cancel.clone(),
         );

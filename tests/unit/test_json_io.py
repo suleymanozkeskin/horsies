@@ -3,7 +3,8 @@
 dumps_json is strict: it rejects non-JSON-native values (tuple, set, non-str
 dict keys, lone surrogates, non-finite floats) rather than coercing them, and
 emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity),
-numeric literals outside the finite binary64 range, and lone surrogates.
+numeric literals outside the finite binary64 range, lone surrogates, and an
+object that repeats a key.
 loads_json_bytes is the stored-payload form: strict UTF-8, and empty is an
 error. dumps_canonical_json is the one canonical form for hashed or stored text.
 """
@@ -272,6 +273,33 @@ class TestLoadsJson:
         assert not is_err(result)
         assert result.ok_value == [int(digits)]
 
+    @pytest.mark.parametrize(
+        'document',
+        [
+            '{"a":1,"a":2}',
+            '{"a":1,"b":2,"a":1}',
+            r'{"a":1,"\u0061":2}',
+            '{"outer":{"a":1,"a":2}}',
+            '[{"a":1,"a":2}]',
+        ],
+        ids=['top-level', 'same-value', 'escaped-key', 'nested-object', 'in-array'],
+    )
+    def test_object_that_repeats_a_key_rejected(self, document: str) -> None:
+        """`json.loads` would keep the last value; the read refuses instead."""
+        result = loads_json(document)
+        assert is_err(result)
+        assert str(result.err_value) == 'JSON parse failed: JSON object repeats a key'
+
+    def test_repeated_key_rejection_text_holds_no_key(self) -> None:
+        result = loads_json('{"secret_key":1,"secret_key":2}')
+        assert is_err(result)
+        assert 'secret_key' not in str(result.err_value)
+
+    def test_same_key_in_separate_objects_is_accepted(self) -> None:
+        result = loads_json('[{"a":1},{"a":2},{"b":{"a":3}}]')
+        assert not is_err(result)
+        assert result.ok_value == [{'a': 1}, {'a': 2}, {'b': {'a': 3}}]
+
 
 def _nested_text(depth: int) -> str:
     """Return a JSON text with `depth` nested lists around one number."""
@@ -445,6 +473,11 @@ class TestLoadsJsonBytes:
         result = loads_json_bytes(payload)
         assert is_err(result)
         assert 'not UTF-8' in str(result.err_value)
+
+    def test_payload_that_repeats_a_key_is_an_error(self) -> None:
+        result = loads_json_bytes(b'{"a":1,"a":2}')
+        assert is_err(result)
+        assert 'repeats a key' in str(result.err_value)
 
     def test_utf8_byte_order_mark_is_an_error(self) -> None:
         assert is_err(loads_json_bytes(b'\xef\xbb\xbf[]'))

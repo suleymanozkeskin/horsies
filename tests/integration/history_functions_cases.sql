@@ -138,12 +138,13 @@ $$;
 
 CREATE FUNCTION fixture_node(p_id uuid, p_workflow uuid, p_index integer, p_task uuid) RETURNS void LANGUAGE sql AS $$
     INSERT INTO horsies_workflow_tasks (
-        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
+        downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+        dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
         good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
         sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
     ) VALUES (
-        p_id, p_workflow, p_index, 'node_' || p_index, 'fixture.task', '{"x":1}', 'default', 50, '{}', NULL,
+        'NONE', p_id, p_workflow, p_index, 'node_' || p_index, 'fixture.task', '{"x":1}', 'default', 50, '{}', NULL,
         NULL, FALSE, 'all', NULL, NULL, 3, 'ISOLATED',
         NULL, 'forever', 'RUNNING', p_task, FALSE, NULL, NULL,
         NULL, NULL, NULL, NULL, now(), now(), NULL
