@@ -290,12 +290,15 @@ fn test_queue() -> String {
 }
 
 fn writer(pool: PgPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
-        Arc::new(PostgresBroker::from_pool(pool)),
+        broker,
         Arc::new(WorkflowSpecRegistry::default()),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
+        successes,
     )
 }
 

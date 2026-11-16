@@ -5,7 +5,7 @@
 //! | End | Statement |
 //! |---|---|
 //! | `NotDispatched` | release of the claim; the row goes back to the queue |
-//! | `Reported(result)`, a value | the fused success of a plain task, or the workflow success |
+//! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
 //! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2 |
@@ -17,10 +17,14 @@
 //! is sent again, at most the retries of its [`WriteStage`]. After the last
 //! retry of a `TASK_TIMEOUT` write, crash recovery writes `TASK_TIMEOUT` at
 //! the same placement, with its own retries (Python
-//! `_recover_timed_out_row`).
+//! `_recover_timed_out_row`). A plain success sent again joins a later
+//! batch; a row whose batch committed before its reply was lost answers
+//! `AlreadyApplied`.
 
 use std::sync::Arc;
 use std::time::Duration;
+
+use serde_json::value::RawValue;
 
 use super::dispatch::{AttemptEnd, ClaimedTask, Settlement};
 use crate::broker::attempt_writes::{
@@ -30,15 +34,19 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::OwnedClaim;
+use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
+use crate::db::Transience;
 use crate::worker::execution::{
     persist_failed_attempt, persist_ok_result, persist_undecodable_result, phase_retry_delay,
-    run_phase2, unclaim_task_with_retry, FinalizeError, FinalizeOutcome, Phase2Work,
+    run_phase2, unclaim_task_with_retry, FinalizeError, FinalizeOutcome, FinalizeStage, Phase2Work,
     PHASE1_MAX_RETRIES,
 };
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
+use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
+use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
 use crate::worker::retry::{admit_retry, RetryAdmission};
 
 /// The text of a worker failure with no detail (Python
@@ -245,13 +253,46 @@ pub fn timeout_recovery_write(
     )
 }
 
+/// The stored form of a success value (`TaskResult::Ok`), with the value
+/// text kept byte for byte. Pure.
+///
+/// Errors: the diagnosis of a value that is not JSON; the caller fails the
+/// task with `WORKER_SERIALIZATION_ERROR`.
+fn ok_envelope(value: &[u8]) -> Result<String, String> {
+    let raw = serde_json::from_slice::<&RawValue>(value).map_err(|error| error.to_string())?;
+    serde_json::to_string(&TaskResult::Ok(raw)).map_err(|error| error.to_string())
+}
+
+/// A finalize batcher for an outcome writer under test: a worker pool of 5
+/// connections (2 flushers) and a queue of 64 rows.
+#[cfg(test)]
+pub(super) fn test_successes(
+    broker: &Arc<PostgresBroker>,
+    worker_id: &str,
+) -> FinalizeBatcher<WorkerPoolSuccessWrite> {
+    use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
+    use crate::worker::finalize_batch::FlusherBound;
+    let sizing = PoolSizing::new(5, Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS))
+        .expect("a worker pool of 5 keeps batch connections");
+    FinalizeBatcher::new(
+        WorkerPoolSuccessWrite::new(Arc::clone(broker), worker_id.to_owned()),
+        std::num::NonZeroUsize::new(64).expect("64 is not zero"),
+        FlusherBound::of_worker_pool(&sizing).expect("a pool of 5 leaves 2 flushers"),
+    )
+}
+
 /// Writes the end of each attempt with the existing statements.
+///
+/// The plain successes go to the finalize batcher of the worker, which
+/// writes them in batches; the worker stop closes it after the drain of the
+/// outcome writes (`finalize_batch::stop::drain_then_close`).
 pub struct OutcomeWriter {
     broker: Arc<PostgresBroker>,
     workflows: Arc<WorkflowSpecRegistry>,
     worker_id: String,
     payload_policy: PayloadPolicy,
     retention: RetentionConfig,
+    successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
 }
 
 impl OutcomeWriter {
@@ -261,6 +302,7 @@ impl OutcomeWriter {
         worker_id: String,
         payload_policy: PayloadPolicy,
         retention: RetentionConfig,
+        successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
     ) -> Self {
         Self {
             broker,
@@ -268,6 +310,7 @@ impl OutcomeWriter {
             worker_id,
             payload_policy,
             retention,
+            successes,
         }
     }
 
@@ -411,17 +454,20 @@ impl OutcomeWriter {
     ) -> Result<FinalizeOutcome, FinalizeError> {
         let workflow = task.kind.is_workflow_task();
         match write {
-            PhaseOneWrite::Success { value } => {
-                persist_ok_result(
-                    &self.broker,
-                    task.task_id,
-                    value,
-                    fence(task, &self.worker_id),
-                    workflow,
-                    &task.queue_name,
-                )
-                .await
-            }
+            PhaseOneWrite::Success { value } => match task.kind.is_workflow_task() {
+                true => {
+                    persist_ok_result(
+                        &self.broker,
+                        task.task_id,
+                        value,
+                        fence(task, &self.worker_id),
+                        workflow,
+                        &task.queue_name,
+                    )
+                    .await
+                }
+                false => self.complete_plain_success(task, value).await,
+            },
             PhaseOneWrite::Undecodable { diagnosis } => {
                 persist_undecodable_result(
                     &self.broker,
@@ -435,6 +481,68 @@ impl OutcomeWriter {
             PhaseOneWrite::Failure(command) => {
                 persist_failed_attempt(&self.broker, command, workflow).await
             }
+        }
+    }
+
+    /// The success of a plain task: its row joins the next batch of the
+    /// finalize batcher (Python `_complete_plain_success`,
+    /// `horsies/core/worker/finalize.py:1386-1436`). Returns after the
+    /// statement of the row's batch returned. A plain success owes no phase
+    /// 2: its capacity wake commits with the row.
+    ///
+    /// Errors: a [`FinalizeError`] of phase 1, retryable when the cause of
+    /// the batch write may clear (an unknown outcome is retryable: the
+    /// replay finds the row `AlreadyApplied` when it committed).
+    async fn complete_plain_success(
+        &self,
+        task: &ClaimedTask,
+        value: &[u8],
+    ) -> Result<FinalizeOutcome, FinalizeError> {
+        let result_json = match ok_envelope(value) {
+            Ok(result_json) => result_json,
+            Err(diagnosis) => {
+                return persist_undecodable_result(
+                    &self.broker,
+                    task.task_id,
+                    fence(task, &self.worker_id),
+                    false,
+                    &diagnosis,
+                )
+                .await
+            }
+        };
+        let answer = self
+            .successes
+            .complete(PlainSuccess {
+                task_id: task.task_id,
+                claimed_at: task.claimed_at,
+                result_json,
+            })
+            .await;
+        match answer {
+            Ok(
+                TerminalizationOutcome::Applied { .. }
+                | TerminalizationOutcome::AlreadyApplied { .. },
+            ) => Ok(FinalizeOutcome::Finalized),
+            Ok(
+                TerminalizationOutcome::LostClaim { .. }
+                | TerminalizationOutcome::SourceStateConflict { .. }
+                | TerminalizationOutcome::TaskAbsent { .. },
+            ) => Ok(FinalizeOutcome::Refused),
+            Err(RowNotWritten::WriteFailed(error)) => Err(FinalizeError {
+                stage: FinalizeStage::Phase1Persist,
+                task_id: task.task_id,
+                message: format!("the batched success write failed: {error}"),
+                retryable: matches!(error.transience(), Transience::Transient),
+            }),
+            Err(
+                stopped @ (RowNotWritten::StatementCancelledAtStop | RowNotWritten::NotSentAtStop),
+            ) => Err(FinalizeError {
+                stage: FinalizeStage::Phase1Persist,
+                task_id: task.task_id,
+                message: stopped.to_string(),
+                retryable: false,
+            }),
         }
     }
 
