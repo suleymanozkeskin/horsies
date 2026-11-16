@@ -264,7 +264,8 @@ pub(crate) const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
 ///
 /// `Err` is the error that the sub-workflow node at `task_index` stores when the child would pass
 /// [`MAX_SUBWORKFLOW_DEPTH`]: the child is not started, the node fails, and the parent's `on_error` applies
-/// (Python `core/workflows/engine.py:1052-1066`).
+/// (Python `core/workflows/engine.py:1052-1066`). Its `data` names the workflow and the node, as Python's
+/// `_fail_enqueued_task` does (`core/workflows/engine.py:507-512`).
 pub(crate) fn child_workflow_depth(
     parent_depth: i32,
     parent_workflow_id: Uuid,
@@ -273,13 +274,19 @@ pub(crate) fn child_workflow_depth(
     let child_depth = parent_depth + 1;
     match child_depth > MAX_SUBWORKFLOW_DEPTH {
         false => Ok(child_depth),
-        true => Err(TaskError::builtin(
-            OperationalErrorCode::SubworkflowDepthLimitReached,
-            format!(
-                "Subworkflow not started: the child workflow would have depth {child_depth}, \
-                 and the limit is {MAX_SUBWORKFLOW_DEPTH} (workflow {parent_workflow_id}:{task_index})"
-            ),
-        )),
+        true => Err(TaskError {
+            data: Some(serde_json::json!({
+                "workflow_id": parent_workflow_id.to_string(),
+                "task_index": task_index,
+            })),
+            ..TaskError::builtin(
+                OperationalErrorCode::SubworkflowDepthLimitReached,
+                format!(
+                    "Subworkflow not started: the child workflow would have depth {child_depth}, \
+                     and the limit is {MAX_SUBWORKFLOW_DEPTH} (workflow {parent_workflow_id}:{task_index})"
+                ),
+            )
+        }),
     }
 }
 
@@ -1351,6 +1358,10 @@ mod tests {
         assert_eq!(
             error.error_code.to_string(),
             "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": parent.to_string(), "task_index": 4}))
         );
         let message = error.message.unwrap();
         assert!(message.contains("depth 33"));

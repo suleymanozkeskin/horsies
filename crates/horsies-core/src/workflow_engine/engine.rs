@@ -1017,17 +1017,22 @@ async fn fail_phase2_node_at_enqueue_in_tx(
 }
 
 /// The error of a sub-workflow node whose child definition is not registered under its definition key.
-/// A child is resolved only by its key (Python `core/workflows/engine.py:1069-1078`, `:4091-4097`).
+/// A child is resolved only by its key (Python `core/workflows/engine.py:1069-1078`, `:4091-4097`). Its
+/// `data` holds the definition key (`null` when the node has none), as Python's `_fail_subworkflow_load`
+/// does (`core/workflows/engine.py:577-581`).
 pub(crate) fn subworkflow_load_failed_error(
     spec_name: &str,
     definition_key: Option<&str>,
 ) -> TaskError {
-    TaskError::builtin(
-        OperationalErrorCode::SubworkflowLoadFailed,
-        format!(
-            "failed to load sub-workflow definition (definition_key={definition_key:?}, name='{spec_name}')",
-        ),
-    )
+    TaskError {
+        data: Some(serde_json::json!({ "definition_key": definition_key })),
+        ..TaskError::builtin(
+            OperationalErrorCode::SubworkflowLoadFailed,
+            format!(
+                "failed to load sub-workflow definition (definition_key={definition_key:?}, name='{spec_name}')",
+            ),
+        )
+    }
 }
 
 async fn complete_phase2_workflow_in_tx(
