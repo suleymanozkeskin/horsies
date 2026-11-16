@@ -81,6 +81,8 @@ outer = app.get_result("task-uuid-here", timeout_ms=5000)
 
 Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.
 
+The threshold is whole minutes from 0 to 525,600 (one year); any other value returns `Err(BrokerInvalidInput)` and nothing runs. The list holds at most 10,000 rows (`MONITORING_LIST_ROW_BOUND`), the rows with no runner beat first, then the oldest beat first; a longer list is cut, and the cut is logged as a warning on `horsies.broker`.
+
 **Returns:** `Ok(list[dict])` with keys: `id`, `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`.
 
 ```python
@@ -98,7 +100,9 @@ For per-worker load, configuration, and liveness, use the typed [Worker & Databa
 
 Find PENDING tasks that exceeded their `good_until` deadline before being picked up.
 
-**Returns:** `Ok(list[dict])` with keys: `id`, `task_name`, `queue_name`, `good_until`, `expired_for`.
+The list holds at most 10,000 rows (`MONITORING_LIST_ROW_BOUND`), the oldest deadline first; a longer list is cut, and the cut is logged as a warning on `horsies.broker`.
+
+**Returns:** `Ok(list[dict])` with keys: `id`, `task_name`, `queue_name`, `priority`, `sent_at`, `enqueued_at`, `good_until`, `expired_for`.
 
 ```python
 result = await broker.get_expired_tasks()
