@@ -839,6 +839,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsies-core"
+version = "0.1.0-alpha.36"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "chrono-tz",
+ "form_urlencoded",
+ "futures",
+ "futures-core",
+ "gethostname",
+ "horsies-macros",
+ "http-body-util",
+ "include_dir",
+ "log",
+ "miette",
+ "mime_guess",
+ "owo-colors",
+ "percent-encoding",
+ "rand",
+ "serde",
+ "serde_json",
+ "serde_plain",
+ "serial_test",
+ "sha2",
+ "sqlx",
+ "sysinfo",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "horsies-examples"
 version = "0.1.0-alpha.1"
 dependencies = [
