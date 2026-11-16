@@ -40,6 +40,7 @@ from horsies.core.models.tasks import (
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at, row_claim
 from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -404,7 +405,7 @@ async def test_success_writes_completed_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -451,7 +452,7 @@ async def test_terminal_failure_writes_failed_attempt_and_error_code(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -508,7 +509,7 @@ async def test_retryable_failure_writes_attempt_with_will_retry(
         task_name='attempt_retry_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=await row_claim(session, task_id),
     )
 
     assert is_ok(result)
@@ -553,7 +554,7 @@ async def test_worker_failure_writes_worker_failure_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -757,7 +758,7 @@ async def test_replay_does_not_create_duplicate_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
     assert is_ok(r1)
 
@@ -775,7 +776,7 @@ async def test_replay_does_not_create_duplicate_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
     assert is_ok(r2)
     assert r2.ok_value is None  # guard caught it
@@ -808,7 +809,7 @@ async def test_claim_lost_writes_no_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -837,7 +838,7 @@ async def test_workflow_stopped_error_code_writes_no_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -870,7 +871,7 @@ async def test_corrupt_json_writes_serialization_error_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -920,7 +921,7 @@ async def test_attempt_number_reflects_retry_count(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
