@@ -22,6 +22,9 @@ pub enum BrokerErrorCode {
     CloseFailed,
     ListenerStartFailed,
     ListenerSubscribeFailed,
+    /// The broker has no listener, so an operation that needs one cannot run.
+    /// Nothing ran. It does not clear for this broker.
+    ListenerDisabled,
     NoBroker,
     InvalidJsonPayload,
     /// An argument of the call was refused before anything ran. Nothing was
@@ -115,6 +118,14 @@ mod tests {
     }
 
     #[test]
+    fn listener_disabled_has_python_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&BrokerErrorCode::ListenerDisabled).unwrap(),
+            "\"LISTENER_DISABLED\""
+        );
+    }
+
+    #[test]
     fn all_codes_round_trip() {
         let codes = [
             BrokerErrorCode::SchemaInitFailed,
@@ -128,6 +139,7 @@ mod tests {
             BrokerErrorCode::CloseFailed,
             BrokerErrorCode::ListenerStartFailed,
             BrokerErrorCode::ListenerSubscribeFailed,
+            BrokerErrorCode::ListenerDisabled,
             BrokerErrorCode::NoBroker,
             BrokerErrorCode::InvalidJsonPayload,
             BrokerErrorCode::InvalidInput,

@@ -341,7 +341,8 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .await
                 .expect("create P5 database");
             let generated_options = base_options.database(&database_name);
-            let database_url = generated_options.to_url_lossy().to_string();
+            let database_url =
+                without_sqlx_parameters(&generated_options.to_url_lossy().to_string());
             let anchor = PgPoolOptions::new()
                 .min_connections(1)
                 .max_connections(1)
@@ -444,6 +445,31 @@ async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
     assert!(!database_exists);
 }
 
+/// sqlx writes `statement-cache-capacity` into a URL it renders. libpq does
+/// not know it, so the core's URL parser refuses it; the broker's listener
+/// parses the session URL with that parser.
+const SQLX_ONLY_PARAMETERS: [&str; 1] = ["statement-cache-capacity"];
+
+/// The URL without the query parameters in [`SQLX_ONLY_PARAMETERS`]. Both
+/// sqlx and the core's parser accept the result.
+fn without_sqlx_parameters(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_owned();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
+            !SQLX_ONLY_PARAMETERS.contains(&name)
+        })
+        .collect();
+    match kept.is_empty() {
+        true => base.to_owned(),
+        false => format!("{base}?{}", kept.join("&")),
+    }
+}
+
+/// The URL of the P5 database, accepted by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
     let pool = migrated_pool().await;
     drop(pool);
@@ -3290,4 +3316,22 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
             cleanup_workflow(pool, &workflow.to_string()).await;
         }
     }
+}
+
+#[test]
+fn the_test_database_url_drops_only_the_sqlx_parameters() {
+    assert_eq!(
+        without_sqlx_parameters(
+            "postgres://u:p@localhost:5432/db?sslmode=prefer&statement-cache-capacity=100"
+        ),
+        "postgres://u:p@localhost:5432/db?sslmode=prefer",
+    );
+    assert_eq!(
+        without_sqlx_parameters("postgres://u@localhost/db?statement-cache-capacity=100"),
+        "postgres://u@localhost/db",
+    );
+    assert_eq!(
+        without_sqlx_parameters("postgres://u@localhost/db"),
+        "postgres://u@localhost/db",
+    );
 }

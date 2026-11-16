@@ -84,8 +84,8 @@ pub enum BrokerError {
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
 
-    /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
-    #[error("shared listener closed")]
+    /// The broker's listener stopped while a wait used it.
+    #[error("the broker's listener stopped")]
     ListenerClosed,
 
     /// A terminalization operation violated its wire contract: an undecodable

@@ -11,9 +11,9 @@ pub mod migrations;
 #[cfg(test)]
 mod monitoring_schema_tests;
 pub mod postgres;
+pub mod process_listener;
 pub mod result_types;
 pub mod row;
-pub mod shared_listener;
 pub mod task_lists;
 pub mod terminalization;
 #[cfg(test)]
@@ -32,6 +32,7 @@ pub use postgres::{
     compute_enqueue_sha, ClaimPassParams, PostgresBroker, SchemaInitializationMode,
     UPSERT_TASK_ATTEMPT_SQL,
 };
+pub use process_listener::{ListenError, ListenerDisabledCause, ListenerPlanError};
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
@@ -40,4 +41,3 @@ pub use row::task::{
 };
 pub use row::worker_state::WorkerStateRow;
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
-pub use shared_listener::SharedNotifyListener;
