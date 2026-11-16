@@ -18,9 +18,9 @@ pub struct DepResult {
 ///
 /// The stored text must pass the core's strict JSON read rule. The merge
 /// re-encodes the object, so an integer that the parse would round is
-/// refused instead of changed. `{}` and `null` (no static input) are an empty
-/// object. Any other non-object input cannot take named members and is
-/// refused.
+/// refused instead of changed. Only an object takes named members: any other
+/// input, `null` included, is refused. The client gives a node with members an
+/// object input such as `{}`; the core does not read `null` as `{}`.
 pub(crate) fn input_object(
     input: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, WorkflowError> {
@@ -39,7 +39,6 @@ pub(crate) fn input_object(
         e
     })?;
     match parsed {
-        serde_json::Value::Null => Ok(serde_json::Map::new()),
         serde_json::Value::Object(object) => Ok(object),
         _ => Err(WorkflowError::Validation(
             "a node input that takes args_from or workflow context members must be a JSON object"
@@ -267,7 +266,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert_eq!(answer["__h_task_result__"], true);
@@ -286,7 +285,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert!(answer["err"].is_object());
@@ -300,7 +299,7 @@ mod tests {
     fn merge_missing_dep_wraps_in_task_result_err() {
         let deps = HashMap::new(); // no deps
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert!(answer["err"].is_object());
@@ -403,9 +402,12 @@ mod tests {
 
     #[test]
     fn merge_into_a_non_object_input_is_refused() {
+        // `null` is not read as `{}`: only an object takes named members.
         let args_from = Some(json!({"dep_val": 0}));
-        let err = merge_args_from_sync("[1]", &args_from, &HashMap::new()).unwrap_err();
-        assert!(matches!(err, WorkflowError::Validation(_)));
+        for input in ["[1]", "null"] {
+            let err = merge_args_from_sync(input, &args_from, &HashMap::new()).unwrap_err();
+            assert!(matches!(err, WorkflowError::Validation(_)), "{input}");
+        }
     }
 
     #[test]
@@ -420,7 +422,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert!(answer["err"].is_object());
