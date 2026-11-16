@@ -17,7 +17,6 @@ applies migrations). Coverage:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -49,7 +48,6 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
-from horsies.monitoring import queries as queries_module
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
@@ -98,10 +96,6 @@ from tests.integration.monitoring_seeding import insert_rows as seed_rows
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 UTC = timezone.utc
-
-# Bound of the detail read that commits a task row while it is open. A lock
-# wait between the two sessions fails the test instead of stopping the run.
-_SNAPSHOT_READ_TIMEOUT_S = 30
 
 # Upper bound for "counts up to now" assertions: generous enough to survive a
 # slow runner, tight enough to catch a span measured from the wrong origin.
@@ -1895,43 +1889,6 @@ class TestGetTaskDetail:
                 task_id=after, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
             )
         )
-
-    async def test_a_task_inserted_during_the_read_is_not_in_its_snapshot(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The task row commits after the live read and before the staged
-        read. Both reads see the snapshot of the live read, so the staged
-        read does not find the row live."""
-        # Seed one row first, so the history setup that insert_rows runs
-        # has nothing left to create while the detail read is open.
-        await insert_rows(session, make_task())
-        task = make_task()
-        staged_detail_published = queries_module.staged_detail_published
-
-        async def commit_task_then_probe(connection: Any) -> bool:
-            await insert_rows(session, task)
-            return await staged_detail_published(connection)
-
-        monkeypatch.setattr(
-            queries_module, 'staged_detail_published', commit_task_then_probe,
-        )
-
-        result = await asyncio.wait_for(
-            get_task_detail(broker, task.id), timeout=_SNAPSHOT_READ_TIMEOUT_S,
-        )
-
-        assert is_ok(result), result
-        assert isinstance(result.ok_value, TaskDetailNotFound)
-        # The row is committed: a new read finds it live.
-        monkeypatch.setattr(
-            queries_module, 'staged_detail_published', staged_detail_published,
-        )
-        again = await get_task_detail(broker, task.id)
-        assert is_ok(again)
-        assert isinstance(again.ok_value, TaskDetail)
 
     async def test_returns_attempts_in_ascending_order(
         self, broker: PostgresBroker, session: AsyncSession

@@ -10,7 +10,7 @@ detail reads. The query tests run on a mocked session.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, get_args
+from typing import get_args
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -37,6 +37,7 @@ from horsies.monitoring.queries import (
 )
 from horsies.web.routes._common import query_failed
 from tests.broker_resources_support import attach_resources, fake_resources
+from tests.monitoring_function_support import function_broker, history_row, node_row
 
 pytestmark = [pytest.mark.unit]
 
@@ -116,26 +117,11 @@ def _broker_with_session(session: AsyncMock) -> MagicMock:
     return broker
 
 
-def _scalar_result(value: Any) -> MagicMock:
-    result = MagicMock()
-    result.scalar_one_or_none.return_value = value
-    return result
-
-
 def _session(*results: MagicMock | BaseException) -> AsyncMock:
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=list(results))
     session.connection = AsyncMock(return_value=MagicMock())
     return session
-
-
-def _refuse_history_read(monkeypatch: pytest.MonkeyPatch, cause: BaseException) -> None:
-    monkeypatch.setattr(
-        queries_module, 'staged_detail_published', AsyncMock(return_value=True),
-    )
-    monkeypatch.setattr(
-        queries_module, 'read_task_detail', AsyncMock(side_effect=cause),
-    )
 
 
 class TestDatabaseFailure:
@@ -151,7 +137,7 @@ class TestDatabaseFailure:
     async def test_the_cause_is_kept_and_classified(
         self, cause: BaseException, retryable: bool,
     ) -> None:
-        broker = _broker_with_session(_session(cause))
+        broker, _ = function_broker(cause)
 
         result = await get_task_detail(broker, TASK_ID)
 
@@ -165,32 +151,24 @@ class TestDatabaseFailure:
 
 class TestHistoryContractViolation:
     @pytest.mark.asyncio
-    async def test_task_detail_returns_the_variant_with_the_cause(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cause = HistoryContractError(CAUSE_MARKER)
-        _refuse_history_read(monkeypatch, cause)
-        broker = _broker_with_session(_session(_scalar_result(None)))
+    async def test_task_detail_returns_the_variant_with_the_cause(self) -> None:
+        broker, _ = function_broker([history_row(TASK_ID, status=CAUSE_MARKER)])
 
         result = await get_task_detail(broker, TASK_ID)
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert error.exception is cause
-        assert error.message == f'task detail history read failed: {CAUSE_MARKER}'
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.message == (
+            f'task detail history read failed: history row {TASK_ID} has status '
+            f"'{CAUSE_MARKER}', which is not a task status"
+        )
 
     @pytest.mark.asyncio
-    async def test_workflow_node_returns_the_variant_with_the_cause(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cause = HistoryContractError(CAUSE_MARKER)
-        _refuse_history_read(monkeypatch, cause)
-        node = MagicMock()
-        node.task_id = TASK_ID
-        node.result = None
-        broker = _broker_with_session(
-            _session(_scalar_result(node), _scalar_result(None)),
+    async def test_workflow_node_returns_the_variant_with_the_cause(self) -> None:
+        broker, _ = function_broker(
+            [node_row(0, history_row(TASK_ID, status=CAUSE_MARKER))],
         )
 
         result = await get_workflow_node(broker, WORKFLOW_ID, 0)
@@ -198,8 +176,11 @@ class TestHistoryContractViolation:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert error.exception is cause
-        assert error.message == f'workflow node history read failed: {CAUSE_MARKER}'
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.message == (
+            f'workflow node history read failed: history row {TASK_ID} has status '
+            f"'{CAUSE_MARKER}', which is not a task status"
+        )
 
     @pytest.mark.asyncio
     async def test_the_task_list_estimate_returns_the_variant_with_the_cause(

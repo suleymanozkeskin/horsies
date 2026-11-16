@@ -179,8 +179,9 @@ list_schedules(broker)
 A task that reaches a terminal status leaves `horsies_tasks` for the
 `horsies_task_history` archive in the same transaction. Detail, result, and
 attempt-history reads resolve on **both** sides, so a moved task still
-answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
-READ snapshot, so the live read and the history read see the same rows.
+answers. `get_task_detail` and `get_workflow_node` each send one statement
+(`horsies_monitoring_task_detail`, `horsies_monitoring_workflow_node`), so
+the live read and the history read see the same rows.
 
 `TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
 404 for each reason. `get_task_detail` derives it from the detached history

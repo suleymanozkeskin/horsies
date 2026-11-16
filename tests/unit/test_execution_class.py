@@ -8,6 +8,7 @@ insert path reads the row's `execution` column from them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import textwrap
@@ -53,7 +54,7 @@ from horsies.core.task_decorator import (
     execution_rule_error,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.types.status import TaskStatus
+from horsies.monitoring.models import TaskDetail
 
 pytestmark = [pytest.mark.unit]
 
@@ -213,7 +214,7 @@ class TestDeclarationsThatAreRefused:
 
     def test_a_grace_on_an_isolated_task(self) -> None:
         def declare(app: Horsies) -> None:
-            @app.task('bad', cancel_grace_ms=1_000)  # pyright: ignore[reportCallIssue, reportUntypedFunctionDecorator]
+            @app.task('bad', cancel_grace_ms=1_000)  # pyright: ignore[reportCallIssue, reportUntypedFunctionDecorator, reportArgumentType]
             def bad(*, n: int) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
                 return TaskResult(ok=n)
 
@@ -223,7 +224,7 @@ class TestDeclarationsThatAreRefused:
 
     def test_a_grace_on_a_shared_thread_task(self) -> None:
         def declare(app: Horsies) -> None:
-            @app.task(
+            @app.task(  # pyright: ignore[reportArgumentType, reportUntypedFunctionDecorator]
                 'bad',
                 execution=Execution.SHARED_THREAD,  # pyright: ignore[reportArgumentType]
                 timeout_ms=5_000,
@@ -774,60 +775,31 @@ class TestMigrationText:
 
 class TestMonitoringDetail:
     def test_a_live_task_shows_its_class(self) -> None:
-        from horsies.monitoring.queries import _leaf_task  # pyright: ignore[reportPrivateUsage]
+        from horsies.monitoring.queries import get_task_detail
+        from tests.monitoring_function_support import detail_row, function_broker
 
-        now = datetime.now(timezone.utc)
-        task = TaskModel(
-            id='00000000-0000-7000-8000-000000000001',
-            task_name='t',
-            queue_name='default',
-            priority=100,
-            status=TaskStatus.PENDING,
-            enqueued_at=now,
-            retry_count=0,
-            max_retries=0,
-            execution='SHARED_THREAD',
-        )
-        assert _leaf_task(task).execution is Execution.SHARED_THREAD
+        task_id = '00000000-0000-7000-8000-000000000001'
+        broker, _ = function_broker([detail_row(task_id, execution='SHARED_THREAD')])
+
+        result = asyncio.run(get_task_detail(broker, task_id))
+
+        match result:
+            case Ok(TaskDetail(leaf=leaf)):
+                assert leaf.execution is Execution.SHARED_THREAD
+            case _:
+                raise AssertionError(f'the detail answered {result!r}')
 
     def test_a_history_task_shows_no_class(self) -> None:
-        from horsies.core.history.reads.detail import HistoryTaskDetail
-        from horsies.monitoring.queries import _history_leaf  # pyright: ignore[reportPrivateUsage]
+        from horsies.monitoring.queries import get_task_detail
+        from tests.monitoring_function_support import function_broker, history_row
 
-        now = datetime.now(timezone.utc)
-        detail = HistoryTaskDetail(
-            task_id='00000000-0000-7000-8000-000000000002',
-            task_name='t',
-            queue_name='default',
-            priority=100,
-            status=TaskStatus.COMPLETED,
-            terminalization_kind='COMPLETED',
-            terminal_at=now,
-            retention_class_key='standard_30d',
-            enqueued_at=now,
-            created_at=now,
-            sent_at=now,
-            claimed_at=None,
-            started_at=None,
-            good_until=None,
-            retry_count=0,
-            max_retries=0,
-            last_claimed_worker_id=None,
-            last_worker_hostname=None,
-            last_worker_pid=None,
-            result_envelope_version=1,
-            result_payload=None,
-            result_digest=None,
-            error_code=None,
-            final_failed_reason=None,
-            rerun_of_task_id=None,
-            rerun_root_task_id=None,
-            workflow_id=None,
-            is_workflow_task=False,
-            rerun_input_disposition='DECLINED_BY_POLICY',
-            rerun_input_version=None,
-            rerun_input_digest=None,
-            rerun_input_inline=None,
-            attempts=(),
-        )
-        assert _history_leaf(detail).execution is None
+        task_id = '00000000-0000-7000-8000-000000000002'
+        broker, _ = function_broker([history_row(task_id)])
+
+        result = asyncio.run(get_task_detail(broker, task_id))
+
+        match result:
+            case Ok(TaskDetail(leaf=leaf)):
+                assert leaf.execution is None
+            case _:
+                raise AssertionError(f'the detail answered {result!r}')
