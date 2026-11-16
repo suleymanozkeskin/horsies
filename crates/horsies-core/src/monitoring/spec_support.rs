@@ -576,6 +576,7 @@ pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
     };
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
+            downstream_subworkflow,
             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
             min_success, task_options, max_retries, execution, good_until,
@@ -583,7 +584,7 @@ pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2, $3, $4, 'alpha_task', '{}', 'default', 100,
+            'NONE', $1, $2, $3, $4, 'alpha_task', '{}', 'default', 100,
             $5, NULL, NULL, FALSE, 'all',
             NULL, NULL, CASE WHEN $8 THEN NULL ELSE 0 END,
             CASE WHEN $8 THEN NULL ELSE 'ISOLATED' END, NULL,

@@ -1703,6 +1703,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
     .unwrap();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
+            downstream_subworkflow,
             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
             min_success, task_options, max_retries, execution, good_until,
@@ -1710,7 +1711,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2, 0, NULL, 'web_run_detail_task', '{}', 'default', 100,
+            'NONE', $1, $2, 0, NULL, 'web_run_detail_task', '{}', 'default', 100,
             '{}'::integer[], NULL, NULL, FALSE, 'all',
             NULL, NULL, 0, 'ISOLATED', NULL,
             'forever', 'FAILED', NULL, FALSE, NULL,

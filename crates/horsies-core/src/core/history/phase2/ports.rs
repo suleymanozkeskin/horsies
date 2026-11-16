@@ -57,6 +57,7 @@ async fn seed_node(
 ) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow,
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
              min_success, task_options, max_retries, execution, good_until,
@@ -64,7 +65,7 @@ async fn seed_node(
              sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
              created_at, started_at, completed_at
          ) VALUES (
-             $1, $2, 0, 'root', 'port.phase2', '{}', 'default', 100,
+             'NONE', $1, $2, 0, 'root', 'port.phase2', '{}', 'default', 100,
              '{}', NULL, NULL, FALSE, 'all',
              NULL, NULL, 0, 'ISOLATED', NULL,
              $4, 'RUNNING', $3, FALSE, NULL,

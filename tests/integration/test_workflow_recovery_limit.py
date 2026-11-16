@@ -97,13 +97,13 @@ INSERT_WORKFLOW_SQL = text("""
 """)
 
 INSERT_NODE_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps, join_type,
         task_options, status, is_subworkflow, sub_workflow_id,
         sub_definition_key, task_id, created_at,
         max_retries, execution, retention_class_key, sub_workflow_params
-    ) VALUES (
+    ) VALUES ('NONE',
         :id, :workflow_id, :index, :node_id, :task_name, '{}',
         'default', 100, :dependencies, FALSE, 'all',
         :options, :status, :is_subworkflow, :sub_workflow_id,
