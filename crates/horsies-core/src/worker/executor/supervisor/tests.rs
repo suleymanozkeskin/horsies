@@ -424,6 +424,7 @@ async fn channel(spawner: &Spawner, script: &str) -> ChildChannel {
         spawned,
         spawner.handle(),
         MailboxBound::for_seats(NonZeroUsize::MIN),
+        CHILD_KILL_WAIT,
     )
     .unwrap()
 }

@@ -18,6 +18,7 @@ pub mod channel;
 pub mod exit;
 mod exit_watch;
 pub mod socket;
+pub mod source;
 pub mod spawner;
 
 #[cfg(test)]
@@ -37,6 +38,7 @@ pub use channel::{
 pub use exit::{ChildExit, ExitMeaning, ExitState, ReapedExit};
 pub use exit_watch::POLLED_EXIT_INTERVAL;
 pub use socket::{child_socket_pair, ChildSocketPair, SOCKET_BUFFER_BYTES};
+pub use source::{ChildSource, SpawnFuture};
 pub use spawner::{
     wait_for_exit, ChildCommand, ChildId, KillOutcome, SpawnError, SpawnedChild, Spawner,
     SpawnerHandle, SpawnerStartError, SpawnerStopReport,

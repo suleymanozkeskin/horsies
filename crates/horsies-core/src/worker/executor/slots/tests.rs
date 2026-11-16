@@ -23,7 +23,7 @@ use crate::worker::executor::protocol::{
     RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskSendPool,
     TaskTimeoutMs,
 };
-use crate::worker::executor::supervisor::{ChildCommand, Spawner};
+use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
 use crate::worker::runner_beats::LiveDispatches;
 
@@ -495,6 +495,7 @@ fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         child_cpus: ChildCpus::Inherited,
+        kill_wait: CHILD_KILL_WAIT,
     }
 }
 

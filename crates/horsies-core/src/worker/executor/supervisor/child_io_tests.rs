@@ -116,6 +116,7 @@ async fn a_frame_reaches_the_child_whole_with_a_small_or_a_large_body() {
             spawned,
             spawner.handle(),
             MailboxBound::for_seats(NonZeroUsize::MIN),
+            CHILD_KILL_WAIT,
         )
         .unwrap();
 
@@ -157,6 +158,7 @@ async fn half_a_frame_before_the_death_is_reported_partial() {
         spawned,
         spawner.handle(),
         MailboxBound::for_seats(NonZeroUsize::MIN),
+        CHILD_KILL_WAIT,
     )
     .unwrap();
 

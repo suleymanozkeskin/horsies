@@ -44,7 +44,6 @@ use crate::worker::executor::protocol::{
 };
 use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
-    CHILD_KILL_WAIT,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
@@ -177,11 +176,13 @@ async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDef
     let boot = BootSlot {
         board: &shared.board,
         index,
+        source: shared.source.as_ref(),
         spawner: &shared.spawner,
         command: &shared.config.command,
         init: &shared.config.init,
         mailbox: MailboxBound::for_seats(NonZeroUsize::MIN),
         cpus: &shared.config.child_cpus,
+        kill_wait: shared.config.kill_wait,
     };
     match boot_child(&boot).await {
         Booted::Child(channel) => {
@@ -453,7 +454,7 @@ async fn end_after_kill(
     seen_end: AttemptEnd,
 ) -> AttemptEnd {
     let _ = channel.kill_for_caller().await;
-    match channel.wait_exit(CHILD_KILL_WAIT).await {
+    match channel.wait_exit(channel.kill_wait()).await {
         ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => seen_end,
         ChildExit::ExitUnknown => exit_not_seen(shared, channel, seen_end).await,
     }
@@ -485,7 +486,7 @@ async fn end_once_seen(
 /// describe its end with the defect as its cause (Python `_clear_slot`).
 async fn defect_kill(channel: &mut ChildChannel) -> ChildLost {
     let _ = channel.kill_for_caller().await;
-    let _ = channel.wait_exit(CHILD_KILL_WAIT).await;
+    let _ = channel.wait_exit(channel.kill_wait()).await;
     channel.lost_for(LossCause::SlotDefect)
 }
 

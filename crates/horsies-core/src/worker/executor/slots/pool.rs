@@ -21,7 +21,9 @@ use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
 };
-use crate::worker::executor::supervisor::{ChildCommand, SpawnerHandle, CHILD_KILL_WAIT};
+use crate::worker::executor::supervisor::{
+    ChildCommand, ChildSource, SpawnerHandle, CHILD_KILL_WAIT,
+};
 use crate::worker::runner_beats::LiveDispatches;
 
 /// After the drain deadline kills the busy children, the slot tasks get
@@ -73,6 +75,9 @@ pub struct IsolatedPoolConfig {
     pub exit_not_seen: ExitNotSeen,
     /// The CPUs of each child, set before its init frame.
     pub child_cpus: ChildCpus,
+    /// The longest wait for the exit of a child after a `SIGKILL`:
+    /// [`CHILD_KILL_WAIT`] in a worker.
+    pub kill_wait: Duration,
 }
 
 /// The answer to one submitted task. Exactly one end reaches the caller:
@@ -122,6 +127,8 @@ pub(super) struct QueuedRun {
 /// The state that the pool and its slot tasks share.
 pub(super) struct PoolShared {
     pub(super) config: IsolatedPoolConfig,
+    /// Where the children come from: the spawner in a worker.
+    pub(super) source: Arc<dyn ChildSource>,
     pub(super) spawner: SpawnerHandle,
     pub(super) live: LiveDispatches,
     pub(super) board: Arc<PoolBoard>,
@@ -203,9 +210,34 @@ impl IsolatedPool {
         spawner: SpawnerHandle,
         live: LiveDispatches,
     ) -> Self {
+        let source: Arc<dyn ChildSource> = Arc::new(spawner.clone());
+        Self::start_with(config, board, spawner, source, live)
+    }
+
+    /// Start the pool with its children from `source`, a source over
+    /// `spawner` that a test builds.
+    #[cfg(test)]
+    pub(super) fn start_from_source(
+        config: IsolatedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        source: Arc<dyn ChildSource>,
+        live: LiveDispatches,
+    ) -> Self {
+        Self::start_with(config, board, spawner, source, live)
+    }
+
+    fn start_with(
+        config: IsolatedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        source: Arc<dyn ChildSource>,
+        live: LiveDispatches,
+    ) -> Self {
         let indices: Range<usize> = board.slots_of(ExecutionClass::Isolated);
         let shared = Arc::new(PoolShared {
             config,
+            source,
             spawner,
             live,
             board,

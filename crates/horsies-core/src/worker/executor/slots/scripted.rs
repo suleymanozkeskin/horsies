@@ -35,7 +35,7 @@ use crate::worker::executor::protocol::{
     SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats,
     HEADER_BYTES,
 };
-use crate::worker::executor::supervisor::{ChildCommand, Spawner};
+use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::read_stored_options;
 use crate::worker::runner_beats::LiveDispatches;
 
@@ -449,6 +449,7 @@ pub(super) fn isolated_config(command: ChildCommand) -> IsolatedPoolConfig {
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         child_cpus: ChildCpus::Inherited,
+        kill_wait: CHILD_KILL_WAIT,
     }
 }
 
@@ -462,6 +463,7 @@ pub(super) fn shared_config(command: ChildCommand, init: InitFrame) -> SharedPoo
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         child_cpus: ChildCpus::Inherited,
+        kill_wait: CHILD_KILL_WAIT,
     }
 }
 
@@ -630,4 +632,37 @@ fn the_scripted_envelope_reads_as_a_task_result() {
         Ok(TaskResultText::Ok(value)) => assert_eq!(value.get(), "3"),
         other => panic!("expected the value 3, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pools over a source that holds exits back
+// ---------------------------------------------------------------------------
+
+/// An isolated pool of `slots` slots, alone on its board, whose children
+/// come from `source`; its runner beats go to `live`.
+pub(super) fn start_isolated_from(
+    spawner: &Spawner,
+    source: &Arc<super::held_exits::HeldExits>,
+    slots: usize,
+    config: IsolatedPoolConfig,
+    live: LiveDispatches,
+) -> (IsolatedPool, Arc<PoolBoard>) {
+    let board = Arc::new(PoolBoard::new(layout(slots, 0, 0)));
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let pool =
+        IsolatedPool::start_from_source(config, Arc::clone(&board), spawner.handle(), source, live);
+    (pool, board)
+}
+
+/// A shared pool on `board` whose children come from `source`; its runner
+/// beats go to `live`.
+pub(super) fn start_shared_from(
+    spawner: &Spawner,
+    source: &Arc<super::held_exits::HeldExits>,
+    board: &Arc<PoolBoard>,
+    config: SharedPoolConfig,
+    live: LiveDispatches,
+) -> SharedPool {
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    SharedPool::start_from_source(config, Arc::clone(board), spawner.handle(), source, live)
 }

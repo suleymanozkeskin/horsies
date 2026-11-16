@@ -35,6 +35,10 @@ pub mod start;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod exit_not_seen_tests;
+#[cfg(test)]
+mod held_exits;
+#[cfg(test)]
 mod isolated_run_tests;
 #[cfg(test)]
 mod isolated_stop_tests;

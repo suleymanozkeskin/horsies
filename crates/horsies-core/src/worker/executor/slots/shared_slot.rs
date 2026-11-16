@@ -43,7 +43,6 @@ use crate::worker::executor::protocol::{
 };
 use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
-    CHILD_KILL_WAIT,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
@@ -161,11 +160,13 @@ async fn boot_and_serve(
     let boot = BootSlot {
         board: &pool.board,
         index: pool.first + local,
+        source: pool.source.as_ref(),
         spawner: &pool.spawner,
         command: &pool.config.command,
         init: &pool.config.init,
         mailbox: MailboxBound::for_seats(pool.seats),
         cpus: &pool.config.child_cpus,
+        kill_wait: pool.config.kill_wait,
     };
     match boot_child(&boot).await {
         Booted::Child(channel) => {
@@ -268,7 +269,8 @@ async fn serve_step(pool: &SharedPoolShared, local: usize, generation: &mut Gene
 async fn kill_at_defect(generation: &mut Generation, defect: SlotDefect) -> ChildLost {
     generation.defect = Some(defect);
     send_kill(generation, KillReason::SlotDefect).await;
-    let _ = generation.channel.wait_exit(CHILD_KILL_WAIT).await;
+    let kill_wait = generation.channel.kill_wait();
+    let _ = generation.channel.wait_exit(kill_wait).await;
     generation.channel.lost_for(LossCause::SlotDefect)
 }
 
@@ -693,10 +695,10 @@ async fn kill_past_deadlines(
 }
 
 /// Read the frames of a killed child until its loss, at most
-/// [`CHILD_KILL_WAIT`]. A result ends its run; other frames are dropped,
+/// the kill wait of the child. A result ends its run; other frames are dropped,
 /// because the child is ending.
 async fn read_until_exit(generation: &mut Generation) -> ChildLost {
-    let until = Instant::now() + CHILD_KILL_WAIT;
+    let until = Instant::now() + generation.channel.kill_wait();
     loop {
         let remaining = until.saturating_duration_since(Instant::now());
         match generation.channel.await_frame(Some(remaining)).await {

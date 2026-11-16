@@ -22,6 +22,7 @@ use crate::worker::executor::protocol::{
 };
 use crate::worker::executor::supervisor::{
     BootFailure, BootFailureCause, ChildCommand, ChildExit, LossCause, ReapedExit, Spawner,
+    CHILD_KILL_WAIT,
 };
 use crate::worker::retry::read_stored_options;
 use crate::worker::runner_beats::LiveDispatches;
@@ -256,6 +257,7 @@ async fn run_one(
             memory_per_child: MemoryLimit::Off,
             exit_not_seen: ExitNotSeen::LeaveToRecovery,
             child_cpus: ChildCpus::Inherited,
+            kill_wait: CHILD_KILL_WAIT,
         },
         Arc::new(PoolBoard::new(board_layout)),
         spawner.handle(),

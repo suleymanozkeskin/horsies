@@ -11,8 +11,8 @@ use crate::worker::executor::placement::{place_process, ChildCpus};
 use crate::worker::executor::protocol::{ChildFrame, InitFrame, ParentFrame, RssReading};
 use crate::worker::executor::supervisor::{
     boot_end_of, wait_for_exit, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause,
-    BootReply, ChildChannel, ChildCommand, ChildLost, FrameWait, LossCause, MailboxBound,
-    SpawnError, SpawnedChild, SpawnerHandle, CHILD_KILL_WAIT, CHILD_READY_TIMEOUT,
+    BootReply, ChildChannel, ChildCommand, ChildLost, ChildSource, FrameWait, LossCause,
+    MailboxBound, SpawnError, SpawnedChild, SpawnerHandle, CHILD_READY_TIMEOUT,
 };
 
 /// What a booting slot needs.
@@ -20,6 +20,9 @@ pub(super) struct BootSlot<'a> {
     pub board: &'a PoolBoard,
     /// The slot's index on the board.
     pub index: usize,
+    /// Where the slot's children come from.
+    pub source: &'a dyn ChildSource,
+    /// The spawner of every child: its kills.
     pub spawner: &'a SpawnerHandle,
     pub command: &'a ChildCommand,
     /// The first frame of the slot's children; its kind is the slot's.
@@ -27,6 +30,8 @@ pub(super) struct BootSlot<'a> {
     pub mailbox: MailboxBound,
     /// The CPUs of the slot's children, set before the init frame.
     pub cpus: &'a ChildCpus,
+    /// The longest wait for the exit of a child after a `SIGKILL`.
+    pub kill_wait: Duration,
 }
 
 /// The end of a boot attempt.
@@ -203,7 +208,7 @@ fn spawn_failure(error: &SpawnError) -> Option<BootFailure> {
 
 /// Start one child, send its init frame, and wait for its ready frame.
 async fn boot_attempt(slot: &BootSlot<'_>) -> BootAttempt {
-    let spawned = match slot.spawner.spawn(slot.command.clone()).await {
+    let spawned = match slot.source.spawn(slot.command.clone()).await {
         Ok(spawned) => spawned,
         Err(error) => {
             return match spawn_failure(&error) {
@@ -217,7 +222,9 @@ async fn boot_attempt(slot: &BootSlot<'_>) -> BootAttempt {
         Err(failure) => return BootAttempt::Ended(BootEnd::Failed(failure)),
     };
     let child_id = spawned.id;
-    let mut channel = match ChildChannel::attach(spawned, slot.spawner.clone(), slot.mailbox) {
+    let attached =
+        ChildChannel::attach(spawned, slot.spawner.clone(), slot.mailbox, slot.kill_wait);
+    let mut channel = match attached {
         Ok(channel) => channel,
         Err(error) => {
             let _ = slot.spawner.kill_session(child_id).await;
@@ -268,7 +275,7 @@ async fn place_child(
     } = spawned;
     drop(socket);
     let _ = slot.spawner.kill_session(id).await;
-    let _ = wait_for_exit(&mut exit, CHILD_KILL_WAIT).await;
+    let _ = wait_for_exit(&mut exit, slot.kill_wait).await;
     Err(BootFailure::new(
         BootFailureCause::SpawnFailed,
         &refused.to_string(),
@@ -315,6 +322,6 @@ async fn boot_reply(mut channel: ChildChannel, reply: FrameWait) -> BootAttempt 
 /// describe its end.
 pub(super) async fn lost_after_kill(channel: &mut ChildChannel) -> ChildLost {
     let _ = channel.kill_for_caller().await;
-    let _ = channel.wait_exit(CHILD_KILL_WAIT).await;
+    let _ = channel.wait_exit(channel.kill_wait()).await;
     channel.lost_for(LossCause::KilledByParent)
 }

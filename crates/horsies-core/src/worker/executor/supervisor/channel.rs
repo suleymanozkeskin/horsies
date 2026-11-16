@@ -384,11 +384,15 @@ pub struct ChildChannel {
     spawner: SpawnerHandle,
     kill_mark: WorkerKillMark,
     drop_kill: KillOnDrop,
+    /// The longest wait for the exit after a `SIGKILL`.
+    kill_wait: Duration,
 }
 
 impl ChildChannel {
     /// Take a spawned child: its socket moves onto the core runtime and a
-    /// reader task starts. Must run inside the core runtime.
+    /// reader task starts. Must run inside the core runtime. `kill_wait` is
+    /// the longest wait for its exit after a `SIGKILL`
+    /// ([`CHILD_KILL_WAIT`] in a worker).
     ///
     /// `Err`: the socket could not join the runtime. The child is then
     /// killed by the caller; this call does not signal it.
@@ -396,6 +400,7 @@ impl ChildChannel {
         spawned: SpawnedChild,
         spawner: SpawnerHandle,
         bound: MailboxBound,
+        kill_wait: Duration,
     ) -> io::Result<Self> {
         spawned.socket.set_nonblocking(true)?;
         let stream = tokio::net::UnixStream::from_std(spawned.socket)?;
@@ -426,6 +431,7 @@ impl ChildChannel {
             spawner,
             kill_mark: WorkerKillMark::default(),
             drop_kill,
+            kill_wait,
         })
     }
 
@@ -435,6 +441,11 @@ impl ChildChannel {
 
     pub fn pid(&self) -> ProcessId {
         self.pid
+    }
+
+    /// The longest wait for the exit of this child after a `SIGKILL`.
+    pub fn kill_wait(&self) -> Duration {
+        self.kill_wait
     }
 
     /// The kill mark of this child, for the runner heartbeat registry.
@@ -566,7 +577,7 @@ impl ChildChannel {
                     "a child broke the frame protocol; killing it"
                 );
                 let _ = self.kill_group().await;
-                let exit = self.wait_exit(CHILD_KILL_WAIT).await;
+                let exit = self.wait_exit(self.kill_wait).await;
                 FrameWait::Lost(self.lost(violation.loss_cause(), exit))
             }
             ReaderEnd::Eof | ReaderEnd::ReadFailed(_) => {
@@ -575,7 +586,7 @@ impl ChildChannel {
                     return self.verdict_after_exit().await;
                 }
                 let _ = self.kill_group().await;
-                let exit = self.wait_exit(CHILD_KILL_WAIT).await;
+                let exit = self.wait_exit(self.kill_wait).await;
                 let cause = match self.kill_mark.read() {
                     KillMark::KilledByParent => LossCause::KilledByParent,
                     KillMark::NotKilled => LossCause::ChannelLost,
@@ -644,7 +655,7 @@ impl ChildChannel {
     /// it.
     pub async fn discard_violating_child(&mut self) -> ChildLost {
         let _ = self.kill_group().await;
-        let exit = self.wait_exit(CHILD_KILL_WAIT).await;
+        let exit = self.wait_exit(self.kill_wait).await;
         self.lost(LossCause::ProtocolViolation, exit)
     }
 
@@ -679,17 +690,18 @@ impl ChildChannel {
             reader_task,
             exit: mut exit_state,
             drop_kill,
+            kill_wait,
             ..
         } = self;
         drop_kill.disarm();
         reader_task.abort();
         drop(writer);
-        let exit = wait_for_exit(&mut exit_state, CHILD_KILL_WAIT).await;
+        let exit = wait_for_exit(&mut exit_state, kill_wait).await;
         if exit == ChildExit::ExitUnknown {
             tracing::error!(
                 pid = pid.get(),
                 "a child did not end {}s after SIGKILL",
-                CHILD_KILL_WAIT.as_secs()
+                kill_wait.as_secs_f64()
             );
         }
         exit
