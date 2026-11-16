@@ -139,7 +139,7 @@ This prevents duplicate executions when:
 
 ### A slot that already has a task
 
-Each slot has a deterministic task id, and the row stores a fingerprint of the enqueue. A scheduler that stops after the enqueue of a slot and before it saves the state fires that slot again at its next start. With the same command, the enqueue returns the existing task. With a different command, the broker returns `PAYLOAD_MISMATCH`. The command is different when the next start runs another horsies version, or when the schedule's kwargs or the task's options changed.
+Each slot has a deterministic task id: a UUIDv7 whose time is the slot time (in milliseconds) and whose other bits come from a hash of the schedule name and the slot time (in microseconds). The row stores a fingerprint of the enqueue. A scheduler that stops after the enqueue of a slot and before it saves the state fires that slot again at its next start. With the same command, the enqueue returns the existing task. With a different command, the broker returns `PAYLOAD_MISMATCH`. The command is different when the next start runs another horsies version, or when the schedule's kwargs or the task's options changed.
 
 The slot already has its task, so the scheduler counts the slot as fired:
 
