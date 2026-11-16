@@ -3203,3 +3203,6 @@ mod tests {
         clean(&pool).await;
     }
 }
+
+#[cfg(test)]
+mod live_worker_tests;
