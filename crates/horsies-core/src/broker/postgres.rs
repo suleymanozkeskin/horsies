@@ -49,7 +49,9 @@ use crate::broker::task_lists::{
     BoundedTaskList, StaleMinutes, TASK_LIST_BOUND, TASK_LIST_READ_LIMIT,
 };
 use crate::broker::wait_limit::WaitLimit;
-use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
+use crate::db::{
+    PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
+};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -797,12 +799,13 @@ impl PostgresBroker {
 
     /// Construct a broker from an existing pool, with its listener on
     /// `session_url`: the process listener of that URL, which opens its
-    /// connection at the first subscription. The URL is parsed then.
+    /// connection at the first subscription with the default socket settings
+    /// (`DEFAULT_SOCKET_SETTINGS`). The URL is parsed then.
     pub fn from_pool_and_session_url(pool: PgPool, session_url: &str) -> Self {
         Self::from_pool_with_schema_initialization_mode(
             pool,
             SchemaInitializationMode::MigrateAndValidate,
-            ProcessListener::on_session_url(session_url),
+            ProcessListener::on_session_url(session_url, DEFAULT_SOCKET_SETTINGS),
         )
     }
 
@@ -918,7 +921,10 @@ impl PostgresBroker {
                 IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
             )
             .num_seconds(),
-            listener: ProcessListener::on_session_url(config.effective_session_database_url()),
+            listener: ProcessListener::on_session_url(
+                config.effective_session_database_url(),
+                config.socket_settings(),
+            ),
             listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
@@ -5587,6 +5593,8 @@ mod session_settings_tests {
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         }
     }
 
@@ -6044,6 +6052,8 @@ mod result_wait_tests {
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         let broker = PostgresBroker::connect_observe_only(&config)
             .await

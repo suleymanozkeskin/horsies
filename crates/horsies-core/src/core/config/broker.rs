@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::config::socket::{socket_settings, TcpKeepalivesConfig, TcpUserTimeoutConfig};
+use crate::db::SocketSettings;
+
 /// PostgreSQL broker configuration.
 ///
 /// `Debug` is implemented manually to redact the password in the connection
@@ -61,6 +64,17 @@ pub struct PostgresConfig {
     /// Whether to log SQL statements.
     #[serde(default)]
     pub echo: bool,
+
+    /// TCP keepalives of every core connection (Python `tcp_keepalives`,
+    /// `tcp_keepalives_idle`, `tcp_keepalives_interval`,
+    /// `tcp_keepalives_count`). Default: on, 30 s, 10 s, 3 probes.
+    #[serde(default)]
+    pub tcp_keepalives: TcpKeepalivesConfig,
+
+    /// TCP user timeout of every core connection (Python
+    /// `tcp_user_timeout_ms`; its 0 is `SystemDefault`). Default: 30,000 ms.
+    #[serde(default)]
+    pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
 /// Redact the password in a `scheme://user:PASS@host/db` URL, leaving the rest
@@ -100,6 +114,8 @@ impl std::fmt::Debug for PostgresConfig {
             .field("pool_timeout", &self.pool_timeout)
             .field("pool_recycle", &self.pool_recycle)
             .field("echo", &self.echo)
+            .field("tcp_keepalives", &self.tcp_keepalives)
+            .field("tcp_user_timeout", &self.tcp_user_timeout)
             .finish()
     }
 }
@@ -187,7 +203,14 @@ impl PostgresConfig {
             pool_timeout: default_pool_timeout(),
             pool_recycle: default_pool_recycle(),
             echo: false,
+            tcp_keepalives: TcpKeepalivesConfig::default(),
+            tcp_user_timeout: TcpUserTimeoutConfig::default(),
         }
+    }
+
+    /// The socket settings of every core connection of this config.
+    pub fn socket_settings(&self) -> SocketSettings {
+        socket_settings(self.tcp_keepalives, self.tcp_user_timeout)
     }
 
     /// Create a PostgresConfig for PgBouncer transaction pooling.
@@ -282,6 +305,8 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         let rendered = format!("{:?}", config);
         assert!(!rendered.contains("topsecret"), "Debug leaked the password");
@@ -301,6 +326,8 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -318,6 +345,8 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -335,6 +364,8 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         };
         assert!(config.validate().is_err());
     }

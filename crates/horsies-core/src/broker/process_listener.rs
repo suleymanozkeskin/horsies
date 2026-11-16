@@ -1,10 +1,10 @@
-//! The process listener: one [`crate::db::Listener`] per process and session
-//! URL, shared by every broker of the process. Every LISTEN of a broker and
+//! The process listener: one [`crate::db::Listener`] per process, session URL
+//! and socket settings, shared by every broker of the process. Every LISTEN of a broker and
 //! of the modules that hold it subscribes here; none of them opens a listener
 //! connection of its own.
 //!
-//! - Brokers on the same session URL share one listener and its one
-//!   connection. The listener stops when the last broker that uses it drops.
+//! - Brokers on the same session URL with the same socket settings share one
+//!   listener and its one connection. The listener stops when the last broker that uses it drops.
 //!   A listener task runs on one tokio runtime, so a broker on another
 //!   runtime of the process gets its own listener.
 //! - The listener starts at the first subscription. The session URL is
@@ -24,8 +24,8 @@ use tokio::sync::OnceCell;
 use crate::db::{
     parse_connection_url, ChannelName, ConnectPlan, ConnectPlanError, ConnectionEnvironment,
     EnvironmentError, Listener, MaskedUrl, PayloadFilter, PayloadSubscription, QueueCapacity,
-    SubscribeError, Transience, UrlError, WakeSubscription, DEFAULT_PAYLOAD_QUEUE_CAPACITY,
-    DEFAULT_SOCKET_SETTINGS,
+    SocketSettings, SubscribeError, Transience, UrlError, WakeSubscription,
+    DEFAULT_PAYLOAD_QUEUE_CAPACITY,
 };
 
 /// The channel of task completions; the payload is the task id.
@@ -122,7 +122,10 @@ impl fmt::Debug for SessionUrl {
 
 #[derive(Debug)]
 enum ListenerSource {
-    SessionUrl(SessionUrl),
+    SessionUrl {
+        session_url: SessionUrl,
+        socket: SocketSettings,
+    },
     /// A broker built from a pool with no session URL.
     NoSessionUrl,
 }
@@ -186,10 +189,14 @@ impl fmt::Debug for ProcessListener {
 }
 
 impl ProcessListener {
-    /// A listener on `session_url`. Nothing is parsed or read here.
-    pub(crate) fn on_session_url(session_url: &str) -> ProcessListener {
+    /// A listener on `session_url` whose connection uses `socket`. Nothing is
+    /// parsed or read here.
+    pub(crate) fn on_session_url(session_url: &str, socket: SocketSettings) -> ProcessListener {
         ProcessListener {
-            source: ListenerSource::SessionUrl(SessionUrl(session_url.to_owned())),
+            source: ListenerSource::SessionUrl {
+                session_url: SessionUrl(session_url.to_owned()),
+                socket,
+            },
             started: OnceCell::new(),
         }
     }
@@ -210,9 +217,17 @@ impl ProcessListener {
     pub async fn start(&self) -> Result<&StartedListener, ListenError> {
         match &self.source {
             ListenerSource::NoSessionUrl => Err(ListenError::NoSessionUrl),
-            ListenerSource::SessionUrl(session_url) => self
+            ListenerSource::SessionUrl {
+                session_url,
+                socket,
+            } => self
                 .started
-                .get_or_try_init(|| process_listener(session_url.clone()))
+                .get_or_try_init(|| {
+                    process_listener(ListenerKey {
+                        session_url: session_url.clone(),
+                        socket: *socket,
+                    })
+                })
                 .await
                 .map(|started| &**started),
         }
@@ -241,11 +256,25 @@ impl ProcessListener {
     }
 }
 
-/// A process listener of one runtime and session URL. The entry holds no
-/// strong reference, so it does not keep its listener alive.
+/// What makes two brokers share one listener: the same session URL text and
+/// the same socket settings (on the same runtime).
+#[derive(Clone)]
+struct ListenerKey {
+    session_url: SessionUrl,
+    socket: SocketSettings,
+}
+
+impl ListenerKey {
+    fn matches(&self, other: &ListenerKey) -> bool {
+        self.session_url.0 == other.session_url.0 && self.socket == other.socket
+    }
+}
+
+/// A process listener of one runtime and key. The entry holds no strong
+/// reference, so it does not keep its listener alive.
 struct RegisteredListener {
     runtime: tokio::runtime::Id,
-    session_url: SessionUrl,
+    key: ListenerKey,
     listener: Weak<StartedListener>,
 }
 
@@ -262,16 +291,15 @@ fn lock_process_listeners() -> MutexGuard<'static, Vec<RegisteredListener>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The running listener of `runtime` on `session_url`, when one is
-/// registered.
+/// The running listener of `runtime` and `key`, when one is registered.
 fn find_running(
     registered: &[RegisteredListener],
     runtime: tokio::runtime::Id,
-    session_url: &SessionUrl,
+    key: &ListenerKey,
 ) -> Option<Arc<StartedListener>> {
     registered
         .iter()
-        .filter(|entry| entry.runtime == runtime && entry.session_url.0 == session_url.0)
+        .filter(|entry| entry.runtime == runtime && entry.key.matches(key))
         .find_map(|entry| {
             entry
                 .listener
@@ -280,21 +308,21 @@ fn find_running(
         })
 }
 
-/// The process listener of `session_url` on the current runtime: the running
-/// one, or a new one. A refused plan starts nothing.
-async fn process_listener(session_url: SessionUrl) -> Result<Arc<StartedListener>, ListenError> {
+/// The process listener of `key` on the current runtime: the running one,
+/// or a new one. A refused plan starts nothing.
+async fn process_listener(key: ListenerKey) -> Result<Arc<StartedListener>, ListenError> {
     let runtime = tokio::runtime::Handle::current().id();
     let running = {
         let registered = lock_process_listeners();
-        find_running(&registered, runtime, &session_url)
+        find_running(&registered, runtime, &key)
     };
     if let Some(running) = running {
         return Ok(running);
     }
-    let plan = load_plan(session_url.clone())
+    let plan = load_plan(key.clone())
         .await
         .map_err(ListenError::PlanRefused)?;
-    Ok(register(runtime, session_url, plan))
+    Ok(register(runtime, key, plan))
 }
 
 /// Starts and registers the listener of `plan`. When another broker of the
@@ -302,12 +330,12 @@ async fn process_listener(session_url: SessionUrl) -> Result<Arc<StartedListener
 /// loaded, that listener is returned and `plan` is dropped unused.
 fn register(
     runtime: tokio::runtime::Id,
-    session_url: SessionUrl,
+    key: ListenerKey,
     plan: ConnectPlan,
 ) -> Arc<StartedListener> {
     let mut registered = lock_process_listeners();
     registered.retain(|entry| entry.listener.strong_count() > 0);
-    if let Some(running) = find_running(&registered, runtime, &session_url) {
+    if let Some(running) = find_running(&registered, runtime, &key) {
         return running;
     }
     let masked_url = plan.masked_url().clone();
@@ -317,15 +345,15 @@ fn register(
     });
     registered.push(RegisteredListener {
         runtime,
-        session_url,
+        key,
         listener: Arc::downgrade(&started),
     });
     started
 }
 
 /// Runs [`read_plan`] on the blocking pool. A panic in it is resumed here.
-async fn load_plan(session_url: SessionUrl) -> Result<ConnectPlan, ListenerPlanError> {
-    match tokio::task::spawn_blocking(move || read_plan(&session_url)).await {
+async fn load_plan(key: ListenerKey) -> Result<ConnectPlan, ListenerPlanError> {
+    match tokio::task::spawn_blocking(move || read_plan(&key)).await {
         Ok(loaded) => loaded,
         Err(join_error) => match join_error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),
@@ -335,15 +363,14 @@ async fn load_plan(session_url: SessionUrl) -> Result<ConnectPlan, ListenerPlanE
 }
 
 /// Reads the connection environment, parses the session URL and loads its
-/// plan. Blocking: reads the TLS files the URL names, `~/.pgpass` when no
-/// other password is given, and the process user name when the URL names no
-/// user.
-fn read_plan(session_url: &SessionUrl) -> Result<ConnectPlan, ListenerPlanError> {
+/// plan with the key's socket settings. Blocking: reads the TLS files the URL
+/// names, `~/.pgpass` when no other password is given, and the process user
+/// name when the URL names no user.
+fn read_plan(key: &ListenerKey) -> Result<ConnectPlan, ListenerPlanError> {
     let environment = ConnectionEnvironment::capture().map_err(ListenerPlanError::Environment)?;
     let settings =
-        parse_connection_url(&session_url.0, &environment).map_err(ListenerPlanError::Url)?;
-    ConnectPlan::load(&settings, &environment, &DEFAULT_SOCKET_SETTINGS)
-        .map_err(ListenerPlanError::Plan)
+        parse_connection_url(&key.session_url.0, &environment).map_err(ListenerPlanError::Url)?;
+    ConnectPlan::load(&settings, &environment, &key.socket).map_err(ListenerPlanError::Plan)
 }
 
 #[cfg(test)]
@@ -360,6 +387,7 @@ impl ProcessListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Keepalives, DEFAULT_SOCKET_SETTINGS};
 
     fn any_channel() -> ChannelName {
         fixed_channel("horsies_listener_unit")
@@ -391,7 +419,10 @@ mod tests {
     /// retryable, and leaves the listener unstarted.
     #[tokio::test]
     async fn a_refused_session_url_is_a_permanent_refusal() {
-        let listener = ProcessListener::on_session_url("mysql://horsies@127.0.0.1:1/horsies");
+        let listener = ProcessListener::on_session_url(
+            "mysql://horsies@127.0.0.1:1/horsies",
+            DEFAULT_SOCKET_SETTINGS,
+        );
 
         let Err(refused) = listener
             .subscribe_wake(any_channel(), PayloadFilter::AnyPayload)
@@ -412,10 +443,12 @@ mod tests {
     /// another URL gets its own. Starting connects to nothing.
     #[tokio::test]
     async fn brokers_on_one_session_url_share_one_listener() {
-        let first = ProcessListener::on_session_url(PLAN_ONLY_URL);
-        let second = ProcessListener::on_session_url(PLAN_ONLY_URL);
-        let other =
-            ProcessListener::on_session_url(&format!("{PLAN_ONLY_URL}?application_name=other"));
+        let first = ProcessListener::on_session_url(PLAN_ONLY_URL, DEFAULT_SOCKET_SETTINGS);
+        let second = ProcessListener::on_session_url(PLAN_ONLY_URL, DEFAULT_SOCKET_SETTINGS);
+        let other = ProcessListener::on_session_url(
+            &format!("{PLAN_ONLY_URL}?application_name=other"),
+            DEFAULT_SOCKET_SETTINGS,
+        );
 
         let first_started = first.start().await.expect("the plan loads");
         let second_started = second.start().await.expect("the plan loads");
@@ -425,13 +458,33 @@ mod tests {
         assert!(!std::ptr::eq(first_started, other_started));
     }
 
+    /// Other socket settings on the same URL get their own listener: one
+    /// connection cannot carry two sets of socket settings.
+    #[tokio::test]
+    async fn other_socket_settings_get_their_own_listener() {
+        let url = format!("{PLAN_ONLY_URL}?application_name=socket_settings");
+        let default = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let no_keepalives = ProcessListener::on_session_url(
+            &url,
+            SocketSettings {
+                keepalives: Keepalives::Off,
+                ..DEFAULT_SOCKET_SETTINGS
+            },
+        );
+
+        let default_started = default.start().await.expect("the plan loads");
+        let no_keepalives_started = no_keepalives.start().await.expect("the plan loads");
+
+        assert!(!std::ptr::eq(default_started, no_keepalives_started));
+    }
+
     /// The listener stops when the last broker that uses it drops; the
     /// process keeps no reference to it.
     #[tokio::test]
     async fn the_last_broker_drop_stops_the_shared_listener() {
         let url = format!("{PLAN_ONLY_URL}?application_name=last_drop");
-        let first = ProcessListener::on_session_url(&url);
-        let second = ProcessListener::on_session_url(&url);
+        let first = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let second = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
         let shared = Arc::downgrade(first.started_for_test().await);
         assert!(second.start().await.is_ok(), "the plan loads");
 
@@ -447,7 +500,10 @@ mod tests {
 
     #[test]
     fn debug_output_does_not_show_the_session_url() {
-        let listener = ProcessListener::on_session_url("postgresql://horsies:secret@db/horsies");
+        let listener = ProcessListener::on_session_url(
+            "postgresql://horsies:secret@db/horsies",
+            DEFAULT_SOCKET_SETTINGS,
+        );
 
         let shown = format!("{listener:?}");
 

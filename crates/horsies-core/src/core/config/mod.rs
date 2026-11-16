@@ -6,6 +6,7 @@ pub mod recovery;
 pub mod resilience;
 pub mod retention;
 pub mod schedule;
+pub mod socket;
 
 pub use app::{mask_database_url, AppConfig, AppConfigError};
 pub use broker::{PostgresConfig, PostgresConfigError};
@@ -18,4 +19,7 @@ pub use schedule::{
     CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule, DailySchedule, DaySelector,
     HourlySchedule, IntervalSchedule, Month, MonthlySchedule, ScheduleConfig, SchedulePattern,
     TaskSchedule, Weekday, WeeklySchedule,
+};
+pub use socket::{
+    KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig, TcpUserTimeoutMs,
 };
