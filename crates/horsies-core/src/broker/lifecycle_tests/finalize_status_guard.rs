@@ -204,7 +204,7 @@ async fn reaper_then_retry_race_sequence() {
 /// runs before the failure write (differences ledger, row 18).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #723"]
+#[ignore = "waits on #711"]
 async fn the_claim_returns_the_retry_facts() {
     let pool = pool().await;
     let task_id = seed_task(
