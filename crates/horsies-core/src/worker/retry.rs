@@ -100,12 +100,14 @@ pub enum DelayCap {
 
 /// A stored retry policy that fits the rule that wrote it.
 ///
-/// Constructed only by [`read_stored_options`]: 1 to [`MAX_RETRY_ATTEMPTS`]
-/// intervals of 1 to [`MAX_RETRY_INTERVAL_SECONDS`] seconds (exactly one for
-/// exponential backoff, one per retry for fixed backoff) and at least one
-/// code in `auto_retry_for`.
+/// Constructed only by [`read_stored_options`]: `max_retries` from 1 to
+/// [`MAX_RETRY_ATTEMPTS`], 1 to [`MAX_RETRY_ATTEMPTS`] intervals of 1 to
+/// [`MAX_RETRY_INTERVAL_SECONDS`] seconds (exactly one for exponential
+/// backoff, one per retry for fixed backoff) and at least one code in
+/// `auto_retry_for`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetryRule {
+    max_retries: u32,
     intervals: Vec<u32>,
     backoff: Backoff,
     jitter: bool,
@@ -275,12 +277,59 @@ fn retry_rule_from_wire(wire: WireRetryPolicy) -> Result<RetryRule, String> {
         );
     }
     Ok(RetryRule {
+        max_retries: wire.max_retries,
         intervals: wire.intervals,
         backoff,
         jitter: wire.jitter,
         delay_cap,
         auto_retry_for: wire.auto_retry_for,
     })
+}
+
+/// Why task options give no `max_retries` for a row. The options are
+/// refused, not read as a guessed limit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RetryLimitRefused {
+    /// The text does not parse, or is not a JSON object.
+    #[error("{reason}")]
+    UnreadableOptions { reason: String },
+    /// `retry_policy` does not fit the policy rule.
+    #[error("{reason}")]
+    InvalidPolicy { reason: String },
+}
+
+/// The `max_retries` column of a row whose `task_options` are this text
+/// (Python `stored_max_retries`, `horsies/core/codec/task_options.py:80-103`).
+///
+/// - No options, an empty text, no `retry_policy` key or a `null` policy: 0.
+/// - A policy that fits the rule of [`read_stored_options`]: its
+///   `max_retries`, 1 to [`MAX_RETRY_ATTEMPTS`].
+/// - Otherwise [`RetryLimitRefused`]: the text does not parse, is not an
+///   object, or holds a policy that does not fit the rule (a missing,
+///   non-integer or out-of-range `max_retries` included).
+///
+/// One reader serves the task row of a send and the node and task rows of a
+/// workflow, so the worker never meets a stored policy that its dispatch
+/// refuses. Other keys of the options are not judged here. Pure.
+pub fn stored_max_retries(task_options: Option<&str>) -> Result<i32, RetryLimitRefused> {
+    match read_stored_options(task_options) {
+        StoredOptions::Unreadable { reason } => {
+            Err(RetryLimitRefused::UnreadableOptions { reason })
+        }
+        StoredOptions::Readable {
+            retry: StoredRetry::NoPolicy,
+            ..
+        } => Ok(0),
+        StoredOptions::Readable {
+            retry: StoredRetry::Invalid { reason },
+            ..
+        } => Err(RetryLimitRefused::InvalidPolicy { reason }),
+        StoredOptions::Readable {
+            retry: StoredRetry::Policy(rule),
+            ..
+        } => Ok(i32::try_from(rule.max_retries())
+            .expect("a stored retry policy holds at most MAX_RETRY_ATTEMPTS (20) retries")),
+    }
 }
 
 impl StoredOptions {
@@ -375,6 +424,11 @@ pub fn admit_retry<'a>(
 }
 
 impl RetryRule {
+    /// The retries the policy allows: 1 to [`MAX_RETRY_ATTEMPTS`].
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
     /// The delay in seconds before retry attempt `retry_attempt` (1-based:
     /// `retry_count + 1`), as Python `calculate_retry_delay` computes it for a
     /// valid policy: the backoff, a floor of 1 s, jitter upward by up to 25 %,

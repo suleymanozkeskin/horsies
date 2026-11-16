@@ -14,6 +14,27 @@ pub mod start;
 
 pub use error::WorkflowError;
 
+/// The `max_retries` of a task node's row and of the task row minted from
+/// it, read from the node's `task_options` with the reader of a task row
+/// ([`crate::worker::retry::stored_max_retries`]; Python
+/// `horsies/core/workflows/engine.py:767-776`,
+/// `horsies/core/workflows/lifecycle.py:182-188`).
+///
+/// Options that the reader refuses are [`WorkflowError::Validation`] naming
+/// the node: no limit is guessed, and the caller writes no row from them.
+/// Pure.
+pub(crate) fn node_max_retries(
+    task_index: impl std::fmt::Display,
+    task_name: &str,
+    task_options: Option<&str>,
+) -> Result<i32, WorkflowError> {
+    crate::worker::retry::stored_max_retries(task_options).map_err(|refusal| {
+        WorkflowError::Validation(format!(
+            "task_options of workflow node {task_index} ({task_name}) refused: {refusal}"
+        ))
+    })
+}
+
 /// Parse `good_until` from a serialized task_options JSON string.
 ///
 /// In the Python spec, `good_until` is stored inside the `task_options` JSON

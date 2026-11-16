@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
@@ -997,7 +996,11 @@ async fn reevaluate_and_enqueue(
                 crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
                     WorkflowError::Validation(format!("task identity mint failed: {error}"))
                 })?;
-            let max_retries = parse_max_retries(task.task_options.as_deref());
+            let max_retries = crate::workflow_engine::node_max_retries(
+                task.task_index,
+                &task.task_name,
+                task.task_options.as_deref(),
+            )?;
 
             // Merge args_from if present.
             let merged_input = merge_args_from_for_ready(

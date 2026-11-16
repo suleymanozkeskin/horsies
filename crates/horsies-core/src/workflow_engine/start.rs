@@ -10,7 +10,6 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{
     AnyNode, OnError, OperationalErrorCode, TaskError, WorkflowSpec, WorkflowSpecRegistry,
@@ -19,7 +18,7 @@ use crate::core::{
 
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
+use crate::workflow_engine::{node_max_retries, parse_good_until_from_options};
 
 // ---------------------------------------------------------------------------
 // SQL constants
@@ -132,7 +131,7 @@ fn node_task_facts(
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
     Ok(NodeTaskFacts {
-        max_retries: parse_max_retries(merged_task_options),
+        max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
         good_until: parse_good_until_from_options(merged_task_options),
         facts,
     })
@@ -1254,6 +1253,136 @@ mod tests {
         let mut keyed = unkeyed;
         keyed.sub_definition_key = Some("tests.child.v1".to_owned());
         assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
+    }
+
+    /// Python refuses a node whose stored retry policy does not validate, and the start's transaction rolls
+    /// back (`horsies/core/workflows/lifecycle.py:152-203`, `root_retry_and_deadline`; the reader is
+    /// `stored_max_retries`, `horsies/core/codec/task_options.py:80-103`). Each options text here is a JSON
+    /// object, so `prepare_workflow_task_facts` accepts it; only the retry limit refuses it. A reader that
+    /// guesses a limit (3 for a policy without an integer `max_retries`) lets the start write its rows, and
+    /// passes 21 on to the baseline CHECK (`max_retries BETWEEN 0 AND 20`) as a database error.
+    #[tokio::test]
+    #[serial]
+    async fn a_node_whose_retry_policy_does_not_fit_is_refused_before_any_row() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let task_name = "start_refused_retry_policy_node";
+        let exponential = |max_retries: &str| {
+            format!(
+                r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [60],
+                    "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}}}"#
+            )
+        };
+        let cases = [
+            (
+                "no max_retries",
+                r#"{"retry_policy": {"backoff_strategy": "exponential"}}"#.to_owned(),
+            ),
+            ("max_retries is text", exponential("\"5\"")),
+            ("max_retries above 20", exponential("21")),
+            ("policy is a number", r#"{"retry_policy": 5}"#.to_owned()),
+        ];
+        for (case, options) in cases {
+            let mut root = node_with(false, Some(17));
+            root.task_name = task_name.to_owned();
+            root.task_options_json = Some(options);
+            let spec = keyed_spec(Some("tests.start.refused_retry_policy.v1"), vec![root]);
+            let workflow_id = Uuid::new_v4();
+
+            let started = start_workflow::<serde_json::Value>(
+                &broker,
+                &spec,
+                Some(workflow_id),
+                &WorkflowSpecRegistry::new(),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await;
+
+            let refused = match started {
+                Ok(_) => panic!("{case}: the start must be refused"),
+                Err(refused) => refused,
+            };
+            assert_eq!(
+                refused.code,
+                WorkflowStartErrorCode::ValidationFailed,
+                "{case}"
+            );
+            assert!(!refused.retryable, "{case}");
+            assert!(
+                refused.message.contains(&format!(
+                    "task_options of workflow node 0 ({task_name}) refused"
+                )),
+                "{case}: {}",
+                refused.message
+            );
+            let rows: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
+                        (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),
+                        (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
+            )
+            .bind(workflow_id)
+            .bind(task_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows, (0, 0, 0), "{case}");
+        }
+    }
+
+    /// A node whose retry policy fits stores its `max_retries` on the node row and on its task row, from
+    /// the same reader as a task row (Python `stored_max_retries`).
+    #[tokio::test]
+    #[serial]
+    async fn a_node_whose_retry_policy_fits_stores_its_limit_on_both_rows() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let mut root = node_with(false, Some(17));
+        root.task_name = "start_fitting_retry_policy_node".to_owned();
+        root.task_options_json = Some(
+            r#"{"retry_policy": {"max_retries": 4, "intervals": [60],
+                "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}"#
+                .to_owned(),
+        );
+        let spec = keyed_spec(Some("tests.start.fitting_retry_policy.v1"), vec![root]);
+        let workflow_id = Uuid::new_v4();
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+            &broker,
+            &spec,
+            Some(workflow_id),
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("start a workflow whose node policy fits");
+
+        let limits: (i32, i32) = sqlx::query_as(
+            "SELECT wt.max_retries, t.max_retries
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM horsies_tasks WHERE id IN (
+                SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
+        assert_eq!(limits, (4, 4));
     }
 
     /// A root node that the start enqueues holds its enqueue time as `started_at`: the fast root (bulk

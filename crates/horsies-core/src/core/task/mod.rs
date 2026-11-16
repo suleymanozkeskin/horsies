@@ -5,7 +5,6 @@ pub mod info;
 pub mod macros;
 pub mod options;
 pub mod result;
-pub mod retry_utils;
 pub mod send_types;
 
 pub use error::{
