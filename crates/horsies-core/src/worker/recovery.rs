@@ -1552,7 +1552,7 @@ async fn process_single_stale_task(
         let task_result: TaskResult<()> = TaskResult::Err(task_error);
         let result_json = serde_json::to_string(&task_result).unwrap_or_else(|e| {
             tracing::error!(task_id = %task_id, error = %e, "failed to serialize stale task result");
-            r#"{"__type":"err","value":{"message":"serialization failed"}}"#.to_owned()
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"},"data":null,"message":"serialization failed"}}"#.to_owned()
         });
 
         // Write the attempt before the move so the terminalization function
@@ -1844,7 +1844,7 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
     );
     let task_result = TaskResult::<()>::Err(task_error);
     let result_json = serde_json::to_string(&task_result)
-        .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+        .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
     let command = crate::core::lifecycle::TerminalizationCommand::ExpirePendingTasks {
         batch_size: crate::core::lifecycle::BatchSize::new(EXPIRE_BATCH_SIZE)
             .expect("EXPIRE_BATCH_SIZE is positive"),

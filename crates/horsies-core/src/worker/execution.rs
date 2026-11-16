@@ -1642,7 +1642,8 @@ mod result_wrap_tests {
         let wrapped_json = serde_json::to_string(&TaskResult::Ok(raw)).expect("wrap serializes");
 
         assert_eq!(
-            wrapped_json, r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
+            wrapped_json,
+            r#"{"__h_task_result__":true,"ok":{"amount": 1.2300, "id": 7},"err":null}"#,
             "result bytes must be embedded verbatim",
         );
 

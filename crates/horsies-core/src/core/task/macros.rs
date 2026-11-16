@@ -106,9 +106,10 @@ where
                     std::any::type_name::<T>(),
                 )),
                 cause: None,
+                // The error names the type and the cause, never the value (Python
+                // `core/task_decorator.py:1856-1914`).
                 data: Some(serde_json::json!({
                     "expected_type": std::any::type_name::<T>(),
-                    "actual_value": candidate,
                     "validation_error": e.to_string(),
                 })),
             })
@@ -119,11 +120,12 @@ where
 /// Serialize a task's success value and verify it round-trips through the
 /// declared output type.
 ///
-/// This mirrors Python's producer-side runtime return-contract validation:
-/// the value must not only serialize, it must deserialize back into the same
-/// declared `T`. If round-trip validation fails, return a structured
-/// `RETURN_TYPE_MISMATCH` error instead of persisting a value that later
-/// readers cannot hydrate through the declared type contract.
+/// This mirrors Python's producer-side runtime return-contract validation
+/// (`encode_returned_result`, `core/codec/typed.py:862-882`): the value must
+/// not only serialize, it must deserialize back into the same declared `T`. A
+/// value that does not read back is `WORKER_SERIALIZATION_ERROR`, as in Python's
+/// child (`core/worker/child_runner.py:1819-1855`); the error names the type and
+/// the cause, never the value.
 #[doc(hidden)]
 pub fn encode_validated_task_output<T>(value: &T) -> crate::core::task::result::TaskResult<Vec<u8>>
 where
@@ -145,23 +147,17 @@ where
     };
 
     if let Err(e) = crate::core::codec::from_json_bytes::<T>(&bytes) {
-        let actual_value =
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|_| {
-                serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
-            });
-
         return crate::core::task::result::TaskResult::Err(crate::core::task::TaskError {
             error_code: Some(crate::core::task::TaskErrorCode::from(
-                crate::core::task::ContractCode::ReturnTypeMismatch,
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
             )),
             message: Some(format!(
-                "task returned a value that does not match its declared output type {}",
+                "task returned a value that does not read back as its declared output type {}",
                 std::any::type_name::<T>(),
             )),
             cause: None,
             data: Some(serde_json::json!({
                 "expected_type": std::any::type_name::<T>(),
-                "actual_value": actual_value,
                 "validation_error": e.to_string(),
             })),
         });
@@ -460,11 +456,13 @@ mod tests {
         assert_eq!(
             err.error_code,
             Some(crate::core::task::TaskErrorCode::from(
-                crate::core::task::ContractCode::ReturnTypeMismatch,
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
             )),
         );
         let data = err.data.expect("expected mismatch diagnostics");
         assert_eq!(data["expected_type"], std::any::type_name::<BadRoundTrip>());
+        // The stored error never holds the returned value.
+        assert!(data.get("actual_value").is_none());
     }
 
     #[test]

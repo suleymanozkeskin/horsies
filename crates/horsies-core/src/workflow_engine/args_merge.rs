@@ -182,9 +182,14 @@ fn task_result_to_value(
 ) -> serde_json::Value {
     serde_json::to_value(&wrapped).unwrap_or_else(|e| {
         tracing::warn!(dep_idx, error = %e, context, "dependency result wrapping failed");
+        // A decodable envelope with a code: no code-less fallback.
         serde_json::json!({
-            "__type": "err",
-            "value": {
+            "__h_task_result__": true,
+            "ok": null,
+            "err": {
+                "exception": null,
+                "error_code": {"__builtin_task_code__": "WORKER_SERIALIZATION_ERROR"},
+                "data": null,
                 "message": context,
             }
         })
@@ -245,8 +250,8 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "ok");
-        assert_eq!(answer["value"], 42);
+        assert_eq!(answer["__h_task_result__"], true);
+        assert_eq!(answer["ok"], 42);
     }
 
     #[test]
@@ -266,8 +271,8 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
-        assert!(answer["value"]["message"]
+        assert!(answer["err"].is_object());
+        assert!(answer["err"]["message"]
             .as_str()
             .unwrap()
             .contains("no stored result"));
@@ -282,7 +287,7 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
+        assert!(answer["err"].is_object());
     }
 
     #[test]
@@ -304,8 +309,8 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["existing"], true);
-        assert_eq!(parsed["dep_val"]["__type"], "ok");
-        assert_eq!(parsed["dep_val"]["value"], "hello");
+        assert_eq!(parsed["dep_val"]["__h_task_result__"], true);
+        assert_eq!(parsed["dep_val"]["ok"], "hello");
     }
 
     #[test]
@@ -402,8 +407,8 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
-        assert!(answer["value"]["message"]
+        assert!(answer["err"].is_object());
+        assert!(answer["err"]["message"]
             .as_str()
             .unwrap()
             .contains("failed to parse upstream task result"));

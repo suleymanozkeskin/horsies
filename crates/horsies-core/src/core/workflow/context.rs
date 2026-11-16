@@ -454,7 +454,7 @@ mod tests {
             "task_index": 3,
             "task_name": "parse",
             "results_by_id": {
-                "fetch:0": {"__type": "ok", "value": 99}
+                "fetch:0": {"__h_task_result__": true, "ok": 99, "err": null}
             }
         }"#;
         let ctx: WorkflowContext = serde_json::from_str(json).unwrap();

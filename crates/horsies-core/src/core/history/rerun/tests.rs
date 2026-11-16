@@ -1098,7 +1098,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert_eq!(
         raw.raw_result,
         Some(
-            serde_json::json!({"__type": "ok", "value": {"value": 7}})
+            serde_json::json!({"__h_task_result__": true, "ok": {"value": 7}, "err": null})
                 .as_object()
                 .unwrap()
                 .clone()

@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::error::{BuiltInTaskCode, OperationalErrorCode, TaskError, TaskErrorCode};
 
@@ -12,13 +14,84 @@ use super::error::{BuiltInTaskCode, OperationalErrorCode, TaskError, TaskErrorCo
 /// `Err(TaskError)` with the appropriate `BuiltInTaskCode` — one result type,
 /// one error taxonomy, one matching shape.
 ///
-/// Serializes with adjacently tagged encoding:
-/// `{"__type": "ok", "value": ...}`, `{"__type": "err", "value": {...}}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "__type", content = "value", rename_all = "snake_case")]
+/// Stored as Python's result envelope (`encode_task_result`, `core/codec/typed.py:798-859`):
+/// `{"__h_task_result__": true, "ok": <value>, "err": null}` or
+/// `{"__h_task_result__": true, "ok": null, "err": {...}}`. A read refuses any other shape
+/// (`validate_task_result_envelope`, `core/codec/typed.py:1133-1180`): not an object, the marker missing or not
+/// `true`, a missing or an extra key, or both slots set. A non-null `err` slot is an error; otherwise the `ok`
+/// slot is the value, `null` included.
+#[derive(Debug, Clone)]
 pub enum TaskResult<T> {
     Ok(T),
     Err(TaskError),
+}
+
+/// The marker key of a stored task result (Python `_TASK_RESULT_ENVELOPE_KEY`).
+pub const TASK_RESULT_ENVELOPE_KEY: &str = "__h_task_result__";
+
+const OK_SLOT: &str = "ok";
+const ERR_SLOT: &str = "err";
+
+impl<T: Serialize> Serialize for TaskResult<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut envelope = serializer.serialize_map(Some(3))?;
+        envelope.serialize_entry(TASK_RESULT_ENVELOPE_KEY, &true)?;
+        match self {
+            Self::Ok(value) => {
+                envelope.serialize_entry(OK_SLOT, value)?;
+                envelope.serialize_entry(ERR_SLOT, &serde_json::Value::Null)?;
+            }
+            Self::Err(error) => {
+                envelope.serialize_entry(OK_SLOT, &serde_json::Value::Null)?;
+                envelope.serialize_entry(ERR_SLOT, error)?;
+            }
+        }
+        envelope.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for TaskResult<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let serde_json::Value::Object(mut envelope) = raw else {
+            return Err(D::Error::custom(
+                "TaskResult envelope must be a JSON object",
+            ));
+        };
+        match envelope.get(TASK_RESULT_ENVELOPE_KEY) {
+            Some(serde_json::Value::Bool(true)) => {}
+            _ => {
+                return Err(D::Error::custom(format!(
+                    "TaskResult envelope missing {TASK_RESULT_ENVELOPE_KEY:?} marker (or marker is not true)"
+                )))
+            }
+        }
+        if let Some(extra) = envelope
+            .keys()
+            .find(|key| !matches!(key.as_str(), TASK_RESULT_ENVELOPE_KEY | OK_SLOT | ERR_SLOT))
+        {
+            return Err(D::Error::custom(format!(
+                "unexpected key {extra:?} in TaskResult envelope"
+            )));
+        }
+        let (Some(ok_slot), Some(err_slot)) = (envelope.remove(OK_SLOT), envelope.remove(ERR_SLOT))
+        else {
+            return Err(D::Error::custom(
+                "TaskResult envelope missing a required key (ok, err)",
+            ));
+        };
+        match (ok_slot, err_slot) {
+            (ok_slot, serde_json::Value::Null) => T::deserialize(ok_slot)
+                .map(Self::Ok)
+                .map_err(D::Error::custom),
+            (serde_json::Value::Null, err_slot) => TaskError::deserialize(err_slot)
+                .map(Self::Err)
+                .map_err(D::Error::custom),
+            (_, _) => Err(D::Error::custom(
+                "TaskResult envelope has both ok and err populated; exactly one must be set",
+            )),
+        }
+    }
 }
 
 impl<T> TaskResult<T> {
@@ -227,12 +300,62 @@ mod tests {
     }
 
     #[test]
-    fn serde_ok_contains_type_tag() {
-        let result: TaskResult<i32> = TaskResult::Ok(42);
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"__type\""));
-        assert!(json.contains("\"ok\""));
-        assert!(json.contains("\"value\""));
+    fn stored_text_is_the_python_envelope() {
+        let ok: TaskResult<serde_json::Value> = TaskResult::Ok(serde_json::json!({"total": 3}));
+        assert_eq!(
+            serde_json::to_string(&ok).unwrap(),
+            r#"{"__h_task_result__":true,"ok":{"total":3},"err":null}"#
+        );
+        let unit: TaskResult<()> = TaskResult::Ok(());
+        assert_eq!(
+            serde_json::to_string(&unit).unwrap(),
+            r#"{"__h_task_result__":true,"ok":null,"err":null}"#
+        );
+        let err: TaskResult<i32> = TaskResult::Err(TaskError::new("RATE_LIMITED", "slow down"));
+        let value = serde_json::to_value(&err).unwrap();
+        assert_eq!(value["__h_task_result__"], true);
+        assert_eq!(value["ok"], serde_json::Value::Null);
+        assert_eq!(value["err"]["error_code"], "RATE_LIMITED");
+        assert_eq!(value["err"]["message"], "slow down");
+    }
+
+    #[test]
+    fn python_envelopes_read_back() {
+        let ok: TaskResult<i32> =
+            serde_json::from_str(r#"{"__h_task_result__":true,"ok":7,"err":null}"#).unwrap();
+        assert!(matches!(ok, TaskResult::Ok(7)));
+        let null_ok: TaskResult<Option<i32>> =
+            serde_json::from_str(r#"{"__h_task_result__":true,"ok":null,"err":null}"#).unwrap();
+        assert!(matches!(null_ok, TaskResult::Ok(None)));
+        let err: TaskResult<i32> = serde_json::from_str(
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_TIMEOUT"},"data":null,"message":"late"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            err.unwrap_err()
+                .error_code
+                .map(|code| code.to_string())
+                .as_deref(),
+            Some("TASK_TIMEOUT")
+        );
+    }
+
+    #[test]
+    fn malformed_envelopes_are_refused() {
+        for text in [
+            r#"{"__type":"ok","value":1}"#,
+            r#"[1]"#,
+            r#"{"__h_task_result__":false,"ok":1,"err":null}"#,
+            r#"{"ok":1,"err":null}"#,
+            r#"{"__h_task_result__":true,"ok":1}"#,
+            r#"{"__h_task_result__":true,"ok":1,"err":null,"extra":1}"#,
+            r#"{"__h_task_result__":true,"ok":1,"err":{"error_code":"X","message":"m"}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskResult<serde_json::Value>>(text).is_err(),
+                "{text} must be refused"
+            );
+        }
     }
 
     #[test]
