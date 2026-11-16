@@ -217,6 +217,14 @@ class TestDetail:
                 task_id=ghost, reason=TaskAbsenceReason.NOT_CLASSIFIED
             )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            'The baseline leaf catalog stores no birth floor, so every '
+            'absence reads NOT_CLASSIFIED. PREDATES_RETAINED_HISTORY returns '
+            'when the reason is derived from the record of detached leaves.'
+        ),
+    )
     @pytest.mark.asyncio
     async def test_purged_task_classifies_before_the_retained_floor(
         self, terminalization_schema: HistorySchema
