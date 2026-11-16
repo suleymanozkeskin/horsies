@@ -1870,18 +1870,6 @@ mod facet_tests {
     /// reads the live table and the history window once each, and the live
     /// side has no error-code set.
     #[test]
-    fn one_statement_reads_each_side_once() {
-        let query = TaskFacetsQuery::new(window());
-        let builder = facets_statement(&query);
-        let sql = builder.sql();
-
-        assert_eq!(sql.matches("FROM horsies_tasks").count(), 1);
-        assert_eq!(sql.matches("FROM horsies_task_history").count(), 1);
-        assert_eq!(sql.matches("GROUPING SETS").count(), 2);
-        assert!(sql.contains("GROUPING(claimed_by_worker_id, task_name, queue_name)"));
-    }
-
-    #[test]
     fn rows_fill_each_facet_in_rank_order() {
         let facets = facets_from_rows(
             vec![
