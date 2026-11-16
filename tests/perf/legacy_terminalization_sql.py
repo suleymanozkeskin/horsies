@@ -169,3 +169,56 @@ EXPIRE_CLAIMED_TASK_BEFORE_START_SQL = """
       AND good_until <= NOW()
     RETURNING id
 """
+
+
+SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
+    SELECT t.id, t.worker_pid, t.worker_hostname, t.claimed_by_worker_id,
+           t.started_at, hb.last_heartbeat, t.retry_count, t.worker_process_name,
+           t.max_retries, t.task_options, t.good_until, t.queue_name,
+           clock_timestamp() AS db_now
+    FROM horsies_tasks t
+    LEFT JOIN LATERAL (
+        SELECT sent_at AS last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = t.id AND h.role = 'runner'
+        ORDER BY sent_at DESC
+        LIMIT 1
+    ) hb ON TRUE
+    WHERE t.id = :id
+      AND t.status = 'RUNNING'
+      AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
+      )
+      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
+    FOR UPDATE OF t
+""")
+
+
+UPSERT_TASK_ATTEMPT_SQL = text("""
+    INSERT INTO horsies_task_attempts (
+        task_id, attempt, outcome, will_retry,
+        started_at, finished_at,
+        error_code, error_message, failed_reason,
+        worker_id, worker_hostname, worker_pid, worker_process_name
+    )
+    VALUES (
+        :task_id, :attempt, :outcome, :will_retry,
+        :started_at, :finished_at,
+        :error_code, :error_message, :failed_reason,
+        :worker_id, :worker_hostname, :worker_pid, :worker_process_name
+    )
+    ON CONFLICT (task_id, attempt) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        will_retry = EXCLUDED.will_retry,
+        started_at = EXCLUDED.started_at,
+        finished_at = EXCLUDED.finished_at,
+        error_code = EXCLUDED.error_code,
+        error_message = EXCLUDED.error_message,
+        failed_reason = EXCLUDED.failed_reason,
+        worker_id = EXCLUDED.worker_id,
+        worker_hostname = EXCLUDED.worker_hostname,
+        worker_pid = EXCLUDED.worker_pid,
+        worker_process_name = EXCLUDED.worker_process_name
+""")

@@ -134,13 +134,13 @@ async def _link_to_workflow(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
                  task_id, created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node_0', 'fence_test', '{}',
+                ('NONE', :id, :wf_id, 0, 'node_0', 'fence_test', '{}',
                  'default', 100, '{}', FALSE, 'all',
                  FALSE, :wt_status, :task_id, NOW(),
                  0, 'ISOLATED', 'standard_30d')
@@ -350,11 +350,11 @@ async def test_real_claim_path_arms_the_fence(
 ) -> None:
     """Rows from the production claim path carry a usable generation.
 
-    A NULL generation disables the fence for that task, so a dispatch path
-    that stopped reporting claimed_at would silently restore the unfenced
-    behavior while every test that pre-arms generations kept passing. This
-    claims through the real statement, then proves the fence engages on the
-    generation that claim produced.
+    The functions refuse a NULL generation, so a dispatch path that stopped
+    reporting claimed_at would fail every terminal write while every test
+    that pre-arms generations kept passing. This claims through the real
+    statement, then proves the fence engages on the generation that claim
+    produced.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='fence_test')

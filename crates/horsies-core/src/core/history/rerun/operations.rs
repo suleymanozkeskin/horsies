@@ -180,6 +180,20 @@ pub enum RerunError {
         stored: crate::broker::client_family::RecordedFamily,
         own: crate::broker::client_family::ClientFamily,
     },
+    /// The client family read failed on the core statement layer. Nothing
+    /// was written. Retryable when the cause may clear
+    /// (`crate::broker::error::is_retryable_statement_failure`); the next
+    /// rerun checks again.
+    #[error("rerun client family check failed: {0}")]
+    FamilyCheckStatement(crate::db::StatementFailure),
+    /// A closed broker handle could not open its core pools again for the
+    /// client family read. Nothing was written. Not retryable.
+    #[error("rerun client family check refused the connection settings: {0}")]
+    FamilyCheckPoolSettings(crate::broker::pools::PoolSettingsError),
+    /// The family row does not have the shape of its reader. Nothing was
+    /// written. Not retryable.
+    #[error("rerun client family check read an unreadable row: {0}")]
+    FamilyCheckRowDecode(crate::broker::core_rows::RowDecodeError),
 }
 
 pub async fn rerun_task_in_tx(
