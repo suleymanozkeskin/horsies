@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::config::app::AppConfig;
+use crate::core::config::worker_profile::{TaskLimitSetting, WorkerProfile};
 use crate::core::task::execution::Execution;
 
 use crate::worker::config::WorkerConfig;
@@ -34,29 +35,111 @@ fn in_process_slots_down() -> serde_json::Value {
     serde_json::Value::Array(Vec::new())
 }
 
+/// One budget of a worker's claim plan, as the snapshot stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetColumn {
+    /// The class of the budget.
+    pub budget: Execution,
+    /// The children (`ISOLATED`) or seats (a shared class) of the budget that
+    /// are in service.
+    pub capacity: u32,
+    /// The classes whose rows the budget claims, in `Execution` order.
+    pub serves: Vec<Execution>,
+}
+
+/// The `class_capacity` column: each budget class maps to its capacity in
+/// service and the classes whose rows it claims (Python
+/// `core/worker/claim_plan.py`, `class_capacity_json`). A class that no
+/// `serves` list names is not served by the worker. Pure.
+pub fn class_capacity_json(budgets: &[BudgetColumn]) -> serde_json::Value {
+    let mut capacity = serde_json::Map::new();
+    for column in budgets {
+        let serves: Vec<&str> = column
+            .serves
+            .iter()
+            .copied()
+            .map(Execution::as_str)
+            .collect();
+        capacity.insert(
+            column.budget.as_str().to_owned(),
+            serde_json::json!({ "capacity": column.capacity, "serves": serves }),
+        );
+    }
+    serde_json::Value::Object(capacity)
+}
+
 /// The class capacity of a worker that runs task bodies in its own process.
 ///
 /// Its claim has one budget of `concurrency` and takes rows of every
 /// execution class. The stored form of that plan is one `ISOLATED` budget
 /// that serves every class, as Python stores it for a worker that runs only
-/// isolated children (`core/worker/claim_plan.py`, `isolated_children_plan`
-/// and `class_capacity_json`): `{"ISOLATED": {"capacity": concurrency,
-/// "serves": ["ISOLATED", "SHARED_ASYNC", "SHARED_THREAD"]}}`. Pure.
+/// isolated children (`core/worker/claim_plan.py`, `isolated_children_plan`):
+/// `{"ISOLATED": {"capacity": concurrency, "serves": ["ISOLATED",
+/// "SHARED_ASYNC", "SHARED_THREAD"]}}`. Pure.
 fn in_process_class_capacity(concurrency: u32) -> serde_json::Value {
-    let serves: Vec<&str> = [
-        Execution::Isolated,
-        Execution::SharedAsync,
-        Execution::SharedThread,
-    ]
-    .into_iter()
-    .map(Execution::as_str)
-    .collect();
-    let mut capacity = serde_json::Map::new();
-    capacity.insert(
-        Execution::Isolated.as_str().to_owned(),
-        serde_json::json!({ "capacity": concurrency, "serves": serves }),
-    );
-    serde_json::Value::Object(capacity)
+    class_capacity_json(&[BudgetColumn {
+        budget: Execution::Isolated,
+        capacity: concurrency,
+        serves: vec![
+            Execution::Isolated,
+            Execution::SharedAsync,
+            Execution::SharedThread,
+        ],
+    }])
+}
+
+/// The columns of a worker snapshot that the children and the claim limits
+/// of the worker decide (Python `core/worker/health.py:233-239`, from the
+/// `WorkerConfig` that `execution_settings(profile)` builds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimColumns {
+    /// `processes`: the children of the worker.
+    pub processes: u32,
+    /// `max_claim_batch`: the most rows that one pass claims from one queue;
+    /// 0 is no limit.
+    pub max_claim_batch: u32,
+    /// `max_claim_per_worker`: the most CLAIMED rows of the worker, resolved.
+    /// With no set limit it is the seats of the worker, never 0.
+    pub max_claim_per_worker: u32,
+}
+
+impl ClaimColumns {
+    /// The columns of a worker that runs `profile`: its child count, its per
+    /// queue limit or 0, and its claimed limit or else its seat count
+    /// (Python: `cfg.max_claim_per_worker if > 0 else cfg.seat_count()`).
+    /// Pure.
+    #[allow(
+        dead_code,
+        reason = "the snapshot loop calls it once the worker runs a profile"
+    )]
+    pub fn of_profile(profile: &WorkerProfile) -> Self {
+        Self {
+            processes: profile.child_count(),
+            max_claim_batch: match profile.claim.per_queue_per_pass {
+                TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
+                TaskLimitSetting::NoTaskLimit {} => 0,
+            },
+            max_claim_per_worker: match profile.claim.claimed_per_worker {
+                TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
+                TaskLimitSetting::NoTaskLimit {} => profile.seat_count(),
+            },
+        }
+    }
+
+    /// The columns of a worker that runs task bodies in its own process, the
+    /// worker loop until it runs every task through the executor. Its
+    /// `concurrency` permits are its seats, so `max_claim_per_worker = 0`
+    /// ("auto") is stored as `concurrency`. Pure.
+    pub fn of_in_process(worker_config: &WorkerConfig) -> Self {
+        Self {
+            processes: worker_config.concurrency,
+            max_claim_batch: worker_config.max_claim_batch,
+            max_claim_per_worker: match worker_config.max_claim_per_worker {
+                0 => worker_config.concurrency,
+                limit => limit,
+            },
+        }
+    }
 }
 
 /// Resource metrics collected from sysinfo.
@@ -146,6 +229,7 @@ pub fn spawn_worker_state_loop(
         let queue_max_concurrency = sqlx::types::Json(&worker_config.queue_max_concurrency);
         let slots_down = in_process_slots_down();
         let class_capacity = in_process_class_capacity(worker_config.concurrency);
+        let claim_columns = ClaimColumns::of_in_process(&worker_config);
 
         // Initialize sysinfo System for resource metrics.
         let sys_pid = Pid::from(pid as usize);
@@ -220,9 +304,9 @@ pub fn spawn_worker_state_loop(
                 .bind(&worker_id)
                 .bind(&hostname)
                 .bind(pid)
-                .bind(worker_config.concurrency as i32)
-                .bind(worker_config.max_claim_batch as i32)
-                .bind(worker_config.max_claim_per_worker as i32)
+                .bind(claim_columns.processes as i32)
+                .bind(claim_columns.max_claim_batch as i32)
+                .bind(claim_columns.max_claim_per_worker as i32)
                 .bind(app_config.cluster_wide_cap.map(|c| c as i32))
                 .bind(&worker_config.queues)
                 .bind(queue_priorities)
@@ -345,6 +429,99 @@ mod tests {
         assert_eq!(in_process_slots_down(), serde_json::json!([]));
     }
 
+    /// Python `test_claim_plan.py::test_budgets_and_worker_state_capacity`:
+    /// each budget maps to its capacity and the classes it serves.
+    #[test]
+    fn class_capacity_names_each_budget_with_the_classes_it_serves() {
+        let budgets = [
+            BudgetColumn {
+                budget: Execution::Isolated,
+                capacity: 3,
+                serves: vec![Execution::Isolated, Execution::SharedThread],
+            },
+            BudgetColumn {
+                budget: Execution::SharedAsync,
+                capacity: 40,
+                serves: vec![Execution::SharedAsync],
+            },
+        ];
+
+        assert_eq!(
+            class_capacity_json(&budgets),
+            serde_json::json!({
+                "ISOLATED": {"capacity": 3, "serves": ["ISOLATED", "SHARED_THREAD"]},
+                "SHARED_ASYNC": {"capacity": 40, "serves": ["SHARED_ASYNC"]}
+            }),
+        );
+        assert_eq!(class_capacity_json(&[]), serde_json::json!({}));
+    }
+
+    /// Python `core/worker/health.py:233-239` with the `WorkerConfig` of
+    /// `execution_settings(profile)`: `processes` is the child count,
+    /// `max_claim_batch` the per-queue limit or 0, and `max_claim_per_worker`
+    /// the claimed limit or else the seat count.
+    #[test]
+    fn the_claim_columns_of_a_profile_are_resolved_as_python() {
+        use crate::core::config::worker_profile::TaskCount;
+
+        let mut profile: WorkerProfile = serde_json::from_value(serde_json::json!({
+            "isolated": {"kind": "isolated_children", "count": 2},
+            "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 10},
+            "shared_thread": {"kind": "shared_thread_children", "count": 2, "seats": 4}
+        }))
+        .expect("the profile is valid");
+
+        assert_eq!(
+            ClaimColumns::of_profile(&profile),
+            ClaimColumns {
+                processes: 5,
+                max_claim_batch: 0,
+                max_claim_per_worker: 2 + 10 + 8,
+            },
+        );
+
+        let tasks = |count: u32| TaskLimitSetting::TaskLimit {
+            tasks: TaskCount::try_from(count).expect("a test limit is inside its bounds"),
+        };
+        profile.claim.per_queue_per_pass = tasks(3);
+        profile.claim.claimed_per_worker = tasks(7);
+        assert_eq!(
+            ClaimColumns::of_profile(&profile),
+            ClaimColumns {
+                processes: 5,
+                max_claim_batch: 3,
+                max_claim_per_worker: 7,
+            },
+        );
+    }
+
+    /// #804: a worker that runs task bodies in its own process stores
+    /// `max_claim_per_worker = 0` ("auto") as its seats, `concurrency`; a set
+    /// limit is stored as it is.
+    #[test]
+    fn an_in_process_worker_stores_auto_as_its_concurrency() {
+        let auto = WorkerConfig {
+            concurrency: 4,
+            max_claim_batch: 2,
+            max_claim_per_worker: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            ClaimColumns::of_in_process(&auto),
+            ClaimColumns {
+                processes: 4,
+                max_claim_batch: 2,
+                max_claim_per_worker: 4,
+            },
+        );
+
+        let set = WorkerConfig {
+            max_claim_per_worker: 6,
+            ..auto
+        };
+        assert_eq!(ClaimColumns::of_in_process(&set).max_claim_per_worker, 6);
+    }
+
     #[test]
     fn an_in_process_worker_has_one_budget_that_serves_every_class() {
         assert_eq!(
@@ -398,11 +575,13 @@ mod tests {
             serde_json::Value,
             serde_json::Value,
             serde_json::Value,
+            i32,
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let row: Option<Columns> = sqlx::query_as(
-                    "SELECT queue_priorities, queue_max_concurrency, slots_down, class_capacity
+                    "SELECT queue_priorities, queue_max_concurrency, slots_down, class_capacity,
+                            max_claim_per_worker
                      FROM horsies_worker_states WHERE worker_id = $1",
                 )
                 .bind(&worker_id)
@@ -424,12 +603,19 @@ mod tests {
             .await
             .expect("delete the snapshots");
 
-        let (queue_priorities, queue_max_concurrency, slots_down, class_capacity) =
-            written.expect("the first snapshot must land on the baseline schema");
+        let (
+            queue_priorities,
+            queue_max_concurrency,
+            slots_down,
+            class_capacity,
+            max_claim_per_worker,
+        ) = written.expect("the first snapshot must land on the baseline schema");
         assert_eq!(queue_priorities, serde_json::json!({}));
         assert_eq!(queue_max_concurrency, serde_json::json!({}));
         assert_eq!(slots_down, serde_json::json!([]));
         assert_eq!(class_capacity, in_process_class_capacity(2));
+        // "auto" (0) is stored resolved: the seats of the worker (#804).
+        assert_eq!(max_claim_per_worker, 2);
     }
 
     /// Run the snapshot loop on `pool` for `window` with a 10 ms interval,
