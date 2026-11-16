@@ -2,6 +2,7 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod client_family;
 pub mod core_rows;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
