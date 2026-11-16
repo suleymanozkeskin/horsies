@@ -23,6 +23,8 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement,
     RetryRequest,
 };
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
@@ -471,7 +473,8 @@ async fn fail_attempt(pool: &PgPool, task_id: Uuid) -> FailedAttempt {
     let result_json =
         serde_json::to_string(&err("RETRY_PROBE", "attempt failed")).expect("encode the failure");
     let outcome = finish_failed_attempt(
-        pool,
+        &core_pool_for_test_pool(pool),
+        StatementLog::Off,
         &FinishFailedAttempt {
             task_id,
             fence: OwnedClaim {

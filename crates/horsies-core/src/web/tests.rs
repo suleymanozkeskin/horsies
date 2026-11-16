@@ -1184,9 +1184,12 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
 
 #[tokio::test]
 #[serial]
-async fn broadcaster_uses_its_own_listener_and_batches_real_notify_bursts() {
+async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_bursts() {
     let pool = migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        pool.clone(),
+        &migrated_database_url().await,
+    ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
     let mut subscription = broadcaster.subscribe().await;
 
@@ -1222,6 +1225,72 @@ async fn broadcaster_uses_its_own_listener_and_batches_real_notify_bursts() {
     assert_eq!(events[1].topic, "workers");
     assert_eq!(events[2].topic, "workflows");
     broadcaster.close().await;
+}
+
+/// The listener loses its connection: it connects again and LISTENs again,
+/// and the stream sends one event with no ids per topic, because
+/// notifications sent in between are lost.
+#[tokio::test]
+#[serial]
+async fn a_listener_gap_sends_one_refresh_per_topic() {
+    let pool = migrated_pool().await;
+    let url = migrated_database_url().await;
+    let application_name = format!("web_events_gap_{}", Uuid::new_v4().simple());
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        pool.clone(),
+        &format!("{url}{separator}application_name={application_name}"),
+    ));
+    let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
+    let mut subscription = broadcaster.subscribe().await;
+
+    let terminated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+             WHERE application_name = $1
+         ) AS killed",
+    )
+    .bind(&application_name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(terminated, 1, "exactly the listener backend is terminated");
+
+    // Events with ids come from other writers of the shared test database;
+    // the refreshes are the events with no ids.
+    let mut refreshed = std::collections::BTreeSet::new();
+    while refreshed.len() < CHANNEL_TOPICS.len() {
+        let event = tokio::time::timeout(Duration::from_secs(10), subscription.recv())
+            .await
+            .expect("refresh timeout")
+            .expect("subscription open")
+            .expect("not degraded");
+        if event.ids.is_empty() {
+            refreshed.insert(event.topic);
+        }
+    }
+    let topics: Vec<&str> = refreshed.iter().map(String::as_str).collect();
+    assert_eq!(topics, ["tasks", "workers", "workflows"]);
+    broadcaster.close().await;
+}
+
+/// A session URL that cannot be reached: the subscriptions fail to start and
+/// every client reads the degraded marker.
+#[tokio::test]
+async fn a_listener_that_cannot_start_degrades_the_stream() {
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        lazy_pool(),
+        "postgresql://postgres:pw@127.0.0.1:1/none",
+    ));
+    let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(25));
+    let mut subscription = broadcaster.subscribe().await;
+
+    let item = tokio::time::timeout(Duration::from_secs(5), subscription.recv())
+        .await
+        .expect("degraded marker timeout");
+
+    assert_eq!(item, Some(None));
+    assert!(broadcaster.degraded());
 }
 
 #[tokio::test]
