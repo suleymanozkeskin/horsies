@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Timelike, Utc};
@@ -26,12 +25,9 @@ use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 use crate::core::{
-    EnqueueRetention, OutcomeCode, PostgresConfig, ResolvedEnqueue, RetrievalCode, TaskError,
-    TaskInfo, TaskOptions, TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendResult,
+    EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
 };
 
-use crate::broker::bound_handle::TaskHandle;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
@@ -567,10 +563,11 @@ LIMIT $1";
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
-// Separate session/direct endpoints usually have much tighter connection
-// limits than a transaction pool. Horsies needs only migrations plus a small
-// number of long-lived LISTEN connections.
-const SESSION_POOL_MAX_CONNECTIONS: u32 = 4;
+/// A pooled connection that waited in the pool for longer than this is
+/// pinged before use when `pool_pre_ping` is on (Python
+/// `PRE_PING_AFTER_IDLE_S`, `horsies/core/defaults.py:28`). A connection used
+/// again within this time, and a new connection, are used with no ping.
+pub(crate) const PRE_PING_AFTER_IDLE: Duration = Duration::from_secs(1);
 
 /// Connect options for every broker pool, including the runtime pool in
 /// PgBouncer transaction mode.
@@ -634,27 +631,51 @@ fn with_session_settings(options: PgPoolOptions, settings: SessionSettings) -> P
     }
 }
 
-fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(
+/// With `pool_pre_ping` on, ping a pooled connection at checkout when it
+/// waited in the pool for longer than [`PRE_PING_AFTER_IDLE`]. A ping that
+/// fails closes that connection, and the checkout takes another one or opens
+/// a new one (Python `register_idle_ping`, `horsies/core/utils/db.py:165-222`).
+/// With it off, a dead pooled connection shows at its first statement as a
+/// retryable error.
+fn with_idle_ping(options: PgPoolOptions, pool_pre_ping: bool) -> PgPoolOptions {
+    let options = options.test_before_acquire(false);
+    match pool_pre_ping {
+        false => options,
+        true => options.before_acquire(|connection, metadata| {
+            Box::pin(async move {
+                if metadata.idle_for > PRE_PING_AFTER_IDLE {
+                    sqlx::Connection::ping(connection).await?;
+                }
+                Ok(true)
+            })
+        }),
+    }
+}
+
+/// The options shared by the runtime and the session pool, as Python builds
+/// both engines from one engine config (`horsies/core/brokers/postgres.py:
+/// 1343-1376`): `pool_size + max_overflow` connections, `pool_timeout` for a
+/// checkout, `pool_recycle` as the age at which a connection is retired, and
+/// the idle ping.
+fn pooled_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_idle_ping(
         PgPoolOptions::new()
             .max_connections(config.pool_size + config.max_overflow)
             .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping),
-        session_settings(config),
+            .max_lifetime(Duration::from_secs(config.pool_recycle as u64))
+            .idle_timeout(None),
+        config.pool_pre_ping,
     )
 }
 
+fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_session_settings(pooled_options(config), session_settings(config))
+}
+
 /// The session pool's URL is direct or session-capable (it carries LISTEN).
+/// It is sized as the runtime pool, as Python's session engine.
 fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    with_session_settings(
-        PgPoolOptions::new()
-            .max_connections(SESSION_POOL_MAX_CONNECTIONS)
-            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-            .test_before_acquire(config.pool_pre_ping),
-        SessionSettings::Kept,
-    )
+    with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
 fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
@@ -1199,6 +1220,9 @@ impl PostgresBroker {
                 .map_err(BrokerError::Database)?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
+        // The task id is bound to another key: the same command with a changed
+        // key is a payload mismatch, not a key conflict that names the task
+        // itself (Python `horsies/core/brokers/postgres.py:2838-2848`).
         if bound_digest
             .as_deref()
             .is_some_and(|digest| digest != key_digest.as_slice())
@@ -1207,10 +1231,7 @@ impl PostgresBroker {
                 .rollback()
                 .await
                 .map_err(BrokerError::Database)?;
-            return Err(BrokerError::IdempotencyKeyConflict {
-                task_name: task_name.to_owned(),
-                task_id,
-            });
+            return Err(BrokerError::PayloadMismatch { task_id });
         }
         if bound_digest.is_none() {
             sqlx::query("UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2")
@@ -1222,215 +1243,6 @@ impl PostgresBroker {
         }
         transaction.commit().await.map_err(BrokerError::Database)?;
         Ok(task_id)
-    }
-
-    /// Send a task using pre-resolved enqueue parameters.
-    ///
-    /// This is the high-level enqueue API. Use [`Horsies::resolve_enqueue()`]
-    /// to get a [`ResolvedEnqueue`], then pass it here along with the encoded
-    /// input: one JSON value, as the task's input type encodes to (`null` for a
-    /// task without input).
-    ///
-    /// If `task_options` contains a `good_until` value, it is forwarded to the
-    /// underlying `enqueue()` call so the broker can skip expired tasks.
-    ///
-    /// Returns a typed [`TaskHandle`] for result retrieval.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let resolved = app.resolve_enqueue("process_image", None, None)?;
-    /// let input = serde_json::to_string(&my_input)?;
-    /// let handle: TaskHandle<String> = broker.send_task(&resolved, &input, None).await?;
-    /// ```
-    pub async fn send_task<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        input: &str,
-        task_options: Option<&TaskOptions>,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        self.send_resolved(resolved, input, None, task_options)
-            .await
-    }
-
-    /// Send a task with automatic retry on transient broker errors.
-    ///
-    /// When `resend_on_transient_err` is `true`, retries up to 3 times with
-    /// exponential backoff (200ms, 400ms, 800ms) on retryable errors.
-    /// Mirrors Python's `resend_on_transient_err` behavior.
-    pub async fn send_task_with_retry<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        input: &str,
-        task_options: Option<&TaskOptions>,
-        resend_on_transient_err: bool,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        if !resend_on_transient_err {
-            return self.send_task(resolved, input, task_options).await;
-        }
-        retry_send(|| self.send_task(resolved, input, task_options)).await
-    }
-
-    /// Send a task with a delay (scheduled for future execution).
-    ///
-    /// Identical to [`send_task`](Self::send_task) but sets `enqueued_at` to
-    /// `now() + delay`, so the task will not become eligible for claiming until
-    /// that time.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    ///
-    /// let resolved = app.resolve_enqueue("send_reminder", None, None)?;
-    /// let handle: TaskHandle<()> = broker
-    ///     .schedule_task(&resolved, "null", Duration::from_secs(3600), None)
-    ///     .await?;
-    /// ```
-    pub async fn schedule_task<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        input: &str,
-        delay: Duration,
-        task_options: Option<&TaskOptions>,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        let delay_secs = delay.as_secs() as i64;
-        self.send_resolved(resolved, input, Some(delay_secs), task_options)
-            .await
-    }
-
-    /// Schedule a task with automatic retry on transient broker errors.
-    ///
-    /// When `resend_on_transient_err` is `true`, retries up to 3 times with
-    /// exponential backoff (200ms, 400ms, 800ms) on retryable errors.
-    pub async fn schedule_task_with_retry<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        input: &str,
-        delay: Duration,
-        task_options: Option<&TaskOptions>,
-        resend_on_transient_err: bool,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        if !resend_on_transient_err {
-            return self
-                .schedule_task(resolved, input, delay, task_options)
-                .await;
-        }
-        retry_send(|| self.schedule_task(resolved, input, delay, task_options)).await
-    }
-
-    /// The shared body of [`send_task`](Self::send_task) and
-    /// [`schedule_task`](Self::schedule_task): one task id and one `sent_at`
-    /// for the call, kept in the payload for [`retry_send`](Self::retry_send).
-    async fn send_resolved<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        input: &str,
-        enqueue_delay_seconds: Option<i64>,
-        task_options: Option<&TaskOptions>,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        let task_options_json = task_options
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::ValidationFailed,
-                message: format!("task_options serialization failed: {}", e),
-                retryable: false,
-                task_id: None,
-                payload: None,
-            })?;
-
-        let good_until = task_options.and_then(|opts| opts.good_until);
-        let sent_at = sent_at_at_stored_precision(Utc::now()).map_err(|error| TaskSendError {
-            code: TaskSendErrorCode::ValidationFailed,
-            message: error.to_string(),
-            retryable: false,
-            task_id: None,
-            payload: None,
-        })?;
-        let pre_task_id =
-            crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                TaskSendError {
-                    code: TaskSendErrorCode::ValidationFailed,
-                    message: format!("failed to mint task identity: {error}"),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                }
-            })?;
-
-        let payload = TaskSendPayload {
-            task_name: resolved.task_name.clone(),
-            queue_name: resolved.queue_name.clone(),
-            priority: resolved.priority as i32,
-            input_json: input.to_owned(),
-            sent_at,
-            good_until,
-            enqueue_delay_seconds,
-            task_options: task_options_json.clone(),
-            idempotency_key: None,
-            retention: resolved.retention,
-        };
-
-        let task_id = self
-            .enqueue(
-                &resolved.task_name,
-                input,
-                &resolved.queue_name,
-                resolved.priority as i32,
-                Some(sent_at),
-                None, // enqueued_at: NOW(), or NOW() plus the delay
-                good_until,
-                task_options_json.as_deref(),
-                Some(pre_task_id),
-                enqueue_delay_seconds,
-                None,
-                resolved.retention,
-                None,
-            )
-            .await
-            .map_err(|e| TaskSendError {
-                code: task_send_error_code(&e),
-                message: format!("{}", e),
-                retryable: e.is_retryable(),
-                task_id: Some(pre_task_id),
-                payload: Some(payload.clone()),
-            })?;
-
-        Ok(TaskHandle::new(task_id, Arc::clone(self)))
-    }
-
-    /// Replay a failed send from its stored payload.
-    ///
-    /// Only `TaskSendErrorCode::EnqueueFailed` errors are retryable.
-    /// The payload carries the input, `sent_at` and every other field of the
-    /// first call, so the exact-id resend check accepts the replay.
-    ///
-    /// Mirrors Python's `TaskFunction.retry_send(error)`.
-    pub async fn retry_send<T>(
-        self: &Arc<Self>,
-        payload: &TaskSendPayload,
-        original_task_id: Option<Uuid>,
-    ) -> Result<TaskHandle<T>, BrokerError> {
-        let task_id = self
-            .enqueue(
-                &payload.task_name,
-                &payload.input_json,
-                &payload.queue_name,
-                payload.priority,
-                Some(payload.sent_at),
-                None,
-                payload.good_until,
-                payload.task_options.as_deref(),
-                original_task_id,
-                payload.enqueue_delay_seconds,
-                payload.idempotency_key.as_deref(),
-                payload.retention,
-                None,
-            )
-            .await?;
-
-        Ok(TaskHandle::new(task_id, Arc::clone(self)))
     }
 
     /// Claim up to `limit` tasks from the given queue.
@@ -3154,13 +2966,6 @@ fn parse_task_attempt_outcome(value: &str) -> Result<crate::core::TaskAttemptOut
     }
 }
 
-fn task_send_error_code(error: &BrokerError) -> TaskSendErrorCode {
-    match error {
-        BrokerError::PayloadMismatch { .. } => TaskSendErrorCode::PayloadMismatch,
-        _ => TaskSendErrorCode::EnqueueFailed,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
@@ -3273,7 +3078,7 @@ fn parse_task_result_row<T: DeserializeOwned>(
 use crate::core::task::retry_utils::parse_max_retries;
 
 // ---------------------------------------------------------------------------
-// Transient retry helper
+// Result wait
 // ---------------------------------------------------------------------------
 
 /// Re-poll interval of the workflow result wait (`get_workflow_result`),
@@ -3328,53 +3133,6 @@ impl ResultWaitMode {
             Self::Polling => tokio::time::sleep(wait).await,
         }
     }
-}
-
-/// Retry count for `resend_on_transient_err` (1 initial + 3 retries = 4 total).
-const SEND_RETRY_COUNT: u32 = 3;
-/// Initial retry delay in ms.
-const SEND_RETRY_INITIAL_MS: u64 = 200;
-/// Maximum retry delay in ms.
-const SEND_RETRY_MAX_MS: u64 = 2000;
-
-/// Retry a send operation on transient errors with exponential backoff.
-///
-/// Matches Python's retry loop in `task_decorator.py`:
-/// - Up to 3 retries (4 total attempts)
-/// - Exponential backoff: 200ms, 400ms, 800ms (capped at 2000ms)
-/// - Only retries when `TaskSendError.retryable` is `true`
-async fn retry_send<T, F, Fut>(mut op: F) -> TaskSendResult<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = TaskSendResult<T>>,
-{
-    let max_attempts = 1 + SEND_RETRY_COUNT;
-    let mut last_err: Option<TaskSendError> = None;
-
-    for attempt in 0..max_attempts {
-        if attempt > 0 {
-            let delay_ms = std::cmp::min(
-                SEND_RETRY_INITIAL_MS * 2u64.pow(attempt - 1),
-                SEND_RETRY_MAX_MS,
-            );
-            tracing::debug!(attempt, delay_ms, "retrying send after transient error",);
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-
-        match op().await {
-            Ok(val) => return Ok(val),
-            Err(err) => {
-                if err.retryable && attempt < max_attempts - 1 {
-                    last_err = Some(err);
-                    continue;
-                }
-                return Err(err);
-            }
-        }
-    }
-
-    // Exhausted all attempts — return the last error.
-    Err(last_err.expect("retry loop should have set last_err"))
 }
 
 #[cfg(test)]
@@ -3747,72 +3505,6 @@ mod tests {
         assert!(is_terminal_status("EXPIRED"));
     }
 
-    // -----------------------------------------------------------------------
-    // send_task / schedule_task compile-time contract checks
-    // -----------------------------------------------------------------------
-
-    /// Verify that send_task returns TaskHandle<T> (compile-time check).
-    #[test]
-    fn send_task_return_type_contract() {
-        // This function will never run but must compile, verifying
-        // that send_task returns Result<TaskHandle<T>, BrokerError>.
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &Arc<PostgresBroker>) {
-            let resolved = ResolvedEnqueue {
-                task_name: "my_task".to_owned(),
-                queue_name: "default".to_owned(),
-                priority: 0,
-                retention: EnqueueRetention::Default,
-            };
-            let _handle: TaskHandle<i32> = broker.send_task(&resolved, "null", None).await.unwrap();
-        }
-    }
-
-    /// Verify that schedule_task returns TaskHandle<T> and accepts Duration.
-    #[test]
-    fn schedule_task_return_type_contract() {
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &Arc<PostgresBroker>) {
-            let resolved = ResolvedEnqueue {
-                task_name: "delayed_task".to_owned(),
-                queue_name: "default".to_owned(),
-                priority: 5,
-                retention: EnqueueRetention::Default,
-            };
-            let delay = Duration::from_secs(60);
-            let _handle: TaskHandle<String> = broker
-                .schedule_task(&resolved, "null", delay, None)
-                .await
-                .unwrap();
-        }
-    }
-
-    /// Verify that send_task accepts TaskOptions.
-    #[test]
-    fn send_task_accepts_task_options() {
-        #[allow(unused, unreachable_code)]
-        async fn _check(broker: &Arc<PostgresBroker>) {
-            let resolved = ResolvedEnqueue {
-                task_name: "opts_task".to_owned(),
-                queue_name: "default".to_owned(),
-                priority: 0,
-                retention: EnqueueRetention::Default,
-            };
-            let opts = TaskOptions {
-                task_name: "opts_task".to_owned(),
-                queue_name: None,
-                good_until: None,
-                auto_retry_for: None,
-                retry_policy: None,
-                timeout_ms: None,
-            };
-            let _handle: TaskHandle<()> = broker
-                .send_task(&resolved, "{}", Some(&opts))
-                .await
-                .unwrap();
-        }
-    }
-
     /// Verify that get_result returns Result<TaskResult<T>, BrokerError>.
     #[test]
     fn get_result_return_type_contract() {
@@ -3846,89 +3538,6 @@ mod tests {
         async fn _check(broker: &PostgresBroker) {
             let _result: BrokerResult<DatabasePing> = broker.ping_database().await;
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // retry_send tests
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn retry_send_succeeds_on_first_attempt() {
-        let result: TaskSendResult<String> = retry_send(|| async { Ok("done".to_owned()) }).await;
-        assert_eq!(result.unwrap(), "done");
-    }
-
-    #[tokio::test]
-    async fn retry_send_retries_on_retryable_error() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let attempts = AtomicU32::new(0);
-
-        let result: TaskSendResult<String> = retry_send(|| {
-            let a = attempts.fetch_add(1, Ordering::SeqCst);
-            async move {
-                if a < 2 {
-                    Err(TaskSendError {
-                        code: TaskSendErrorCode::EnqueueFailed,
-                        message: "transient".to_owned(),
-                        retryable: true,
-                        task_id: None,
-                        payload: None,
-                    })
-                } else {
-                    Ok("recovered".to_owned())
-                }
-            }
-        })
-        .await;
-
-        assert_eq!(result.unwrap(), "recovered");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3); // 2 failures + 1 success
-    }
-
-    #[tokio::test]
-    async fn retry_send_does_not_retry_non_retryable() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let attempts = AtomicU32::new(0);
-
-        let result: TaskSendResult<String> = retry_send(|| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err(TaskSendError {
-                    code: TaskSendErrorCode::ValidationFailed,
-                    message: "permanent".to_owned(),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                })
-            }
-        })
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 1); // no retries
-    }
-
-    #[tokio::test]
-    async fn retry_send_exhausts_attempts() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let attempts = AtomicU32::new(0);
-
-        let result: TaskSendResult<String> = retry_send(|| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err(TaskSendError {
-                    code: TaskSendErrorCode::EnqueueFailed,
-                    message: "always fails".to_owned(),
-                    retryable: true,
-                    task_id: None,
-                    payload: None,
-                })
-            }
-        })
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 4); // 1 initial + 3 retries
     }
 
     // -----------------------------------------------------------------------
@@ -6301,5 +5910,124 @@ mod stale_and_expired_list_tests {
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;
+    }
+}
+
+#[cfg(test)]
+mod pool_options_tests {
+    //! Python's pool rules (`horsies/core/brokers/postgres.py:1343-1404`,
+    //! `horsies/core/utils/db.py:165-222`): `pool_recycle` retires a
+    //! connection by age, the session pool is sized as the runtime pool, and
+    //! a connection idle for more than 1 s is pinged at checkout.
+    use super::*;
+    use serial_test::serial;
+
+    fn config(pool_pre_ping: bool) -> PostgresConfig {
+        let mut config = PostgresConfig::from_url("postgresql://horsies@127.0.0.1/horsies");
+        config.pool_size = 3;
+        config.max_overflow = 2;
+        config.pool_timeout = 7;
+        config.pool_recycle = 1_800;
+        config.pool_pre_ping = pool_pre_ping;
+        config
+    }
+
+    #[test]
+    fn pool_recycle_is_the_age_at_which_a_connection_retires() {
+        let options = pg_pool_options(&config(true));
+
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
+        assert_eq!(options.get_idle_timeout(), None);
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_acquire_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn the_session_pool_is_sized_as_the_runtime_pool() {
+        let options = pg_session_pool_options(&config(true));
+
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1_800)));
+    }
+
+    /// The ping at every checkout is gone in both settings; with
+    /// `pool_pre_ping` on, the idle ping replaces it.
+    #[test]
+    fn no_pool_pings_at_every_checkout() {
+        assert!(!pg_pool_options(&config(true)).get_test_before_acquire());
+        assert!(!pg_pool_options(&config(false)).get_test_before_acquire());
+        assert!(!pg_session_pool_options(&config(true)).get_test_before_acquire());
+    }
+
+    async fn pool_on_test_database(pool_pre_ping: bool) -> PgPool {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let mut config = PostgresConfig::from_url(url.clone());
+        config.pool_size = 1;
+        config.max_overflow = 0;
+        config.pool_pre_ping = pool_pre_ping;
+        pg_pool_options(&config)
+            .connect_with(pg_connect_options(&url, false).expect("parse test URL"))
+            .await
+            .expect("connect test pool")
+    }
+
+    async fn terminate(backend_pid: i32) {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect admin pool");
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(backend_pid)
+            .fetch_one(&admin)
+            .await
+            .expect("terminate the pooled backend");
+        assert!(terminated);
+        admin.close().await;
+    }
+
+    /// Python `test_idle_ping.py`: a pooled connection that died while it
+    /// waited more than 1 s is found by the ping and replaced at checkout,
+    /// so the statement runs on a new connection.
+    #[tokio::test]
+    #[serial]
+    async fn a_dead_connection_idle_over_one_second_is_replaced_at_checkout() {
+        let pool = pool_on_test_database(true).await;
+        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("first statement");
+        terminate(first).await;
+        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
+
+        let second: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("the idle ping replaces the dead connection");
+
+        assert_ne!(second, first);
+        pool.close().await;
+    }
+
+    /// With `pool_pre_ping` off, nothing checks the connection at checkout:
+    /// the first statement on the dead connection fails.
+    #[tokio::test]
+    #[serial]
+    async fn without_the_idle_ping_the_first_statement_meets_the_dead_connection() {
+        let pool = pool_on_test_database(false).await;
+        let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .expect("first statement");
+        terminate(first).await;
+        tokio::time::sleep(PRE_PING_AFTER_IDLE + Duration::from_millis(250)).await;
+
+        let failed = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await;
+
+        assert!(failed.is_err(), "the dead connection serves the statement");
+        pool.close().await;
     }
 }
