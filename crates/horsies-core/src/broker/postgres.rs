@@ -54,7 +54,7 @@ use crate::broker::wait_limit::WaitLimit;
 use crate::broker::pools::{CloseOutcome, CoreHandle, PoolProfile, SessionPool};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
-    StatementFailure, Transaction as CoreTransaction, TypedStatement,
+    Transaction as CoreTransaction, TypedStatement,
 };
 
 #[cfg(test)]
@@ -5986,6 +5986,7 @@ mod broker_operation_error_tests {
     //! classification of its cause (`core/brokers/postgres.py`,
     //! `_operation_failed`).
     use super::*;
+    use crate::db::StatementFailure;
 
     /// No server listens on port 1, so a call that reached the pool would
     /// fail with a pool timeout instead of the refusal under test.
@@ -6504,6 +6505,7 @@ mod task_info_code_tests {
     //! `:4973-4977`): only a stored result that fails its check is
     //! `INVALID_JSON_PAYLOAD`.
     use super::*;
+    use crate::db::StatementFailure;
 
     #[test]
     fn a_result_that_does_not_parse_is_invalid_json_payload() {
