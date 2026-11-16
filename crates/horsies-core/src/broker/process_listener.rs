@@ -14,8 +14,11 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::OnceCell;
+
+use crate::broker::error::is_retryable_sqlx_error;
 
 use crate::db::{
     parse_connection_url, ChannelName, ConnectPlan, ConnectPlanError, ConnectionEnvironment,
@@ -33,6 +36,15 @@ pub const WORKFLOW_DONE_CHANNEL: &str = "workflow_done";
 /// The prefix of a worker ping's reply channel; a 32-digit hex correlation id
 /// follows it.
 pub const WORKER_PONG_CHANNEL_PREFIX: &str = "horsies_worker_pong_";
+
+/// The prefix of the worker boot's session check channel; a 32-digit hex id
+/// follows it.
+pub const SESSION_CHECK_CHANNEL_PREFIX: &str = "horsies_check_";
+
+/// The longest the worker boot's session check waits for its NOTIFY
+/// (Python's `SESSION_CAPABILITY_TIMEOUT`,
+/// `horsies/core/brokers/session_capability.py:13`).
+pub const SESSION_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The channel name of a fixed name, or of a generated name whose length the
 /// caller bounds below the channel limit.
@@ -101,6 +113,67 @@ impl ListenError {
         match self.transience() {
             Transience::Transient => true,
             Transience::Permanent => false,
+        }
+    }
+}
+
+/// What ended the session check before its NOTIFY arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckInterruption {
+    /// The listener reconnected: the NOTIFY may have been sent while it was
+    /// down.
+    Reconnected,
+    /// The listener stopped.
+    Stopped,
+}
+
+impl fmt::Display for CheckInterruption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CheckInterruption::Reconnected => formatter.write_str("reconnected"),
+            CheckInterruption::Stopped => formatter.write_str("stopped"),
+        }
+    }
+}
+
+/// Why the session check of a worker boot did not pass. The check's
+/// subscription is dropped; nothing else changed.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionCheckFailure {
+    /// LISTEN was accepted, but the NOTIFY did not arrive within the bound:
+    /// the session URL does not keep session state (for example PgBouncer
+    /// transaction pooling). Not retryable: the same URL fails again.
+    #[error(
+        "LISTEN on {session_url} received no NOTIFY within {} ms: the session URL does not \
+         keep session state (for example PgBouncer transaction pooling); set \
+         session_database_url to a direct or session-pooled URL",
+        .waited.as_millis()
+    )]
+    NotCapable {
+        session_url: MaskedUrl,
+        waited: Duration,
+    },
+    /// The check could not subscribe on the broker's listener. Retryable when
+    /// the refusal is transient (a database that cannot be reached).
+    #[error("the session check could not subscribe: {0}")]
+    Subscribe(ListenError),
+    /// The NOTIFY on the main pool failed. Retryable by the driver error.
+    #[error("the session check could not send its NOTIFY: {0}")]
+    Notify(sqlx::Error),
+    /// The listener reconnected or stopped before the NOTIFY arrived, so the
+    /// check proves nothing. Retryable.
+    #[error("the listener {0} during the session check")]
+    Interrupted(CheckInterruption),
+}
+
+impl SessionCheckFailure {
+    /// Whether a later check can pass.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            SessionCheckFailure::NotCapable { .. } => false,
+            SessionCheckFailure::Subscribe(refused) => refused.is_retryable(),
+            SessionCheckFailure::Notify(error) => is_retryable_sqlx_error(error),
+            SessionCheckFailure::Interrupted(_) => true,
         }
     }
 }
@@ -340,10 +413,35 @@ mod tests {
         for name in [TASK_DONE_CHANNEL, WORKFLOW_DONE_CHANNEL] {
             assert_eq!(fixed_channel(name).as_str(), name);
         }
-        let reply = format!(
-            "{WORKER_PONG_CHANNEL_PREFIX}{}",
-            uuid::Uuid::new_v4().simple()
-        );
-        assert_eq!(fixed_channel(&reply).as_str(), reply);
+        for prefix in [WORKER_PONG_CHANNEL_PREFIX, SESSION_CHECK_CHANNEL_PREFIX] {
+            let generated = format!("{prefix}{}", uuid::Uuid::new_v4().simple());
+            assert_eq!(fixed_channel(&generated).as_str(), generated);
+        }
+    }
+
+    /// A URL that drops notifications is refused for good, with the masked
+    /// URL and the fix; a check that the listener cut short is tried again.
+    #[test]
+    fn session_check_failures_follow_python_s_retry_rule() {
+        let settings = crate::db::parse_connection_url(
+            "postgresql://horsies:secret@pgbouncer:6432/horsies",
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("a valid URL");
+        let not_capable = SessionCheckFailure::NotCapable {
+            session_url: settings.masked_url().clone(),
+            waited: SESSION_CAPABILITY_TIMEOUT,
+        };
+
+        assert!(!not_capable.is_retryable());
+        let message = not_capable.to_string();
+        assert!(!message.contains("secret"), "{message}");
+        assert!(message.contains("session_database_url"), "{message}");
+        for interruption in [CheckInterruption::Reconnected, CheckInterruption::Stopped] {
+            assert!(SessionCheckFailure::Interrupted(interruption).is_retryable());
+        }
+        assert!(SessionCheckFailure::Notify(sqlx::Error::PoolTimedOut).is_retryable());
+        assert!(!SessionCheckFailure::Notify(sqlx::Error::PoolClosed).is_retryable());
+        assert!(!SessionCheckFailure::Subscribe(ListenError::NoSessionUrl).is_retryable());
     }
 }

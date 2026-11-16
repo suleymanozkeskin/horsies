@@ -585,6 +585,11 @@ pub(crate) fn serialize_explicit_input<V: Serialize>(value: &V) -> Result<String
     let value = crate::core::codec::to_json_value_strict(value).map_err(|e| {
         HorsiesError::new(format!("failed to serialize workflow node input: {}", e))
     })?;
+    match &value {
+        serde_json::Value::Object(map) => check_node_input(&[], map)?,
+        serde_json::Value::Null => {}
+        other => check_node_input(std::slice::from_ref(other), &serde_json::Map::new())?,
+    }
 
     Ok(value.to_string())
 }
@@ -597,10 +602,11 @@ pub(crate) fn merge_kwarg_value(
     field_name: &str,
     value: serde_json::Value,
 ) -> Result<String, HorsiesError> {
-    let parsed = serde_json::from_str::<serde_json::Value>(existing_input_json).map_err(|e| {
-        HorsiesError::new(format!("input_json is not valid JSON: {}", e))
-            .with_help("ensure the node's input is valid JSON")
-    })?;
+    let parsed = crate::core::codec::from_json_str::<serde_json::Value>(existing_input_json)
+        .map_err(|e| {
+            HorsiesError::new(format!("input_json is not valid JSON: {}", e))
+                .with_help("ensure the node's input is valid JSON")
+        })?;
     let mut map = match parsed {
         serde_json::Value::Object(map) => map,
         _ => {
@@ -614,7 +620,25 @@ pub(crate) fn merge_kwarg_value(
     };
 
     map.insert(field_name.to_owned(), value);
+    check_node_input(&[], &map)?;
     Ok(serde_json::Value::Object(map).to_string())
+}
+
+/// The rules of a user value on a node input: no engine key at any depth or as a kwarg name, and at most 200
+/// levels per value (Python encodes each node input with `encode_value`, `core/codec/typed.py:274-296`).
+fn check_node_input(
+    args: &[serde_json::Value],
+    kwargs: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), HorsiesError> {
+    crate::core::codec::user_value::check_task_input(
+        args,
+        kwargs,
+        &std::collections::HashSet::new(),
+    )
+    .map_err(|refusal| {
+        HorsiesError::new(format!("workflow node input refused: {refusal}"))
+            .with_help("keys that start with __h_ or __horsies_, and __builtin_task_code__, belong to the engine")
+    })
 }
 
 fn apply_field_set<T, I, F>(
@@ -738,6 +762,21 @@ mod tests {
             serialize_explicit_input(&serde_json::json!({})).unwrap(),
             "{}"
         );
+    }
+
+    /// Python `encode_value` refuses an engine key in a node input at any depth.
+    #[test]
+    fn a_node_input_with_an_engine_key_is_refused() {
+        let err = serialize_explicit_input(&serde_json::json!({"a": {"__h_task_result__": true}}))
+            .unwrap_err();
+        assert!(err.to_string().contains("workflow node input refused"));
+        assert!(serialize_explicit_input(&serde_json::json!(["__builtin_task_code__"])).is_ok());
+        assert!(
+            serialize_explicit_input(&serde_json::json!([{"__builtin_task_code__": "X"}])).is_err()
+        );
+        assert!(merge_kwarg_value("{}", "__h_workflow_ctx__", serde_json::json!({})).is_err());
+        assert!(merge_kwarg_value("{}", "x", serde_json::json!({"__horsies_y": 1})).is_err());
+        assert!(merge_kwarg_value("{}", "x", serde_json::json!({"y": 1})).is_ok());
     }
 
     #[test]
