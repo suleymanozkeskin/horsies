@@ -47,11 +47,15 @@ _INSERT_WORKER_STATE = text("""
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
         max_claim_batch, max_claim_per_worker, queues,
-        tasks_running, tasks_claimed, worker_started_at
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at,
+        slots_down, class_capacity
     ) VALUES (
         :worker_id, :snapshot_at, :hostname, :pid, :processes,
         :max_claim_batch, :max_claim_per_worker, :queues,
-        :tasks_running, :tasks_claimed, :worker_started_at
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        :tasks_running, :tasks_claimed, :worker_started_at,
+        '[]'::jsonb, '{}'::jsonb
     )
 """)
 
@@ -117,6 +121,10 @@ async def test_list_worker_states_returns_latest_per_worker(
     assert len(seeded) == 1, 'expected exactly one row per worker'
     assert seeded[0].tasks_running == 3  # newest snapshot
     assert seeded[0].queues == ['default', 'priority']
+    # Maps the worker did not set read as empty dicts, never None.
+    assert seeded[0].queue_priorities == {}
+    assert seeded[0].queue_max_concurrency == {}
+    assert seeded[0].recovery_config == {}
 
 
 @pytest.mark.integration
@@ -191,11 +199,15 @@ _INSERT_WORKER_STATE_WITH_SLOTS = text("""
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
         max_claim_batch, max_claim_per_worker, queues,
-        tasks_running, tasks_claimed, worker_started_at, slots_down
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at, slots_down,
+        class_capacity
     ) VALUES (
         :worker_id, NOW(), 'itest-host', 4242, 2,
         2, 2, ARRAY['default'],
-        0, 0, NOW(), CAST(:slots_down AS JSONB)
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        0, 0, NOW(), CAST(:slots_down AS JSONB),
+        '{}'::jsonb
     )
 """)
 
@@ -277,11 +289,15 @@ _INSERT_WORKER_STATE_WITH_CAPACITY = text("""
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
         max_claim_batch, max_claim_per_worker, queues,
-        tasks_running, tasks_claimed, worker_started_at, class_capacity
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at, slots_down,
+        class_capacity
     ) VALUES (
         :worker_id, NOW(), 'itest-host', 4242, 2,
         2, 2, ARRAY['default'],
-        0, 0, NOW(), CAST(:class_capacity AS JSONB)
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        0, 0, NOW(), '[]'::jsonb,
+        CAST(:class_capacity AS JSONB)
     )
 """)
 

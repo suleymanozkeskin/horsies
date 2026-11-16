@@ -544,12 +544,14 @@ class TestWorkerReads:
                 INSERT INTO horsies_worker_states (
                     worker_id, snapshot_at, hostname, pid, processes,
                     max_claim_batch, max_claim_per_worker, queues,
+                    queue_priorities, queue_max_concurrency, recovery_config,
                     tasks_running, tasks_claimed, worker_started_at,
                     slots_down, class_capacity
                 ) VALUES (
                     :wid, now(), 'itest-host', 4242, 2, 0, 2,
-                    ARRAY['default'], 0, 0, now(),
-                    CAST(:slots_down AS JSONB), NULL
+                    ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                    0, 0, now(),
+                    CAST(:slots_down AS JSONB), '{}'::jsonb
                 )
             """),
             {
@@ -600,11 +602,13 @@ class TestWorkerReads:
                 INSERT INTO horsies_worker_states (
                     worker_id, snapshot_at, hostname, pid, processes,
                     max_claim_batch, max_claim_per_worker, queues,
+                    queue_priorities, queue_max_concurrency, recovery_config,
                     tasks_running, tasks_claimed, worker_started_at,
                     slots_down, class_capacity
                 ) VALUES (
                     'w-async', now(), 'itest-host', 4242, 2, 0, 2,
-                    ARRAY['default'], 0, 0, now(), '[]'::jsonb,
+                    ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                    0, 0, now(), '[]'::jsonb,
                     '{"SHARED_ASYNC": {"capacity": 8, "serves": ["SHARED_ASYNC"]}}'
                 )
             """),
