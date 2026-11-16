@@ -514,9 +514,7 @@ mod tests {
             let err = result.unwrap_err();
             assert_eq!(
                 err.error_code,
-                Some(TaskErrorCode::from(
-                    OperationalErrorCode::ResultDeserializationError,
-                )),
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
                 "{stored:?}",
             );
             assert_eq!(
@@ -534,9 +532,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
     }
 
@@ -551,15 +547,13 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
     }
 
     #[test]
     fn failed_with_valid_error() {
-        let task_err = TaskError::new("VALIDATION", "bad input");
+        let task_err = TaskError::new("VALIDATION", "bad input").unwrap();
         let err_json = serde_json::to_string(&task_err).unwrap();
         let r = row("FAILED", None, Some(&err_json));
 
@@ -567,7 +561,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::User("VALIDATION".to_owned())),
+            TaskErrorCode::User(crate::core::UserCode::parse("VALIDATION").unwrap()),
         );
         assert_eq!(err.message.as_deref(), Some("bad input"));
     }
@@ -585,9 +579,7 @@ mod tests {
             let err = result.unwrap_err();
             assert_eq!(
                 err.error_code,
-                Some(TaskErrorCode::from(
-                    OperationalErrorCode::ResultDeserializationError,
-                )),
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
                 "{stored}",
             );
             assert_eq!(
@@ -608,7 +600,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowFailed)),
+            TaskErrorCode::from(OutcomeCode::WorkflowFailed),
         );
     }
 
@@ -620,7 +612,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowCancelled)),
+            TaskErrorCode::from(OutcomeCode::WorkflowCancelled),
         );
     }
 
@@ -638,7 +630,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowExpired)),
+            TaskErrorCode::from(OutcomeCode::WorkflowExpired),
         );
     }
 
@@ -652,7 +644,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowPaused)),
+            TaskErrorCode::from(OutcomeCode::WorkflowPaused),
         );
     }
 
@@ -664,7 +656,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(RetrievalCode::ResultNotReady)),
+            TaskErrorCode::from(RetrievalCode::ResultNotReady),
         );
         assert!(err
             .message
@@ -701,9 +693,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
         assert!(err
             .message
@@ -720,9 +710,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
         let msg = err.message.as_deref().unwrap();
         assert!(
@@ -734,7 +722,7 @@ mod tests {
 
     #[test]
     fn map_err_passes_through() {
-        let original = TaskError::new("MY_CODE", "original error");
+        let original = TaskError::new("MY_CODE", "original error").unwrap();
         let raw: TaskResult<serde_json::Value> = TaskResult::Err(original.clone());
 
         let result: TaskResult<i32> = map_task_result_value(raw, Uuid::nil(), None);
@@ -779,7 +767,7 @@ mod wait_tests {
         let err = outcome.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(RetrievalCode::WorkflowNotFound)),
+            TaskErrorCode::from(RetrievalCode::WorkflowNotFound),
         );
     }
 
@@ -817,7 +805,7 @@ mod wait_tests {
         let error = result.unwrap_err();
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowPaused)),
+            TaskErrorCode::from(OutcomeCode::WorkflowPaused),
         );
 
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
@@ -836,13 +824,14 @@ mod wait_tests {
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
         let persisted = TaskError {
-            error_code: Some(OutcomeCode::WorkflowExpired.into()),
+            error_code: OutcomeCode::WorkflowExpired.into(),
             message: Some("paused_workflow_auto_cancel_after elapsed: 3600 seconds".to_owned()),
-            cause: None,
+            exception: None,
             data: Some(serde_json::json!({
                 "policy": "paused_workflow_auto_cancel_after",
                 "older_than_seconds": 3600.0,
             })),
+            kind: crate::core::TaskErrorKind::Plain,
         };
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -910,9 +899,7 @@ mod wait_tests {
         let error = handle.get(None).await.unwrap_err();
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
         assert!(error
             .message
