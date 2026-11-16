@@ -54,7 +54,9 @@ _BOUND: Final = 3
 
 @dataclass(frozen=True, slots=True)
 class _Seed:
-    records: tuple[uuid.UUID, ...]
+    records: tuple[tuple[uuid.UUID, uuid.UUID], ...]
+    """(task, workflow) of each record, as discovery gives them; the last
+    task has no record, with an unknown workflow."""
 
 
 def _one_workflow(
@@ -89,11 +91,11 @@ def _seed(connection: Connection) -> _Seed:
     pause_workflow_row(connection, paused)
     return _Seed(
         records=(
-            insert_phase2_pending(connection, fails, 0, _BOUND - 1),
-            insert_phase2_pending(connection, live, 0, _BOUND - 1),
-            insert_phase2_pending(connection, counted, 0, 0),
-            insert_phase2_pending(connection, paused, 0, _BOUND - 1),
-            uuid.uuid4(),
+            (insert_phase2_pending(connection, fails, 0, _BOUND - 1), fails),
+            (insert_phase2_pending(connection, live, 0, _BOUND - 1), live),
+            (insert_phase2_pending(connection, counted, 0, 0), counted),
+            (insert_phase2_pending(connection, paused, 0, _BOUND - 1), paused),
+            (uuid.uuid4(), uuid.uuid4()),
         ),
     )
 
@@ -117,7 +119,7 @@ def _reference(database: DualRunDatabase, seed: _Seed) -> tuple[reference.RaiseR
     with psycopg.connect(database.url, autocommit=True) as connection:
         return tuple(
             _without_task_id(reference.record_raise(connection, task, _BOUND), task)
-            for task in seed.records
+            for task, _ in seed.records
         )
 
 
@@ -138,10 +140,12 @@ async def _candidate_async(
     try:
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         reports: list[reference.RaiseReport] = []
-        for task in seed.records:
+        for task, workflow in seed.records:
             raised = await _record_raised_row(
                 sessions,
                 task_id=str(task),
+                workflow_id=str(workflow),
+                task_index=0,
                 exc=RuntimeError('boom'),
                 quarantine_after_attempts=_BOUND,
             )

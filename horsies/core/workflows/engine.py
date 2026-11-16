@@ -54,7 +54,6 @@ from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -1669,37 +1668,6 @@ def pause_halts_progression(workflow_status: str | None) -> bool:
     question rather than spelling the comparison twice.
     """
     return workflow_status == WorkflowStatus.PAUSED.value
-
-
-def node_status_for_terminal_task(task_status: str) -> str:
-    """The workflow-node status a terminal task produces.
-
-    A task that completed makes a completed node; every other terminal
-    outcome — failed, cancelled, expired — makes a failed node, because
-    a node's job is done-or-not and the reason lives on the task.
-
-    This is the status-side expression of the policy the in-process
-    completion path spells over a ``TaskResult`` as
-    ``'COMPLETED' if result.is_ok() else 'FAILED'``. The two callers
-    hold different inputs and neither can honestly be given the
-    other's, so they stay two signatures over one policy, bound by an
-    enumeration pin that walks the canonical terminal set.
-
-    A non-terminal status raises: the caller has handed over a task
-    that has not finished, which is an underspecified caller and not a
-    case to default.
-    """
-    status = TaskStatus(task_status)
-    if status not in TASK_TERMINAL_STATES:
-        raise ValueError(
-            f'node status requested for non-terminal task status '
-            f'{task_status!r}'
-        )
-    return (
-        WorkflowTaskStatus.COMPLETED.value
-        if status is TaskStatus.COMPLETED
-        else WorkflowTaskStatus.FAILED.value
-    )
 
 
 @dataclass(frozen=True, slots=True)
