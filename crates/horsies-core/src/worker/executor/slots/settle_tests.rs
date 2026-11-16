@@ -576,6 +576,48 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
+/// Python `tests/integration/test_soft_cap_start_check.py::test_stop_returns_the_held_rows_to_their_queue`:
+/// at the stop, a row that waited for its queue cap goes back to the queue
+/// with the claim fence (`worker::worker::return_held_rows` settles each
+/// held row so).
+#[tokio::test]
+#[serial]
+async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let held = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::Isolated,
+        None,
+        0,
+    );
+
+    let settled = writer(pool.clone())
+        .settle(
+            &held,
+            AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::Written);
+    let row = live_row(&pool, task_id).await.expect("the row stays live");
+    assert_eq!(row["status"], "PENDING");
+    assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
+    assert_eq!(row["execution"], "ISOLATED");
+    remove_task(&pool, task_id).await;
+}
+
 /// The number of attempt rows of a task.
 async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")

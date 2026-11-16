@@ -5,7 +5,9 @@
 //! User code never runs in the worker process. The worker starts the
 //! children of its profile before any database work, then claims with the
 //! budgets of the children in service, submits each row to the pool of its
-//! kind, and settles each end with the outcome writer.
+//! kind, and settles each end with the outcome writer. In soft-cap mode a
+//! row of a capped queue waits in the parent until its queue's count leaves
+//! room (`queue_cap_hold`).
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -41,8 +43,9 @@ use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask, OrphanSelfHeal,
-    OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts, TaskKind,
+    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask,
+    NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts,
+    TaskKind,
 };
 use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -52,6 +55,7 @@ use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::profile_fit::{
     log_connection_fit_at_boot, log_memory_fit_at_boot, SelectedProfile,
 };
+use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper};
 use crate::worker::retry::read_stored_options;
 use crate::worker::runner_beats::{
@@ -459,6 +463,32 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
     }
 }
 
+/// Return each row that waited for its queue cap to the queue, at the stop
+/// (Python `_return_held_rows`). Runs after the claim loop ended and the
+/// pools stopped. Each row is one release write of the outcome writer
+/// (`NotDispatched(HeldForQueueCap)`), spawned with the outcome writes, so
+/// the drain of the writes bounds it. A row the release cannot return goes
+/// back when its lease expires.
+fn return_held_rows(
+    hold: &mut QueueCapHold,
+    writer: &Arc<OutcomeWriter>,
+    writes: &mut JoinSet<()>,
+) {
+    for row in hold.drain() {
+        let task = claimed_of(row).task;
+        let writer = Arc::clone(writer);
+        writes.spawn(async move {
+            let settled = writer
+                .settle(
+                    &task,
+                    AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
+                )
+                .await;
+            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "held row returned");
+        });
+    }
+}
+
 /// Task queue worker.
 ///
 /// Claims tasks from PostgreSQL with the budgets of its children, runs each
@@ -860,22 +890,52 @@ impl Worker {
 
     /// One claim pass (Python `_claim_and_dispatch_all`): the claim with the
     /// budgets and routes of the slots now, the workflow filter, the row
-    /// class check, then each row to the pool of its kind.
+    /// class check, then each row to the pool of its kind. A row of a queue
+    /// that `hold` checks waits in `hold`; then the start check admits the
+    /// held rows that their queue's count leaves room for, also on a pass
+    /// that claimed nothing.
     ///
-    /// Errors: the error of the claim, the filter or the class return. The
-    /// rows the claim committed before a later step failed go back when
-    /// their lease expires.
+    /// Errors: the error of the claim, the filter, the class return or the
+    /// start check. The rows the claim committed before a later step failed
+    /// go back when their lease expires; the rows submitted before the start
+    /// check failed run, and the held rows stay held.
     async fn claim_and_dispatch(
         &self,
         steps: &BrokerClaimSteps,
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
+        hold: &mut QueueCapHold,
     ) -> Result<ClaimPassCounts, WorkerError> {
         let request = self.claim_request(children.service().claim_classes());
         let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
         for row in claimed.rows {
-            self.dispatch(children, writer, writes, claimed_of(row));
+            match hold.holds(&row.queue_name) {
+                true => hold.hold(row),
+                false => self.dispatch(
+                    children,
+                    writer,
+                    writes,
+                    claimed_of(row),
+                    StartCount::Unchecked,
+                ),
+            }
+        }
+        let admitted = admit_held_rows(
+            self.broker.core_main_pool(),
+            self.broker.statement_log(),
+            &self.worker_id,
+            hold,
+        )
+        .await?;
+        for admitted in admitted {
+            self.dispatch(
+                children,
+                writer,
+                writes,
+                claimed_of(admitted.row),
+                StartCount::Admitted(admitted.started),
+            );
         }
         Ok(claimed.counts)
     }
@@ -883,14 +943,17 @@ impl Worker {
     /// Submit one claimed task to the pool of its kind, and spawn the write
     /// of its end (Python `_dispatch_one`, `_finalize_after`). When the write
     /// ends, the claim loop is woken: a slot or seat is free again (Python
-    /// `_capacity_released`). Never fails for a task: a task that reaches no
-    /// child ends `NotDispatched`, and its claim goes back to the queue.
+    /// `_capacity_released`). An admitted row of a capped queue counts in
+    /// its queue's start check until the write ends (`count`). Never fails
+    /// for a task: a task that reaches no child ends `NotDispatched`, and its
+    /// claim goes back to the queue.
     fn dispatch(
         &self,
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
         claimed: Claimed,
+        count: StartCount,
     ) {
         let task = claimed.task.clone();
         let submitted = children.submit(claimed);
@@ -900,6 +963,9 @@ impl Worker {
             let end = attempt_end(submitted).await;
             let settled = writer.settle(&task, end).await;
             tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
+            // The claim leaves the start check before the wake, so the pass
+            // that the wake runs counts without it.
+            drop(count);
             released.notify_one();
         });
     }
@@ -913,6 +979,7 @@ impl Worker {
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
+        hold: &mut QueueCapHold,
         notifications: &mut mpsc::Receiver<sqlx::postgres::PgNotification>,
     ) -> Option<WorkerError> {
         let steps = BrokerClaimSteps::new(Arc::clone(&self.broker), self.worker_id.clone());
@@ -926,7 +993,7 @@ impl Worker {
             }
             reap_finished(writes);
             match self
-                .claim_and_dispatch(&steps, children, writer, writes)
+                .claim_and_dispatch(&steps, children, writer, writes, hold)
                 .await
             {
                 Ok(counts) => {
@@ -1071,8 +1138,14 @@ impl Worker {
         tracing::info!(worker_id = %self.worker_id, "worker ready");
 
         let mut writes: JoinSet<()> = JoinSet::new();
+        // Soft-cap mode: the claimed rows of each capped queue wait here
+        // until a claim pass finds room under the queue's cap.
+        let mut hold = QueueCapHold::new(StartCheckCaps::of_mode(
+            self.app_config.prefetch_buffer,
+            &self.worker_config.queue_max_concurrency,
+        ));
         let fatal_claim_error = self
-            .claim_loop(&children, &writer, &mut writes, &mut notify_rx)
+            .claim_loop(&children, &writer, &mut writes, &mut hold, &mut notify_rx)
             .await;
 
         // Stop the claim loop and every service loop on every exit path,
@@ -1081,6 +1154,9 @@ impl Worker {
         self.cancel.cancel();
         let drain = self.profile.profile.drain_timeout.get();
         RunningChildren::stop_pools(children, drain).await;
+        // Rows that waited for their queue cap never reached a child: return
+        // them to their queue, with the writes that the drain below bounds.
+        return_held_rows(&mut hold, &writer, &mut writes);
         // After the pools: every end is known, so the writes have database
         // work left only. A write that the drain cancels leaves its row in
         // the batcher, and the close still writes it.
@@ -2150,8 +2226,9 @@ mod tests {
 
     /// Python `Worker.stop` and `test_runner_heartbeat.py::test_stop_ends_the_heartbeat_after_the_children`:
     /// the claim loop ends, then the pools stop with the drain timeout, then
-    /// the outcome writes drain and the batcher closes, then the runner
-    /// heartbeats stop, then the spawner thread.
+    /// the rows held for their queue cap go back to the queue (Python
+    /// `_return_held_rows`), then the outcome writes drain and the batcher
+    /// closes, then the runner heartbeats stop, then the spawner thread.
     #[test]
     fn the_stop_runs_in_python_order() {
         let source = include_str!("worker.rs");
@@ -2166,12 +2243,14 @@ mod tests {
         let claim_loop = at(".claim_loop(&children");
         let cancel = at("self.cancel.cancel();\n        let drain");
         let pools = at("RunningChildren::stop_pools(children, drain).await");
+        let held = at("return_held_rows(&mut hold, &writer, &mut writes);");
         let writes = at("drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher)");
         let beats = at("services.stop_runner_beats().await");
         let spawner = at("RunningChildren::stop_spawner(spawner).await");
         assert!(claim_loop < cancel);
         assert!(cancel < pools);
-        assert!(pools < writes);
+        assert!(pools < held);
+        assert!(held < writes);
         assert!(writes < beats);
         assert!(beats < spawner);
     }

@@ -10,6 +10,7 @@ mod claim_start_release;
 mod failed_attempt_finish;
 mod failed_attempt_round_trips;
 mod finalize_status_guard;
+mod soft_cap_start_check;
 mod success_batch_write;
 mod support;
 mod task_attempt_history;

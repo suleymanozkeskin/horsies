@@ -363,3 +363,52 @@ fn release_rows_that_break_the_contract_fail_closed() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Start check (Python `tests/unit/test_queue_cap_hold.py::TestReadQueueStarts`)
+// ---------------------------------------------------------------------------
+
+fn queues(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// Python `test_count_is_running_plus_started_not_running`.
+#[test]
+fn the_count_of_a_queue_is_running_plus_started_not_running() {
+    let starts = decode_queue_starts(
+        &queues(&["a", "b"]),
+        vec![("a".to_owned(), 2, 1), ("b".to_owned(), 0, 3)],
+    )
+    .expect("a valid count");
+    assert_eq!(starts.of("a"), 3);
+    assert_eq!(starts.of("b"), 3);
+}
+
+/// Python `test_no_row_is_no_count`.
+#[test]
+fn a_queue_with_no_row_counts_0() {
+    let starts = decode_queue_starts(&queues(&["a"]), Vec::new()).expect("a valid count");
+    assert_eq!(starts, QueueStarts::default());
+    assert_eq!(starts.of("a"), 0);
+}
+
+/// Python `test_a_queue_counted_twice_is_a_defect`, and the other rows
+/// the statement never returns.
+#[test]
+fn count_rows_that_break_the_contract_fail_closed() {
+    let cases: Vec<(&str, Vec<(String, i64, i64)>)> = vec![
+        (
+            "queue_counted_twice",
+            vec![("a".to_owned(), 1, 0), ("a".to_owned(), 1, 0)],
+        ),
+        ("queue_not_named", vec![("c".to_owned(), 1, 0)]),
+        ("negative_running", vec![("a".to_owned(), -1, 0)]),
+        ("negative_started", vec![("a".to_owned(), 0, -1)]),
+    ];
+    for (name, rows) in cases {
+        assert!(
+            decode_queue_starts(&queues(&["a", "b"]), rows).is_err(),
+            "{name} must fail closed"
+        );
+    }
+}
