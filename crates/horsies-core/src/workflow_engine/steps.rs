@@ -62,14 +62,15 @@ pub(crate) static CANCEL: TypedStatement = TypedStatement::new(
 
 /// The columns that the core reads from a row of `horsies_workflow_step_row`:
 /// the `OUTCOME` columns, the `CHILD_START` columns that the host build of a
-/// child reads, and the `SOURCE` columns that its `args_from` members take.
+/// child reads (`workflow_name`: the name of the parent workflow), and the
+/// `SOURCE` columns that its `args_from` members take.
 macro_rules! step_row_select {
     ($call:literal) => {
         concat!(
-            "SELECT row_kind, disposition, workflow_id, advance_child_workflow_id, detail, ",
-            "task_index, node_input, args_from, sub_workflow_name, sub_definition_key, ",
-            "sub_workflow_params, parent_depth, source_task_index, source_status, ",
-            "source_result FROM ",
+            "SELECT row_kind, disposition, workflow_id, workflow_name, ",
+            "advance_child_workflow_id, detail, task_index, node_input, args_from, ",
+            "sub_workflow_name, sub_definition_key, sub_workflow_params, parent_depth, ",
+            "source_task_index, source_status, source_result FROM ",
             $call
         )
     };
@@ -355,6 +356,10 @@ pub(crate) struct ChildStartSource {
 pub(crate) struct OwedChildStart {
     /// The parent workflow.
     pub(crate) workflow_id: Uuid,
+    /// The name of the parent workflow. The node errors of a child that
+    /// cannot start name the workflow by it (Python's `parent_workflow_name`,
+    /// `core/workflows/engine.py:1014-1016`).
+    pub(crate) workflow_name: String,
     /// The sub-workflow node.
     pub(crate) task_index: i32,
     /// The node's stored input, as the client encoded it.
@@ -987,7 +992,8 @@ pub(crate) fn step_rows<D: StepDisposition>(
     }
 }
 
-/// Decodes one `CHILD_START` row, with no sources yet. Pure.
+/// Decodes one `CHILD_START` row, with no sources yet. A NULL
+/// `workflow_name` does not decode ([`RowDecodeError`]). Pure.
 fn child_start_row(
     row: &Row,
     statement: &TypedStatement,
@@ -1005,6 +1011,7 @@ fn child_start_row(
     };
     Ok(OwedChildStart {
         workflow_id: column(row, statement, "workflow_id")?,
+        workflow_name: column(row, statement, "workflow_name")?,
         task_index: column(row, statement, "task_index")?,
         node_input: column(row, statement, "node_input")?,
         args_from: column(row, statement, "args_from")?,

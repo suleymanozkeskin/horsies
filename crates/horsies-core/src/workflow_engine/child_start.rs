@@ -261,13 +261,12 @@ pub(crate) fn child_start_kind(
     owed: &OwedChildStart,
     build: ChildBuild<'_>,
 ) -> Result<ChildStartKind, WorkflowError> {
-    let spec_name = owed.sub_workflow_name.as_deref().unwrap_or("?");
     let built = build_child(
         ChildOfNode {
             parent_workflow_id: owed.workflow_id,
+            parent_workflow_name: &owed.workflow_name,
             task_index: owed.task_index,
             parent_depth: owed.parent_depth,
-            spec_name,
             definition_key: owed.sub_definition_key.as_deref(),
         },
         || merged_child_input(owed),
@@ -287,7 +286,9 @@ pub(crate) fn child_start_kind(
         ChildBuildOutcome::NodeFails(error) => {
             tracing::error!(
                 workflow_id = %owed.workflow_id,
+                workflow_name = %owed.workflow_name,
                 task_index = owed.task_index,
+                sub_workflow_name = ?owed.sub_workflow_name,
                 definition_key = ?owed.sub_definition_key,
                 error = ?error.message,
                 "sub-workflow child not started; its node fails",

@@ -392,28 +392,34 @@ async fn cancel_answers_terminal_and_missing_workflows() {
 /// A step whose `OUTCOME` row comes last, after a `SOURCE` row and the
 /// `CHILD_START` row of its node, as `horsies_workflow_node_finish` returns
 /// them. `$3` is the params choice of the `CHILD_START` row; `$4` is the node
-/// that the `SOURCE` row names.
+/// that the `SOURCE` row names; `$5` is the parent workflow name of the
+/// `CHILD_START` row.
 static STEP_ROWS_WITH_CHILD_START: TypedStatement = TypedStatement::new(
     "test_step_rows_with_child_start",
     r#"SELECT * FROM (VALUES
-         ('SOURCE'::text, NULL::text, $1::uuid, NULL::uuid, NULL::text, $4::integer,
+         ('SOURCE'::text, NULL::text, $1::uuid, NULL::text, NULL::uuid, NULL::text, $4::integer,
           NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer,
           2::integer, 'COMPLETED'::text, '{"__h_task_result__":true,"ok":7,"err":null}'::text),
-         ('CHILD_START', NULL, $1, NULL, NULL, 3,
+         ('CHILD_START', NULL, $1, $5::text, NULL, NULL, 3,
           '{"base": 1}', '{"value": 2}', 'child', 'tests.child.v1', $3::text, 4,
           NULL, NULL, NULL),
-         ('OUTCOME', 'APPLIED', $1, $2::uuid, NULL, NULL,
+         ('OUTCOME', 'APPLIED', $1, NULL, $2::uuid, NULL, NULL,
           NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
-     ) AS r(row_kind, disposition, workflow_id, advance_child_workflow_id, detail, task_index,
-            node_input, args_from, sub_workflow_name, sub_definition_key, sub_workflow_params,
-            parent_depth, source_task_index, source_status, source_result)"#,
+     ) AS r(row_kind, disposition, workflow_id, workflow_name, advance_child_workflow_id, detail,
+            task_index, node_input, args_from, sub_workflow_name, sub_definition_key,
+            sub_workflow_params, parent_depth, source_task_index, source_status, source_result)"#,
     &[
         ParameterType::Uuid,
         ParameterType::Uuid,
         ParameterType::Text,
         ParameterType::Int4,
+        ParameterType::Text,
     ],
 );
+
+/// The parent workflow name of the `CHILD_START` row of
+/// [`STEP_ROWS_WITH_CHILD_START`].
+const PARENT_NAME: &str = "parent_workflow";
 
 async fn step_rows_with_child_start(
     broker: &PostgresBroker,
@@ -421,8 +427,10 @@ async fn step_rows_with_child_start(
     ended_child: Uuid,
     params: &str,
     source_node: i32,
+    workflow_name: Option<&str>,
 ) -> Vec<Row> {
     let params = params.to_owned();
+    let workflow_name = workflow_name.map(str::to_owned);
     rows_of(
         broker,
         &STEP_ROWS_WITH_CHILD_START
@@ -431,6 +439,7 @@ async fn step_rows_with_child_start(
             .value(&ended_child)
             .value(&params)
             .value(&source_node)
+            .value(&workflow_name)
             .finish(),
     )
     .await
@@ -475,7 +484,15 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
     let broker = test_broker().await;
     let workflow_id = Uuid::new_v4();
     let ended_child = Uuid::new_v4();
-    let rows = step_rows_with_child_start(&broker, workflow_id, ended_child, "GIVEN", 3).await;
+    let rows = step_rows_with_child_start(
+        &broker,
+        workflow_id,
+        ended_child,
+        "GIVEN",
+        3,
+        Some(PARENT_NAME),
+    )
+    .await;
 
     let step =
         step_rows::<NodeFinishDisposition>(&rows, &STEP_ROWS_WITH_CHILD_START).expect("step rows");
@@ -491,6 +508,7 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
             },
             owed_child_starts: vec![OwedChildStart {
                 workflow_id,
+                workflow_name: PARENT_NAME.to_owned(),
                 task_index: 3,
                 node_input: r#"{"base": 1}"#.to_owned(),
                 args_from: Some(r#"{"value": 2}"#.to_owned()),
@@ -508,16 +526,24 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
     );
 }
 
-/// A `SOURCE` row whose node has no `CHILD_START` row, and a params choice
-/// outside `GIVEN` and `NOT_GIVEN`, break the contract.
+/// A `SOURCE` row whose node has no `CHILD_START` row, a params choice
+/// outside `GIVEN` and `NOT_GIVEN`, and a `CHILD_START` row with no parent
+/// workflow name break the contract.
 #[tokio::test]
 #[serial]
 async fn child_start_rows_outside_the_contract_are_refused() {
     let broker = test_broker().await;
     let workflow_id = Uuid::new_v4();
 
-    let orphan_source =
-        step_rows_with_child_start(&broker, workflow_id, workflow_id, "GIVEN", 9).await;
+    let orphan_source = step_rows_with_child_start(
+        &broker,
+        workflow_id,
+        workflow_id,
+        "GIVEN",
+        9,
+        Some(PARENT_NAME),
+    )
+    .await;
     let refused = step_rows::<NodeFinishDisposition>(&orphan_source, &STEP_ROWS_WITH_CHILD_START);
     assert!(
         matches!(
@@ -527,13 +553,34 @@ async fn child_start_rows_outside_the_contract_are_refused() {
         "{refused:?}"
     );
 
-    let unknown_params =
-        step_rows_with_child_start(&broker, workflow_id, workflow_id, "SOME", 3).await;
+    let unknown_params = step_rows_with_child_start(
+        &broker,
+        workflow_id,
+        workflow_id,
+        "SOME",
+        3,
+        Some(PARENT_NAME),
+    )
+    .await;
     let refused = step_rows::<NodeFinishDisposition>(&unknown_params, &STEP_ROWS_WITH_CHILD_START);
     assert!(
         matches!(
             refused,
             Err(StepContractError::Row(RowDecodeError::Shape { .. }))
+        ),
+        "{refused:?}"
+    );
+
+    let no_parent_name =
+        step_rows_with_child_start(&broker, workflow_id, workflow_id, "GIVEN", 3, None).await;
+    let refused = step_rows::<NodeFinishDisposition>(&no_parent_name, &STEP_ROWS_WITH_CHILD_START);
+    assert!(
+        matches!(
+            refused,
+            Err(StepContractError::Row(RowDecodeError::Column {
+                column: "workflow_name",
+                ..
+            }))
         ),
         "{refused:?}"
     );

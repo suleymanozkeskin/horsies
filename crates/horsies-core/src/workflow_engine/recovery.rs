@@ -510,7 +510,7 @@ WHERE workflow_id = $2 AND task_index = $3
 
 /// Get parent depth and root workflow ID.
 const GET_DEPTH_AND_ROOT_SQL: &str = "\
-SELECT depth, root_workflow_id
+SELECT depth, root_workflow_id, name
 FROM horsies_workflows
 WHERE id = $1";
 
@@ -589,6 +589,7 @@ struct GlobalWorkflowAuditRow {
 struct DepthRow {
     depth: Option<i32>,
     root_workflow_id: Option<Uuid>,
+    name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1645,12 +1646,6 @@ async fn start_stuck_subworkflow(
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
-    let spec_name = row
-        .task_name
-        .strip_prefix("__sub_workflow:")
-        .or(row.sub_workflow_name.as_deref())
-        .unwrap_or(&row.task_name);
-
     let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
         .bind(&row.workflow_id)
         .fetch_one(pool)
@@ -1658,6 +1653,7 @@ async fn start_stuck_subworkflow(
     let child_depth = match child_workflow_depth(
         depth_row.depth.unwrap_or(0),
         row.workflow_id,
+        &depth_row.name,
         row.task_index,
     ) {
         Ok(child_depth) => child_depth,
@@ -1683,7 +1679,11 @@ async fn start_stuck_subworkflow(
             pool,
             row.workflow_id,
             row.task_index,
-            engine::subworkflow_load_failed_error(spec_name, row.sub_definition_key.as_deref()),
+            engine::subworkflow_load_failed_error(
+                &depth_row.name,
+                row.task_index,
+                row.sub_definition_key.as_deref(),
+            ),
             registry,
             payload,
             retention,
