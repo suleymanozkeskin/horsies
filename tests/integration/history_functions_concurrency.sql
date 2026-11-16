@@ -161,12 +161,13 @@ INSERT INTO horsies_workflows (
 );
 SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'waiting'), 'RUNNING', 'forever', TRUE);
 INSERT INTO horsies_workflow_tasks (
-    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
+    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+    dependencies, args_from,
     workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
     good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
     sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
 ) VALUES (
-    (SELECT id FROM fixture_ids WHERE name = 'node'), (SELECT id FROM fixture_ids WHERE name = 'workflow'), 0,
+    'NONE', (SELECT id FROM fixture_ids WHERE name = 'node'), (SELECT id FROM fixture_ids WHERE name = 'workflow'), 0,
     'node_0', 'fixture.task', '{"x":1}', 'default', 50, '{}', NULL, NULL, FALSE, 'all', NULL, NULL, 3, 'ISOLATED',
     NULL, 'forever', 'RUNNING', (SELECT id FROM fixture_ids WHERE name = 'waiting'), FALSE, NULL, NULL, NULL, NULL,
     NULL, NULL, now(), now(), NULL

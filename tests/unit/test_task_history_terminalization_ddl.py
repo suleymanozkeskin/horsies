@@ -13,46 +13,99 @@ import re
 
 import pytest
 
-from horsies.core.history.ddl.fragments import frozen_fragments
-from horsies.core.history.terminalization.live_cutover import (
-    LIVE_CUTOVER_COLUMNS_DDL,
-)
-from horsies.core.history.terminalization.move import (
-    ATTEMPT_ENCODER_DDL,
-    ATTEMPT_ENCODER_FUNCTION,
-    COMPLETE_FUSED_BATCH_FUNCTION,
-    COMPLETE_FUSED_FUNCTION,
-    COMPLETE_LOCKED_FUNCTION,
-    FAIL_LOCKED_FUNCTION,
-    FINISH_FAILED_ATTEMPT_FUNCTION,
-    FINISH_WORKFLOW_SUCCESS_FUNCTION,
-    KIND_PROJECTIONS,
-    cancellation_family_fragments,
-    completion_batch_fragments,
-    completion_batch_replacement_ddl,
-    completion_family_fragments,
-    disposition_case_expression,
-    disposition_if_chain,
-    expiry_family_fragments,
-    failed_attempt_fragments,
-    failure_family_fragments,
-    locking_read_replacement_ddl,
-    terminal_snapshot_replacement_ddl,
-    workflow_node_family_fragments,
-    workflow_success_fragments,
-)
-from horsies.core.history.terminalization.outcome import (
-    MISS_CLASSIFIER_DDL,
-    OUTCOME_TYPE_DDL,
-    outcome_fragments,
-)
 from horsies.core.lifecycle.operations import TerminalizationKind
-from tests.baseline_sql import baseline_sql
+from tests.baseline_sql import (
+    baseline_function,
+    baseline_overload,
+    baseline_sql,
+    baseline_table,
+    baseline_type,
+)
 
 pytestmark = [pytest.mark.unit]
 
 
-MOVE_BODY = completion_family_fragments()[1]
+# The functions under test, read from the baseline migration, grouped as the
+# families they were written in.
+MOVE_BODY = baseline_overload('horsies_move_task_to_history', 'p_task_id uuid')
+"""The move overload that the writers call: it takes the task id."""
+ATTEMPT_ENCODER_FUNCTION = 'horsies_encode_task_attempts'
+COMPLETE_LOCKED_FUNCTION = 'horsies_complete_locked_task'
+COMPLETE_FUSED_FUNCTION = 'horsies_complete_task_fused'
+COMPLETE_FUSED_BATCH_FUNCTION = 'horsies_complete_tasks_fused'
+FAIL_LOCKED_FUNCTION = 'horsies_fail_locked_task'
+FINISH_FAILED_ATTEMPT_FUNCTION = 'horsies_finish_failed_attempt'
+FINISH_WORKFLOW_SUCCESS_FUNCTION = 'horsies_finish_workflow_success'
+
+
+def _functions(*names: str) -> list[str]:
+    return [baseline_function(name) for name in names]
+
+
+def completion_family_fragments() -> list[str]:
+    return [
+        baseline_function(ATTEMPT_ENCODER_FUNCTION),
+        MOVE_BODY,
+        baseline_function(COMPLETE_LOCKED_FUNCTION),
+        baseline_function(COMPLETE_FUSED_FUNCTION),
+    ]
+
+
+def failure_family_fragments() -> list[str]:
+    return _functions(FAIL_LOCKED_FUNCTION, 'horsies_fail_stale_task')
+
+
+def failed_attempt_fragments() -> list[str]:
+    return [
+        baseline_type('horsies_failed_attempt_outcome'),
+        baseline_function(FINISH_FAILED_ATTEMPT_FUNCTION),
+    ]
+
+
+def workflow_success_fragments() -> list[str]:
+    return [
+        baseline_type('horsies_workflow_success_outcome'),
+        baseline_function(FINISH_WORKFLOW_SUCCESS_FUNCTION),
+    ]
+
+
+def expiry_family_fragments() -> list[str]:
+    return _functions('horsies_expire_owned_claim', 'horsies_expire_pending_tasks')
+
+
+def cancellation_family_fragments() -> list[str]:
+    return _functions(
+        'horsies_cancel_locked_task',
+        'horsies_cancel_owned_orphan',
+        'horsies_cancel_orphaned_tasks',
+    )
+
+
+def workflow_node_family_fragments() -> list[str]:
+    return _functions(
+        'horsies_abandon_owned_node',
+        'horsies_cancel_owned_node',
+        'horsies_abandon_owned_nodes',
+        'horsies_cancel_owned_nodes',
+        'horsies_abandon_nodes_of_paused_workflows',
+        'horsies_cancel_nodes_of_cancelled_workflow',
+    )
+
+
+def completion_batch_fragments() -> list[str]:
+    return _functions(COMPLETE_FUSED_BATCH_FUNCTION)
+
+
+def outcome_fragments() -> list[str]:
+    return [
+        baseline_type('horsies_terminalization_outcome'),
+        baseline_function('horsies_terminalization_miss'),
+    ]
+
+
+OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
+MISS_CLASSIFIER_DDL = baseline_function('horsies_terminalization_miss')
+ATTEMPT_ENCODER_DDL = baseline_function(ATTEMPT_ENCODER_FUNCTION)
 
 
 class TestOutcomeLayer:
@@ -108,10 +161,10 @@ class TestMoveStructure:
         declined = MOVE_BODY.index(
             "v_rerun_disposition := 'DECLINED_BY_POLICY'"
         )
-        carried = MOVE_BODY.index(
-            'v_rerun_disposition := v_task.prepared_rerun_input_disposition'
+        built = MOVE_BODY.index(
+            'v_rerun_envelope := horsies_encode_rerun_input('
         )
-        assert never < declined < carried
+        assert never < declined < built
 
     def test_completed_status_is_never_eligible(self) -> None:
         assert (
@@ -119,12 +172,10 @@ class TestMoveStructure:
             in MOVE_BODY
         )
 
-    def test_envelope_digest_is_copied_never_recomputed(self) -> None:
-        assert 'v_rerun_digest := v_task.prepared_rerun_input_digest' in (
-            MOVE_BODY
-        )
-        assert 'sha256(v_rerun' not in MOVE_BODY
-        assert 'sha256(v_task.prepared' not in MOVE_BODY
+    def test_envelope_digest_is_of_the_built_envelope_once(self) -> None:
+        assert MOVE_BODY.count('sha256(v_rerun_envelope)') == 1
+        assert 'v_rerun_digest := sha256(v_rerun_envelope)' in MOVE_BODY
+        assert 'prepared_rerun_input' not in MOVE_BODY
 
     def test_row_count_assertions_guard_insert_and_delete(self) -> None:
         assert MOVE_BODY.count('GET DIAGNOSTICS') == 2
@@ -184,30 +235,6 @@ class TestLockOrderInvariant:
         batch = expiry_family_fragments()[1]
         assert 'pg_advisory_xact_lock' not in batch
         assert 'FOR UPDATE SKIP LOCKED' in batch
-
-
-class TestLadderSingleSource:
-    """Both ladder renderings derive from one source; drift is impossible."""
-
-    def test_single_row_move_embeds_the_generated_if_chain(self) -> None:
-        assert disposition_if_chain('v_task', 'p_terminal_status') in MOVE_BODY
-
-    def test_batch_embeds_the_generated_case_expression(self) -> None:
-        batch = expiry_family_fragments()[1]
-        assert disposition_case_expression('t', "'EXPIRED'") in batch
-
-    def test_the_two_renderings_agree_rung_for_rung(self) -> None:
-        chain = disposition_if_chain('r', 's')
-        case = disposition_case_expression('r', 's')
-        for fact in (
-            "r.is_workflow_task OR s = 'COMPLETED'",
-            'NOT r.retain_rerun_input',
-            "'NEVER_ELIGIBLE'",
-            "'DECLINED_BY_POLICY'",
-            'r.prepared_rerun_input_disposition',
-        ):
-            assert fact in chain
-            assert fact in case
 
 
 class TestExpiryFamily:
@@ -305,13 +332,12 @@ class TestFailureFamily:
         assert 'p_result, p_error_code, p_failed_reason' in locked
 
 
-class TestCodecCrossPins:
-    """The DDL's codec literals, with their exact spellings."""
+class TestNoCodecLiterals:
+    """The history format version implies the codec and content type."""
 
-    def test_move_codec_literal_spellings(self) -> None:
-        assert "'json-utf8'" in MOVE_BODY
-        assert MOVE_BODY.count("'json-utf8'") == 2
-        assert MOVE_BODY.count("'application/json'") == 2
+    def test_the_move_stores_no_codec_literal(self) -> None:
+        assert "'json-utf8'" not in MOVE_BODY
+        assert "'application/json'" not in MOVE_BODY
 
 
 class TestBatchBuilder:
@@ -392,6 +418,27 @@ _BATCH_MOVE_IDS = (
 )
 
 
+class TestLadderOrder:
+    """The single-row move and every batch move rank the rerun dispositions
+    the same way: never eligible, declined by policy, over the bound,
+    inline."""
+
+    @pytest.mark.parametrize(
+        'body',
+        [MOVE_BODY, *_BATCH_MOVES],
+        ids=['move', *_BATCH_MOVE_IDS],
+    )
+    def test_rungs_appear_in_ladder_order(self, body: str) -> None:
+        position = body.index("'NEVER_ELIGIBLE'")
+        for rung in ("'DECLINED_BY_POLICY'", "'OVER_BOUND'", "'INLINE'"):
+            following = body.index(rung, position)
+            assert following > position, rung
+            position = following
+        assert 'retain_rerun_input' in body
+        assert '> 65536' in body
+        assert 'horsies_encode_rerun_input(' in body
+
+
 class TestSnapshotAndDigestReuse:
     """Each move encodes an attempt snapshot once and hashes a result once."""
 
@@ -417,26 +464,11 @@ class TestSnapshotAndDigestReuse:
 
     def test_move_hashes_the_result_once(self) -> None:
         assert MOVE_BODY.count('sha256(v_result_payload)') == 1
-        assert MOVE_BODY.count('sha256(v_prior_result_payload)') == 1
+        assert 'prior_result_payload' not in MOVE_BODY
         pending = MOVE_BODY[
             MOVE_BODY.index('INSERT INTO horsies_workflow_phase2_pending'):
         ]
         assert '1, v_result_digest,' in pending
-
-    def test_the_prior_payload_kind_is_never_deferred(self) -> None:
-        """The deferred digest equals the result digest only while this holds."""
-        deferred = {kind: flag for kind, _, _, flag in KIND_PROJECTIONS}
-        assert deferred[TerminalizationKind.CANCEL_ADMIN] is False
-
-    def test_replacement_covers_every_reusing_move(self) -> None:
-        statements = terminal_snapshot_replacement_ddl()
-        assert all(
-            s.lstrip().startswith('CREATE OR REPLACE FUNCTION')
-            for s in statements
-        )
-        assert [s for s in statements if 'CREATE FUNCTION' in s] == []
-        assert len(statements) == len(_BATCH_MOVES) + 1
-
 
 class TestCancellationFamily:
     """The cancellation family's wire shape against the production contract."""
@@ -447,11 +479,6 @@ class TestCancellationFamily:
 
     def test_admin_cancel_rejects_workflow_tasks(self) -> None:
         assert "'COMPLETE_FUSED', 'CANCEL_ADMIN'" in MOVE_BODY
-
-    def test_gate_8_swap_copies_prior_bytes_and_digests_them(self) -> None:
-        assert 'v_prior_result_payload := CASE' in MOVE_BODY
-        assert 'convert_to(v_task.result' in MOVE_BODY
-        assert 'sha256(v_prior_result_payload)' in MOVE_BODY
 
     def test_admin_wire_owns_the_literals(self) -> None:
         admin = cancellation_family_fragments()[0]
@@ -475,11 +502,10 @@ class TestWorkflowNodeFamily:
     """The final six operations: postures, literals, and full coverage."""
 
     def test_every_terminalization_kind_is_accounted_for(self) -> None:
-        from horsies.core.history.terminalization.move import (
-            KIND_PROJECTIONS,
-        )
-
-        classified = {kind for kind, _, _, _ in KIND_PROJECTIONS}
+        """The single-row move handles every kind but the two batch-only ones."""
+        classified = {
+            kind for kind in TerminalizationKind if f"'{kind.value}'" in MOVE_BODY
+        }
         batch_only = {
             TerminalizationKind.EXPIRE_PENDING,
             TerminalizationKind.CANCEL_ORPHAN_SWEEP,
@@ -593,94 +619,41 @@ class TestAttemptEncoder:
 
 
 class TestLiveStatusDomain:
-    """The classifier's premise is a declared fragment, not fixture folklore."""
+    """The classifier's premise is a declared constraint, not fixture folklore."""
 
-    def test_live_only_status_domain_is_production_ddl(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            LIVE_STATUS_DOMAIN_DDL,
-        )
-
-        assert 'ADD CONSTRAINT horsies_tasks_live_status_only' in (
-            LIVE_STATUS_DOMAIN_DDL
-        )
-        assert (
-            "CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING'))"
-            in LIVE_STATUS_DOMAIN_DDL
-        )
+    def test_live_only_status_domain_is_a_baseline_check(self) -> None:
+        sql = ' '.join(baseline_sql().split())
+        assert 'CONSTRAINT horsies_tasks_status_live CHECK (' in sql
+        assert "status IN ('PENDING', 'CLAIMED', 'RUNNING')" in sql
 
 
 class TestNodeRowIdentityType:
     """uuid end to end: frozen fragments, the move, never a stand-in guess."""
 
-    def test_frozen_fragments_declare_uuid_node_identity(self) -> None:
-        combined = '\n'.join(frozen_fragments())
-        assert combined.count('workflow_node_row_id uuid NOT NULL') == 2
-        assert 'workflow_node_row_id bigint' not in combined
+    def test_the_baseline_tables_declare_uuid_node_identity(self) -> None:
+        sql = baseline_sql()
+        assert sql.count('workflow_node_row_id uuid NOT NULL') == 2
+        assert 'workflow_node_row_id bigint' not in sql
 
     def test_move_declares_uuid_node_identity(self) -> None:
         assert 'v_workflow_node_row_id uuid;' in MOVE_BODY
         assert 'v_workflow_node_row_id bigint' not in MOVE_BODY
 
 
-class TestLiveCutover:
-    def test_prepared_disposition_is_not_null_with_the_ratified_set(
-        self,
-    ) -> None:
-        combined = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
-        assert 'prepared_rerun_input_disposition varchar(32) NOT NULL' in (
-            combined
-        )
-        assert 'retain_rerun_input boolean NOT NULL' in combined
-        assert 'idempotency_key_digest bytea' in combined
+class TestLiveRerunColumns:
+    """The live columns the rerun path classifies by: typed, no defaults."""
 
-    def test_no_defaults_on_classification_columns(self) -> None:
-        combined = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
-        assert 'DEFAULT' not in combined
+    def test_classification_columns_are_typed(self) -> None:
+        table = _live_tasks_table()
+        assert 'retain_rerun_input boolean NOT NULL' in table
+        assert 'idempotency_key_digest bytea' in table
+
+    def test_no_defaults_on_the_live_table(self) -> None:
+        assert 'DEFAULT' not in _live_tasks_table()
 
 
-class TestTighteningRendering:
-    """Three renderings, one structured authority, no text parsing."""
-
-    def test_set_not_null_covers_exactly_the_declared_columns(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            CUTOVER_COLUMNS,
-            tightening_cutover_ddl,
-        )
-
-        rendered = '\n'.join(tightening_cutover_ddl())
-        for column in CUTOVER_COLUMNS:
-            clause = f'ALTER COLUMN {column.name} SET NOT NULL'
-            assert (clause in rendered) is column.not_null, column.name
-
-    def test_every_declared_check_lands_once(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            CUTOVER_COLUMNS,
-            tightening_cutover_ddl,
-        )
-
-        rendered = tightening_cutover_ddl()
-        checked = [c for c in CUTOVER_COLUMNS if c.check is not None]
-        constraint_statements = [
-            s for s in rendered if 'ADD CONSTRAINT' in s
-        ]
-        # One per declared column check, plus the lineage pair.
-        assert len(constraint_statements) == len(checked) + 1
-        assert any(
-            'rerun_lineage_pair' in s for s in constraint_statements
-        )
-
-    def test_final_and_transitional_share_the_column_set(self) -> None:
-        from horsies.core.history.terminalization.live_cutover import (
-            LIVE_CUTOVER_COLUMNS_DDL,
-            cutover_column_definitions,
-            transitional_cutover_columns_ddl,
-        )
-
-        final = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
-        transitional = transitional_cutover_columns_ddl()
-        for name, _ in cutover_column_definitions():
-            assert f'ADD COLUMN {name} ' in final
-            assert f'ADD COLUMN IF NOT EXISTS {name} ' in transitional
+def _live_tasks_table() -> str:
+    return baseline_table('horsies_tasks')
 
 
 class TestBatchedFusedCompletion:
@@ -692,23 +665,22 @@ class TestBatchedFusedCompletion:
     def test_each_row_calls_the_fused_completion_with_its_own_arguments(
         self,
     ) -> None:
+        """Each row passes its own id, claim generation and result; the
+        worker and the wake are those of the batch."""
         assert (
-            f'FROM {COMPLETE_FUSED_FUNCTION}(\n'
-            '            v_item.task_id, v_item.worker_id, v_item.claimed_at,\n'
-            '            v_item.result, v_item.notify_channel, v_item.notify_payload\n'
-            '        );'
+            f'FROM {COMPLETE_FUSED_FUNCTION}(v_item.id, p_worker_id, '
+            'v_item.claimed_at, v_item.result, p_wake) AS c;'
         ) in self.BODY
-        assert 'SELECT * INTO STRICT v_row' in self.BODY
 
     def test_rows_run_in_sorted_task_id_order_at_their_input_ordinality(
         self,
     ) -> None:
         assert 'WITH ORDINALITY' in self.BODY
         loop = self.BODY.index('FOR v_item IN')
-        assert self.BODY.index('ORDER BY u.task_id', loop) < self.BODY.index(
+        assert self.BODY.index('ORDER BY u.id', loop) < self.BODY.index(
             'LOOP', loop
         )
-        assert 'v_row.ordinality := v_item.ordinality;' in self.BODY
+        assert 'SELECT c.task_id, v_item.position,' in self.BODY
 
     def test_the_function_takes_no_lock_and_no_subtransaction_of_its_own(
         self,
@@ -723,9 +695,11 @@ class TestBatchedFusedCompletion:
     def test_the_arrays_are_checked_before_any_row_runs(self) -> None:
         loop = self.BODY.index('FOR v_item IN')
         for check in (
-            "'batch arrays must be non-NULL'",
-            "'batch array lengths differ'",
-            "'batch task ids must be distinct and non-NULL'",
+            'batch arrays, worker and wake must be non-NULL',
+            'a batch holds 1 to 64 rows',
+            'batch array lengths differ',
+            'batch task ids must be distinct and non-NULL',
+            'every row needs its claim generation',
         ):
             assert self.BODY.index(check) < loop
 
@@ -735,33 +709,16 @@ class TestBatchedFusedCompletion:
         batched = sql.index(f'CREATE FUNCTION {COMPLETE_FUSED_BATCH_FUNCTION}(')
         assert fused < batched
 
-    def test_the_v56_replacement_is_the_same_function_as_create_or_replace(
-        self,
-    ) -> None:
-        (replacement,) = completion_batch_replacement_ddl()
-        assert replacement == self.BODY.replace(
-            'CREATE FUNCTION',
-            'CREATE OR REPLACE FUNCTION',
-            1,
-        )
-
-
 _LOCKING_READ = re.compile(
-    r'FROM horsies_tasks\n    WHERE (?P<where>.*?)\n    FOR UPDATE;',
+    r'FROM horsies_tasks(?: (?P<alias>\w+))?\n    WHERE (?:(?P=alias)\.)?(?P<where>.*?)\n    FOR UPDATE;',
     re.DOTALL,
 )
+"""A locking read of one live row; ``where`` is its predicate without the
+table alias."""
 
 
 def _function_ddl(name: str) -> str:
-    fragments = (
-        *completion_family_fragments(),
-        *failure_family_fragments(),
-        *failed_attempt_fragments(),
-        *workflow_success_fragments(),
-    )
-    matching = [ddl for ddl in fragments if f'CREATE FUNCTION {name}(' in ddl]
-    assert len(matching) == 1, name
-    return matching[0]
+    return baseline_function(name)
 
 
 class TestLockingReads:
@@ -784,14 +741,3 @@ class TestLockingReads:
 
         assert reads == ['id = p_task_id']
 
-    def test_the_upgrade_replaces_the_functions_that_the_cutover_installs_once(
-        self,
-    ) -> None:
-        replaced = [
-            name
-            for name in (COMPLETE_LOCKED_FUNCTION, COMPLETE_FUSED_FUNCTION, FAIL_LOCKED_FUNCTION)
-            for ddl in locking_read_replacement_ddl()
-            if f'CREATE OR REPLACE FUNCTION {name}(' in ddl
-        ]
-
-        assert replaced == [COMPLETE_LOCKED_FUNCTION, COMPLETE_FUSED_FUNCTION, FAIL_LOCKED_FUNCTION]

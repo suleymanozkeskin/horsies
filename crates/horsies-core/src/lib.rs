@@ -67,8 +67,8 @@ pub use crate::broker::{
     ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError, PostgresBroker, RawResultRecord,
     SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle,
     TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
-    MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 

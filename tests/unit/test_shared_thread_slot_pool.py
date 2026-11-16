@@ -34,6 +34,7 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
 )
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.child_main import BAD_PARENT_FRAME_EXIT_CODE
 from horsies.core.worker.child_protocol import (
     InitFrame,
@@ -79,6 +80,10 @@ from horsies.core.worker.thread_slots import (
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 
 SCRIPTED_CHILD = str(
     Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py'
@@ -157,7 +162,7 @@ def _request(
         kwargs_json=argument,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=CLAIM,
         work=ThreadSeatTask(timeout_ms=timeout_ms),
     )
 
@@ -344,7 +349,7 @@ class TestSeats:
             kwargs_json=None,
             worker_id='worker-1',
             is_workflow_task=False,
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
             work=SeatTask(timeout_ms=LONG_TIMEOUT_MS, cancel_grace_ms=1_000),
         )
 
