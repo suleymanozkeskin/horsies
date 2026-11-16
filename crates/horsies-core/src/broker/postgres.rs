@@ -3467,46 +3467,21 @@ fn parse_task_result_row<T: DeserializeOwned>(
     }
 }
 
-use crate::worker::retry::{read_stored_options, StoredOptions, StoredRetry};
+use crate::worker::retry::stored_max_retries;
 
 /// The `max_retries` that enqueue stores, by Python's rule
-/// (`horsies/core/brokers/postgres.py:274-311`, `stored_max_retries`): no
+/// (`horsies/core/codec/task_options.py:80-103`, `stored_max_retries`): no
 /// options and no `retry_policy` store 0; a policy stores its `max_retries`.
-/// The options are read with the reader of the dispatch, so a text that the
-/// worker would refuse is refused here, before any statement: text that does
-/// not parse, that is not a JSON object, or whose `retry_policy` does not fit
-/// Python's `RetryPolicy` (a limit outside 1 to 20, a wrong field, no code)
-/// is `EnqueueContract`, which a send reports as `VALIDATION_FAILED`. Other
-/// keys are not judged here.
+/// The options are read with the reader of the dispatch
+/// ([`stored_max_retries`]), so a text that the worker would refuse is refused
+/// here, before any statement: text that does not parse, that is not a JSON
+/// object, or whose `retry_policy` does not fit Python's `RetryPolicy` (a
+/// limit outside 1 to 20, a wrong field, no code) is `EnqueueContract`, which
+/// a send reports as `VALIDATION_FAILED`. Other keys are not judged here.
 fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
-    let refused = |reason: String| {
-        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {reason}"))
-    };
-    match read_stored_options(task_options) {
-        StoredOptions::Unreadable { reason } => Err(refused(reason)),
-        StoredOptions::Readable {
-            retry: StoredRetry::NoPolicy,
-            ..
-        } => Ok(0),
-        StoredOptions::Readable {
-            retry: StoredRetry::Invalid { reason },
-            ..
-        } => Err(refused(reason)),
-        StoredOptions::Readable {
-            retry: StoredRetry::Policy(_),
-            ..
-        } => stored_policy_max_retries(task_options).ok_or_else(|| {
-            refused("retry_policy.max_retries is not a stored retry limit".to_owned())
-        }),
-    }
-}
-
-/// `retry_policy.max_retries` of options that the dispatch reader accepted
-/// with a policy, so the value is an integer from 1 to 20.
-fn stored_policy_max_retries(task_options: Option<&str>) -> Option<i32> {
-    let value: serde_json::Value = serde_json::from_str(task_options?).ok()?;
-    let limit = value.get("retry_policy")?.get("max_retries")?.as_u64()?;
-    i32::try_from(limit).ok()
+    stored_max_retries(task_options).map_err(|refusal| {
+        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {refusal}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
