@@ -79,6 +79,18 @@ pub use crate::worker::{
     WorkerError,
 };
 
+// worker state snapshot values
+pub use crate::broker::{
+    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+
+// fleet check and class report
+pub use crate::broker::{
+    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
+    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
+};
+
 pub use crate::broker::client_family::ClientFamily;
 pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
