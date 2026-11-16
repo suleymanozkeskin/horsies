@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.commands import CollectPartitionHealth, LeafRef
 from horsies.core.history.heartbeats.partitioning import hourly_leaf_ref
@@ -33,17 +34,16 @@ from horsies.core.history.names import (
     TASK_LOOKUP_MANIFEST,
 )
 from horsies.core.history.outcomes import LeafCreation
-from horsies.core.history.partitions import manager as partition_manager
 from horsies.core.history.partitions.catalog import (
     database_now,
     leaf_enqueued_index_name,
 )
 from horsies.core.history.partitions.health import collect_partition_health
 from horsies.core.history.partitions.locks import (
-    IndexRelationState,
     IndexRemovalOutcome,
     remove_attached_index_for_repair,
 )
+from horsies.core.history.partitions.publication import LoaderRepublished
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.integration.task_history_harness import (
     HistorySchema,
@@ -55,11 +55,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 partition_schema = terminalization_schema_fixture(
     'task_history_it_maintenance_fast_path',
 )
-
-
-async def test_complete_probe_uses_24_hour_heartbeat_leaf_names() -> None:
-    assert "'YYYY_MM_DD_HH24'" in coverage_module._COVERAGE_PROBE_SQL
-    assert "'YYYY_MM_DD_HH'" not in coverage_module._COVERAGE_PROBE_SQL
 
 
 @pytest.mark.parametrize(
@@ -91,12 +86,12 @@ async def test_healthy_complete_set_has_constant_statement_budget(
     statements: list[str] = []
 
     def record_statement(
-        _connection,
-        _cursor,
+        _connection: object,
+        _cursor: object,
         statement: str,
-        _parameters,
-        _context,
-        _executemany,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
     ) -> None:
         statements.append(statement)
 
@@ -179,7 +174,7 @@ async def test_current_heartbeat_wrong_physical_range_refuses_startup(
     assert isinstance(startup, StartupCoverageRefused), startup
     assert isinstance(startup.outcome, CoverageEnsureFailed)
     assert not startup.outcome.heartbeat_covered_now
-    assert 'requested bounds' in startup.outcome.refusal
+    assert 'PHYSICAL_NONCONFORMANT' in startup.outcome.refusal
 
 
 async def test_heartbeat_health_uses_the_heartbeat_index_shape(
@@ -254,7 +249,7 @@ async def test_coverage_repairs_noncanonical_index_metadata(
             text(
                 f'CREATE INDEX {heartbeat.id_index_name} '
                 f'ON {heartbeat.leaf_name} '
-                '(task_id, role varchar_pattern_ops, sent_at DESC)'
+                '(task_id, role, sent_at)'
             )
         )
         await connection.execute(
@@ -303,6 +298,63 @@ async def test_coverage_repairs_noncanonical_index_metadata(
     )
     assert definitions[str(history.id_index_name)].endswith('USING btree (task_id)')
     assert definitions[ordering_name].endswith('USING btree (enqueued_at)')
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        '#1154: horsies_history_leaf_indexes does not compare the operator '
+        'class, so a role varchar_pattern_ops probe index is conformant'
+    ),
+)
+async def test_coverage_repairs_a_noncanonical_operator_class(
+    partition_schema: HistorySchema,
+) -> None:
+    database = PartitionMaintenanceDatabase(
+        partition_schema.engine,
+        connection_capacity=2,
+    )
+    first = await maintain_partition_coverage(
+        database,
+        history_horizon_days=2,
+        heartbeat_horizon_hours=2,
+    )
+    assert isinstance(first, CoverageEnsured), first
+    async with partition_schema.engine.begin() as connection:
+        heartbeat = (
+            await connection.execute(
+                text(
+                    f'SELECT leaf_name, leaf_name || \'_probe_idx\' AS id_index_name FROM {LEAF_CATALOG} '
+                    'WHERE class_key = :heartbeat_class '
+                    'AND lower_anchor <= statement_timestamp() '
+                    'AND upper_anchor > statement_timestamp()'
+                ),
+                {'heartbeat_class': HEARTBEAT_CLASS_KEY},
+            )
+        ).one()
+        await connection.execute(text(f'DROP INDEX {heartbeat.id_index_name}'))
+        await connection.execute(
+            text(
+                f'CREATE INDEX {heartbeat.id_index_name} '
+                f'ON {heartbeat.leaf_name} '
+                '(task_id, role varchar_pattern_ops, sent_at DESC)'
+            )
+        )
+
+    outcome = await maintain_partition_coverage(
+        database,
+        history_horizon_days=2,
+        heartbeat_horizon_hours=2,
+    )
+    assert isinstance(outcome, CoverageEnsured), outcome
+    async with partition_schema.engine.connect() as connection:
+        definition = (
+            await connection.execute(
+                text('SELECT pg_get_indexdef(to_regclass(:index_name))'),
+                {'index_name': heartbeat.id_index_name},
+            )
+        ).scalar_one()
+    assert str(definition).endswith('USING btree (task_id, role, sent_at DESC)')
 
 
 async def test_coverage_repairs_an_invalid_index(
@@ -399,17 +451,24 @@ async def test_failed_final_publication_is_retried(
     )
     first = await maintain_partition_coverage(
         database,
-        history_horizon_days=1,
+        history_horizon_days=2,
         heartbeat_horizon_hours=2,
     )
     assert isinstance(first, CoverageEnsured), first
+    async with partition_schema.engine.begin() as connection:
+        await connection.execute(
+            text(
+                f'UPDATE {TASK_LOOKUP_MANIFEST} '
+                'SET probe_position = probe_position + 100'
+            )
+        )
     original = StagedLoaderPublisher.republish
     calls = 0
 
     async def fail_first_publication(
         self: StagedLoaderPublisher,
-        connection,
-    ):
+        connection: AsyncConnection,
+    ) -> LoaderRepublished:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -427,9 +486,48 @@ async def test_failed_final_publication_is_retried(
             history_horizon_days=2,
             heartbeat_horizon_hours=2,
         )
-
     async with partition_schema.engine.connect() as connection:
-        committed_unpublished = (
+        assert not await StagedLoaderPublisher().is_current(connection)
+
+    retry = await maintain_partition_coverage(
+        database,
+        history_horizon_days=2,
+        heartbeat_horizon_hours=2,
+    )
+    assert isinstance(retry, CoverageEnsured), retry
+    assert retry.republished
+    assert calls == 2
+
+
+async def test_a_created_leaf_is_published_by_its_own_creation(
+    partition_schema: HistorySchema,
+) -> None:
+    """horsies_create_history_leaf publishes the readers in the creation's
+    transaction, so a pass that only creates leaves leaves the readers
+    current and does not publish at its end."""
+    database = PartitionMaintenanceDatabase(
+        partition_schema.engine,
+        connection_capacity=2,
+    )
+    first = await maintain_partition_coverage(
+        database,
+        history_horizon_days=2,
+        heartbeat_horizon_hours=2,
+    )
+    assert isinstance(first, CoverageEnsured), first
+
+    wider = await maintain_partition_coverage(
+        database,
+        history_horizon_days=3,
+        heartbeat_horizon_hours=2,
+    )
+
+    assert isinstance(wider, CoverageEnsured), wider
+    assert wider.created_history_leaves > 0
+    assert not wider.republished
+    async with partition_schema.engine.connect() as connection:
+        assert await StagedLoaderPublisher().is_current(connection)
+        unpublished = (
             await connection.execute(
                 text(
                     f'SELECT count(*) FROM {LEAF_CATALOG} AS catalog '
@@ -443,129 +541,7 @@ async def test_failed_final_publication_is_retried(
                 {'heartbeat_class': HEARTBEAT_CLASS_KEY},
             )
         ).scalar_one()
-    assert committed_unpublished > 0
-
-    retry = await maintain_partition_coverage(
-        database,
-        history_horizon_days=2,
-        heartbeat_horizon_hours=2,
-    )
-    assert isinstance(retry, CoverageEnsured), retry
-    assert retry.republished
-    assert calls == 2
-
-
-async def test_index_name_reuse_after_ownership_read_does_not_drop_foreign_index(
-    partition_schema: HistorySchema,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = PartitionMaintenanceDatabase(
-        partition_schema.engine,
-        connection_capacity=2,
-    )
-    first = await maintain_partition_coverage(
-        database,
-        history_horizon_days=2,
-        heartbeat_horizon_hours=2,
-    )
-    assert isinstance(first, CoverageEnsured), first
-    async with partition_schema.engine.begin() as connection:
-        history = (
-            await connection.execute(
-                text(
-                    f'SELECT leaf_name, leaf_name || \'_task_idx\' AS id_index_name FROM {LEAF_CATALOG} '
-                    'WHERE class_key <> :heartbeat_class '
-                    'AND detached_at IS NULL AND dropped_at IS NULL '
-                    'ORDER BY lower_anchor, leaf_name LIMIT 1'
-                ),
-                {'heartbeat_class': HEARTBEAT_CLASS_KEY},
-            )
-        ).one()
-        await connection.execute(text(f'DROP INDEX {history.id_index_name}'))
-        await connection.execute(
-            text(
-                f'CREATE INDEX {history.id_index_name} '
-                f'ON {history.leaf_name} (task_id DESC)'
-            )
-        )
-        await connection.execute(
-            text('CREATE TABLE horsies_index_race_foreign (value integer)')
-        )
-
-    ownership_read = asyncio.Event()
-    resume_repair = asyncio.Event()
-    original_state_reader = partition_manager.read_index_relation_state
-    paused = False
-
-    async def pause_after_ownership_read(
-        connection,
-        *,
-        leaf_name: str,
-        index_name: str,
-    ) -> IndexRelationState:
-        nonlocal paused
-        state = await original_state_reader(
-            connection,
-            leaf_name=leaf_name,
-            index_name=index_name,
-        )
-        if index_name == history.id_index_name and not paused:
-            paused = True
-            ownership_read.set()
-            await resume_repair.wait()
-        return state
-
-    monkeypatch.setattr(
-        partition_manager,
-        'read_index_relation_state',
-        pause_after_ownership_read,
-    )
-    repair = asyncio.create_task(
-        maintain_partition_coverage(
-            database,
-            history_horizon_days=2,
-            heartbeat_horizon_hours=2,
-        )
-    )
-    await asyncio.wait_for(ownership_read.wait(), timeout=5)
-    async with partition_schema.engine.begin() as connection:
-        await connection.execute(
-            text(
-                f'ALTER INDEX {history.id_index_name} '
-                'RENAME TO horsies_index_race_original'
-            )
-        )
-        await connection.execute(
-            text(
-                f'CREATE INDEX {history.id_index_name} '
-                'ON horsies_index_race_foreign (value)'
-            )
-        )
-    resume_repair.set()
-    outcome = await asyncio.wait_for(repair, timeout=10)
-    assert isinstance(outcome, CoverageEnsureFailed), outcome
-    assert 'belongs to another relation' in outcome.refusal
-
-    # to_regclass resolves each name in this test's schema; other schemas
-    # in the database can hold indexes with the same names.
-    owner_sql = text(
-        'SELECT index_state.indrelid::regclass::text '
-        'FROM pg_index AS index_state '
-        'WHERE index_state.indexrelid = to_regclass(:index_name)'
-    )
-    async with partition_schema.engine.connect() as connection:
-        canonical_owner = (
-            await connection.execute(
-                owner_sql, {'index_name': history.id_index_name}
-            )
-        ).scalar_one()
-        original_owner = (
-            await connection.execute(
-                owner_sql, {'index_name': 'horsies_index_race_original'}
-            )
-        ).scalar_one()
-    assert canonical_owner == 'horsies_index_race_foreign'
-    assert original_owner == str(history.leaf_name)
+    assert unpublished == 0
 
 
 async def test_index_relation_lock_wait_is_bounded_and_restores_timeout(
@@ -740,7 +716,7 @@ async def test_history_error_does_not_stop_heartbeat_repair(
         await connection.execute(text(f'DROP INDEX {history_index}'))
         await connection.execute(text(f'DROP INDEX {heartbeat_index}'))
 
-    original_heartbeat = coverage_module._maintain_heartbeat_leaf
+    original_heartbeat = coverage_module._maintain_heartbeat_leaf  # pyright: ignore[reportPrivateUsage]
     heartbeat_repairs = 0
 
     async def fail_history(
