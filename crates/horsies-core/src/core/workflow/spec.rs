@@ -47,8 +47,8 @@ fn is_valid_node_id(id: &str) -> bool {
 
 /// Validated, immutable workflow specification.
 ///
-/// Produced by `WorkflowSpecBuilder::build()` after passing all 6 validation
-/// phases. Contains the complete DAG definition ready for engine execution.
+/// Produced by `WorkflowSpecBuilder::build()` after its validation passed.
+/// Contains the complete DAG definition ready for engine execution.
 #[derive(Debug, Clone)]
 pub struct WorkflowSpec {
     /// Workflow name.
@@ -79,7 +79,8 @@ pub struct WorkflowSpec {
 /// Builder for constructing and validating a `WorkflowSpec`.
 ///
 /// Add tasks via `task()`, configure policies, then call `build()` to
-/// produce a validated `WorkflowSpec`. Validation runs in 5 gated phases.
+/// produce a validated `WorkflowSpec`. Validation runs in two gates
+/// (`WorkflowSpecBuilder::validate`).
 pub struct WorkflowSpecBuilder {
     name: String,
     definition_key: Option<String>,
@@ -150,102 +151,60 @@ impl WorkflowSpecBuilder {
 
     /// Validate and build an immutable `WorkflowSpec`.
     ///
-    /// Runs 6 gated validation phases. Errors in phase N prevent phase N+1
-    /// from executing.
+    /// Validation in two gates (`validate`): the node-id errors stop it;
+    /// the DAG, data-flow, output, success-policy and join errors are
+    /// reported together. Errors: the validation report; one error keeps its
+    /// code, several are one collected error.
     pub fn build(mut self) -> Result<WorkflowSpec, HorsiesError> {
-        // Phase 1: Node IDs
-        let mut p1 = ValidationReport::new("node_id_validation");
-        self.validate_node_ids(&mut p1);
-        if p1.has_errors() {
-            return p1.into_result().map(|_| unreachable!());
-        }
+        self.validate()?;
+        Ok(self.into_spec())
+    }
 
-        // Phase 2: DAG structure
-        let mut p2 = ValidationReport::new("dag_validation");
-        self.validate_dag_structure(&mut p2);
-        if p2.has_errors() {
-            return p2.into_result().map(|_| unreachable!());
-        }
+    /// Validate, build, and return a `RegisteredWorkflowSpec`. Validation
+    /// and errors as [`Self::build`].
+    pub fn build_registered(mut self) -> Result<RegisteredWorkflowSpec, HorsiesError> {
+        self.validate()?;
+        Ok(RegisteredWorkflowSpec {
+            spec: self.into_spec(),
+            spec_builder: None,
+        })
+    }
 
-        // Phase 3: Data flow
-        let mut p3 = ValidationReport::new("data_flow_validation");
-        self.validate_data_flow(&mut p3);
-        if p3.has_errors() {
-            return p3.into_result().map(|_| unreachable!());
-        }
+    /// The validation of a spec, in Python's two gates
+    /// (`WorkflowSpec.__post_init__`, `core/models/workflow/spec.py:322-397`):
+    ///
+    /// 1. Node ids: the name, the node count, the auto node ids, the
+    ///    `workflow_ctx_from` lowering, the node id pattern and uniqueness.
+    ///    An error here stops the validation: the later checks read node ids.
+    /// 2. The DAG, data-flow, output, success-policy and join checks all
+    ///    run, and every error they find is reported together. A check that
+    ///    reads an index skips an index that is out of range (another check
+    ///    reports it) instead of failing on it.
+    ///
+    /// Sets the auto node ids and the lowered `workflow_ctx_from` ids.
+    fn validate(&mut self) -> Result<(), HorsiesError> {
+        let mut node_ids = ValidationReport::new("node_id_validation");
+        self.validate_node_ids(&mut node_ids);
+        node_ids.into_result()?;
 
-        // Phase 4: Output and policy
-        let mut p4 = ValidationReport::new("output_policy_validation");
-        self.validate_output_and_policy(&mut p4);
-        if p4.has_errors() {
-            return p4.into_result().map(|_| unreachable!());
-        }
+        let mut report = ValidationReport::new("workflow_validation");
+        self.validate_dag_structure(&mut report);
+        self.validate_data_flow(&mut report);
+        self.validate_output_and_policy(&mut report);
+        self.validate_join_semantics(&mut report);
+        report.into_result()
+    }
 
-        // Phase 5: Join semantics
-        let mut p5 = ValidationReport::new("join_validation");
-        self.validate_join_semantics(&mut p5);
-        if p5.has_errors() {
-            return p5.into_result().map(|_| unreachable!());
-        }
-
-        Ok(WorkflowSpec {
+    /// The validated spec of this builder.
+    fn into_spec(self) -> WorkflowSpec {
+        WorkflowSpec {
             name: self.name,
             definition_key: self.definition_key,
             tasks: self.tasks,
             on_error: self.on_error,
             output_index: self.output_ref.map(|r| r.index),
             success_policy: self.success_policy,
-        })
-    }
-
-    /// Validate, build, and return a `RegisteredWorkflowSpec`.
-    pub fn build_registered(mut self) -> Result<RegisteredWorkflowSpec, HorsiesError> {
-        // Phase 1: Node IDs
-        let mut p1 = ValidationReport::new("node_id_validation");
-        self.validate_node_ids(&mut p1);
-        if p1.has_errors() {
-            return p1.into_result().map(|_| unreachable!());
         }
-
-        // Phase 2: DAG structure
-        let mut p2 = ValidationReport::new("dag_validation");
-        self.validate_dag_structure(&mut p2);
-        if p2.has_errors() {
-            return p2.into_result().map(|_| unreachable!());
-        }
-
-        // Phase 3: Data flow
-        let mut p3 = ValidationReport::new("data_flow_validation");
-        self.validate_data_flow(&mut p3);
-        if p3.has_errors() {
-            return p3.into_result().map(|_| unreachable!());
-        }
-
-        // Phase 4: Output and policy
-        let mut p4 = ValidationReport::new("output_policy_validation");
-        self.validate_output_and_policy(&mut p4);
-        if p4.has_errors() {
-            return p4.into_result().map(|_| unreachable!());
-        }
-
-        // Phase 5: Join semantics
-        let mut p5 = ValidationReport::new("join_validation");
-        self.validate_join_semantics(&mut p5);
-        if p5.has_errors() {
-            return p5.into_result().map(|_| unreachable!());
-        }
-
-        Ok(RegisteredWorkflowSpec {
-            spec: WorkflowSpec {
-                name: self.name,
-                definition_key: self.definition_key,
-                tasks: self.tasks,
-                on_error: self.on_error,
-                output_index: self.output_ref.map(|r| r.index),
-                success_policy: self.success_policy,
-            },
-            spec_builder: None,
-        })
     }
 
     // -----------------------------------------------------------------------
@@ -1302,18 +1261,57 @@ mod tests {
 
     /// Python `WorkflowSpec.__post_init__` gates on node-id errors only; the
     /// DAG and data-flow checks report their errors together
-    /// (`test_workflow_models.py::TestMultiErrorWorkflowCollection`).
+    /// (`test_workflow_models.py::TestMultiErrorWorkflowCollection`). Node
+    /// `b` has an object input, so the out-of-range `args_from` is its only
+    /// data-flow error.
     #[test]
-    #[ignore = "waits on #1017"]
     fn dag_and_data_flow_errors_are_reported_together() {
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(simple_node("root"));
-        let _b_ref = b.task(simple_node("b"));
+        let _b_ref = b.task(TaskNode::<()>::raw("b", "{}"));
         b.tasks[1].dependencies.push(99); // DAG: an invalid dependency
         b.tasks[1].args_from.insert("x".to_owned(), 88); // data flow: an invalid args_from
         let err = b.build().unwrap_err();
         assert_eq!(err.code, None, "{err}");
         assert!(err.message.contains("2 previous errors"), "{err}");
+    }
+
+    /// The output, success-policy and join checks run after a DAG error, and
+    /// their errors are reported with it (Python
+    /// `test_workflow_models.py::TestMultiErrorWorkflowCollection`).
+    #[test]
+    fn output_policy_and_join_errors_are_reported_with_a_dag_error() {
+        let mut b = WorkflowSpecBuilder::new("wf");
+        let root = b.task(simple_node("root"));
+        b.task(
+            TaskNode::<()>::raw("b", "null")
+                .waits_for(root)
+                .join_quorum(5),
+        );
+        b.tasks[1].dependencies.push(99); // DAG: an invalid dependency
+        b.output(NodeRef { index: 42 }); // output: out of range
+        b.success_policy(SuccessPolicy {
+            cases: vec![SuccessCase {
+                required_indices: vec![7],
+            }],
+            optional_indices: None,
+        }); // success policy: out of range
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, None, "{err}");
+        assert!(err.message.contains("4 previous errors"), "{err}");
+        for code in [
+            ErrorCode::WorkflowInvalidDependency,
+            ErrorCode::WorkflowInvalidOutput,
+            ErrorCode::WorkflowInvalidSuccessPolicy,
+            ErrorCode::WorkflowInvalidJoin,
+        ] {
+            assert!(
+                err.notes
+                    .iter()
+                    .any(|note| note.contains(&format!("error[{code}]"))),
+                "{code}: {err}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
