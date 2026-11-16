@@ -360,6 +360,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: Default::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -397,6 +398,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: Default::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -464,6 +466,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: Default::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
