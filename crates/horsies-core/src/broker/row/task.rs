@@ -65,8 +65,8 @@ pub struct SetRunningRow {
 pub struct ClaimedTaskRow {
     pub id: Uuid,
     pub task_name: String,
-    pub args: Option<String>,
-    pub kwargs: Option<String>,
+    /// The encoded task input as one JSON value, as the send wrote it.
+    pub input: String,
     pub queue_name: String,
     pub is_workflow_task: bool,
     pub task_options: Option<String>,
