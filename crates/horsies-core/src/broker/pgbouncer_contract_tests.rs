@@ -219,7 +219,7 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
     broker.migrate().await.expect("install the schema");
     broker.health_check().await.expect("the health check");
     broker
-        .check_listener_delivery()
+        .check_session_delivery()
         .await
         .expect("the session URL delivers a NOTIFY");
 
@@ -297,7 +297,7 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
     .expect("connect the broker");
 
     let refused = broker
-        .ensure_listener_delivery_checked()
+        .check_session_delivery()
         .await
         .expect_err("the transaction pool keeps no session");
 
@@ -325,7 +325,7 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
         .await
         .expect("an enqueue through the session pool");
     broker
-        .check_listener_delivery()
+        .check_session_delivery()
         .await
         .expect("the session pool delivers a NOTIFY");
 
