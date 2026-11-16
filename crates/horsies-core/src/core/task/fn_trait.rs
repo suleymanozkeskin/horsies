@@ -20,17 +20,17 @@ pub trait AsyncTaskFn: Send + Sync + 'static {
 
     /// Dry-run the typed input deserialization without executing the task.
     ///
-    /// `envelope` is the worker args/kwargs envelope (`{"args": [...],
-    /// "kwargs": {...}}`). Returns `Ok(())` if the payload deserializes into the
-    /// task's declared input type via the same path `execute` uses, otherwise
-    /// the structured deserialize error.
+    /// `input` is the task input: the stored input value as one JSON value.
+    /// Returns `Ok(())` if it deserializes into the task's declared input type
+    /// via the same path `execute` uses, otherwise the structured deserialize
+    /// error.
     ///
     /// The default returns `Ok(())` for implementations that cannot introspect
     /// their input type (e.g. hand-written trait impls). Macro-generated tasks
     /// override this to perform the real typed check, enabling `app.check()` to
     /// validate schedule and workflow-node payloads at startup.
-    fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
-        let _ = envelope;
+    fn validate_input(&self, input: &[u8]) -> Result<(), TaskError> {
+        let _ = input;
         Ok(())
     }
 }
@@ -47,8 +47,8 @@ pub trait BlockingTaskFn: Send + Sync + 'static {
     ///
     /// See [`AsyncTaskFn::validate_input`] for semantics. The default returns
     /// `Ok(())`; macro-generated tasks override it.
-    fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
-        let _ = envelope;
+    fn validate_input(&self, input: &[u8]) -> Result<(), TaskError> {
+        let _ = input;
         Ok(())
     }
 }
@@ -141,14 +141,14 @@ impl RegisteredTask {
         }
     }
 
-    /// Dry-run the typed input deserialization for `envelope` without executing.
+    /// Dry-run the typed input deserialization for `input` without executing.
     ///
     /// Delegates to the inner task fn. Returns `Ok(())` for tasks that cannot
     /// introspect their input type. See [`AsyncTaskFn::validate_input`].
-    pub fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
+    pub fn validate_input(&self, input: &[u8]) -> Result<(), TaskError> {
         match self {
-            Self::Async { task, .. } => task.validate_input(envelope),
-            Self::Blocking { task, .. } => task.validate_input(envelope),
+            Self::Async { task, .. } => task.validate_input(input),
+            Self::Blocking { task, .. } => task.validate_input(input),
         }
     }
 

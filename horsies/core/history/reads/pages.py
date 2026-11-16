@@ -290,8 +290,8 @@ def window_conditions(
 ) -> tuple[list[str], dict[str, object]]:
     return (
         [
-            'retention_anchor_at >= :window_lower',
-            'retention_anchor_at < :window_upper',
+            'terminal_at >= :window_lower',
+            'terminal_at < :window_upper',
         ],
         {'window_lower': window.lower, 'window_upper': window.upper},
     )

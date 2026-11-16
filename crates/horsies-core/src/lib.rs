@@ -13,6 +13,7 @@ pub(crate) mod broker;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod manifest;
 pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;
@@ -31,9 +32,9 @@ pub use crate::core::RegisteredTask;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
-    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, ErrorCategory,
-    ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule, InputField,
-    IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
+    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
+    ErrorCategory, ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
+    InputField, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
     OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig, PostgresConfigError,
     QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
@@ -52,13 +53,13 @@ pub use crate::core::{AppConfig, HorsiesError};
 
 // broker re-exports
 pub use crate::broker::{
-    compute_enqueue_sha, expected_schema_version, run_horsies_migrations, BrokerError,
-    BrokerErrorCode, BrokerOperationError, BrokerResult, CheckInterruption, ClaimedTaskRow,
-    DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenerDisabledCause,
-    ListenerPlanError, PostgresBroker, RawResultRecord, SchemaInitializationMode,
-    SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
-    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    expected_schema_version, run_horsies_migrations, BrokerError, BrokerErrorCode,
+    BrokerOperationError, BrokerResult, CheckInterruption, ClaimedTaskRow, DatabasePing,
+    ExpiredTaskRow, HeartbeatRow, ListenError, ListenerDisabledCause, ListenerPlanError,
+    PostgresBroker, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
+    TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow, TaskRunningContextRow,
+    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot,
+    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 
 // worker re-exports

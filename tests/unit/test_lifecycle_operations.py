@@ -180,13 +180,10 @@ class TestEveryCommandHasADatabaseIdentity:
         assert len(set(kinds)) == len(kinds)
 
     def test_kind_vocabulary_is_exactly_what_the_commands_write(self) -> None:
-        """Every command writes exactly one kind; the one kind no command
-        writes is the relocation-only marker, which has no wire family
-        by design."""
+        """Every command writes exactly one kind, and every kind is written
+        by one command."""
         variants = get_args(TerminalizationCommand.__value__)
-        wire_kinds = set(TerminalizationKind) - {
-            TerminalizationKind.LEGACY_TERMINAL
-        }
+        wire_kinds = set(TerminalizationKind)
         assert len(wire_kinds) == len(variants)
         assert {kind_of(c) for c in ONE_OF_EACH} == wire_kinds
 

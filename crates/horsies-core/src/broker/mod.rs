@@ -28,8 +28,7 @@ pub use health::{
 };
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
 pub use postgres::{
-    compute_enqueue_sha, ClaimPassParams, PostgresBroker, SchemaInitializationMode,
-    UPSERT_TASK_ATTEMPT_SQL,
+    ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerDisabledCause, ListenerPlanError, SessionCheckFailure,

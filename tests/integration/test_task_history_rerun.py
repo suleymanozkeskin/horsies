@@ -501,7 +501,6 @@ class TestTypedRefusals:
             assert outcome == RerunInputUnavailable(
                 task_id=source,
                 disposition='DECLINED_BY_POLICY',
-                reference_locator=None,
             )
 
     @pytest.mark.asyncio

@@ -16,7 +16,6 @@ anything cannot masquerade as a passing regression.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 from uuid import uuid4
 
 import pytest
@@ -55,6 +54,7 @@ from tests.integration.task_history_harness import (
     HistorySchema,
     day_bounds,
     frozen_history_row,
+    insert_live_task,
     register_class,
     task_history_schema_fixture,
 )
@@ -125,14 +125,12 @@ class TestLookupOutcomes:
         async with history_schema.engine.begin() as connection:
             row_a, row_b = await seed_two_classes(connection)
 
-            live_id = v7_with_birth(datetime.now(UTC))
-            await connection.execute(
-                text(
-                    'INSERT INTO horsies_tasks (id, '
-                    'command_fingerprint_version, command_fingerprint) '
-                    'VALUES (CAST(:task_id AS uuid), 1, :fingerprint)'
-                ),
-                {'task_id': live_id, 'fingerprint': sha256(b'live').digest()},
+            live_id = await insert_live_task(
+                connection,
+                class_key=CLASS_A,
+                status='PENDING',
+                worker=None,
+                task_id=v7_with_birth(datetime.now(UTC)),
             )
             forever_id = v7_with_birth(datetime.now(UTC) - timedelta(days=400))
             await connection.execute(
@@ -403,28 +401,24 @@ class TestHeartbeatLeafExclusion:
             await connection.execute(
                 text(
                     "INSERT INTO horsies_retention_classes "
-                    "(class_key, duration, partition_interval, "
-                    "finite_parent_name, created_at) VALUES "
-                    "('heartbeats', NULL, NULL, NULL, statement_timestamp())"
+                    "(class_key, class_kind, retention_days, "
+                    "heartbeat_horizon_hours, created_at) VALUES "
+                    "('heartbeats', 'HEARTBEAT', NULL, 3, "
+                    "statement_timestamp())"
                 )
             )
             await connection.execute(
                 text(
                     'INSERT INTO horsies_task_history_leaf_catalog ('
-                    'leaf_name, parent_name, class_key, lower_anchor, '
-                    'upper_anchor, index_schema_version, id_index_name, '
-                    'partition_bound, min_birth_at, min_birth_verified, '
-                    'created_at'
+                    'leaf_name, class_key, lower_bound_kind, lower_anchor, '
+                    'upper_anchor, index_schema_version, created_at, '
+                    'detached_at, dropped_at'
                     ") VALUES ("
-                    ":leaf_name, 'horsies_heartbeats', 'heartbeats', "
+                    ":leaf_name, 'heartbeats', 'AT', "
                     "'2026-08-07T00:00:00Z', '2026-08-07T01:00:00Z', 1, "
-                    ":index_name, 'FOR VALUES ...', NULL, TRUE, "
-                    'statement_timestamp())'
+                    'statement_timestamp(), NULL, NULL)'
                 ),
-                {
-                    'leaf_name': heartbeat_leaf,
-                    'index_name': f'{heartbeat_leaf}_task_idx',
-                },
+                {'leaf_name': heartbeat_leaf},
             )
 
             # Presence half: bypassing the filter provably includes the
@@ -437,12 +431,10 @@ class TestHeartbeatLeafExclusion:
                 leaves=(
                     LookupLeaf(
                         relation_name=heartbeat_row.leaf_name,
-                        lower_anchor=heartbeat_row.lower_anchor,
+                        lower_bound=heartbeat_row.lower_bound,
                         upper_anchor=heartbeat_row.upper_anchor,
-                        min_birth_at=None,
                     ),
                 ),
-                birth_floor=None,
             )
             assert heartbeat_leaf in render_staged_provenance_function(
                 unfiltered

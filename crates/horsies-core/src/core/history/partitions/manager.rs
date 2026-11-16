@@ -178,7 +178,16 @@ impl LeafBlockerQuarantine for NoQuarantine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetachExpiredLeafOutcome {
-    Busy { leaf_name: String },
+    Busy {
+        leaf_name: String,
+    },
+    /// This call detached the leaf, recorded the detach in the catalog and
+    /// republished the readers.
+    Detached {
+        leaf_name: String,
+    },
+    /// This call did not detach the leaf; the inspection names the state that
+    /// kept it. `LeafInspection::Detached` means an earlier call detached it.
     Inspection(LeafInspection),
     QuarantineRefused(QuarantineRefused),
 }
@@ -1022,9 +1031,9 @@ where
         PhysicalDetach::Busy => Ok(DetachExpiredLeafOutcome::Busy {
             leaf_name: leaf.leaf_name().to_owned(),
         }),
-        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Inspection(
-            inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
-        )),
+        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Detached {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }),
     }
 }
 
