@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from horsies.core.history.names import CLOCK_SKEW_EXCEPTIONS, LEAF_CATALOG
 from tests.baseline_sql import baseline_function_statements
 
 pytestmark = [pytest.mark.unit]
@@ -416,11 +417,17 @@ def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
 
 
 
+_HISTORY_SIDE_TABLES = (LEAF_CATALOG, CLOCK_SKEW_EXCEPTIONS)
+"""Tables under the history name prefix that hold no history record: the
+leaf catalog and the clock-skew exceptions."""
+
 _HISTORY_UPDATE_RE = re.compile(
-    r'UPDATE\s+(?:horsies_task_history|\{TASK_HISTORY_PARENT\})',
+    r'UPDATE\s+(?:(?!(?:' + '|'.join(_HISTORY_SIDE_TABLES) + r')\b)horsies_task_history\w*'
+    r'|\{TASK_HISTORY_PARENT\})',
     re.IGNORECASE,
 )
-"""An UPDATE against the history relation, named or interpolated.
+"""An UPDATE against the history relation, one of its class parents or
+leaves, named or interpolated; not against a side table.
 
 The DDL builds its statements by interpolating TASK_HISTORY_PARENT, so a
 scan for the literal name alone would read as clean while the generated
@@ -666,6 +673,12 @@ class TestTerminalWriterInventory:
         )
         assert not _scan_history_updates(
             "UPDATE horsies_tasks SET status = 'PENDING'"
+        )
+        assert _scan_history_updates(
+            'UPDATE horsies_task_history_forever_open SET result_payload = NULL'
+        )
+        assert not _scan_history_updates(
+            'UPDATE horsies_task_history_leaf_catalog AS c SET dropped_at = NULL'
         )
 
     def test_no_runtime_statement_updates_a_history_record(self) -> None:
