@@ -244,6 +244,96 @@ pub fn decode_input_envelope(
     })
 }
 
+/// The input and options texts that a version-1 rerun envelope frames.
+///
+/// The move to history writes the envelope with `horsies_encode_rerun_input`
+/// (baseline migration): `{"input":<input>,"options":<task_options or null>}`,
+/// the stored texts framed byte for byte. A rerun takes both spans as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FramedRerunInput {
+    /// The source task's `input` text.
+    pub input: String,
+    /// The source task's `task_options` text; `None` when it stored none.
+    pub options: Option<String>,
+}
+
+const FRAME_INPUT_PREFIX: &str = "{\"input\":";
+const FRAME_OPTIONS_SEPARATOR: &str = ",\"options\":";
+const FRAME_SUFFIX: &str = "}";
+
+/// Decode a version-1 framed rerun envelope into its exact input and options
+/// spans.
+///
+/// Refuses an unknown version, a digest that disagrees with the payload, text
+/// that is not the framing, and spans that are not one JSON value each (the
+/// options must be an object or `null`).
+pub fn decode_framed_rerun_input(
+    version: i16,
+    payload: &[u8],
+    digest: &[u8],
+) -> Result<FramedRerunInput, InputEnvelopeDecodeError> {
+    if version != INPUT_ENVELOPE_VERSION {
+        return Err(InputEnvelopeDecodeError::VersionUnknown(version));
+    }
+    if Sha256::digest(payload).as_slice() != digest {
+        return Err(InputEnvelopeDecodeError::Corrupt(
+            "payload digest disagrees with the stored digest".to_owned(),
+        ));
+    }
+    let text = std::str::from_utf8(payload).map_err(|error| {
+        InputEnvelopeDecodeError::Corrupt(format!("payload is not UTF-8: {error}"))
+    })?;
+    let after_prefix = text.strip_prefix(FRAME_INPUT_PREFIX).ok_or_else(|| {
+        InputEnvelopeDecodeError::Corrupt("payload does not open with the input member".to_owned())
+    })?;
+
+    // The input span ends where its one JSON value ends.
+    let mut values = serde_json::Deserializer::from_str(after_prefix).into_iter::<Value>();
+    let input_value = match values.next() {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => {
+            return Err(InputEnvelopeDecodeError::Corrupt(format!(
+                "input member is not JSON: {error}"
+            )));
+        }
+        None => {
+            return Err(InputEnvelopeDecodeError::Corrupt(
+                "input member is empty".to_owned(),
+            ));
+        }
+    };
+    let input_end = values.byte_offset();
+    let input = &after_prefix[..input_end];
+
+    let options_text = after_prefix[input_end..]
+        .strip_prefix(FRAME_OPTIONS_SEPARATOR)
+        .and_then(|rest| rest.strip_suffix(FRAME_SUFFIX))
+        .ok_or_else(|| {
+            InputEnvelopeDecodeError::Corrupt(
+                "payload does not close with the options member".to_owned(),
+            )
+        })?;
+    let options_value: Value = serde_json::from_str(options_text).map_err(|error| {
+        InputEnvelopeDecodeError::Corrupt(format!("options member is not JSON: {error}"))
+    })?;
+    let options = match options_value {
+        Value::Null => None,
+        Value::Object(_) => Some(options_text.to_owned()),
+        _ => {
+            return Err(InputEnvelopeDecodeError::Corrupt(
+                "options is neither an object nor null".to_owned(),
+            ));
+        }
+    };
+
+    validate_finite_float_domain(&input_value)?;
+    validate_integer_domain(text).map_err(InputEnvelopeDecodeError::Corrupt)?;
+    Ok(FramedRerunInput {
+        input: input.to_owned(),
+        options,
+    })
+}
+
 fn validate_finite_float_domain(value: &Value) -> Result<(), InputEnvelopeDecodeError> {
     match value {
         Value::Number(number) => {
@@ -369,6 +459,58 @@ mod tests {
 
     fn decode(payload: &[u8]) -> Result<ReconstructedInput, InputEnvelopeDecodeError> {
         decode_input_envelope(1, payload, &Sha256::digest(payload))
+    }
+
+    fn decode_framed(payload: &[u8]) -> Result<FramedRerunInput, InputEnvelopeDecodeError> {
+        decode_framed_rerun_input(1, payload, &Sha256::digest(payload))
+    }
+
+    #[test]
+    fn framed_envelope_yields_the_exact_input_and_options_spans() {
+        let decoded =
+            decode_framed(br#"{"input":{"b": 1, "a":[1e-07]},"options":{"timeout_ms":5}}"#)
+                .unwrap();
+        assert_eq!(decoded.input, r#"{"b": 1, "a":[1e-07]}"#);
+        assert_eq!(decoded.options.as_deref(), Some(r#"{"timeout_ms":5}"#));
+
+        for (payload, input) in [
+            (&br#"{"input":null,"options":null}"#[..], "null"),
+            (&br#"{"input":7,"options":null}"#[..], "7"),
+            (&br#"{"input":"x,y","options":null}"#[..], r#""x,y""#),
+            (&br#"{"input":[1,2],"options":null}"#[..], "[1,2]"),
+        ] {
+            let decoded = decode_framed(payload).unwrap();
+            assert_eq!(decoded.input, input);
+            assert!(decoded.options.is_none());
+        }
+    }
+
+    #[test]
+    fn framed_envelope_refuses_other_shapes() {
+        for payload in [
+            &br#"{"args":[],"kwargs":{},"options":null}"#[..],
+            &br#"{"input":1}"#[..],
+            &br#"{"input":1,"options":[1]}"#[..],
+            &br#"{"input":,"options":null}"#[..],
+            &br#"{"input":1,"options":null} "#[..],
+        ] {
+            assert!(
+                matches!(
+                    decode_framed(payload),
+                    Err(InputEnvelopeDecodeError::Corrupt(_))
+                ),
+                "{}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+        assert!(matches!(
+            decode_framed_rerun_input(2, b"{}", &Sha256::digest(b"{}")),
+            Err(InputEnvelopeDecodeError::VersionUnknown(2))
+        ));
+        assert!(matches!(
+            decode_framed_rerun_input(1, br#"{"input":1,"options":null}"#, &[0_u8; 32]),
+            Err(InputEnvelopeDecodeError::Corrupt(_))
+        ));
     }
 
     #[test]
