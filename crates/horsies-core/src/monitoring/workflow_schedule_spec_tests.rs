@@ -504,6 +504,7 @@ async fn schedules_come_in_next_run_order_with_their_run_count() {
         .map(|schedule| schedule.schedule_name.as_str())
         .collect();
     assert_eq!(names, ["soon", "later"]);
+    assert!(schedules[0].next_run_at < schedules[1].next_run_at);
     assert_eq!(schedules[0].run_count, 4);
     assert_eq!(schedules[0].last_task_id, Some(last_task_id));
     assert_eq!(schedules[1].last_task_id, None);

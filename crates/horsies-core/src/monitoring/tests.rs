@@ -560,7 +560,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
             keys(ScheduleStateInfo {
                 schedule_name: "s".to_owned(),
                 last_run_at: None,
-                next_run_at: None,
+                next_run_at: now,
                 last_task_id: None,
                 run_count: 0,
                 updated_at: now,
