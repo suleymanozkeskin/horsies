@@ -24,7 +24,7 @@ async def open_broker(database: DualRunDatabase) -> AsyncGenerator[PostgresBroke
 
     Raises ``AssertionError`` when the broker refuses the schema.
     """
-    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(sqlalchemy_url(database))))
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database.url)))
     try:
         match await broker.ensure_schema_initialized():
             case Err(refused):
