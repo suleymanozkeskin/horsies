@@ -1060,8 +1060,14 @@ pub fn describe_worker_profile(profile: &WorkerProfile) -> String {
 /// The config path of a profile, as a user writes it in Python:
 /// `worker_profiles['batch']`. A `\` or `'` in the name is escaped.
 pub fn profile_path(name: &str) -> String {
-    let quoted = name.replace('\\', "\\\\").replace('\'', "\\'");
-    format!("worker_profiles['{quoted}']")
+    format!("worker_profiles[{}]", quoted_profile_name(name))
+}
+
+/// A profile name in single quotes, as Python's `repr` writes a name that
+/// holds no `'`: `'batch'`. A `\` or `'` in the name is escaped.
+pub fn quoted_profile_name(name: &str) -> String {
+    let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("'{escaped}'")
 }
 
 fn profile_error(message: String, notes: &[String], help: String) -> HorsiesError {

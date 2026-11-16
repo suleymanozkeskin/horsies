@@ -202,7 +202,7 @@ pub fn decode_input_envelope(
     let text = std::str::from_utf8(payload).map_err(|error| {
         InputEnvelopeDecodeError::Corrupt(format!("payload is not UTF-8: {error}"))
     })?;
-    let parsed: Value = serde_json::from_str(text).map_err(|error| {
+    let parsed: Value = crate::core::codec::from_json_str(text).map_err(|error| {
         InputEnvelopeDecodeError::Corrupt(format!("payload is not JSON: {error}"))
     })?;
     validate_finite_float_domain(&parsed)?;

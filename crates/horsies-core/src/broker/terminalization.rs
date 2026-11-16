@@ -438,7 +438,7 @@ mod catalog_tests {
         ),
         (
             "horsies_terminalization_miss",
-            "p_task_id uuid, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone",
+            "p_task_id uuid, p_equivalent_kinds text[], p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone",
             "SETOF horsies_terminalization_outcome",
             "plpgsql",
         ),
@@ -640,7 +640,7 @@ mod catalog_tests {
 
         let miss: String = sqlx::query_scalar(
             "SELECT pg_get_functiondef(
-                'horsies_terminalization_miss(uuid, text[], text, timestamptz)'::regprocedure
+                'horsies_terminalization_miss(uuid, text[], text, text, timestamptz)'::regprocedure
              )",
         )
         .fetch_one(&pool)
