@@ -48,11 +48,6 @@ it; ``horsies_finish_workflow_success`` took its one caller."""
 FINISH_WORKFLOW_SUCCESS_FUNCTION: Final = 'horsies_finish_workflow_success'
 WORKFLOW_SUCCESS_OUTCOME_TYPE: Final = 'horsies_workflow_success_outcome'
 
-RETRY_IN_SAME_CLASS: Final = 'same_class'
-"""The retry placement that keeps the execution class of the row."""
-RETRY_ISOLATED: Final = 'isolated'
-"""The retry placement that writes ``execution = 'ISOLATED'`` with the retry."""
-
 TASK_LOCK_SEED: Final = 731
 """The seed of the task advisory lock. The lock key of a task is
 ``hashtextextended(<task id as uuid text>, TASK_LOCK_SEED)``."""
