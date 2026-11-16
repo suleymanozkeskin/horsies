@@ -2352,6 +2352,84 @@ mod tests {
         assert_eq!(fetch_attempt_count(&pool, &task_id).await, 0);
     }
 
+    /// Python `test_stored_timeout_refusal.py::test_unreadable_options_fail_in_one_claim_and_do_not_retry`:
+    /// stored options that do not parse fail the task before user code runs,
+    /// with WORKER_SERIALIZATION_ERROR, and the task does not retry (its
+    /// retry policy is inside the unreadable text).
+    #[tokio::test]
+    #[serial]
+    async fn unreadable_stored_options_fail_the_task_before_user_code_runs() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 3, Some("{")).await;
+
+        run_finalize(
+            &broker,
+            async_task_fn!(succeed, ()),
+            claimed_task_row(&task_id, "default", Some("{".to_owned())),
+        )
+        .await;
+
+        let (status, _result, error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "FAILED", "a run of `succeed` would have completed");
+        assert_eq!(error_code.as_deref(), Some("WORKER_SERIALIZATION_ERROR"));
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
+        assert_eq!(outcome, "FAILED");
+        assert!(!will_retry);
+        assert_eq!(
+            attempt_error_code.as_deref(),
+            Some("WORKER_SERIALIZATION_ERROR")
+        );
+    }
+
+    /// Python `test_stored_timeout_refusal.py::test_a_refused_timeout_retries_until_max_retries_when_asked`:
+    /// a stored timeout above the limit refuses the run, and a readable
+    /// policy that names WORKER_SERIALIZATION_ERROR still retries it.
+    #[tokio::test]
+    #[serial]
+    async fn a_refused_timeout_retries_when_the_policy_names_the_refusal() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        let task_options = serde_json::json!({
+            "timeout_ms": 4_294_967_296_u64,
+            "retry_policy": {
+                "max_retries": 2,
+                "intervals": [1, 1],
+                "backoff_strategy": "fixed",
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["WORKER_SERIALIZATION_ERROR"]
+            }
+        })
+        .to_string();
+        insert_claimed_task(&pool, &task_id, "default", 0, 2, Some(&task_options)).await;
+
+        run_finalize(
+            &broker,
+            async_task_fn!(succeed, ()),
+            claimed_task_row(&task_id, "default", Some(task_options)),
+        )
+        .await;
+
+        let (status, _result, _error_code) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "PENDING", "the refusal is retried, not run");
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
+        assert_eq!(outcome, "FAILED");
+        assert!(will_retry);
+        assert_eq!(
+            attempt_error_code.as_deref(),
+            Some("WORKER_SERIALIZATION_ERROR")
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_retryable_failure_requeues_and_skips_callback() {
@@ -2360,12 +2438,15 @@ mod tests {
         clean(&pool).await;
 
         let task_id = Uuid::new_v4();
+        // Python's stored layout: auto_retry_for lives inside retry_policy.
         let task_options = serde_json::json!({
-            "auto_retry_for": ["RETRY_ME"],
             "retry_policy": {
+                "max_retries": 3,
                 "intervals": [1, 1, 1],
                 "backoff_strategy": "fixed",
-                "jitter": false
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["RETRY_ME"]
             }
         })
         .to_string();
@@ -2492,6 +2573,7 @@ mod tests {
             task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
+            &crate::worker::retry::read_stored_options(None),
             &crate::broker::SetRunningRow {
                 id: task_id,
                 started_at: Utc::now(),

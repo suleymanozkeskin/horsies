@@ -18,10 +18,9 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::retry_utils::check_retry_eligibility;
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
 
-use crate::worker::retry::calculate_retry_delay;
+use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
 /// Releases immediately so workers can finalize between scan and per-task lock.
@@ -1334,20 +1333,31 @@ async fn process_single_stale_task(
         threshold_ms, threshold_secs,
     );
 
-    // Check retry eligibility using fresh DB timestamp.
-    let eligible = check_retry_eligibility(
+    // The one retry rule of the core, shared with the worker (Python
+    // `check_retry_eligibility`): the stored policy must name the crash code
+    // by its value, retries must remain, and `good_until` must be after the
+    // database time of this capture. horsies-rust #68: the reaper used a
+    // second rule that never matched a built-in code.
+    let stored_options = read_stored_options(row.task_options.as_deref());
+    let admitted = match admit_retry(
         row.retry_count,
         row.max_retries,
-        row.task_options.as_deref(),
-        error_code_str,
-        row.good_until,
-        detected_at,
-    );
+        stored_options.retry(),
+        Some(error_code_str),
+    ) {
+        RetryAdmission::Admitted(rule) => match row.good_until {
+            Some(deadline) if deadline <= detected_at => None,
+            Some(_) | None => Some(rule),
+        },
+        RetryAdmission::RetriesSpent | RetryAdmission::NoPolicy | RetryAdmission::CodeNotListed => {
+            None
+        }
+    };
 
-    if eligible {
+    if let Some(rule) = admitted {
         // Retry path: attempt requeue, fall through to fail if good_until blocks.
         let new_count = row.retry_count + 1;
-        let delay = calculate_retry_delay(new_count as u32, row.task_options.as_deref());
+        let delay = rule.delay_seconds(new_count.unsigned_abs());
         let next_retry_at = detected_at + chrono::Duration::milliseconds((delay * 1000.0) as i64);
 
         let schedule_result = sqlx::query(SCHEDULE_STALE_TASK_RETRY_SQL)

@@ -1,647 +1,407 @@
-use crate::core::task::error::{TaskError, TaskErrorCode};
-use chrono::{DateTime, Utc};
+//! The retry rule and the stored run limits of a claimed task.
+//!
+//! One rule serves the worker and the reaper. Python reference:
+//! `horsies/core/utils/retry.py` (the admission and the delay) and
+//! `horsies/core/worker/stored_timeout.py` (the stored timeout).
+//!
+//! The stored `task_options` text is read once, when the task is dispatched,
+//! into [`StoredOptions`]. A value that does not fit the rule that wrote it is
+//! not replaced by a default: the task fails before user code runs, with
+//! `WORKER_SERIALIZATION_ERROR` (see [`StoredOptions::run_permit`]).
+//!
+//! Layout of the stored options (Python's): a JSON object whose
+//! `retry_policy` key holds the policy, with `auto_retry_for` inside it, and
+//! whose `timeout_ms` key holds the timeout. Other keys of the object are not
+//! read here.
+//!
+//! Does no I/O and logs nothing.
+
+use std::time::Duration;
+
 use rand::Rng;
+use serde::Deserialize;
 
-/// Calculate the retry delay in seconds for a given attempt.
-///
-/// Returns `f64` to preserve sub-second precision from jitter.
-/// Floored at 1.0 second.
-///
-/// Reads the retry policy from the task_options JSON string.
-/// Falls back to sensible defaults if parsing fails.
-pub fn calculate_retry_delay(attempt: u32, task_options_json: Option<&str>) -> f64 {
-    let (intervals, backoff_strategy, jitter, max_delay_seconds) =
-        parse_retry_policy_fields(task_options_json);
+/// The smallest stored `timeout_ms` (Python `MIN_TASK_TIMEOUT_MS`).
+pub const MIN_TASK_TIMEOUT_MS: u64 = 1_000;
+/// The largest stored `timeout_ms`, about 49.7 days (Python `MAX_TASK_TIMEOUT_MS`).
+pub const MAX_TASK_TIMEOUT_MS: u64 = 4_294_967_295;
+/// The most retries one task can have (Python `MAX_RETRY_ATTEMPTS`).
+pub const MAX_RETRY_ATTEMPTS: u32 = 20;
+/// The largest retry interval in seconds (Python `RetryPolicy.intervals`).
+pub const MAX_RETRY_INTERVAL_SECONDS: u32 = 86_400;
+/// The smallest retry delay in seconds; jitter is added above it.
+const MIN_RETRY_DELAY_SECONDS: f64 = 1.0;
+/// The jitter adds up to this fraction of the base delay.
+const JITTER_FRACTION: f64 = 0.25;
 
-    let base_delay: f64 = match backoff_strategy.as_str() {
-        "exponential" => {
-            let base = intervals.first().copied().unwrap_or(60) as f64;
-            base * 2.0_f64.powi((attempt as i32) - 1)
-        }
-        _ => {
-            // Fixed: use intervals directly, clamp to last element.
-            let idx = (attempt as usize).saturating_sub(1);
-            let clamped = idx.min(intervals.len().saturating_sub(1));
-            intervals.get(clamped).copied().unwrap_or(60) as f64
-        }
-    };
+// ---------------------------------------------------------------------------
+// Stored options
+// ---------------------------------------------------------------------------
 
-    // Floor before jitter so 1.0 is the bottom of the spread, not a clamp that
-    // destroys uniformity at small base delays. Jitter is applied upward, so the
-    // floored value is the bottom of the jitter range (parity with horsies #78).
-    let base_delay = base_delay.max(1.0);
-
-    let delay = if jitter {
-        let mut rng = rand::thread_rng();
-        base_delay + rng.gen_range(0.0..=base_delay * 0.25)
-    } else {
-        base_delay
-    };
-
-    // Apply the opt-in max delay cap after backoff and jitter. The cap is a
-    // positive integer >= 1 and base_delay is already >= 1.0, so the result
-    // stays >= 1.0 without a trailing floor.
-    match max_delay_seconds {
-        Some(cap) if cap > 0 => delay.min(cap as f64),
-        _ => delay,
-    }
+/// The `task_options` of a claimed row, read once at dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoredOptions {
+    /// The row has no options, or the text is a JSON object.
+    Readable {
+        timeout: StoredTimeout,
+        retry: StoredRetry,
+    },
+    /// The text does not parse, or is not a JSON object. The retry policy is
+    /// in the options, so such a task cannot retry.
+    Unreadable { reason: String },
 }
 
-/// Determine if a failed task should be retried.
+/// The timeout a readable row stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredTimeout {
+    /// No `timeout_ms` key, or `null`.
+    NoTimeout,
+    /// A `timeout_ms` from [`MIN_TASK_TIMEOUT_MS`] to [`MAX_TASK_TIMEOUT_MS`].
+    Limit(Duration),
+    /// A `timeout_ms` that is not an int inside the bounds.
+    Invalid(TimeoutRefusal),
+}
+
+/// Why a stored `timeout_ms` cannot be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutRefusal {
+    NotAnInteger,
+    BelowMinimum,
+    AboveMaximum,
+}
+
+/// The retry policy a readable row stores.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoredRetry {
+    /// No `retry_policy` key, or `null`.
+    NoPolicy,
+    /// A policy that fits the rule that wrote it.
+    Policy(RetryRule),
+    /// A `retry_policy` value that does not fit that rule.
+    Invalid { reason: String },
+}
+
+/// The backoff of a retry rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backoff {
+    /// Attempt `n` waits `intervals[min(n, len) - 1]`.
+    Fixed,
+    /// Attempt `n` waits `intervals[0] * 2^(n - 1)`.
+    Exponential,
+}
+
+/// The upper bound of a retry delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelayCap {
+    Uncapped,
+    /// At most this many seconds, after backoff and jitter.
+    AtMost(u32),
+}
+
+/// A stored retry policy that fits the rule that wrote it.
 ///
-/// Checks:
-/// 1. `retry_count < max_retries` and `max_retries > 0`
-/// 2. `good_until` has not already passed (task is not expired)
-/// 3. The error code matches one of the `auto_retry_for` entries in task_options
-/// 4. The exception type name (from `error.exception`) matches one of the
-///    `auto_retry_for` entries -- mirrors Python's support for matching on
-///    exception class names (e.g. `"ConnectionError"`, `"ValueError"`)
-pub fn should_retry(
-    error: &TaskError,
-    retry_count: i32,
-    max_retries: i32,
-    task_options_json: Option<&str>,
-    good_until: Option<DateTime<Utc>>,
-) -> bool {
-    if max_retries == 0 || retry_count >= max_retries {
-        return false;
-    }
+/// Constructed only by [`read_stored_options`]: 1 to [`MAX_RETRY_ATTEMPTS`]
+/// intervals of 1 to [`MAX_RETRY_INTERVAL_SECONDS`] seconds (exactly one for
+/// exponential backoff, one per retry for fixed backoff) and at least one
+/// code in `auto_retry_for`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetryRule {
+    intervals: Vec<u32>,
+    backoff: Backoff,
+    jitter: bool,
+    delay_cap: DelayCap,
+    auto_retry_for: Vec<String>,
+}
 
-    // Pre-check: if the task has already expired, don't schedule a retry.
-    if let Some(deadline) = good_until {
-        if Utc::now() >= deadline {
-            return false;
-        }
-    }
+/// Whether the dispatch may run user code, from the stored options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunPermit {
+    /// Run with no time limit.
+    RunWithoutTimeout,
+    /// Run, and end the attempt as `TASK_TIMEOUT` after this time.
+    RunWithTimeout(Duration),
+    /// Fail the task before user code runs, with `WORKER_SERIALIZATION_ERROR`
+    /// and this message.
+    Refuse(String),
+}
 
-    let auto_retry_for = parse_auto_retry_for(task_options_json);
-    if auto_retry_for.is_empty() {
-        return false;
-    }
+/// The wire form of a stored retry policy (Python `RetryPolicy`, which
+/// forbids extra keys).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRetryPolicy {
+    max_retries: u32,
+    intervals: Vec<u32>,
+    backoff_strategy: WireBackoff,
+    jitter: bool,
+    #[serde(default)]
+    max_delay_seconds: Option<u32>,
+    auto_retry_for: Vec<String>,
+}
 
-    // Check 1: match on error code (library or user-defined).
-    if let Some(ref error_code) = error.error_code {
-        let error_code_str = match error_code {
-            TaskErrorCode::BuiltIn(code) => code.to_string(),
-            TaskErrorCode::User(code) => code.clone(),
-        };
-        if auto_retry_for.iter().any(|entry| entry == &error_code_str) {
-            return true;
-        }
-    }
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireBackoff {
+    Fixed,
+    Exponential,
+}
 
-    // Check 2: match on exception type name from the `exception` field.
-    // This mirrors Python's behaviour where `auto_retry_for` can contain
-    // exception class names (e.g. "ConnectionError"). The exception field
-    // can be:
-    //   - A JSON object with a "type" or "exception_type" key
-    //   - A plain JSON string used directly as the type name
-    if let Some(ref cause) = error.cause {
-        let exception_type = extract_exception_type(cause);
-        if let Some(ref etype) = exception_type {
-            if auto_retry_for.iter().any(|entry| entry == etype) {
-                return true;
+/// Read the stored `task_options` of a claimed row.
+///
+/// `None` and an empty text mean the row has no options, as the enqueue
+/// reader treats them.
+pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
+    let text = match task_options {
+        None | Some("") => {
+            return StoredOptions::Readable {
+                timeout: StoredTimeout::NoTimeout,
+                retry: StoredRetry::NoPolicy,
             }
         }
-    }
-
-    false
-}
-
-/// Extract the exception type name from a serialized exception value.
-///
-/// Supports three formats:
-/// - JSON object with `"type"` key (from Python's `_exception_to_json`)
-/// - JSON object with `"exception_type"` key (from task_decorator data field)
-/// - Plain JSON string (used directly as the type name)
-fn extract_exception_type(exception: &serde_json::Value) -> Option<String> {
-    match exception {
-        serde_json::Value::Object(map) => {
-            // Try "type" first, then "exception_type" -- same order as Python.
-            map.get("type")
-                .and_then(|v| v.as_str())
-                .or_else(|| map.get("exception_type").and_then(|v| v.as_str()))
-                .map(String::from)
-        }
-        serde_json::Value::String(s) => Some(s.clone()),
-        _ => None,
+        Some(text) => text,
+    };
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Err(error) => StoredOptions::Unreadable {
+            reason: format!("stored task_options do not parse: {error}"),
+        },
+        Ok(serde_json::Value::Object(options)) => StoredOptions::Readable {
+            timeout: read_timeout(options.get("timeout_ms")),
+            retry: read_retry_policy(options.get("retry_policy")),
+        },
+        Ok(other) => StoredOptions::Unreadable {
+            reason: format!(
+                "stored task_options are a JSON {}, not an object",
+                json_kind(&other)
+            ),
+        },
     }
 }
 
-/// Extract retry policy fields from task_options JSON.
-///
-/// Returns `(intervals, backoff_strategy, jitter, max_delay_seconds)`.
-fn parse_retry_policy_fields(
-    task_options_json: Option<&str>,
-) -> (Vec<u32>, String, bool, Option<u32>) {
-    let defaults = (vec![60, 300, 900], "fixed".to_owned(), true, None);
-
-    let Some(json_str) = task_options_json else {
-        return defaults;
-    };
-    let value = match serde_json::from_str::<serde_json::Value>(json_str) {
-        Ok(value) => value,
-        Err(e) => {
-            tracing::warn!(error = %e, "corrupt task_options JSON; using default retry policy");
-            return defaults;
-        }
-    };
-    let Some(policy) = value.get("retry_policy") else {
-        return defaults;
-    };
-
-    let intervals = policy
-        .get("intervals")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_u64().map(|n| n as u32))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![60, 300, 900]);
-
-    let backoff_strategy = policy
-        .get("backoff_strategy")
-        .and_then(|v| v.as_str())
-        .unwrap_or("fixed")
-        .to_owned();
-
-    let jitter = policy
-        .get("jitter")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-
-    let max_delay_seconds = policy
-        .get("max_delay_seconds")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
-
-    (intervals, backoff_strategy, jitter, max_delay_seconds)
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
-/// Extract the `auto_retry_for` list from task_options JSON.
-///
-/// Checks both top-level `auto_retry_for` and nested `retry_policy.auto_retry_for`,
-/// matching Python's behavior.
-fn parse_auto_retry_for(task_options_json: Option<&str>) -> Vec<String> {
-    let Some(json_str) = task_options_json else {
-        return Vec::new();
+/// Check the stored `timeout_ms` against the rule that wrote it (Python
+/// `_timeout_value`). A float, a string, a bool or a negative number is
+/// not an int.
+fn read_timeout(raw: Option<&serde_json::Value>) -> StoredTimeout {
+    let number = match raw {
+        None | Some(serde_json::Value::Null) => return StoredTimeout::NoTimeout,
+        Some(serde_json::Value::Number(number)) => number,
+        Some(_) => return StoredTimeout::Invalid(TimeoutRefusal::NotAnInteger),
     };
-    let value = match serde_json::from_str::<serde_json::Value>(json_str) {
-        Ok(value) => value,
-        Err(e) => {
-            tracing::warn!(error = %e, "corrupt task_options JSON; using empty auto_retry_for");
-            return Vec::new();
+    match (number.as_u64(), number.as_i64()) {
+        (Some(ms), _) if ms < MIN_TASK_TIMEOUT_MS => {
+            StoredTimeout::Invalid(TimeoutRefusal::BelowMinimum)
         }
-    };
-
-    // Check top-level first, then nested under retry_policy.
-    let auto_retry_for = value.get("auto_retry_for").or_else(|| {
-        value
-            .get("retry_policy")
-            .and_then(|rp| rp.get("auto_retry_for"))
-    });
-
-    // Accept both serializations of a code: a plain string (workflow-node path
-    // and user codes) and the tagged built-in object the direct-send path emits
-    // (`serde_json::to_string(&TaskOptions)` writes `TaskErrorCode::BuiltIn` as
-    // `{"__builtin_task_code__": "TASK_TIMEOUT"}`). Keeping only strings silently
-    // dropped every built-in code sent via `send`/`with_options` (C6).
-    auto_retry_for
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    serde_json::Value::Object(map) => map
-                        .get("__builtin_task_code__")
-                        .and_then(|c| c.as_str())
-                        .map(String::from),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        (Some(ms), _) if ms > MAX_TASK_TIMEOUT_MS => {
+            StoredTimeout::Invalid(TimeoutRefusal::AboveMaximum)
+        }
+        (Some(ms), _) => StoredTimeout::Limit(Duration::from_millis(ms)),
+        (None, Some(_)) => StoredTimeout::Invalid(TimeoutRefusal::BelowMinimum),
+        (None, None) => StoredTimeout::Invalid(TimeoutRefusal::NotAnInteger),
+    }
 }
 
-/// Extract `timeout_ms` from a stored task_options JSON string.
-///
-/// Total: any malformed payload, missing field, or out-of-range value yields
-/// `None` (no timeout) with a warning — a timeout must never block a task from
-/// running. A value below the 1000 ms floor is rejected (mirrors the macro's
-/// compile-time minimum). Parity with horsies PR #102 `_parse_timeout_ms`.
-pub fn parse_timeout_ms(task_options_json: Option<&str>) -> Option<u32> {
-    let json_str = task_options_json?;
-    let value = match serde_json::from_str::<serde_json::Value>(json_str) {
-        Ok(value) => value,
-        Err(e) => {
-            tracing::warn!(error = %e, "corrupt task_options JSON; ignoring timeout_ms");
-            return None;
+/// Check the stored `retry_policy` against the rule that wrote it (Python
+/// `RetryPolicy` and its validators).
+fn read_retry_policy(raw: Option<&serde_json::Value>) -> StoredRetry {
+    let value = match raw {
+        None | Some(serde_json::Value::Null) => return StoredRetry::NoPolicy,
+        Some(value) => value,
+    };
+    let wire = match WireRetryPolicy::deserialize(value) {
+        Ok(wire) => wire,
+        Err(error) => {
+            return StoredRetry::Invalid {
+                reason: format!("stored retry_policy does not fit the policy rule: {error}"),
+            }
         }
     };
-    let raw = value.get("timeout_ms")?;
-    match raw.as_u64() {
-        Some(ms) if (1000..=u64::from(u32::MAX)).contains(&ms) => Some(ms as u32),
-        _ => {
-            tracing::warn!(value = %raw, "invalid timeout_ms in task_options; ignoring");
-            None
+    match retry_rule_from_wire(wire) {
+        Ok(rule) => StoredRetry::Policy(rule),
+        Err(reason) => StoredRetry::Invalid { reason },
+    }
+}
+
+fn retry_rule_from_wire(wire: WireRetryPolicy) -> Result<RetryRule, String> {
+    if wire.max_retries == 0 || wire.max_retries > MAX_RETRY_ATTEMPTS {
+        return Err(format!(
+            "stored retry_policy.max_retries is outside 1..={MAX_RETRY_ATTEMPTS}"
+        ));
+    }
+    if wire.intervals.is_empty() || wire.intervals.len() > MAX_RETRY_ATTEMPTS as usize {
+        return Err(format!(
+            "stored retry_policy.intervals must hold 1 to {MAX_RETRY_ATTEMPTS} entries"
+        ));
+    }
+    if wire
+        .intervals
+        .iter()
+        .any(|interval| *interval == 0 || *interval > MAX_RETRY_INTERVAL_SECONDS)
+    {
+        return Err(format!(
+            "stored retry_policy.intervals must each be 1..={MAX_RETRY_INTERVAL_SECONDS} seconds"
+        ));
+    }
+    let backoff = match wire.backoff_strategy {
+        WireBackoff::Fixed if wire.intervals.len() != wire.max_retries as usize => {
+            return Err(
+                "stored fixed retry_policy has a different number of intervals and retries"
+                    .to_owned(),
+            )
+        }
+        WireBackoff::Fixed => Backoff::Fixed,
+        WireBackoff::Exponential if wire.intervals.len() != 1 => {
+            return Err("stored exponential retry_policy has more than one interval".to_owned())
+        }
+        WireBackoff::Exponential => Backoff::Exponential,
+    };
+    let delay_cap = match wire.max_delay_seconds {
+        None => DelayCap::Uncapped,
+        Some(0) => return Err("stored retry_policy.max_delay_seconds is not positive".to_owned()),
+        Some(seconds) => DelayCap::AtMost(seconds),
+    };
+    if wire.auto_retry_for.is_empty() || wire.auto_retry_for.iter().any(String::is_empty) {
+        return Err(
+            "stored retry_policy.auto_retry_for must name at least one non-empty code".to_owned(),
+        );
+    }
+    Ok(RetryRule {
+        intervals: wire.intervals,
+        backoff,
+        jitter: wire.jitter,
+        delay_cap,
+        auto_retry_for: wire.auto_retry_for,
+    })
+}
+
+impl StoredOptions {
+    /// Whether the dispatch may run user code (Python `read_stored_timeout`
+    /// and the child's refusal path). Unreadable options, a timeout that does
+    /// not fit its rule, and a retry policy that does not fit its rule each
+    /// refuse the run.
+    pub fn run_permit(&self) -> RunPermit {
+        match self {
+            Self::Unreadable { reason } => RunPermit::Refuse(reason.clone()),
+            Self::Readable {
+                retry: StoredRetry::Invalid { reason },
+                ..
+            } => RunPermit::Refuse(reason.clone()),
+            Self::Readable {
+                timeout: StoredTimeout::Invalid(refusal),
+                ..
+            } => RunPermit::Refuse(timeout_refusal_message(*refusal).to_owned()),
+            Self::Readable {
+                timeout: StoredTimeout::NoTimeout,
+                ..
+            } => RunPermit::RunWithoutTimeout,
+            Self::Readable {
+                timeout: StoredTimeout::Limit(limit),
+                ..
+            } => RunPermit::RunWithTimeout(*limit),
+        }
+    }
+
+    /// The retry policy the options hold, when one fits its rule.
+    pub fn retry(&self) -> &StoredRetry {
+        match self {
+            Self::Readable { retry, .. } => retry,
+            Self::Unreadable { .. } => &StoredRetry::NoPolicy,
+        }
+    }
+}
+
+fn timeout_refusal_message(refusal: TimeoutRefusal) -> &'static str {
+    match refusal {
+        TimeoutRefusal::NotAnInteger => "stored timeout_ms is not an int",
+        TimeoutRefusal::BelowMinimum => "stored timeout_ms is below 1000 ms",
+        TimeoutRefusal::AboveMaximum => {
+            "stored timeout_ms is above the limit of 4294967295 ms (about 49.7 days)"
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admission and delay
+// ---------------------------------------------------------------------------
+
+/// The answer of [`admit_retry`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RetryAdmission<'a> {
+    /// The policy names the code and retries remain.
+    Admitted(&'a RetryRule),
+    /// `max_retries` is 0, or `retry_count` reached it.
+    RetriesSpent,
+    /// The options hold no policy that fits its rule.
+    NoPolicy,
+    /// The failure has no code, or the policy does not name it.
+    CodeNotListed,
+}
+
+/// The retry policy of a task when it retries `error_code` now (Python
+/// `admitted_retry_policy`). Pure. The deadline (`good_until`) is not judged
+/// here: the worker's failed-attempt write and the reaper judge it on the
+/// database clock.
+///
+/// `error_code` is the code text: a built-in code is compared by its value
+/// (`"WORKER_CRASHED"`), as Python compares `BuiltInTaskCode.value`.
+pub fn admit_retry<'a>(
+    retry_count: i32,
+    max_retries: i32,
+    retry: &'a StoredRetry,
+    error_code: Option<&str>,
+) -> RetryAdmission<'a> {
+    if max_retries <= 0 || retry_count >= max_retries {
+        return RetryAdmission::RetriesSpent;
+    }
+    let rule = match retry {
+        StoredRetry::Policy(rule) => rule,
+        StoredRetry::NoPolicy | StoredRetry::Invalid { .. } => return RetryAdmission::NoPolicy,
+    };
+    match error_code {
+        Some(code) if !code.is_empty() && rule.auto_retry_for.iter().any(|entry| entry == code) => {
+            RetryAdmission::Admitted(rule)
+        }
+        Some(_) | None => RetryAdmission::CodeNotListed,
+    }
+}
+
+impl RetryRule {
+    /// The delay in seconds before retry attempt `retry_attempt` (1-based:
+    /// `retry_count + 1`), as Python `calculate_retry_delay` computes it for a
+    /// valid policy: the backoff, a floor of 1 s, jitter upward by up to 25 %,
+    /// then the cap.
+    pub fn delay_seconds(&self, retry_attempt: u32) -> f64 {
+        let base = match self.backoff {
+            Backoff::Exponential => {
+                let exponent = i32::try_from(retry_attempt.saturating_sub(1)).unwrap_or(i32::MAX);
+                f64::from(self.intervals[0]) * 2.0_f64.powi(exponent)
+            }
+            Backoff::Fixed => {
+                let index =
+                    (retry_attempt.saturating_sub(1) as usize).min(self.intervals.len() - 1);
+                f64::from(self.intervals[index])
+            }
+        };
+        let floored = base.max(MIN_RETRY_DELAY_SECONDS);
+        let jittered = match self.jitter {
+            true => floored + rand::thread_rng().gen_range(0.0..=floored * JITTER_FRACTION),
+            false => floored,
+        };
+        match self.delay_cap {
+            DelayCap::Uncapped => jittered,
+            DelayCap::AtMost(seconds) => jittered.min(f64::from(seconds)),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::task::error::{OperationalErrorCode, RetrievalCode};
-
-    #[test]
-    fn parse_timeout_ms_totality() {
-        // Valid.
-        assert_eq!(
-            parse_timeout_ms(Some(r#"{"timeout_ms": 2000}"#)),
-            Some(2000)
-        );
-        // None input / missing field / no options.
-        assert_eq!(parse_timeout_ms(None), None);
-        assert_eq!(parse_timeout_ms(Some(r#"{"retry_policy": {}}"#)), None);
-        // Malformed JSON.
-        assert_eq!(parse_timeout_ms(Some("{not json")), None);
-        // Below the 1000 ms floor.
-        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": 500}"#)), None);
-        // Non-integer / wrong type.
-        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": "2000"}"#)), None);
-        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": 2000.5}"#)), None);
-        assert_eq!(parse_timeout_ms(Some(r#"{"timeout_ms": -1}"#)), None);
-    }
-
-    #[test]
-    fn fixed_delay_first_attempt() {
-        let opts = r#"{"retry_policy": {"intervals": [60, 300, 900], "backoff_strategy": "fixed", "jitter": false}}"#;
-        assert_eq!(calculate_retry_delay(1, Some(opts)), 60.0);
-    }
-
-    #[test]
-    fn fixed_delay_second_attempt() {
-        let opts = r#"{"retry_policy": {"intervals": [60, 300, 900], "backoff_strategy": "fixed", "jitter": false}}"#;
-        assert_eq!(calculate_retry_delay(2, Some(opts)), 300.0);
-    }
-
-    #[test]
-    fn fixed_delay_third_attempt() {
-        let opts = r#"{"retry_policy": {"intervals": [60, 300, 900], "backoff_strategy": "fixed", "jitter": false}}"#;
-        assert_eq!(calculate_retry_delay(3, Some(opts)), 900.0);
-    }
-
-    #[test]
-    fn fixed_delay_clamped_beyond_intervals() {
-        let opts = r#"{"retry_policy": {"intervals": [60, 300], "backoff_strategy": "fixed", "jitter": false}}"#;
-        // Attempt 5 clamps to last interval (300).
-        assert_eq!(calculate_retry_delay(5, Some(opts)), 300.0);
-    }
-
-    #[test]
-    fn exponential_delay() {
-        let opts = r#"{"retry_policy": {"intervals": [30], "backoff_strategy": "exponential", "jitter": false}}"#;
-        assert_eq!(calculate_retry_delay(1, Some(opts)), 30.0); // 30 * 2^0
-        assert_eq!(calculate_retry_delay(2, Some(opts)), 60.0); // 30 * 2^1
-        assert_eq!(calculate_retry_delay(3, Some(opts)), 120.0); // 30 * 2^2
-    }
-
-    // Parity with horsies PR #44: opt-in max retry delay cap.
-
-    #[test]
-    fn exponential_without_max_delay_remains_uncapped() {
-        let opts = r#"{"retry_policy": {"intervals": [60], "backoff_strategy": "exponential", "jitter": false}}"#;
-        // 60 * 2^19 = 31_457_280
-        assert_eq!(calculate_retry_delay(20, Some(opts)), 31_457_280.0);
-    }
-
-    #[test]
-    fn exponential_max_delay_caps_large_attempts() {
-        let opts = r#"{"retry_policy": {"intervals": [60], "backoff_strategy": "exponential", "jitter": false, "max_delay_seconds": 600}}"#;
-        assert_eq!(calculate_retry_delay(20, Some(opts)), 600.0);
-    }
-
-    #[test]
-    fn max_delay_caps_after_jitter() {
-        let opts = r#"{"retry_policy": {"intervals": [60], "backoff_strategy": "exponential", "jitter": true, "max_delay_seconds": 600}}"#;
-        for _ in 0..50 {
-            assert!(calculate_retry_delay(5, Some(opts)) <= 600.0);
-        }
-    }
-
-    #[test]
-    fn jitter_within_range() {
-        let opts = r#"{"retry_policy": {"intervals": [100], "backoff_strategy": "exponential", "jitter": true}}"#;
-        for _ in 0..50 {
-            let delay = calculate_retry_delay(1, Some(opts));
-            assert!(
-                (75.0..=125.0).contains(&delay),
-                "delay {} out of jitter range",
-                delay
-            );
-        }
-    }
-
-    #[test]
-    fn jitter_preserves_sub_second_precision() {
-        // With a small base (2s), upward jitter produces fractional values (2.0–2.5s).
-        let opts =
-            r#"{"retry_policy": {"intervals": [2], "backoff_strategy": "fixed", "jitter": true}}"#;
-        let mut saw_fractional = false;
-        for _ in 0..100 {
-            let delay = calculate_retry_delay(1, Some(opts));
-            assert!(delay >= 1.0, "delay {delay} below 1.0s floor");
-            if delay.fract() > 0.001 {
-                saw_fractional = true;
-            }
-        }
-        assert!(saw_fractional, "jitter should produce fractional seconds");
-    }
-
-    #[test]
-    fn jitter_does_not_collapse_lower_half_onto_floor() {
-        // Parity with horsies #78: previously symmetric ±25% jitter followed by
-        // a trailing max(1.0) snapped the entire lower half of a small base
-        // delay's jitter window onto exactly 1.0, destroying the spread. With
-        // floor-then-upward-jitter, base=1 spreads uniformly over [1.0, 1.25]
-        // and is no longer pinned to the 1.0 floor.
-        let opts =
-            r#"{"retry_policy": {"intervals": [1], "backoff_strategy": "fixed", "jitter": true}}"#;
-        let samples: Vec<f64> = (0..400)
-            .map(|_| calculate_retry_delay(1, Some(opts)))
-            .collect();
-        for &d in &samples {
-            assert!((1.0..=1.25).contains(&d), "delay {d} outside [1.0, 1.25]");
-        }
-        let exactly_floor = samples.iter().filter(|&&d| d == 1.0).count();
-        assert!(
-            exactly_floor < samples.len() / 8,
-            "{exactly_floor}/{} samples collapsed onto the 1.0 floor; jitter spread destroyed",
-            samples.len(),
-        );
-    }
-
-    #[test]
-    fn delay_floored_at_one_second() {
-        // The floor is 1.0s: small base delays are raised to 1.0 before jitter.
-        let opts =
-            r#"{"retry_policy": {"intervals": [1], "backoff_strategy": "fixed", "jitter": true}}"#;
-        for _ in 0..50 {
-            let delay = calculate_retry_delay(1, Some(opts));
-            assert!(delay >= 1.0, "delay {delay} should be >= 1.0s");
-        }
-    }
-
-    #[test]
-    fn no_options_uses_defaults() {
-        // Default: fixed [60, 300, 900] with jitter.
-        let delay = calculate_retry_delay(1, None);
-        assert!(
-            (45.0..=75.0).contains(&delay),
-            "delay {} out of default range",
-            delay
-        );
-    }
-
-    #[test]
-    fn should_retry_matching_code() {
-        let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
-        let opts = r#"{"auto_retry_for": ["TASK_ERROR"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_non_matching_code() {
-        let error = TaskError::builtin(RetrievalCode::WaitTimeout, "timeout");
-        let opts = r#"{"auto_retry_for": ["TASK_ERROR"]}"#;
-        assert!(!should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_exhausted() {
-        let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
-        let opts = r#"{"auto_retry_for": ["TASK_EXCEPTION"]}"#;
-        assert!(!should_retry(&error, 3, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_no_max_retries() {
-        let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
-        let opts = r#"{"auto_retry_for": ["TASK_EXCEPTION"]}"#;
-        assert!(!should_retry(&error, 0, 0, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_user_code() {
-        let error = TaskError::new("TRANSIENT", "try again");
-        let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_no_auto_retry_for() {
-        let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
-        let opts = r#"{"retry_policy": {"max_retries": 3}}"#;
-        assert!(!should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_no_error_code() {
-        let error = TaskError {
-            error_code: None,
-            message: Some("mystery".to_owned()),
-            cause: None,
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["TASK_EXCEPTION"]}"#;
-        assert!(!should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_builtin_code_from_direct_send_tagged_object() {
-        // C6: the direct-send path serializes `TaskOptions` via serde, which
-        // writes built-in `auto_retry_for` codes as the tagged object
-        // `{"__builtin_task_code__": "TASK_TIMEOUT"}`. should_retry must match
-        // them; before the fix the parser kept only strings and dropped these.
-        use crate::core::task::options::TaskOptions;
-        use crate::core::task::OutcomeCode;
-
-        let opts = TaskOptions {
-            task_name: "t".to_owned(),
-            queue_name: None,
-            good_until: None,
-            auto_retry_for: Some(vec![OutcomeCode::TaskTimeout.into()]),
-            retry_policy: None,
-            timeout_ms: None,
-        };
-        let json = serde_json::to_string(&opts).unwrap();
-        assert!(
-            json.contains("__builtin_task_code__"),
-            "direct-send serializes built-ins as tagged objects: {json}",
-        );
-
-        let error = TaskError::builtin(OutcomeCode::TaskTimeout, "timed out");
-        assert!(
-            should_retry(&error, 0, 3, Some(&json), None),
-            "a built-in auto_retry_for code sent via direct send must trigger retry",
-        );
-    }
-
-    // --- Exception type matching tests ---
-
-    #[test]
-    fn should_retry_exception_type_from_object() {
-        // Exception is a JSON object with a "type" key (from Python's _exception_to_json).
-        let error = TaskError {
-            error_code: Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
-            message: Some("connection refused".to_owned()),
-            cause: Some(serde_json::json!({
-                "type": "ConnectionError",
-                "message": "connection refused"
-            })),
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["ConnectionError"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_exception_type_field() {
-        // Exception is a JSON object with an "exception_type" key (alternate format).
-        let error = TaskError {
-            error_code: Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
-            message: Some("timed out".to_owned()),
-            cause: Some(serde_json::json!({
-                "exception_type": "TimeoutError",
-                "detail": "read timed out"
-            })),
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["TimeoutError"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_exception_string_value() {
-        // Exception is a plain JSON string (used directly as type name).
-        let error = TaskError {
-            error_code: Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
-            message: Some("value error".to_owned()),
-            cause: Some(serde_json::Value::String("ValueError".to_owned())),
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["ValueError"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_exception_type_no_match() {
-        // Exception type does not match any entry in auto_retry_for.
-        let error = TaskError {
-            error_code: Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
-            message: Some("key error".to_owned()),
-            cause: Some(serde_json::json!({
-                "type": "KeyError",
-                "message": "missing key"
-            })),
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["ConnectionError", "TimeoutError"]}"#;
-        assert!(!should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_no_error_code_but_exception_matches() {
-        // No error code at all, but exception type matches.
-        // This mirrors the case where a task produces an error without a code
-        // but with exception metadata.
-        let error = TaskError {
-            error_code: None,
-            message: Some("connection refused".to_owned()),
-            cause: Some(serde_json::json!({
-                "type": "ConnectionError"
-            })),
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["ConnectionError"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_error_code_matches_exception_does_not() {
-        // Error code matches, exception type does not -- should still retry.
-        let error = TaskError {
-            error_code: Some(TaskErrorCode::User("TRANSIENT".to_owned())),
-            message: Some("transient failure".to_owned()),
-            cause: Some(serde_json::json!({
-                "type": "SomeOtherError"
-            })),
-            data: None,
-        };
-        let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
-        assert!(should_retry(&error, 0, 3, Some(opts), None));
-    }
-
-    #[test]
-    fn should_retry_mixed_codes_and_exception_types() {
-        // auto_retry_for contains both error codes and exception type names.
-        let opts = r#"{"auto_retry_for": ["TIMEOUT", "ConnectionError", "ValueError"]}"#;
-
-        // Match on error code.
-        let error1 = TaskError::new("TIMEOUT", "timed out");
-        assert!(should_retry(&error1, 0, 3, Some(opts), None));
-
-        // Match on exception type.
-        let error2 = TaskError {
-            error_code: Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
-            message: Some("conn refused".to_owned()),
-            cause: Some(serde_json::json!({"type": "ConnectionError"})),
-            data: None,
-        };
-        assert!(should_retry(&error2, 0, 3, Some(opts), None));
-
-        // No match on either.
-        let error3 = TaskError {
-            error_code: Some(TaskErrorCode::User("OTHER".to_owned())),
-            message: Some("other error".to_owned()),
-            cause: Some(serde_json::json!({"type": "RuntimeError"})),
-            data: None,
-        };
-        assert!(!should_retry(&error3, 0, 3, Some(opts), None));
-    }
-
-    // --- good_until pre-check tests ---
-
-    #[test]
-    fn should_retry_blocked_by_expired_good_until() {
-        let error = TaskError::new("TRANSIENT", "try again");
-        let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
-        let expired = Utc::now() - chrono::Duration::seconds(10);
-        assert!(
-            !should_retry(&error, 0, 3, Some(opts), Some(expired)),
-            "should not retry when good_until has already passed",
-        );
-    }
-
-    #[test]
-    fn should_retry_allowed_with_future_good_until() {
-        let error = TaskError::new("TRANSIENT", "try again");
-        let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
-        let future = Utc::now() + chrono::Duration::hours(1);
-        assert!(
-            should_retry(&error, 0, 3, Some(opts), Some(future)),
-            "should retry when good_until is in the future",
-        );
-    }
-
-    #[test]
-    fn should_retry_allowed_with_no_good_until() {
-        let error = TaskError::new("TRANSIENT", "try again");
-        let opts = r#"{"auto_retry_for": ["TRANSIENT"]}"#;
-        assert!(
-            should_retry(&error, 0, 3, Some(opts), None),
-            "should retry when good_until is None (no deadline)",
-        );
-    }
-}
+mod tests;

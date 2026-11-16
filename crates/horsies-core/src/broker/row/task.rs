@@ -18,7 +18,7 @@ pub struct ClaimedId {
 /// with the CLAIMED → RUNNING transition.
 ///
 /// `retry_count`, `max_retries`, and `good_until` are threaded through
-/// execution into finalize with NO re-read: `should_retry`, the retry-delay
+/// execution into finalize with NO re-read: `admit_retry`, the retry-delay
 /// math, and the expired-vs-reclaimed postcheck all consume them directly.
 /// That is sound under three invariants the schema and statements maintain:
 ///

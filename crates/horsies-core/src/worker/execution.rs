@@ -39,7 +39,9 @@ use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 
 use crate::worker::heartbeat::spawn_runner_heartbeat;
-use crate::worker::retry::{calculate_retry_delay, parse_timeout_ms, should_retry};
+use crate::worker::retry::{
+    admit_retry, read_stored_options, RetryAdmission, RetryRule, RunPermit, StoredOptions,
+};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -664,19 +666,21 @@ fn task_timeout_error(timeout: Duration) -> TaskResult<Vec<u8>> {
 /// - `ReaperReclaimed` — task no longer RUNNING
 /// - `Expired` — next_retry_at would exceed good_until
 /// - `DbError` — transient DB failure after exhausting retries
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn schedule_retry_for_task(
     broker: &PostgresBroker,
     task_id: Uuid,
     task_error: &TaskError,
     row: &ClaimedTaskRow,
     running: &SetRunningRow,
+    rule: &RetryRule,
     attempt_num: i32,
     now: chrono::DateTime<Utc>,
     worker: &WorkerProcessInfo<'_>,
 ) -> ScheduleRetryOutcome {
     let task_started_at = running.started_at;
     let new_count = running.retry_count + 1;
-    let delay = calculate_retry_delay(new_count as u32, row.task_options.as_deref());
+    let delay = rule.delay_seconds(new_count.unsigned_abs());
     let next_retry_at = Utc::now() + chrono::Duration::milliseconds((delay * 1000.0) as i64);
     let error_code_str = task_error.error_code.as_ref().map(|c| c.to_string());
     let error_msg = task_error.message.as_deref();
@@ -785,6 +789,7 @@ pub(crate) async fn persist_terminal_state(
     task_id: Uuid,
     result: TaskResult<Vec<u8>>,
     row: &ClaimedTaskRow,
+    stored_options: &StoredOptions,
     running: &SetRunningRow,
     worker_id: &str,
     hostname: &str,
@@ -830,20 +835,29 @@ pub(crate) async fn persist_terminal_state(
             .await
         }
         TaskResult::Err(ref task_error) => {
-            // Check retry eligibility.
-            if should_retry(
-                task_error,
+            // The one retry rule of the core (Python `admitted_retry_policy`):
+            // the policy read at dispatch must name the failure's code, and
+            // retries must remain. The deadline is judged by the retry write.
+            let error_code = task_error.error_code.as_ref().map(ToString::to_string);
+            let admitted = match admit_retry(
                 running.retry_count,
                 running.max_retries,
-                row.task_options.as_deref(),
-                running.good_until,
+                stored_options.retry(),
+                error_code.as_deref(),
             ) {
+                RetryAdmission::Admitted(rule) => Some(rule),
+                RetryAdmission::RetriesSpent
+                | RetryAdmission::NoPolicy
+                | RetryAdmission::CodeNotListed => None,
+            };
+            if let Some(rule) = admitted {
                 match schedule_retry_for_task(
                     broker,
                     task_id,
                     task_error,
                     row,
                     running,
+                    rule,
                     attempt_num,
                     now,
                     &worker,
@@ -1552,11 +1566,13 @@ pub(crate) async fn finalize_pre_execution_failure(
         OwnershipOutcome::Aborted => return None,
     };
 
+    let stored_options = read_stored_options(row.task_options.as_deref());
     match retry_phase1(
         &broker,
         task_id,
         TaskResult::Err(task_error),
         &row,
+        &stored_options,
         &running,
         &worker_id,
         &hostname,
@@ -1668,6 +1684,10 @@ pub(crate) async fn execute_and_finalize(
     let is_workflow_task = row.is_workflow_task;
     let pid = std::process::id() as i32;
     let accepts_workflow_ctx = task_fn.accepts_workflow_ctx();
+    // The stored options are read once, here, into typed values; the run
+    // limit and the retry decision use this value and never read the text
+    // again.
+    let stored_options = read_stored_options(row.task_options.as_deref());
 
     // Phase 0: Confirm ownership and transition to RUNNING.
     let running = match confirm_ownership_and_set_running(
@@ -1709,11 +1729,23 @@ pub(crate) async fn execute_and_finalize(
 
     // Phase 1: Build envelope + execute task. The deadline (if any) is measured
     // around user-code execution; on expiry the result is TASK_TIMEOUT and the
-    // finalize path below decides fail-vs-retry via auto_retry_for.
-    let timeout = parse_timeout_ms(row.task_options.as_deref())
-        .map(|ms| Duration::from_millis(u64::from(ms)));
-    let result = match build_task_envelope(&row, accepts_workflow_ctx) {
-        Ok(envelope) => execute_task(task_fn, envelope, timeout).await,
+    // finalize path below decides fail-vs-retry via auto_retry_for. Stored
+    // options that do not fit the rule that wrote them fail the task here,
+    // after the row is RUNNING and before user code runs (Python
+    // `core/worker/stored_timeout.py`).
+    let timeout = match stored_options.run_permit() {
+        RunPermit::RunWithoutTimeout => Ok(None),
+        RunPermit::RunWithTimeout(limit) => Ok(Some(limit)),
+        RunPermit::Refuse(reason) => Err(TaskError::builtin(
+            OperationalErrorCode::WorkerSerializationError,
+            reason,
+        )),
+    };
+    let prepared = timeout.and_then(|timeout| {
+        build_task_envelope(&row, accepts_workflow_ctx).map(|envelope| (envelope, timeout))
+    });
+    let result = match prepared {
+        Ok((envelope, timeout)) => execute_task(task_fn, envelope, timeout).await,
         Err(err) => TaskResult::Err(err),
     };
 
@@ -1741,6 +1773,7 @@ pub(crate) async fn execute_and_finalize(
         task_id,
         result,
         &row,
+        &stored_options,
         &running,
         &worker_id,
         &hostname,
@@ -1797,6 +1830,7 @@ async fn retry_phase1(
     task_id: Uuid,
     result: TaskResult<Vec<u8>>,
     row: &ClaimedTaskRow,
+    stored_options: &StoredOptions,
     running: &SetRunningRow,
     worker_id: &str,
     hostname: &str,
@@ -1808,6 +1842,7 @@ async fn retry_phase1(
         task_id,
         result.clone(),
         row,
+        stored_options,
         running,
         worker_id,
         hostname,
@@ -1850,6 +1885,7 @@ async fn retry_phase1(
             task_id,
             result.clone(),
             row,
+            stored_options,
             running,
             worker_id,
             hostname,
