@@ -5,11 +5,16 @@
 #[cfg(test)]
 extern crate self as horsies;
 
+// `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
+// which this crate reaches through its own name.
+extern crate self as horsies_core;
+
 // Internal modules (merged from formerly separate crates).
 // `core` is `pub` (rather than `pub(crate)`) because `#[macro_export]` macros
 // in `core::task::macros` use `$crate::core::…` paths that must be
 // resolvable when the macro is expanded in downstream crates.
 pub(crate) mod broker;
+pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
@@ -77,6 +82,8 @@ pub use crate::broker::{
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
+pub use crate::broker::client_family::ClientFamily;
+pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
