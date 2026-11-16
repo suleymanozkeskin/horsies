@@ -370,7 +370,7 @@ fn joined_result(joined: Result<RawTaskResult, JoinError>) -> RawTaskResult {
     match joined {
         Ok(result) => result,
         Err(error) => TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::UnhandledError,
+            OperationalErrorCode::UnhandledException,
             format!("async task panicked: {error}"),
         )),
     }

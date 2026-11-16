@@ -171,14 +171,14 @@ _INSERT_WORKFLOWS_SQL = text("""
 """)
 
 _INSERT_WORKFLOW_TASKS_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps,
         join_type, is_subworkflow, status, task_id, created_at,
         max_retries, execution, retention_class_key
     )
     SELECT
-        'wt-' || :prefix || g, 'wf-' || :prefix || g, 0, 'node_0',
+        'NONE', 'wt-' || :prefix || g, 'wf-' || :prefix || g, 0, 'node_0',
         'perf.task', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
         'RUNNING', :prefix || g, NOW(), 0, 'ISOLATED', 'standard_30d'
     FROM generate_series(1, :count) AS g

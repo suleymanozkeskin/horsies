@@ -4,7 +4,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -122,7 +122,7 @@ async fn fail_task(pool: &PgPool, task_id: Uuid) {
                 worker_id: "w3-worker".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("W3 failure".to_owned()),
         },
     )
@@ -199,11 +199,11 @@ async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
 async fn seed_workflow_task_link(pool: &PgPool, workflow_id: Uuid, task_id: Uuid, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
             created_at, started_at, max_retries, execution, retention_class_key
         ) VALUES (
-            $1, $2, 0, 'w3-node', 'w3_node_task', 'null', 'default', 100, ARRAY[]::integer[],
+            'NONE', $1, $2, 0, 'w3-node', 'w3_node_task', 'null', 'default', 100, ARRAY[]::integer[],
             FALSE, 'all', $3, $4, FALSE, NOW(),
             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END, 0, 'ISOLATED',
             'standard_30d'
@@ -266,6 +266,11 @@ fn action_models_and_task_mapping_serialize_exactly() {
             error(TaskActionErrorCode::DbOperationFailed, None, "database"),
             503,
             r#"{"detail":"database"}"#,
+        ),
+        (
+            error(TaskActionErrorCode::EventLoopLimit, None, "loop limit"),
+            503,
+            r#"{"detail":"loop limit"}"#,
         ),
         (
             error(TaskActionErrorCode::StoredDataInvalid, None, "stored"),
@@ -493,7 +498,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let payload = PayloadPolicy::default();
     let retention = RetentionConfig::default();
 

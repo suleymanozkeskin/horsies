@@ -29,6 +29,7 @@ from pydantic import SecretStr
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -291,6 +292,7 @@ class TestStagedResultReader:
             enqueued = await broker.enqueue_async(
                 'result.reader.task',
                 task_id=task_id,
+                send_kind=SendKind.FIRST,
                 enqueue_sha='d' * 64,
                 sent_at=datetime.now(timezone.utc),
                 args_json='[]',

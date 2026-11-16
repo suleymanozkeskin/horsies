@@ -100,13 +100,14 @@ RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_o
 # ---------- Worker SQL constants ----------
 
 # TIER 1: one server-side call performs lock acquisition + cap counts + the
-# windowed claim (see horsies_claim, schemas/migrations.py). The caller runs it
+# windowed claim (see horsies_claim in the baseline SQL). The caller runs it
 # in autocommit, so the advisory lock is held only for this one statement —
 # never across a client round trip. Replaces the per-pass lock loop + counts +
 # per-queue CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
     SELECT row_kind, id, task_name, input, queue_name, is_workflow_task,
-           task_options, claimed_at, execution, short_by
+           task_options, claimed_at, retry_count, max_retries, execution,
+           short_by
     FROM horsies_claim(
         :p_worker_id,
         CAST(:p_queues AS jsonb),
@@ -231,31 +232,10 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
 """)
 
 # The bounded lookup lives in horsies_find_non_runnable_workflow_tasks
-# (horsies/core/schemas/non_runnable_lookup.py).
+# (horsies/core/baseline/sql/0003_interim_functions.sql).
 GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
     SELECT id, status
     FROM horsies_find_non_runnable_workflow_tasks(CAST(:ids AS uuid[]))
-""")
-
-# Fenced to this worker and the claim generation of the dispatch
-# (:claimed_at), so it cannot release a row that was claimed again.
-UNCLAIM_CLAIMED_TASK_SQL = text("""
-    UPDATE horsies_tasks
-    SET status = 'PENDING',
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = NOW()
-    WHERE id = :id
-      AND status = 'CLAIMED'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
 """)
 
 RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
@@ -275,19 +255,6 @@ SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
 
 NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
-""")
-
-# The retry facts of the attempt this claim generation holds, without a lock.
-# The facts cannot change inside one generation; the write that follows
-# fences on the generation and on the retry count read here.
-READ_IN_FLIGHT_ATTEMPT_SQL = text("""
-    SELECT CAST(status AS text) AS status, retry_count, max_retries,
-           task_options
-    FROM horsies_tasks
-    WHERE id = :id
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND status IN ('CLAIMED', 'RUNNING')
-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
 """)
 
 NOTIFY_DELAYED_SQL = text("""
@@ -434,3 +401,22 @@ _RETENTION_PASS_TIME_BUDGET_S = 60.0
 
 
 _FINALIZER_DRAIN_TIMEOUT_S: float = 30.0
+
+# Soft-cap start check (worker/queue_cap_hold.py): for each capped queue in
+# :queues, its RUNNING rows on every worker plus the rows of :started_ids that
+# this worker started and that are still CLAIMED. One row per queue that has
+# any; a queue with no row has 0.
+COUNT_QUEUE_STARTS_SQL = text("""
+    SELECT t.queue_name,
+           COUNT(*) FILTER (WHERE t.status = 'RUNNING') AS running,
+           COUNT(*) FILTER (WHERE t.status = 'CLAIMED') AS started_not_running
+    FROM horsies_tasks t
+    WHERE t.queue_name = ANY(CAST(:queues AS VARCHAR[]))
+      AND (
+          t.status = 'RUNNING'
+          OR (t.status = 'CLAIMED'
+              AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
+              AND t.id = ANY(CAST(:started_ids AS uuid[])))
+      )
+    GROUP BY t.queue_name
+""")

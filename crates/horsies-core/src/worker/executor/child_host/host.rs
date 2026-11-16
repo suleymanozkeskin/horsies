@@ -32,19 +32,10 @@ const INIT_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const SMALL_RUNTIME_THREADS: usize = 2;
 const RUNTIME_THREAD_NAME: &str = "horsies-child-runtime";
 
-/// Whether a workflow task whose node is not linked cancels its own claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrphanSelfHeal {
-    On,
-    Off,
-}
-
 /// What a worker binary gives its child mode: its tasks and the settings a
 /// child reads from the app.
 pub struct ChildApp {
     pub registry: Arc<TaskRegistry>,
-    /// The app's `auto_terminate_orphaned_workflow_tasks`.
-    pub orphan_self_heal: OrphanSelfHeal,
     /// The host name written with each start.
     pub hostname: String,
 }

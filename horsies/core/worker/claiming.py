@@ -13,6 +13,7 @@ block declares the slice of ``Worker`` it relies on.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -43,8 +44,17 @@ from horsies.core.utils.db import (
 )
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
+    ClaimPlan,
+    NotServed,
+    ServedBy,
     budgets_json,
     routes_json,
+)
+from horsies.core.worker.dispatch_claim import DispatchClaim, dispatch_claim_of
+from horsies.core.worker.queue_cap_hold import (
+    HeldRow,
+    QueueCapHold,
+    read_queue_starts,
 )
 from horsies.core.worker.release import (
     HeldClaim,
@@ -68,6 +78,7 @@ from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
+    COUNT_QUEUE_STARTS_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     HORSIES_CLAIM_SQL,
@@ -79,6 +90,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from horsies.core.worker.config import WorkerConfig
+    from horsies.core.worker.runtime import _RequeueOutcome
 
 logger = get_logger('worker')
 
@@ -253,6 +265,38 @@ class ClaimPass:
         return short_passes_before + 1 if self.short_of_plan > 0 else 0
 
 
+def route_budget(plan: ClaimPlan, execution: Execution, task_id: str) -> Execution:
+    """The budget class of ``plan`` whose children run claimed task
+    ``task_id`` of class ``execution``.
+
+    The claim reads only classes that ``plan`` serves, so a class that it
+    does not serve is a defect: ``AssertionError``. Pure.
+    """
+    match plan.route(execution):
+        case ServedBy(budget=budget):
+            return budget
+        case NotServed():
+            raise AssertionError(
+                f'task {task_id}: a {execution.value} row was claimed by a '
+                'worker that does not serve that class',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _end_start_when_done(
+    hold: QueueCapHold,
+    finalizer: asyncio.Future[Any],
+    task_id: str,
+) -> None:
+    """Forget the started row ``task_id`` when its finalizer ends."""
+
+    def _ended(_done: asyncio.Future[Any]) -> None:
+        hold.end(task_id)
+
+    finalizer.add_done_callback(_ended)
+
+
 class ClaimMixin:
     """Budgeted claim pass, queue caps, lease math, advisory claim mutex."""
 
@@ -263,11 +307,13 @@ class ClaimMixin:
         _claim_runner: StatementRunner
         worker_instance_id: str
         _registered_classes: Mapping[str, Execution]
+        _queue_cap_hold: QueueCapHold
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_slot_count(self) -> int: ...
         def _shared_async_seats_in_service(self) -> int: ...
         def _shared_thread_seats_in_service(self) -> int: ...
+        def _free_children(self, budget: Execution) -> int: ...
         async def _dispatch_one(
             self,
             task_id: str,
@@ -278,10 +324,15 @@ class ClaimMixin:
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
             *,
-            claimed_at: datetime,
+            claim: DispatchClaim,
             execution: Execution,
-            task_options: str | None,
-        ) -> None: ...
+        ) -> asyncio.Future[Any]: ...
+        async def _requeue_claimed_task(
+            self,
+            task_id: str,
+            reason: str,
+            claim: DispatchClaim,
+        ) -> _RequeueOutcome: ...
 
     async def _claim_and_dispatch_all(self) -> ClaimPass:
         """
@@ -292,6 +343,11 @@ class ClaimMixin:
           - max_claim_per_worker guard (prevents over-claiming)
           - queue priorities (CUSTOM mode)
           - per-queue max_concurrency (CUSTOM mode)
+
+        In soft-cap mode a row of a capped queue is held, not started; each
+        pass starts the held rows that its queue's count leaves room for
+        (``_start_held_rows``, ``queue_cap_hold``). This also runs on a pass
+        that claims nothing.
 
         Raises:
             Exception: DB errors propagate to the main loop, which
@@ -309,7 +365,7 @@ class ClaimMixin:
         # the xact-scoped advisory lock ends with the statement — never held
         # across a client round trip, so a stalled worker cannot freeze the
         # cluster mid-pass. Budget and cap semantics are computed in-function;
-        # see schemas/migrations.py::horsies_claim.
+        # see horsies_claim in the baseline SQL.
         # The claim loop's held connection: one checkout for the passes that
         # follow each other, given back after an idle period.
         claim_result = rows_or_raise(
@@ -323,38 +379,113 @@ class ClaimMixin:
         claim_rows = read_claim_rows(claim_result.columns, claim_result.rows)
 
         claimed_rows = claim_rows.tasks
-        if not claimed_rows:
-            return ClaimPass(
-                claimed=0,
-                dropped=0,
-                short_of_plan=claim_rows.short_of_plan,
+        fitting_rows: list[dict[str, Any]] = []
+        if claimed_rows:
+            # Post-claim guard: filter out tasks for non-runnable workflow states.
+            dispatchable_rows = await self._filter_nonrunnable_workflow_tasks(
+                claimed_rows,
             )
-
-        # Post-claim guard: filter out tasks for non-runnable workflow states.
-        dispatchable_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
-        fitting_rows = await self._return_rows_of_another_class(dispatchable_rows)
+            fitting_rows = await self._return_rows_of_another_class(dispatchable_rows)
 
         for row in fitting_rows:
-            # The row's input is the task's keyword arguments as one JSON
-            # object text; the dispatch carries it as the kwargs text, and
-            # no positional arguments.
-            await self._dispatch_one(
-                row['id'],
-                row['task_name'],
-                None,
-                row['input'],
-                row.get('queue_name') or 'default',
-                bool(row.get('is_workflow_task', False)),
-                timeout=read_claimed_options(row.get('task_options')),
-                claimed_at=claim_time_of(row),
-                execution=parse_row_class(str(row['id']), row['execution']),
-                task_options=row.get('task_options'),
-            )
+            queue_name = str(row['queue_name'])
+            if self._queue_cap_hold.holds(queue_name):
+                task_id = str(row['id'])
+                self._queue_cap_hold.hold(
+                    HeldRow(
+                        task_id=task_id,
+                        queue_name=queue_name,
+                        budget=route_budget(
+                            self.cfg.claim_plan(),
+                            parse_row_class(task_id, row['execution']),
+                            task_id,
+                        ),
+                        row=row,
+                    ),
+                )
+            else:
+                _ = await self._dispatch_claim_row(row)
+        await self._start_held_rows()
         return ClaimPass(
             claimed=len(claimed_rows),
             dropped=len(claimed_rows) - len(fitting_rows),
             short_of_plan=claim_rows.short_of_plan,
         )
+
+    async def _dispatch_claim_row(self, row: Mapping[str, Any]) -> asyncio.Future[Any]:
+        """Hand one claimed row to dispatch, and return its finalizer task."""
+        # The row's input is the task's keyword arguments as one JSON
+        # object text; the dispatch carries it as the kwargs text, and
+        # no positional arguments.
+        return await self._dispatch_one(
+            row['id'],
+            row['task_name'],
+            None,
+            row['input'],
+            row.get('queue_name') or 'default',
+            bool(row.get('is_workflow_task', False)),
+            timeout=read_claimed_options(row.get('task_options')),
+            claim=dispatch_claim_of(row),
+            execution=parse_row_class(str(row['id']), row['execution']),
+        )
+
+    async def _start_held_rows(self) -> None:
+        """Start the held rows of the capped queues that have room, while a
+        child of the row's route is free.
+
+        Sends one statement (``COUNT_QUEUE_STARTS_SQL``) when rows are held,
+        none otherwise. The free capacity of each budget is read after the
+        count, and nothing awaits between that read and the submits, so each
+        started row goes to a child that is free at its submit. Each started
+        row leaves the started set when its finalizer ends.
+
+        Raises:
+            Exception: a DB error of the count, as in
+                ``_claim_and_dispatch_all``. The held rows stay held.
+        """
+        hold = self._queue_cap_hold
+        queues = hold.held_queues()
+        if not queues:
+            return
+        counted = rows_or_raise(
+            await self._claim_runner.run(
+                SingleStatement(
+                    statement=COUNT_QUEUE_STARTS_SQL,
+                    parameters={
+                        'queues': list(queues),
+                        'wid': self.worker_instance_id,
+                        'started_ids': list(hold.started_ids()),
+                    },
+                ),
+            ),
+        )
+        starts = read_queue_starts(counted.columns, counted.rows)
+        for held in hold.admit(starts, self._free_capacity()):
+            finalizer = await self._dispatch_claim_row(held.row)
+            _end_start_when_done(hold, finalizer, held.task_id)
+
+    def _free_capacity(self) -> dict[Execution, int]:
+        """The free capacity of each budget of the claim plan now: its
+        children or seats that take a task at once (``_free_children``).
+        Reads only."""
+        return {
+            budget: self._free_children(budget)
+            for budget in self.cfg.claim_plan().budgets()
+        }
+
+    async def _return_held_rows(self) -> None:
+        """Return each held row to its queue, at the stop of the worker.
+
+        Runs after the claim loop ended. Never raises:
+        ``_requeue_claimed_task`` logs a DB error, and the lease of a row it
+        could not return expires.
+        """
+        for held in self._queue_cap_hold.drain():
+            _ = await self._requeue_claimed_task(
+                held.task_id,
+                'the worker stopped while the row waited for its queue cap',
+                dispatch_claim_of(held.row),
+            )
 
     def _claim_params(self) -> dict[str, Any]:
         """The parameters of HORSIES_CLAIM_SQL for one pass. Does no I/O.

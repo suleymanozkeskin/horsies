@@ -8,7 +8,7 @@ use super::operations::{
     rerun_task_in_tx, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::ddl::classes::register_period_class;
 use crate::core::history::identity::fingerprint::EnqueueCommandV1;
@@ -23,6 +23,8 @@ use crate::core::lifecycle::{
     WorkerOwned,
 };
 use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
+
+mod ports;
 
 const WORKER: &str = "p8-rerun-worker";
 const SOURCE_CLASS: &str = "forever";
@@ -56,7 +58,7 @@ fn terminal_result(kind: TerminalSource) -> String {
         }
         TerminalSource::Failed | TerminalSource::Expired | TerminalSource::Cancelled => {
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::builtin(
-                OperationalErrorCode::TaskError,
+                OperationalErrorCode::TaskException,
                 "p8 terminal source",
             )))
             .unwrap()
@@ -140,12 +142,12 @@ async fn seed_source(
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, is_subworkflow,
                  max_retries, execution, retention_class_key,
                  task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p8.rerun', $3, 'default',
+             ) VALUES ('NONE', $1, $2, 0, 'root', 'p8.rerun', $3, 'default',
                        50, '{}', FALSE, 'all', 'RUNNING', FALSE,
                        3, 'ISOLATED', 'forever', $4, NOW())",
         )
@@ -1171,7 +1173,8 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .unwrap();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
-    let expected_error = TaskError::builtin(OperationalErrorCode::TaskError, "p8 terminal source");
+    let expected_error =
+        TaskError::builtin(OperationalErrorCode::TaskException, "p8 terminal source");
     let expected_error_envelope =
         serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone()))
             .unwrap()

@@ -1,8 +1,8 @@
 # pyright: reportPrivateUsage=false
 """The retry of a task error, from the finalize entry point.
 
-``_persist_task_terminal_state`` reads the retry facts without a lock, asks
-the policy, and hands the decision to ``horsies_finish_failed_attempt``,
+``_persist_task_terminal_state`` asks the policy with the retry facts of the
+claim, and hands the decision to ``horsies_finish_failed_attempt``,
 which writes the retry or the terminal failure under the lock. Each test
 enters at the finalize and asserts the row it left.
 """
@@ -29,10 +29,12 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker import failed_attempt as failed_attempt_module
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.failed_attempt import FinishFailedAttempt, RetryAfter
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at, row_claim
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal, read_attempts
 
@@ -177,7 +179,9 @@ def _error_result(code: str) -> str:
     return dumps_json(envelope).unwrap()
 
 
-async def _finalize_error(worker: Worker, task_id: str, code: str) -> Any:
+async def _finalize_error(
+    worker: Worker, task_id: str, claim: DispatchClaim, code: str,
+) -> Any:
     return await worker._persist_task_terminal_state(
         task_id=task_id,
         now=datetime.now(timezone.utc),
@@ -187,7 +191,7 @@ async def _finalize_error(worker: Worker, task_id: str, code: str) -> Any:
         task_name=TASK_NAME,
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim,
     )
 
 
@@ -233,7 +237,7 @@ async def test_a_declined_retry_fails_the_task(
     )
     worker = _make_worker(engine)
 
-    result = await _finalize_error(worker, task_id, 'ERR')
+    result = await _finalize_error(worker, task_id, await row_claim(session, task_id), 'ERR')
 
     assert is_ok(result) and result.ok_value is None
     row = await _row(session, task_id)
@@ -251,7 +255,7 @@ async def test_a_listed_code_schedules_the_retry(
     task_id = await _insert_task(session, retry_count=1, task_options=opts)
     worker = _make_worker(engine)
 
-    result = await _finalize_error(worker, task_id, 'ERR')
+    result = await _finalize_error(worker, task_id, await row_claim(session, task_id), 'ERR')
 
     assert is_ok(result) and result.ok_value is None
     row = await _row(session, task_id)
@@ -273,14 +277,15 @@ async def test_a_listed_code_schedules_the_retry(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_the_retry_reads_the_row_once(
+async def test_the_retry_is_one_statement_with_no_read(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """One read of the retry facts and one write: no second read of the row."""
+    """One write and no read of the row: the retry facts come with the claim."""
     opts = _make_task_options(auto_retry_for=['ERR'])
     task_id = await _insert_task(session, task_options=opts)
+    claim = await row_claim(session, task_id)
     worker = _make_worker(engine)
     statements: list[str] = []
 
@@ -296,15 +301,14 @@ async def test_the_retry_reads_the_row_once(
 
     event.listen(engine.sync_engine, 'before_cursor_execute', _record)
     try:
-        result = await _finalize_error(worker, task_id, 'ERR')
+        result = await _finalize_error(worker, task_id, claim, 'ERR')
     finally:
         event.remove(engine.sync_engine, 'before_cursor_execute', _record)
 
     assert is_ok(result)
-    reads = [s for s in statements if 'FROM horsies_tasks' in s]
-    assert len(reads) == 1, statements
+    assert [s for s in statements if 'FROM horsies_tasks' in s] == [], statements
     assert [s for s in statements if 'horsies_finish_failed_attempt' in s]
-    assert len(statements) == 2, statements
+    assert len(statements) == 1, statements
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -318,7 +322,7 @@ async def test_a_retry_after_good_until_fails_the_task(
     task_id = await _insert_task(session, task_options=opts, good_until=good_until)
     worker = _make_worker(engine)
 
-    result = await _finalize_error(worker, task_id, 'ERR')
+    result = await _finalize_error(worker, task_id, await row_claim(session, task_id), 'ERR')
 
     assert is_ok(result) and result.ok_value is None
     assert (await _row(session, task_id)).status == 'FAILED'
@@ -358,7 +362,7 @@ async def test_good_until_is_judged_under_the_lock(
         'horsies.core.worker.finalize.finish_failed_attempt',
         _shrink_then_finish,
     ):
-        result = await _finalize_error(worker, task_id, 'ERR')
+        result = await _finalize_error(worker, task_id, await row_claim(session, task_id), 'ERR')
 
     assert is_ok(result) and result.ok_value is None
     assert (await _row(session, task_id)).status == 'FAILED'
@@ -388,7 +392,7 @@ async def test_a_row_this_claim_does_not_hold_is_left_alone(
     before = await _row(session, task_id)
     worker = _make_worker(engine)
 
-    result = await _finalize_error(worker, task_id, 'ERR')
+    result = await _finalize_error(worker, task_id, claim_at(CLAIMED_AT), 'ERR')
 
     assert is_ok(result) and result.ok_value is None
     assert await _row(session, task_id) == before
