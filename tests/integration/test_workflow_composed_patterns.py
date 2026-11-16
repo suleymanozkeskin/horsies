@@ -138,7 +138,7 @@ class TestComposedPatterns:
             f'task_id is NULL for workflow_id={workflow_id}, task_index={task_index}'
         )
         task_result = await session.execute(
-            text('SELECT kwargs FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT input FROM horsies_tasks WHERE id = :tid'),
             {'tid': row[0]},
         )
         kwargs_row = task_result.fetchone()
