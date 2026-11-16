@@ -65,6 +65,11 @@ pub(crate) struct WebState {
 }
 
 /// Build a monitoring router for an already connected broker.
+///
+/// The event stream and the worker ping subscribe on the broker's listener.
+/// A broker with no listener (observe-only, or built from a pool without a
+/// session URL) sends the degraded frame on the event stream and answers the
+/// worker ping with 503.
 pub fn create_monitoring_router<P>(
     app: &Horsies,
     broker: Arc<PostgresBroker>,
