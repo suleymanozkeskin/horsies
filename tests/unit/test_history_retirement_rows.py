@@ -86,12 +86,20 @@ class TestStates:
             leaf_name=LEAF, expires_at=EXPIRES_AT
         )
 
-    @pytest.mark.parametrize('kind', list(CatalogConflictKind))
-    def test_every_conflict_kind_of_the_functions_maps_to_its_member(
+    @pytest.mark.parametrize(
+        'kind',
+        [
+            CatalogConflictKind.RELATION_WITHOUT_CATALOG,
+            CatalogConflictKind.OPEN_LOWER_BOUND,
+            CatalogConflictKind.DROPPED_RELATION_EXISTS,
+            CatalogConflictKind.FOREIGN_PARENT,
+            CatalogConflictKind.DETACH_RECORDED_WHILE_ATTACHED,
+            CatalogConflictKind.PHYSICAL_NONCONFORMANT,
+        ],
+    )
+    def test_every_conflict_kind_of_the_inspection_maps_to_its_member(
         self, kind: CatalogConflictKind
     ) -> None:
-        if kind is CatalogConflictKind.METADATA_MISMATCH:
-            pytest.skip('the functions never return METADATA_MISMATCH: they take no class or bounds')
         outcome = inspection_of(LEAF, _columns(conflict_kind=kind.value), 'CATALOG_CONFLICT')
         assert isinstance(outcome, LeafCatalogConflict)
         assert outcome.kind is kind

@@ -44,6 +44,14 @@ class CatalogConflictKind(Enum):
     """The leaf is attached to a parent other than its class parent."""
     DETACH_RECORDED_WHILE_ATTACHED = 'DETACH_RECORDED_WHILE_ATTACHED'
     """The catalog recorded a detach and the leaf is attached."""
+    PARENT_MISSING = 'PARENT_MISSING'
+    """The parent relation of the leaf does not exist."""
+    FOREIGN_INDEX = 'FOREIGN_INDEX'
+    """Another relation holds a canonical index name of the leaf."""
+    CATALOG_WITHOUT_RELATION = 'CATALOG_WITHOUT_RELATION'
+    """The catalog row matches and the relation is gone."""
+    STATIC_LEAF_MISSING = 'STATIC_LEAF_MISSING'
+    """The static forever leaf has no catalog row and no relation."""
 
 
 @dataclass(frozen=True, slots=True)
