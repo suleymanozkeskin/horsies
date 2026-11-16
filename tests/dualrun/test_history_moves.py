@@ -2,12 +2,16 @@
 
 Reference side: the terminal writes before the switch, with the single move
 that takes the task advisory lock again and reads the live row again
-(``reference/interim_moves.sql``), and the array overload of the miss
-classifier that those writes call (``reference/interim_miss_classifier.sql``). Candidate side: the baseline, where each
-single write passes the row it locked to
-``horsies_move_task_to_history(horsies_tasks, ...)`` and each batch write
-calls ``horsies_move_tasks_to_history``. The function-call script calls each
-of the 17 terminal writes on a path that moves its rows.
+(``reference/interim_moves.sql``, the writers of 0003), the array overload
+of the miss classifier that those writes call
+(``reference/interim_miss_classifier.sql``), and the writers of 0004 that
+call history, with the array classifier that takes a fence kind and the
+two-argument provenance reader (``reference/lifecycle_history_calls.sql``).
+Candidate side: the baseline, where each single write passes the row it
+locked to ``horsies_move_task_to_history(horsies_tasks, ...)``, each batch
+write calls ``horsies_move_tasks_to_history``, and each miss passes its kind
+and fence kind to the classifier of 0008. The function-call script calls
+each of the 17 terminal writes on a path that moves its rows.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ BEFORE_THE_SWITCH: Final = FrozenDefinitions(
     paths=(
         REFERENCE_FOLDER / 'interim_miss_classifier.sql',
         REFERENCE_FOLDER / 'interim_moves.sql',
+        REFERENCE_FOLDER / 'lifecycle_history_calls.sql',
     )
 )
 
