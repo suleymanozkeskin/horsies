@@ -277,7 +277,7 @@ class TestReportedRetentionEqualsGoverning:
         from horsies.core.worker.health import _effective_retention
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@h/d',
+            dsn='postgresql://u:p@h/d',
             psycopg_dsn='postgresql://u:p@h/d',
             queues=['default'],
         )
@@ -295,7 +295,7 @@ class TestReportedRetentionEqualsGoverning:
         from horsies.core.worker.health import _effective_retention
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@h/d',
+            dsn='postgresql://u:p@h/d',
             psycopg_dsn='postgresql://u:p@h/d',
             queues=['default'],
             retention_config=RetentionConfig(

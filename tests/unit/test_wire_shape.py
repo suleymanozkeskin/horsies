@@ -1283,7 +1283,7 @@ def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://user:password@localhost/unused',
+                database_url='postgresql://user:password@localhost/unused',
             ),
         ),
     )

@@ -6,7 +6,7 @@ evidence that a phase is allowed to proceed, and refuses to start unless the
 conditions that make its numbers meaningful have been stated.
 
     uv run python -m tests.perf --scenario fused-completion-small-result \\
-        --dsn postgresql+psycopg://postgres:testpassword@localhost:15446/horsies \\
+        --dsn postgresql://postgres:testpassword@localhost:15446/horsies \\
         --scale smoke --control
 
     uv run python -m tests.perf --scenario fused-completion-small-result \\
@@ -32,6 +32,7 @@ from tests.perf.scenarios import (
     scenario_by_name,
 )
 from tests.perf.statistics import Verdict
+from horsies.core.utils.url import sqlalchemy_url
 
 RESULTS_DIR = Path(__file__).parent / 'results'
 RAW_DIR = RESULTS_DIR / 'raw'
@@ -143,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
                 'a gate requires a real candidate; missing for: ' + ', '.join(missing)
             )
 
-    engine = create_engine(arguments.dsn)
+    engine = create_engine(sqlalchemy_url(arguments.dsn))
     outcomes: list[tuple[Verdict, bool]] = []
     control_failures: list[str] = []
     try:

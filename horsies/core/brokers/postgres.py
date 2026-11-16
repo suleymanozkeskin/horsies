@@ -186,7 +186,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.task_loop_registry import is_task_loop
-from horsies.core.utils.url import to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
@@ -1069,7 +1069,7 @@ class PostgresBroker:
         listener connect on first use.
         """
         engine = create_async_engine(
-            self.config.database_url.get_secret_value(),
+            sqlalchemy_url(self.config.database_url.get_secret_value()),
             **self._runtime_engine_config(),
         )
         register_identity_text_reads(engine)
@@ -1084,7 +1084,7 @@ class PostgresBroker:
             session_async_engine = engine
         else:
             session_async_engine = create_async_engine(
-                session_url, **self._session_engine_config()
+                sqlalchemy_url(session_url), **self._session_engine_config()
             )
             # The session URL must keep session state (LISTEN, session
             # advisory locks), so it keeps session settings too.
@@ -1387,7 +1387,8 @@ class PostgresBroker:
         engine_cfg['pool_size'] = 1
         engine_cfg['max_overflow'] = 0
         engine = create_async_engine(
-            self.config.database_url.get_secret_value(), **engine_cfg,
+            sqlalchemy_url(self.config.database_url.get_secret_value()),
+            **engine_cfg,
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
@@ -3316,7 +3317,7 @@ class PostgresBroker:
                 case _ as unreachable:
                     assert_never(unreachable)
             engine = create_engine(
-                self.config.database_url.get_secret_value(),
+                sqlalchemy_url(self.config.database_url.get_secret_value()),
                 **self._runtime_engine_config(),
                 isolation_level='AUTOCOMMIT',
             )

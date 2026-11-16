@@ -49,6 +49,7 @@ from horsies.core.lifecycle.outcomes import (
     decode_failed_attempt_row,
 )
 from horsies.core.logging import get_logger
+from horsies.core.models.tasks import RetryPolicy
 from horsies.core.types.status import TaskAttemptOutcome
 from horsies.core.utils.retry import (
     admitted_retry_policy,
@@ -142,7 +143,7 @@ def retry_request_for(
     match policy:
         case None:
             return NoRetry()
-        case dict():
+        case RetryPolicy():
             return RetryAfter(
                 retry_count=claim.retry_count,
                 delay_s=calculate_retry_delay(claim.retry_count + 1, policy),

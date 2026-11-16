@@ -79,7 +79,7 @@ def _test_app() -> Horsies:
     if _TEST_APP is None:
         cfg = AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://u:p@localhost/db',
+                database_url='postgresql://u:p@localhost/db',
             )
         )
         _TEST_APP = Horsies(cfg)
@@ -111,7 +111,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB (no listener needed)."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )

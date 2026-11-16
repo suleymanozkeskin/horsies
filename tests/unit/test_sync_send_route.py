@@ -32,7 +32,7 @@ from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.unit]
 
-URL = 'postgresql+psycopg://user:pass@localhost/db'
+URL = 'postgresql://user:pass@localhost/db'
 TASK_ID = UUID('0190a5a0-0000-7000-8000-000000000001')
 
 
