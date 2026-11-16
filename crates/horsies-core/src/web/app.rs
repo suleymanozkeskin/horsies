@@ -195,7 +195,9 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
     let disabled_reason = match schema.state {
         SchemaState::Match => None,
         SchemaState::Unknown => Some(SCHEMA_UNKNOWN.to_owned()),
-        SchemaState::Mismatch | SchemaState::Absent => Some(SCHEMA_INCOMPATIBLE.to_owned()),
+        SchemaState::Mismatch | SchemaState::Absent | SchemaState::ZeroX => {
+            Some(SCHEMA_INCOMPATIBLE.to_owned())
+        }
     };
     Json(MetaResponse {
         horsies_version: env!("CARGO_PKG_VERSION").to_owned(),

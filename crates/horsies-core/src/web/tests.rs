@@ -460,6 +460,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             Some(SCHEMA_INCOMPATIBLE),
         ),
         (SchemaState::Absent, None, false, Some(SCHEMA_INCOMPATIBLE)),
+        (SchemaState::ZeroX, None, false, Some(SCHEMA_INCOMPATIBLE)),
         (SchemaState::Unknown, None, false, Some(SCHEMA_UNKNOWN)),
     ];
     for (state, version, compatible, reason) in cases {
