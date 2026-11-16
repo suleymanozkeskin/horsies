@@ -5850,7 +5850,11 @@ mod connect_options_tests {
     #[serial]
     async fn transaction_mode_runtime_pool_prepares_a_repeated_query_once() {
         let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let config = PostgresConfig::from_pgbouncer_urls(url.clone(), url);
+        // PgBouncer mode refuses a session URL equal to `database_url`; a
+        // distinct application name keeps the same server.
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let session_url = format!("{url}{separator}application_name=prepared_session");
+        let config = PostgresConfig::from_pgbouncer_urls(url, session_url);
         let broker = PostgresBroker::connect_with(&config)
             .await
             .expect("connect broker");
