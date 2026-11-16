@@ -179,8 +179,8 @@ answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
 READ snapshot, so the live read and the history read see the same rows.
 
 `TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
-404 for each reason. A path id that is not a UUID answers 422
-(`uuid_parsing`) before any read.
+404 for each reason. A path id that is not a UUID answers 400 with
+`{"code": "INVALID_INPUT", "detail": ...}` before any read.
 
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |
@@ -224,7 +224,8 @@ cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[Task
   `TaskActionErrorCode` member; match on the variant. Every variant has
   `code`, `message`, `retryable` and `task_id` (a `uuid.UUID`). HTTP is the
   status of `POST /api/tasks/{task_id}/cancel`. A path id that is not a UUID
-  answers 422 (`uuid_parsing`) before the action runs.
+  answers 400 with `{"code": "INVALID_INPUT", "detail": ...}` before the
+  action runs.
 
 <!-- members: TaskActionErrorCode -->
 | Code | Variant | Fields | `retryable` | HTTP | When |

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, assert_never
-from uuid import UUID
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -56,6 +55,7 @@ from horsies.monitoring import (
     TaskActionWorkflowTask,
     cancel_task,
 )
+from horsies.web.routes._common import require_path_uuid
 
 logger = get_logger('web')
 
@@ -195,25 +195,26 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
     @router.post('/tasks/{task_id}/cancel')
     async def cancel_task_route(
-        task_id: UUID, body: CancelTaskBody = CancelTaskBody()
+        task_id: str, body: CancelTaskBody = CancelTaskBody()
     ) -> JSONResponse:
         """Cancel a task. RUNNING requires ``include_running``.
 
-        A path id that is not a UUID is refused with 422 before the route
-        runs; nothing is read.
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
         """
+        parsed_id = require_path_uuid('task_id', task_id)
         result = await cancel_task(
-            broker, task_id, include_running=body.include_running
+            broker, parsed_id, include_running=body.include_running
         )
         if is_err(result):
             return _respond(
                 'tasks.cancel',
-                str(task_id),
+                str(parsed_id),
                 _task_action_failed(result.err_value),
             )
         return _respond(
             'tasks.cancel',
-            str(task_id),
+            str(parsed_id),
             _succeeded('cancelled', was_status=result.ok_value.was_status.value),
         )
 

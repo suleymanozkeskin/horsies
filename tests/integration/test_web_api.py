@@ -397,15 +397,17 @@ class TestTaskReads:
         assert response.status_code == 404
         assert response.json()['detail'] == 'Task not found.'
 
-    async def test_an_id_that_is_not_a_uuid_is_unprocessable(
+    async def test_an_id_that_is_not_a_uuid_is_invalid_input(
         self, api: AsyncClient,
     ) -> None:
         response = await api.get('/api/tasks/not-a-uuid')
 
-        assert response.status_code == 422
-        [error] = response.json()['detail']
-        assert error['type'] == 'uuid_parsing'
-        assert error['loc'] == ['path', 'task_id']
+        assert response.status_code == 400
+        body = response.json()
+        assert body['code'] == 'INVALID_INPUT'
+        assert body['detail'].startswith(
+            'Path parameter task_id: Input should be a valid UUID, ',
+        )
 
     async def test_error_category_filters_every_task_surface(
         self, api: AsyncClient, session: AsyncSession
@@ -708,15 +710,17 @@ class TestTaskActionMapping:
         assert response.status_code == 404
         assert 'detail' in response.json()
 
-    async def test_an_id_that_is_not_a_uuid_is_unprocessable(
+    async def test_an_id_that_is_not_a_uuid_is_invalid_input(
         self, api: AsyncClient,
     ) -> None:
         response = await api.post('/api/tasks/not-a-uuid/cancel', headers=ACT)
 
-        assert response.status_code == 422
-        [error] = response.json()['detail']
-        assert error['type'] == 'uuid_parsing'
-        assert error['loc'] == ['path', 'task_id']
+        assert response.status_code == 400
+        body = response.json()
+        assert body['code'] == 'INVALID_INPUT'
+        assert body['detail'].startswith(
+            'Path parameter task_id: Input should be a valid UUID, ',
+        )
 
     async def test_uncancellable_task_is_a_conflict(
         self, api: AsyncClient, session: AsyncSession

@@ -30,6 +30,7 @@ from horsies.core.utils.url import to_psycopg_url
 from horsies.web.auth import MonitoringAuthPolicy, act_guard, view_guard
 from horsies.web.events import EventBroadcaster
 from horsies.web.routes import actions, events, tasks, workers, workflows
+from horsies.web.routes._common import INVALID_INPUT, InvalidInput
 from horsies.web.read_cache import TaskReadCaches
 from horsies.web.schema import (
     SCHEMA_INCOMPATIBLE,
@@ -198,6 +199,25 @@ def create_monitoring_app(
             status_code=status.HTTP_409_CONFLICT,
             content={'code': code, 'detail': detail},
         )
+
+    @monitoring_app.exception_handler(InvalidInput)
+    async def _on_invalid_input(request: Request, exc: Exception) -> JSONResponse:
+        """Render request text refused before any read: 400 ``INVALID_INPUT``."""
+        match exc:
+            case InvalidInput(refused=refused):
+                logger.info(
+                    f'monitoring request refused path={request.url.path} '
+                    f'http=400 result={INVALID_INPUT}'
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={'code': INVALID_INPUT, 'detail': refused.detail},
+                )
+            case _:
+                raise AssertionError(
+                    f'invalid input handler got {type(exc).__name__}; it is '
+                    'registered for InvalidInput only',
+                )
 
     @monitoring_app.get('/api/meta', dependencies=[view_only])
     async def read_meta(request: Request) -> MetaResponse:

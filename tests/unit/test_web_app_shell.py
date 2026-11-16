@@ -384,10 +384,10 @@ class TestRequestValidation:
         ],
         ids=['detail', 'cancel'],
     )
-    async def test_a_task_id_that_is_not_a_uuid_is_unprocessable(
+    async def test_a_task_id_that_is_not_a_uuid_is_invalid_input(
         self, method: str, path: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The route does not run: with an unreachable database it would
+        """Nothing is read: with an unreachable database a read would
         answer 503. The schema probe reports a match, so the action gate
         lets the cancel through to its path check."""
 
@@ -408,10 +408,13 @@ class TestRequestValidation:
         async with client_for(app) as client:
             response = await client.request(method, path, headers=ACT_HEADERS)
 
-        assert response.status_code == 422
-        [error] = response.json()['detail']
-        assert error['type'] == 'uuid_parsing'
-        assert error['loc'] == ['path', 'task_id']
+        assert response.status_code == 400
+        body = response.json()
+        assert set(body) == {'code', 'detail'}
+        assert body['code'] == 'INVALID_INPUT'
+        assert body['detail'].startswith(
+            'Path parameter task_id: Input should be a valid UUID, ',
+        )
 
     async def test_task_page_reach_past_five_hundred_is_rejected(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
