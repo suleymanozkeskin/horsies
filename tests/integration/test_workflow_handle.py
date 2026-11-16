@@ -998,6 +998,52 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
 
+    async def test_cancel_sets_completed_at_on_every_cancelled_workflow(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The cancelled root and its cancelled child both get completed_at."""
+        task_a = make_simple_task(app, 'cancel_completed_at_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_completed_at', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+        child_workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
+                VALUES
+                    (:child_id, 'cancel_completed_at_child', 'PAUSED', 'fail', 1,
+                     :parent_id, 0, :parent_id, NOW(), NOW(), NOW(), NOW())
+            """),
+            {'child_id': child_workflow_id, 'parent_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT id, status, completed_at FROM horsies_workflows
+                    WHERE id IN (:root_id, :child_id)
+                """),
+                {'root_id': handle.workflow_id, 'child_id': child_workflow_id},
+            )
+        ).fetchall()
+        assert len(rows) == 2
+        for row in rows:
+            assert row.status == 'CANCELLED', row
+            assert row.completed_at is not None, row
+
     async def test_cancel_skips_pending(
         self,
         clean_workflow_tables: None,
@@ -1109,6 +1155,13 @@ class TestWorkflowHandleCancel:
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
+        cancelled_at = (
+            await session.execute(
+                text('SELECT completed_at FROM horsies_workflows WHERE id = :wf_id'),
+                {'wf_id': handle.workflow_id},
+            )
+        ).scalar_one()
+        assert cancelled_at is not None
 
         # The still-running task finishes after the cancel.
         await _complete_task(
@@ -1128,7 +1181,7 @@ class TestWorkflowHandleCancel:
         assert row[0] == 'CANCELLED', (
             f'Late completion must not resurrect a cancelled workflow, got {row[0]}'
         )
-        assert row[1] is None, 'completed_at must stay NULL for CANCELLED'
+        assert row[1] == cancelled_at, 'the late completion keeps the cancel time'
         assert row[2] is None, 'workflow result must not be written after cancel'
 
     async def test_cancel_does_not_deadlock_against_completion_lock_order(
