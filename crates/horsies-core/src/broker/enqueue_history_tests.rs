@@ -641,7 +641,7 @@ fn every_core_task_insert_names_the_baseline_columns() {
         }
     }
 
-    assert_eq!(insert_count, 42, "classify every core task insert");
+    assert_eq!(insert_count, 43, "classify every core task insert");
 }
 
 #[test]

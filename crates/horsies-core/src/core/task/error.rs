@@ -120,12 +120,15 @@ pub enum OutcomeCode {
     UpstreamSkipped,
     SubworkflowFailed,
     WorkflowSuccessCaseNotMet,
+    /// A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
+    /// SKIPPED.
+    WorkflowOutputSkipped,
     WorkflowStopped,
     SendSuppressed,
 }
 
 impl OutcomeCode {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::TaskCancelled,
         Self::TaskExpired,
         Self::TaskTimeout,
@@ -136,6 +139,7 @@ impl OutcomeCode {
         Self::UpstreamSkipped,
         Self::SubworkflowFailed,
         Self::WorkflowSuccessCaseNotMet,
+        Self::WorkflowOutputSkipped,
         Self::WorkflowStopped,
         Self::SendSuppressed,
     ];
@@ -585,6 +589,7 @@ mod tests {
             OutcomeCode::UpstreamSkipped,
             OutcomeCode::SubworkflowFailed,
             OutcomeCode::WorkflowSuccessCaseNotMet,
+            OutcomeCode::WorkflowOutputSkipped,
             OutcomeCode::WorkflowStopped,
             OutcomeCode::SendSuppressed,
         ];
@@ -647,22 +652,18 @@ mod tests {
             sub_workflow_id: uuid::Uuid::nil(),
             sub_workflow_summary: SubWorkflowSummary {
                 status: "FAILED".to_owned(),
-                is_success: false,
-                success_case: None,
                 output: None,
                 total_tasks: 4,
                 completed_tasks: 2,
                 failed_tasks: 1,
                 skipped_tasks: 1,
                 error_summary: Some("task 'transform' exploded".to_owned()),
-                child_workflow_id: uuid::Uuid::nil(),
             },
         };
 
         let json = serde_json::to_string(&err).unwrap();
         let back: SubWorkflowError = serde_json::from_str(&json).unwrap();
         assert_eq!(back.sub_workflow_id, uuid::Uuid::nil());
-        assert!(!back.sub_workflow_summary.is_success);
     }
 
     #[test]
@@ -677,15 +678,12 @@ mod tests {
             sub_workflow_id: uuid::Uuid::nil(),
             sub_workflow_summary: SubWorkflowSummary {
                 status: "FAILED".to_owned(),
-                is_success: false,
-                success_case: None,
                 output: None,
                 total_tasks: 1,
                 completed_tasks: 0,
                 failed_tasks: 1,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: uuid::Uuid::nil(),
             },
         };
 
@@ -702,15 +700,12 @@ mod tests {
     fn failed_summary() -> SubWorkflowSummary {
         SubWorkflowSummary {
             status: "FAILED".to_owned(),
-            is_success: false,
-            success_case: None,
             output: None,
             total_tasks: 3,
             completed_tasks: 1,
             failed_tasks: 1,
             skipped_tasks: 1,
             error_summary: Some("child task 'b' failed".to_owned()),
-            child_workflow_id: uuid::Uuid::nil(),
         }
     }
 
@@ -720,11 +715,11 @@ mod tests {
         // with code SUBWORKFLOW_FAILED carrying the id/summary in `data`.
         let summary = failed_summary();
         let err = TaskError {
-            error_code: Some(TaskErrorCode::User("SUBWORKFLOW_FAILED".to_owned())),
+            error_code: Some(TaskErrorCode::from(OutcomeCode::SubworkflowFailed)),
             message: Some("child task 'b' failed".to_owned()),
             cause: None,
             data: Some(serde_json::json!({
-                "sub_workflow_id": summary.child_workflow_id,
+                "sub_workflow_id": uuid::Uuid::nil(),
                 "sub_workflow_summary": summary,
             })),
         };
@@ -733,18 +728,17 @@ mod tests {
         assert_eq!(details.sub_workflow_id, uuid::Uuid::nil());
         assert_eq!(details.sub_workflow_summary.status, "FAILED");
         assert_eq!(details.sub_workflow_summary.failed_tasks, 1);
-        assert!(!details.sub_workflow_summary.is_success);
     }
 
     #[test]
     fn sub_workflow_details_survives_json_round_trip() {
         let summary = failed_summary();
         let err = TaskError {
-            error_code: Some(TaskErrorCode::User("SUBWORKFLOW_FAILED".to_owned())),
+            error_code: Some(TaskErrorCode::from(OutcomeCode::SubworkflowFailed)),
             message: Some("child failed".to_owned()),
             cause: None,
             data: Some(serde_json::json!({
-                "sub_workflow_id": summary.child_workflow_id,
+                "sub_workflow_id": uuid::Uuid::nil(),
                 "sub_workflow_summary": summary,
             })),
         };

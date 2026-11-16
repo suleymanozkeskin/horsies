@@ -209,10 +209,11 @@ SELECT depth, root_workflow_id
 FROM horsies_workflows
 WHERE id = $1";
 
-/// Link a sub-workflow task to its child workflow.
+/// Link a sub-workflow task to its child workflow. A linked parent node is RUNNING while its child runs
+/// (Python `LINK_SUB_WORKFLOW_SQL`, `core/workflows/sql.py:271-275`).
 const LINK_SUBWORKFLOW_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1, status = 'ENQUEUED', started_at = NOW()
+SET sub_workflow_id = $1, status = 'RUNNING', started_at = NOW()
 WHERE workflow_id = $2 AND task_index = $3
   AND status = 'READY'";
 
@@ -1656,13 +1657,12 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
-                sub_workflow_id, created_at
-            ) VALUES (
-                $1, $2, 0, 'child', '__sub_workflow:p7_child', 'null', 'default', 100, '{}',
-                FALSE, 'all', 'ENQUEUED', TRUE, $3, NOW()
-            )",
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 priority, dependencies, allow_failed_deps, join_type, status,
+                 is_subworkflow, sub_workflow_id, created_at
+             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       $3, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(parent_id)
@@ -1742,13 +1742,12 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
-                sub_workflow_id, created_at
-            ) VALUES (
-                $1, $2, 0, 'child', '__sub_workflow:p7_poison_child', 'null', 'default', 100,
-                '{}', FALSE, 'all', 'ENQUEUED', TRUE, $3, NOW()
-            )",
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 priority, dependencies, allow_failed_deps, join_type, status,
+                 is_subworkflow, sub_workflow_id, created_at
+             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       $3, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(parent_id)
@@ -1838,7 +1837,7 @@ mod p7_lifecycle_tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(facts, ("EXPIRED".to_owned(), "ENQUEUED".to_owned()));
+        assert_eq!(facts, ("EXPIRED".to_owned(), "RUNNING".to_owned()));
 
         sqlx::query("DROP TRIGGER p7_poison_parent_progression ON horsies_workflow_tasks")
             .execute(&pool)
@@ -1865,13 +1864,12 @@ mod p7_lifecycle_tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
-                sub_workflow_id, created_at
-            ) VALUES (
-                $1, $2, 0, 'child', '__sub_workflow:p7_child_lock', 'null', 'default', 100,
-                '{}', FALSE, 'all', 'ENQUEUED', TRUE, $3, NOW()
-            )",
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 priority, dependencies, allow_failed_deps, join_type, status,
+                 is_subworkflow, sub_workflow_id, created_at
+             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                       $3, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(parent_id)

@@ -356,7 +356,6 @@ mod tests {
             let policy = SuccessPolicy {
                 cases: vec![SuccessCase {
                     required_indices: vec![a.index, b.index],
-                    name: None,
                 }],
                 optional_indices: Some(vec![2]),
             };
@@ -484,7 +483,6 @@ mod tests {
         let policy = SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0],
-                name: None,
             }],
             optional_indices: None,
         };

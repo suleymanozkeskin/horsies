@@ -208,7 +208,9 @@ WHERE wt.status = 'READY'
   AND wt.workflow_id = ANY($1::uuid[])
 LIMIT CAST($2 AS bigint)";
 
-/// Case 1.6: Non-terminal sub-workflow wf_tasks where child workflow is terminal.
+/// Case 1.6: a RUNNING sub-workflow node whose child workflow is terminal, in a RUNNING parent. Every link
+/// path writes the parent node RUNNING, so Python's selection covers every linked node
+/// (`GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL`, `core/workflows/recovery.py:266-276`).
 const GLOBAL_CASE1_6_STALE_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.sub_workflow_id,
        cw.status as child_status, cw.result as child_result
@@ -217,7 +219,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
+  AND wt.status = 'RUNNING'
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
 LIMIT CAST($1 AS bigint)";
@@ -230,7 +232,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
+  AND wt.status = 'RUNNING'
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
   AND cw.id = ANY($1::uuid[])
@@ -498,10 +500,11 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND w.id = wt.workflow_id
   AND w.status = 'RUNNING'";
 
-/// Link workflow_task to a newly started child workflow.
+/// Link workflow_task to a newly started child workflow. A linked parent node is RUNNING while its child
+/// runs (Python `LINK_SUB_WORKFLOW_SQL`, `core/workflows/sql.py:271-275`).
 const LINK_SUBWORKFLOW_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1, status = 'ENQUEUED', started_at = NOW()
+SET sub_workflow_id = $1, status = 'RUNNING', started_at = NOW()
 WHERE workflow_id = $2 AND task_index = $3
   AND status = 'READY'";
 
