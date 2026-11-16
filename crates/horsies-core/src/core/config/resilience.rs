@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// All time values are in milliseconds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerResilienceConfig {
     /// Initial delay before first DB retry (100ms–60s).
     #[serde(default = "default_db_retry_initial_ms")]

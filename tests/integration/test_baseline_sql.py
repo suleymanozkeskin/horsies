@@ -196,3 +196,107 @@ async def test_every_interim_function_runs_on_the_baseline_tables(
     calls = _FUNCTION_CALLS_SQL.read_text(encoding='utf-8')
     async with installed.transaction(force_rollback=True):
         await installed.execute(calls.encode('utf-8'))
+
+
+_LEAF_ROW_SQL: Final = """
+    INSERT INTO horsies_task_history_leaf_catalog (
+        leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor, index_schema_version,
+        created_at, detached_at, dropped_at
+    ) VALUES (%s, 'forever', %s, %s, %s, 1, now(), NULL, NULL)
+"""
+
+_MANIFEST_ROW_SQL: Final = """
+    INSERT INTO horsies_task_lookup_manifest (
+        leaf_name, probe_position, lower_bound_kind, lower_anchor, upper_anchor, published_at
+    ) VALUES (%s, %s, %s, %s, %s, now())
+"""
+
+_UPPER: Final = '2030-01-01 00:00:00+00'
+_LOWER: Final = '2029-12-31 00:00:00+00'
+
+
+@pytest.mark.parametrize(
+    ('kind', 'lower', 'violated'),
+    [
+        ('OPEN', None, None),
+        ('AT', _LOWER, None),
+        ('OPEN', _LOWER, 'horsies_task_history_leaf_catalog_lower_bound_pair'),
+        ('AT', None, 'horsies_task_history_leaf_catalog_lower_bound_pair'),
+        ('ON', None, 'horsies_task_history_leaf_catalog_lower_bound_pair'),
+        ('AT', _UPPER, 'horsies_task_history_leaf_catalog_bounds_ordered'),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_leaf_catalog_lower_bound_is_typed(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    kind: str,
+    lower: str | None,
+    violated: str | None,
+) -> None:
+    async with installed.transaction(force_rollback=True):
+        match violated:
+            case None:
+                await installed.execute(_LEAF_ROW_SQL, ('leaf_case', kind, lower, _UPPER))
+            case constraint:
+                with pytest.raises(psycopg.errors.CheckViolation) as raised:
+                    await installed.execute(_LEAF_ROW_SQL, ('leaf_case', kind, lower, _UPPER))
+                assert raised.value.diag.constraint_name == constraint
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_leaf_catalog_holds_one_open_leaf_per_class_and_upper_anchor(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+) -> None:
+    async with installed.transaction(force_rollback=True):
+        await installed.execute(_LEAF_ROW_SQL, ('leaf_first', 'OPEN', None, _UPPER))
+        with pytest.raises(psycopg.errors.UniqueViolation) as raised:
+            await installed.execute(_LEAF_ROW_SQL, ('leaf_second', 'OPEN', None, _UPPER))
+        assert raised.value.diag.constraint_name == 'horsies_task_history_leaf_catalog_open_interval_unique'
+
+
+@pytest.mark.parametrize(
+    ('kind', 'lower', 'violated'),
+    [
+        ('OPEN', None, None),
+        ('AT', _LOWER, None),
+        ('OPEN', _LOWER, 'horsies_task_lookup_manifest_lower_bound_pair'),
+        ('AT', None, 'horsies_task_lookup_manifest_lower_bound_pair'),
+        ('ON', None, 'horsies_task_lookup_manifest_lower_bound_pair'),
+        ('AT', _UPPER, 'horsies_task_lookup_manifest_bounds_ordered'),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_manifest_lower_bound_is_typed(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    kind: str,
+    lower: str | None,
+    violated: str | None,
+) -> None:
+    async with installed.transaction(force_rollback=True):
+        match violated:
+            case None:
+                await installed.execute(_MANIFEST_ROW_SQL, ('leaf_case', 0, kind, lower, _UPPER))
+            case constraint:
+                with pytest.raises(psycopg.errors.CheckViolation) as raised:
+                    await installed.execute(_MANIFEST_ROW_SQL, ('leaf_case', 0, kind, lower, _UPPER))
+                assert raised.value.diag.constraint_name == constraint
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_forever_leaf_starts_at_minvalue_with_an_open_catalog_bound(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+) -> None:
+    await installed.execute("SET TimeZone = 'UTC'")
+    cursor = await installed.execute(
+        """
+        SELECT pg_get_expr(c.relpartbound, c.oid), l.lower_bound_kind, l.lower_anchor IS NULL
+        FROM pg_class c
+        JOIN horsies_task_history_leaf_catalog l ON l.leaf_name = c.relname
+        WHERE c.relname = 'horsies_task_history_forever_open'
+        """
+    )
+    assert await cursor.fetchone() == (
+        "FOR VALUES FROM (MINVALUE) TO ('9999-01-01 00:00:00+00')",
+        'OPEN',
+        True,
+    )

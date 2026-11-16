@@ -82,7 +82,9 @@
     "horsies/core/baseline/install.py",
     "tests/unit/test_baseline_install.py",
     "tests/integration/test_baseline_install.py",
-    "tests/session_database.py"
+    "tests/session_database.py",
+    "tests/unit/test_history_catalog_derived.py",
+    "tests/integration/test_history_forever_leaf.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

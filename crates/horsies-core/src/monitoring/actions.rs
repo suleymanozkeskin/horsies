@@ -69,7 +69,6 @@ fn succeeded(outcome: &str, was_status: Option<String>, warning: Option<String>)
         body: ActionBody::Success(ActionResponse {
             outcome: outcome.to_owned(),
             was_status,
-            next_attempt_number: None,
             warning,
         }),
     }
@@ -112,6 +111,9 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
             error.current_status.map(|status| status.to_string()),
         ),
         TaskActionErrorCode::DbOperationFailed => detail(503, error.message),
+        // The request was valid, and a repeat gives the same answer until the
+        // stored row changes (Python `horsies/web/routes/actions.py:110-130`).
+        TaskActionErrorCode::StoredDataInvalid => detail(500, error.message),
     }
 }
 
@@ -270,7 +272,6 @@ mod tests {
             serde_json::json!({
                 "outcome": "resumed",
                 "was_status": null,
-                "next_attempt_number": null,
                 "warning": "post_resume_recovery_failed",
             })
         );

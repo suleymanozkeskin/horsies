@@ -421,7 +421,7 @@ pub async fn classify_locked_read_miss_in_tx(
     task_id: uuid::Uuid,
     requested: TerminalizationKind,
     worker_id: &str,
-    claimed_at: Option<DateTime<Utc>>,
+    claimed_at: DateTime<Utc>,
 ) -> Result<TerminalizationOutcome, BrokerError> {
     let operation = "horsies_terminalization_miss";
     let mut equivalent_kinds: Vec<String> = equivalence_class_of(requested)
