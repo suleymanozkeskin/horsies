@@ -398,7 +398,7 @@ Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_id: str  # UUID, stable across retries of the same send
+task_id: UUID  # stable across retries of the same send
 
 def get(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
 async def get_async(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
@@ -416,7 +416,7 @@ async def info_async(*, include_result: bool = False, include_failed_reason: boo
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_id: str, task_name: str, status: TaskStatus
+task_id: UUID, task_name: str, status: TaskStatus
 queue_name: str, priority: int
 retry_count: int, max_retries: int, next_retry_at: datetime | None
 sent_at: datetime | None, enqueued_at: datetime
@@ -426,14 +426,14 @@ worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | 
 error_code: str | None                      # always returned (final TaskError.error_code, NULL if not failed)
 result: TaskResult[Any, TaskError] | None    # opt-in: include_result=True
 failed_reason: str | None                    # opt-in: include_failed_reason=True
-attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty)
+attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty); newest first
 ```
 
 ### `TaskAttemptInfo` fields
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_id: str, attempt: int
+task_id: UUID, attempt: int
 outcome: TaskAttemptOutcome  # COMPLETED, FAILED, WORKER_FAILURE
 will_retry: bool
 started_at: datetime, finished_at: datetime

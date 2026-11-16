@@ -18,13 +18,13 @@ SLOT = datetime(2026, 11, 16, 10, 0, tzinfo=timezone.utc)
 
 def test_the_pinned_vector_of_the_sql_function() -> None:
     """The vector of ``baseline_scheduler_monitoring_cases.sql`` for (daily, 2026-11-16 10:00:00+00)."""
-    assert schedule_slot_task_id('daily', SLOT) == '01a1e3cc-9d00-7a2c-be43-740ce1fde7de'
+    assert schedule_slot_task_id('daily', SLOT) == uuid.UUID('01a1e3cc-9d00-7a2c-be43-740ce1fde7de')
 
 
 def test_the_id_is_a_uuidv7_whose_birth_is_the_slot_millisecond() -> None:
     slot = SLOT + timedelta(microseconds=123_456)
 
-    task_id = uuid.UUID(schedule_slot_task_id('daily', slot))
+    task_id = schedule_slot_task_id('daily', slot)
 
     assert task_id.version == 7
     assert task_id.variant == uuid.RFC_4122

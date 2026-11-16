@@ -2,6 +2,7 @@
 from __future__ import annotations
 import datetime
 from dataclasses import dataclass
+from uuid import UUID
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -395,7 +396,7 @@ class TaskResult(Generic[T, E]):
 class TaskAttemptInfo:
     """Metadata for a single task execution attempt."""
 
-    task_id: str
+    task_id: UUID
     attempt: int
     outcome: TaskAttemptOutcome
     will_retry: bool
@@ -431,9 +432,12 @@ class TaskInfo:
 
     ``execution`` is the stored ``Execution`` of a live task. It is ``None``
     for a task read from the history archive, which does not keep the class.
+
+    ``attempts`` lists the attempts newest first (highest attempt number
+    first), for a live task and for a task read from the history archive.
     """
 
-    task_id: str
+    task_id: UUID
     task_name: str
     status: TaskStatus
     queue_name: str

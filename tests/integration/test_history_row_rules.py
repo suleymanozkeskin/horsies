@@ -82,7 +82,7 @@ def history_row(
     """One history row; `rerun_input` set gives an INLINE disposition."""
     from horsies.core.history.identity.uuid7 import mint_task_id
 
-    task_id = mint_task_id()
+    task_id = str(mint_task_id())
     snapshot = encode_attempt_snapshot(())
     return {
         'task_id': task_id,

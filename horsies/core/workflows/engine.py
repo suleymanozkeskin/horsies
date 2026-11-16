@@ -972,7 +972,7 @@ async def _build_enqueued_task_params(
 
     # Create actual task in tasks table
     return Ok(workflow_task_row_params(
-        task_id=mint_task_id(),
+        task_id=str(mint_task_id()),
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
@@ -1435,7 +1435,7 @@ async def enqueue_subworkflow_task(
             )
             child_task_id: str | None = None
             if is_fast_root and child_task.index is not None:
-                child_task_id = mint_task_id()
+                child_task_id = str(mint_task_id())
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
                 # structurally absent on fast roots).

@@ -11,6 +11,7 @@ semantics (no live expiry, expired-terminal reuse, bounded batches).
 from __future__ import annotations
 
 import re
+from uuid import UUID
 
 import pytest
 
@@ -26,7 +27,7 @@ from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
 pytestmark = [pytest.mark.unit]
 
 
-TASK_ID = '0198c0de-0000-7000-8000-000000000001'
+TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
 KEY_RESERVATION_CLAIM_FUNCTION_DDL = baseline_function('horsies_key_reservation_claim')
 KEY_RESERVATION_TERMINALIZE_FUNCTION_DDL = baseline_function(
     'horsies_key_reservation_terminalize'
@@ -133,21 +134,21 @@ class TestOutcomeDecode:
     def test_applied(self) -> None:
         assert decode_reservation_row(
             outcome='APPLIED',
-            row_task_id=TASK_ID,
+            row_task_id=str(TASK_ID),
             observed_fingerprint_version=None,
         ) == ReservationApplied(task_id=TASK_ID)
 
     def test_replay(self) -> None:
         assert decode_reservation_row(
             outcome='REPLAY',
-            row_task_id=TASK_ID,
+            row_task_id=str(TASK_ID),
             observed_fingerprint_version=1,
         ) == ReservationReplay(task_id=TASK_ID)
 
     def test_conflict_carries_the_observed_version(self) -> None:
         assert decode_reservation_row(
             outcome='CONFLICT',
-            row_task_id=TASK_ID,
+            row_task_id=str(TASK_ID),
             observed_fingerprint_version=1,
         ) == ReservationConflict(task_id=TASK_ID, observed_fingerprint_version=1)
 

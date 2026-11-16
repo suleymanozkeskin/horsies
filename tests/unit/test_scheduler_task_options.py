@@ -358,7 +358,7 @@ def _mock_app(schedule: TaskSchedule) -> MagicMock:
 
 
 def _slot(slot_at: datetime, outcome: SlotOutcome) -> FiredSlot:
-    return FiredSlot(slot_at, schedule_slot_task_id(SCHEDULE_NAME, slot_at), outcome)
+    return FiredSlot(slot_at, str(schedule_slot_task_id(SCHEDULE_NAME, slot_at)), outcome)
 
 
 @pytest.mark.unit

@@ -236,7 +236,7 @@ def _advanced(*slots: datetime) -> Ok[ScheduleAdvanced]:
     return Ok(
         ScheduleAdvanced(
             slots=tuple(
-                FiredSlot(slot, schedule_slot_task_id('s', slot), SlotOutcome.INSERTED)
+                FiredSlot(slot, str(schedule_slot_task_id('s', slot)), SlotOutcome.INSERTED)
                 for slot in slots
             ),
         ),

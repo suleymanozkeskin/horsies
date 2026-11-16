@@ -41,6 +41,7 @@ from horsies.core.history.identity.fingerprint import COMMAND_FINGERPRINT_VERSIO
 from horsies.core.models.tasks import Execution
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.utils.db import uuid_column_value
 
 ENQUEUE_TASK_SQL = text("""
     SELECT outcome, task_id FROM horsies_enqueue_task(
@@ -75,6 +76,10 @@ ENQUEUE_TASK_DRIVER_SQL: Final[str] = ENQUEUE_TASK_SQL.compile(
 ).string
 """``ENQUEUE_TASK_SQL`` as the psycopg dialect sends it (``%(name)s``
 binds): the statement of a sync send on the caller's thread."""
+
+
+_HOLDER_COLUMN: Final = 'horsies_enqueue_task.task_id'
+"""The column of the id that holds a key, as ``uuid_column_value`` names it."""
 
 
 class SendKind(Enum):
@@ -133,7 +138,7 @@ type EnqueueKey = Unkeyed | Keyed
 class EnqueueRow:
     """The checked values of one send, as the row stores them."""
 
-    task_id: str
+    task_id: UUID
     task_name: str
     queue_name: str
     priority: int
@@ -185,7 +190,7 @@ def _key_params(key: EnqueueKey) -> dict[str, Any]:
 def enqueue_task_params(row: EnqueueRow, send_kind: SendKind) -> dict[str, Any]:
     """The parameters of ``ENQUEUE_TASK_SQL``, one entry per bind. Pure."""
     return {
-        'task_id': row.task_id,
+        'task_id': str(row.task_id),
         'task_name': row.task_name,
         'queue_name': row.queue_name,
         'priority': row.priority,
@@ -220,14 +225,14 @@ class SameCommand:
 class KeyReplay:
     """The key is held by ``task_id`` with the same command."""
 
-    task_id: str
+    task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
 class KeyConflict:
     """The key is held by ``owner_task_id`` with another command."""
 
-    owner_task_id: str
+    owner_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,9 +269,11 @@ def read_enqueue_outcome(rows: Sequence[Sequence[Any]]) -> EnqueueOutcome:
         case 'SAME_COMMAND':
             return SameCommand()
         case 'KEY_REPLAY':
-            return KeyReplay(task_id=str(task_id))
+            return KeyReplay(task_id=uuid_column_value(task_id, column=_HOLDER_COLUMN))
         case 'KEY_CONFLICT':
-            return KeyConflict(owner_task_id=str(task_id))
+            return KeyConflict(
+                owner_task_id=uuid_column_value(task_id, column=_HOLDER_COLUMN),
+            )
         case 'PAYLOAD_MISMATCH':
             return PayloadMismatch()
         case 'CONFLICT_UNVERIFIABLE':
@@ -278,10 +285,10 @@ def read_enqueue_outcome(rows: Sequence[Sequence[Any]]) -> EnqueueOutcome:
 def enqueue_result(
     outcome: EnqueueOutcome,
     *,
-    task_id: str,
+    task_id: UUID,
     task_name: str,
 ) -> Result[
-    str,
+    UUID,
     BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict,
 ]:
     """The result of ``enqueue_async`` for ``outcome``. Pure.
