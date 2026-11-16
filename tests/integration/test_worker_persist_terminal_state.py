@@ -26,7 +26,7 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.autocommit_support import use_pooled_runners
@@ -356,13 +356,110 @@ async def test_claim_lost_skips(
     assert status == 'RUNNING'
 
 
+async def _make_claimed(
+    session: AsyncSession, task_id: str, *, claimed_at: datetime,
+) -> None:
+    """Turn a seeded RUNNING row into a CLAIMED row of ``claimed_at``."""
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET status = 'CLAIMED', started_at = NULL, claimed_at = :claimed_at,
+                claim_expires_at = NOW() + INTERVAL '5 minutes',
+                worker_pid = NULL, worker_hostname = NULL,
+                worker_process_name = NULL
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id, 'claimed_at': claimed_at},
+    )
+    await session.commit()
+
+
+async def _claim_columns(
+    session: AsyncSession, task_id: str,
+) -> tuple[str, str | None, datetime | None]:
+    row = (
+        await session.execute(
+            text(
+                'SELECT status, claimed_by_worker_id, claimed_at '
+                'FROM horsies_tasks WHERE id = CAST(:id AS uuid)'
+            ),
+            {'id': task_id},
+        )
+    ).one()
+    return (str(row[0]), row[1], row[2])
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_ownership_unconfirmed_skips(
+async def test_ownership_unconfirmed_releases_the_claim_at_once(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """failed_reason=OWNERSHIP_UNCONFIRMED → Ok(None), task stays RUNNING."""
+    """The start did not confirm and no task code ran: the row of this
+    claim generation goes back to the queue now, not at the end of its
+    lease."""
+    task_id = await _insert_running_task(session)
+    await _make_claimed(session, task_id, claimed_at=CLAIMED_AT)
+    worker = _make_worker(engine)
+
+    result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
+        task_id=task_id,
+        now=NOW,
+        ok=False,
+        result_json_str='',
+        failed_reason='OWNERSHIP_UNCONFIRMED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
+    )
+
+    assert result == Ok(None)
+    session.expire_all()
+    assert await _claim_columns(session, task_id) == ('PENDING', None, None)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_ownership_unconfirmed_leaves_another_generation_claimed(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The release is fenced on the generation of the dispatch: a later
+    claim of the row is not released."""
+    later_claim = CLAIMED_AT + timedelta(minutes=1)
+    task_id = await _insert_running_task(session)
+    await _make_claimed(session, task_id, claimed_at=later_claim)
+    worker = _make_worker(engine)
+
+    result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
+        task_id=task_id,
+        now=NOW,
+        ok=False,
+        result_json_str='',
+        failed_reason='OWNERSHIP_UNCONFIRMED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
+    )
+
+    assert result == Ok(None)
+    session.expire_all()
+    assert await _claim_columns(session, task_id) == (
+        'CLAIMED', TEST_WORKER_ID, later_claim,
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_ownership_unconfirmed_leaves_a_running_row(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """failed_reason=OWNERSHIP_UNCONFIRMED on a RUNNING row (a start that
+    committed before its reply was lost) → Ok(None): the fenced release does
+    not touch it, and stale recovery owns it."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
 
