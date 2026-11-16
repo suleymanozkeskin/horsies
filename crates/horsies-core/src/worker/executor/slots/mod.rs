@@ -38,6 +38,8 @@ mod isolated_verdict_tests;
 #[cfg(test)]
 mod scripted;
 #[cfg(test)]
+mod settle_tests;
+#[cfg(test)]
 mod shared_async_end_tests;
 #[cfg(test)]
 mod shared_async_tests;
