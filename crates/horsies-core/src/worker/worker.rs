@@ -1320,17 +1320,15 @@ mod tests {
     ) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, claimed_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, task_options,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, status, sent_at, claimed_at,
+                created_at, updated_at, claimed_by_worker_id, retry_count, max_retries,
+                task_options, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, execution, enqueued_at,
+                is_workflow_task, claim_expires_at
             ) VALUES (
-                $1, 'finalize_test', $2, 100, '[]', '{}', 'CLAIMED',
-                NOW(), $6, NOW(), NOW(), TRUE,
-                'worker-1', $3, $4, $5,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'finalize_test', $2, 100, 'null', 'CLAIMED', NOW(), $6, NOW(), NOW(),
+                'worker-1', $3, $4, $5, 1, decode(repeat('00', 32), 'hex'), 'standard_30d',
+                FALSE, 'ISOLATED', NOW(), FALSE, NOW() + interval '1 hour'
             )",
         )
         .bind(*task_id)
@@ -1354,17 +1352,14 @@ mod tests {
     ) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, claimed,
-                retry_count, max_retries, task_options, enqueue_sha,
-                command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, status, sent_at, started_at,
+                created_at, updated_at, retry_count, max_retries, task_options,
+                command_fingerprint_version, command_fingerprint, retention_class_key,
+                retain_rerun_input, execution, enqueued_at, is_workflow_task
             ) VALUES (
-                $1, 'finalize_test', $2, 100, '[]', '{}', 'RUNNING',
-                NOW(), NOW(), NOW(), NOW(), FALSE,
-                $3, $4, $5,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'finalize_test', $2, 100, 'null', 'RUNNING', NOW(), NOW(), NOW(), NOW(),
+                $3, $4, $5, 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE,
+                'ISOLATED', NOW(), FALSE
             )",
         )
         .bind(*task_id)
@@ -1389,8 +1384,7 @@ mod tests {
         ClaimedTaskRow {
             id: *task_id,
             task_name: "finalize_test".to_owned(),
-            args: Some("[]".to_owned()),
-            kwargs: Some("{}".to_owned()),
+            input: "null".to_owned(),
             queue_name: queue_name.to_owned(),
             is_workflow_task: false,
             task_options,
@@ -1438,13 +1432,12 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, created_at
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'finalize_test', '[]', '{}',
-                'default', 100, '{}', FALSE, 'all',
-                'ENQUEUED', FALSE, $3, NOW()
+                $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
+                'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
         .bind(workflow_task_id)
@@ -1983,17 +1976,14 @@ mod tests {
     async fn insert_running_task_owned_by(pool: &PgPool, task_id: &Uuid, owner: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
-                command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, status, sent_at, started_at,
+                created_at, updated_at, claimed_by_worker_id, retry_count, max_retries,
+                command_fingerprint_version, command_fingerprint, retention_class_key,
+                retain_rerun_input, execution, enqueued_at, is_workflow_task
             ) VALUES (
-                $1, 'finalize_test', 'default', 100, '[]', '{}', 'RUNNING',
-                NOW(), NOW(), NOW(), NOW(), FALSE,
-                $2, 0, 3,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'finalize_test', 'default', 100, 'null', 'RUNNING', NOW(), NOW(), NOW(),
+                NOW(), $2, 0, 3, 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE,
+                'ISOLATED', NOW(), FALSE
             )",
         )
         .bind(*task_id)
@@ -3129,18 +3119,14 @@ mod tests {
             let id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, args, kwargs, status,
-                    sent_at, enqueued_at, claimed_at, created_at, updated_at, claimed,
-                    claimed_by_worker_id, claim_expires_at, retry_count, max_retries,
-                    is_workflow_task, enqueue_sha, command_fingerprint_version,
-                    command_fingerprint, retention_class_key, retain_rerun_input,
-                    prepared_rerun_input_disposition
+                    id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+                    claimed_at, created_at, updated_at, claimed_by_worker_id, claim_expires_at,
+                    retry_count, max_retries, is_workflow_task, command_fingerprint_version,
+                    command_fingerprint, retention_class_key, retain_rerun_input, execution
                 ) VALUES (
-                    $1, 'block_a_while', 'c17q', 100, '[]', '{}', 'CLAIMED',
-                    NOW(), NOW(), NOW(), NOW(), NOW(), TRUE,
-                    $2, NOW() + INTERVAL '60 seconds', 0, 3,
-                    FALSE, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                    1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                    $1, 'block_a_while', 'c17q', 100, 'null', 'CLAIMED', NOW(), NOW(), NOW(),
+                    NOW(), NOW(), $2, NOW() + INTERVAL '60 seconds', 0, 3, FALSE, 1,
+                    decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'ISOLATED'
                 )",
             )
             .bind(id)
