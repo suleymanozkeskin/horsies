@@ -31,6 +31,8 @@ export default defineConfig({
 				ThemeSelect: './src/components/ThemeSelect.astro',
 			},
 			customCss: ['./src/styles/custom.css'],
+			// Labels Rust page titles and keeps previous/next links within one language.
+			routeMiddleware: './src/routeData.ts',
 			expressiveCode: {
 				themes: [darkThemeS],
 				styleOverrides: {
@@ -186,6 +188,116 @@ export default defineConfig({
 					label: 'Changelog',
 					items: [
 						{ label: 'Changelog', slug: 'changelog' },
+					],
+				},
+				{
+					// The Rust crates. Every slug is under rust/.
+					label: 'Rust',
+					collapsed: true,
+					items: [
+						{ label: 'Overview', slug: 'rust' },
+						{
+							label: 'Quick Start',
+							items: [
+								{ label: 'Getting Started', slug: 'rust/quick-start/getting-started' },
+								{ label: 'Configuring Horsies', slug: 'rust/quick-start/01-configuring-horsies' },
+								{ label: 'Producing Tasks', slug: 'rust/quick-start/02-producing-tasks' },
+								{ label: 'Defining Workflows', slug: 'rust/quick-start/03-defining-workflows' },
+								{ label: 'Scheduling', slug: 'rust/quick-start/04-scheduling' },
+								{ label: 'Workflow Patterns', slug: 'rust/quick-start/05-workflow-patterns' },
+							],
+						},
+						{
+							label: 'Q&A',
+							items: [
+								{ label: 'Questions & Answers', slug: 'rust/questions-and-answers' },
+							],
+						},
+						{
+							label: 'Concepts',
+							items: [
+								{ label: 'Architecture', slug: 'rust/concepts/architecture' },
+							],
+						},
+						{
+							label: 'Tasks',
+							items: [
+								{ label: 'Task Lifecycle', slug: 'rust/concepts/task-lifecycle' },
+								{ label: 'Result Handling', slug: 'rust/concepts/result-handling' },
+								{ label: 'Defining Tasks', slug: 'rust/tasks/defining-tasks' },
+								{ label: 'Sending Tasks', slug: 'rust/tasks/sending-tasks' },
+								{ label: 'Error Handling', slug: 'rust/tasks/error-handling' },
+								{ label: 'Errors Reference', slug: 'rust/tasks/errors' },
+								{ label: 'Retrieving Results', slug: 'rust/tasks/retrieving-results' },
+								{ label: 'Retry Policy', slug: 'rust/tasks/retry-policy' },
+							],
+						},
+						{
+							label: 'Workflows',
+							items: [
+								{ label: 'Workflow Semantics', slug: 'rust/concepts/workflows/workflow-semantics' },
+								{ label: 'Workflow API', slug: 'rust/concepts/workflows/workflow-api' },
+								{ label: 'Subworkflows', slug: 'rust/concepts/workflows/subworkflows' },
+							],
+						},
+						{
+							label: 'Configuration',
+							items: [
+								{ label: 'Queue Modes', slug: 'rust/concepts/queue-modes' },
+								{ label: 'App Config', slug: 'rust/configuration/app-config' },
+								{ label: 'Broker Config', slug: 'rust/configuration/broker-config' },
+								{ label: 'Recovery Config', slug: 'rust/configuration/recovery-config' },
+								{ label: 'Retention Config', slug: 'rust/configuration/retention-config' },
+							],
+						},
+						{
+							label: 'Workers',
+							items: [
+								{ label: 'Worker Architecture', slug: 'rust/workers/worker-architecture' },
+								{ label: 'Concurrency', slug: 'rust/workers/concurrency' },
+								{ label: 'Heartbeats & Recovery', slug: 'rust/workers/heartbeats-recovery' },
+							],
+						},
+						{
+							label: 'Monitoring',
+							items: [
+								{ label: 'Web UI Overview', slug: 'rust/monitoring/web-ui-overview' },
+								{ label: 'Deployment & Authentication', slug: 'rust/monitoring/web-ui-deployment' },
+								{ label: 'Action Semantics', slug: 'rust/monitoring/action-semantics' },
+								{ label: 'Syce Overview', slug: 'rust/monitoring/syce-overview' },
+								{ label: 'Broker Methods', slug: 'rust/monitoring/broker-methods' },
+							],
+						},
+						{
+							label: 'Scheduling',
+							items: [
+								{ label: 'Scheduler Overview', slug: 'rust/scheduling/scheduler-overview' },
+								{ label: 'Schedule Patterns', slug: 'rust/scheduling/schedule-patterns' },
+								{ label: 'Schedule Config', slug: 'rust/scheduling/schedule-config' },
+							],
+						},
+						{
+							label: 'CLI',
+							items: [
+								{ label: 'CLI Reference', slug: 'rust/cli' },
+							],
+						},
+						{
+							label: 'Operations',
+							items: [
+								{ label: 'Autovacuum Tuning', slug: 'rust/operations/autovacuum-tuning' },
+								{ label: 'Task-history Cutover', slug: 'rust/operations/cutover-runbook' },
+							],
+						},
+						{
+							label: 'Internals',
+							items: [
+								{ label: 'Database Schema', slug: 'rust/internals/database-schema' },
+								{ label: 'Serialization', slug: 'rust/internals/serialization' },
+								{ label: 'Performance', slug: 'rust/internals/performance' },
+								{ label: 'Operational Indexes', slug: 'rust/internals/operational-indexes' },
+							],
+						},
 					],
 				},
 				],
