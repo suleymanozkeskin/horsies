@@ -18,11 +18,11 @@ use uuid::Uuid;
 use horsies_core::db::{
     open_connection, parse_connection_url, ChannelName, CheckoutClass, CheckoutFailure,
     ConnectFailure, ConnectPlan, ConnectionAge, ConnectionEnvironment, CorePool, DatabasePassword,
-    EnvironmentPassword, HomeDirectory, IdlePing, Listener, ListenerClose, NotSentCause,
-    ParameterType, PayloadEvent, PayloadFilter, PoolPlan, PoolRole, PoolSizing, PooledConnection,
-    QueueCapacity, RefusalCause, Reserve, StatementBound, StatementFailure, StatementProtocol,
-    Transience, TypedStatement, UnknownOutcomeCause, WakeEvent, DEFAULT_SOCKET_SETTINGS,
-    WORKER_RESERVED_CONNECTIONS,
+    EnvironmentPassword, HomeDirectory, IdlePing, IsolationLevel, Listener, ListenerClose,
+    NotSentCause, ParameterType, PayloadEvent, PayloadFilter, PoolPlan, PoolRole, PoolSizing,
+    PooledConnection, QueueCapacity, RefusalCause, Reserve, RollbackOutcome, StatementBound,
+    StatementFailure, StatementProtocol, Transience, TypedStatement, UnknownOutcomeCause,
+    WakeEvent, DEFAULT_SOCKET_SETTINGS, WORKER_RESERVED_CONNECTIONS,
 };
 
 const PID: TypedStatement =
@@ -72,6 +72,24 @@ const ADD: TypedStatement = TypedStatement::new(
     "stmt_test_add",
     "SELECT $1::int8 + $2::int8 AS total",
     &[ParameterType::Int8, ParameterType::Int8],
+);
+
+const COUNT_ITEMS: TypedStatement = TypedStatement::new(
+    "stmt_test_count_items",
+    "SELECT count(*) AS total FROM stmt_items WHERE id = $1",
+    &[ParameterType::Int4],
+);
+
+const INSERT_DEFERRED: TypedStatement = TypedStatement::new(
+    "stmt_test_insert_deferred",
+    "INSERT INTO stmt_deferred (id) VALUES ($1)",
+    &[ParameterType::Int4],
+);
+
+const INSERT_SLOW_COMMIT: TypedStatement = TypedStatement::new(
+    "stmt_test_insert_slow_commit",
+    "INSERT INTO stmt_slow_commit (id) VALUES ($1)",
+    &[ParameterType::Int4],
 );
 
 const EVENT_BOUND: Duration = Duration::from_secs(15);
@@ -161,7 +179,14 @@ impl TestDatabase {
             .batch_execute(
                 "CREATE TABLE stmt_items (id int4 PRIMARY KEY, label text NOT NULL); \
                  CREATE FUNCTION stmt_raise(code text) RETURNS int4 LANGUAGE plpgsql AS \
-                 $$ BEGIN RAISE EXCEPTION 'raised %', code USING ERRCODE = code; END $$;",
+                 $$ BEGIN RAISE EXCEPTION 'raised %', code USING ERRCODE = code; END $$; \
+                 CREATE TABLE stmt_deferred (id int4 PRIMARY KEY DEFERRABLE INITIALLY DEFERRED); \
+                 CREATE TABLE stmt_slow_commit (id int4 PRIMARY KEY); \
+                 CREATE FUNCTION stmt_sleep_at_commit() RETURNS trigger LANGUAGE plpgsql AS \
+                 $$ BEGIN PERFORM pg_sleep(10); RETURN NULL; END $$; \
+                 CREATE CONSTRAINT TRIGGER stmt_slow_commit_trigger AFTER INSERT ON \
+                 stmt_slow_commit DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION \
+                 stmt_sleep_at_commit();",
             )
             .await
             .expect("create test schema");
@@ -237,6 +262,34 @@ async fn notify(pool: &CorePool, channel: &str, payload: &str) {
         )
         .await
         .expect("notify");
+}
+
+async fn item_count(pool: &CorePool, id: i32) -> i64 {
+    let rows = pool
+        .query(
+            CheckoutClass::Reserved,
+            &COUNT_ITEMS.bind().value(&id).finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("count query");
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {}", rows.len());
+    };
+    row.try_get("total").expect("total column")
+}
+
+async fn insert_item(
+    transaction: &mut horsies_core::db::Transaction<'_>,
+    id: i32,
+) -> Result<u64, StatementFailure> {
+    let label = format!("item {id}");
+    transaction
+        .execute(
+            &INSERT_ITEM.bind().value(&id).value(&label).finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
 }
 
 async fn backend_pid(connection: &mut PooledConnection) -> i32 {
@@ -674,6 +727,236 @@ async fn a_wake_subscription_follows_its_payload_filter() {
     database.remove().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_committed_transaction_persists_and_a_rolled_back_one_does_not() {
+    let database = TestDatabase::create().await;
+    let pool = database.pool(
+        PoolRole::Main,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    );
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("checkout");
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .expect("begin");
+    assert_eq!(insert_item(&mut transaction, 10).await.expect("insert"), 1);
+    transaction.commit().await.expect("commit");
+    let mut transaction = connection
+        .begin(IsolationLevel::Serializable)
+        .await
+        .expect("begin");
+    assert_eq!(insert_item(&mut transaction, 11).await.expect("insert"), 1);
+    assert!(matches!(
+        transaction.rollback().await,
+        RollbackOutcome::RolledBack
+    ));
+    drop(connection);
+    assert_eq!(item_count(&pool, 10).await, 1);
+    assert_eq!(item_count(&pool, 11).await, 0);
+    pool.close();
+    database.remove().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_statement_aborts_the_transaction_and_commit_is_not_sent() {
+    let database = TestDatabase::create().await;
+    let pool = database.pool(
+        PoolRole::Main,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::UnnamedOnly,
+    );
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("checkout");
+    let pid = backend_pid(&mut connection).await;
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .expect("begin");
+    assert_eq!(insert_item(&mut transaction, 20).await.expect("insert"), 1);
+    match insert_item(&mut transaction, 20).await {
+        Err(StatementFailure::StatementRefused {
+            cause: RefusalCause::Server(error),
+            ..
+        }) => assert_eq!(error.code(), &SqlState::UNIQUE_VIOLATION),
+        other => panic!("expected a unique violation, got {other:?}"),
+    }
+    match insert_item(&mut transaction, 21).await {
+        Err(StatementFailure::NotSent {
+            cause: NotSentCause::TransactionAborted { failed_statement },
+            ..
+        }) => assert_eq!(failed_statement, INSERT_ITEM.name()),
+        other => panic!("expected TransactionAborted, got {other:?}"),
+    }
+    match transaction.commit().await {
+        Err(StatementFailure::NotSent {
+            cause: NotSentCause::TransactionAborted { failed_statement },
+            statement,
+        }) => {
+            assert_eq!(failed_statement, INSERT_ITEM.name());
+            assert_eq!(statement, "commit");
+        }
+        other => panic!("expected TransactionAborted at commit, got {other:?}"),
+    }
+    assert_eq!(backend_pid(&mut connection).await, pid);
+    drop(connection);
+    assert_eq!(item_count(&pool, 20).await, 0);
+    pool.close();
+    database.remove().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deferred_constraint_refuses_the_commit() {
+    let database = TestDatabase::create().await;
+    let pool = database.pool(
+        PoolRole::Main,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    );
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("checkout");
+    let pid = backend_pid(&mut connection).await;
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .expect("begin");
+    let id: i32 = 30;
+    for _copy in 0..2 {
+        let _inserted = transaction
+            .execute(
+                &INSERT_DEFERRED.bind().value(&id).finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("a deferred constraint does not check the insert");
+    }
+    match transaction.commit().await {
+        Err(failure @ StatementFailure::StatementRefused { .. }) => {
+            assert_eq!(failure.transience(), Transience::Permanent);
+            match failure {
+                StatementFailure::StatementRefused {
+                    cause: RefusalCause::Server(error),
+                    statement,
+                } => {
+                    assert_eq!(error.code(), &SqlState::UNIQUE_VIOLATION);
+                    assert_eq!(statement, "commit");
+                }
+                other => panic!("expected a server refusal, got {other}"),
+            }
+        }
+        other => panic!("expected StatementRefused at commit, got {other:?}"),
+    }
+    assert_eq!(backend_pid(&mut connection).await, pid);
+    drop(connection);
+    pool.close();
+    database.remove().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_commit_reply_leaves_the_outcome_unknown() {
+    let database = TestDatabase::create().await;
+    let pool = database.pool(
+        PoolRole::Main,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    );
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("checkout");
+    let pid = backend_pid(&mut connection).await;
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .expect("begin");
+    let id: i32 = 1;
+    let _inserted = transaction
+        .execute(
+            &INSERT_SLOW_COMMIT.bind().value(&id).finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("insert");
+    let killer = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        database.terminate(pid).await;
+    };
+    let (outcome, ()) = tokio::join!(transaction.commit(), killer);
+    match outcome {
+        Err(StatementFailure::OutcomeUnknown { statement, .. }) => assert_eq!(statement, "commit"),
+        other => panic!("expected OutcomeUnknown at commit, got {other:?}"),
+    }
+    drop(connection);
+    pool.close();
+    database.remove().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_open_transaction_discards_its_connection() {
+    let database = TestDatabase::create().await;
+    let pool = database.pool(
+        PoolRole::Main,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    );
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("checkout");
+    {
+        let mut transaction = connection
+            .begin(IsolationLevel::ServerDefault)
+            .await
+            .expect("begin");
+        assert_eq!(insert_item(&mut transaction, 40).await.expect("insert"), 1);
+    }
+    match connection
+        .query(&PID.bind().finish(), StatementBound::ConnectionTimeouts)
+        .await
+    {
+        Err(StatementFailure::NotSent {
+            cause: NotSentCause::ConnectionDiscarded,
+            ..
+        }) => {}
+        other => panic!("expected ConnectionDiscarded, got {other:?}"),
+    }
+    drop(connection);
+    assert_eq!(item_count(&pool, 40).await, 0);
+    pool.close();
+    database.remove().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_pool_runs_the_statement_pooling_check() {
+    let database = TestDatabase::create().await;
+    let pool = database.pool(
+        PoolRole::Session,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    );
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("a direct URL keeps transactions");
+    let _pid = backend_pid(&mut connection).await;
+    drop(connection);
+    pool.close();
+    database.remove().await;
+}
+
 #[tokio::test]
 #[ignore = "needs PgBouncer in statement mode; set HORSIES_STMT_PGBOUNCER_STATEMENT_URL"]
 async fn a_statement_pooled_url_is_refused_at_every_first_checkout() {
@@ -703,6 +986,21 @@ async fn a_statement_pooled_url_is_refused_at_every_first_checkout() {
             Ok(_) => panic!("attempt {attempt}: a statement-pooled URL passed the check"),
         }
     }
+    let session_pool = CorePool::new(
+        PoolPlan {
+            role: PoolRole::Session,
+            sizing: PoolSizing::new(1, Reserve::NoReserve).expect("valid sizing"),
+            checkout_wait: Duration::from_secs(5),
+            idle_ping: IdlePing::Off,
+            max_age: ConnectionAge::Unlimited,
+            protocol: StatementProtocol::PreparedPerConnection,
+        },
+        load_plan(&url),
+    );
+    assert!(matches!(
+        session_pool.checkout(CheckoutClass::Reserved).await,
+        Err(CheckoutFailure::StatementPooledUrl { .. })
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
