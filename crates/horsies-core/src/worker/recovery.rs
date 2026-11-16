@@ -1101,6 +1101,7 @@ async fn run_reaper_pass(
         runtime_pool,
         registry,
         config.crashed_worker_recovery_grace_ms,
+        config.workflow_recovery_failure_limit,
         payload,
         retention,
     )
