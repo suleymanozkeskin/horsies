@@ -330,6 +330,16 @@ hb AS (
 )
 SELECT id, started_at, retry_count, max_retries, good_until FROM upd";
 
+/// What the pre-start expiry of a claimed task found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrestartExpiry {
+    /// The task is EXPIRED: this call moved it, or an earlier call did.
+    Expired,
+    /// The deadline has not passed, or the row is not this worker's claim;
+    /// nothing is written.
+    NotExpired,
+}
+
 // Terminal transitions (COMPLETED/FAILED/CANCELLED/EXPIRED) run through the
 // terminalization operations — broker/terminalization.rs and the functions
 // installed by migration 0032.
@@ -1828,22 +1838,28 @@ impl PostgresBroker {
     /// Runs through `horsies_expire_owned_claim`, which fences on worker
     /// ownership but deliberately not on the claim generation: once the
     /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. Returns the persisted `TaskResult::Err`
-    /// JSON when the transition was applied. Returns `None` if the deadline
-    /// guard refused or another actor already moved the task (the outcome is
-    /// logged with its evidence at the adapter boundary).
+    /// generation holds the row. `Applied` and `AlreadyApplied` both mean the
+    /// task is expired, as Python's `_expire_claimed_task_before_start`
+    /// (`core/worker/child_runner.py`) reads them; any other outcome is
+    /// logged with its evidence at the adapter boundary. The stored error is
+    /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
+    /// as `data`.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
         worker_id: &str,
-    ) -> Result<Option<String>, BrokerError> {
-        let task_error = crate::core::TaskError::builtin(
+    ) -> Result<PrestartExpiry, BrokerError> {
+        let mut task_error = crate::core::TaskError::builtin(
             crate::core::OutcomeCode::TaskExpired,
-            "task expired before execution started (good_until passed)",
+            "Task expired: good_until deadline passed before execution started",
         );
+        task_error.data = Some(serde_json::json!({
+            "task_id": task_id.to_string(),
+            "worker_id": worker_id,
+        }));
         let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
-        let result_json = serde_json::to_string(&task_result)
-            .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
+        let result_json =
+            serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
 
         let outcomes = crate::broker::terminalization::terminalize(
             &self.pool,
@@ -1852,17 +1868,23 @@ impl PostgresBroker {
                 fence: crate::core::lifecycle::WorkerOwned {
                     worker_id: worker_id.to_owned(),
                 },
-                result_json: result_json.clone(),
+                result_json,
                 error_code: "TASK_EXPIRED".to_owned(),
             },
         )
         .await?;
 
         Ok(match outcomes.first() {
-            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. }) => {
-                Some(result_json)
-            }
-            _ => None,
+            Some(
+                crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
+                | crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. },
+            ) => PrestartExpiry::Expired,
+            Some(
+                crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
+                | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
+                | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. },
+            )
+            | None => PrestartExpiry::NotExpired,
         })
     }
 
@@ -5434,7 +5456,11 @@ mod set_running_heartbeat_tests {
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
             .expect("expire");
-        assert!(not_due.is_none(), "unexpired deadline must refuse");
+        assert_eq!(
+            not_due,
+            PrestartExpiry::NotExpired,
+            "unexpired deadline must refuse"
+        );
         sqlx::query(
             "UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 second' WHERE id = $1",
         )
@@ -5446,10 +5472,17 @@ mod set_running_heartbeat_tests {
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
             .expect("expire");
-        assert!(
-            expired.is_some(),
+        assert_eq!(
+            expired,
+            PrestartExpiry::Expired,
             "expired deadline must expire for any generation of this worker's claim"
         );
+        // Python counts a replay as expired too.
+        let replayed = broker
+            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .await
+            .expect("expire replay");
+        assert_eq!(replayed, PrestartExpiry::Expired);
         let _ = live_generation;
 
         cleanup(&pool, &id).await;
@@ -6076,7 +6109,7 @@ mod terminal_at_stamp_tests {
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
             .expect("expire");
-        assert!(expired.is_some());
+        assert_eq!(expired, PrestartExpiry::Expired);
 
         let (status, terminal_at) = terminal_at_of(&pool, &id).await;
         assert_eq!(status, "EXPIRED");

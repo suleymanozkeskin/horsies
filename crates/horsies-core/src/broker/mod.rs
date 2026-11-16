@@ -60,7 +60,8 @@ pub use health::{
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
+    ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode,
+    UPSERT_TASK_ATTEMPT_SQL,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,

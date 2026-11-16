@@ -2599,9 +2599,13 @@ mod tests {
         assert_eq!(workflow_result, None);
     }
 
+    /// Python's start of a workflow task: a database error in the start
+    /// gives no run (`core/worker/child_runner.py`, OWNERSHIP_UNCONFIRMED),
+    /// and the claim is released at once with the fenced release. Before, a
+    /// failed node statement was treated as informational and user code ran.
     #[tokio::test]
     #[serial]
-    async fn finalize_prestart_workflow_update_failure_is_nonfatal_and_runs_user_code() {
+    async fn a_failed_workflow_node_check_runs_no_user_code_and_releases_the_claim() {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
@@ -2620,30 +2624,16 @@ mod tests {
             )
             .await;
 
-            // C4: the workflow_task RUNNING update is purely informational
-            // (set_running already committed the CLAIMED->RUNNING flip durably,
-            // and completion tolerates an ENQUEUED workflow_task). A transient
-            // failure of it must NOT fail the task closed — user code runs and
-            // the task completes normally.
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
-                1,
-                "user code must still run when the informational workflow_task RUNNING update fails",
+                0,
+                "user code must not run when the workflow node check fails",
             );
-
             let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
-            assert_eq!(status, "COMPLETED");
+            assert_eq!(status, "PENDING", "the claim is released at once");
+            assert_eq!(result, None);
             assert_eq!(error_code, None);
-
-            let persisted: TaskResult<serde_json::Value> =
-                serde_json::from_str(result.as_deref().unwrap()).unwrap();
-            assert_eq!(
-                persisted.unwrap(),
-                serde_json::Value::String("counted".to_owned()),
-            );
-
-            let attempts = broker.get_task_attempts(task_id).await.unwrap();
-            assert_eq!(attempts.len(), 1);
+            assert!(broker.get_task_attempts(task_id).await.unwrap().is_empty());
         })
         .catch_unwind()
         .await;
@@ -2653,6 +2643,46 @@ mod tests {
         if let Err(panic) = result {
             resume_unwind(panic);
         }
+    }
+
+    /// Python `test_orphaned_workflow_task_repro.py::test_workflow_check_failed_disabled_leaves_orphan_claimed`:
+    /// a workflow task with no runnable node does not run; with orphan
+    /// self-heal off nothing is written and the row stays CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn an_unlinked_workflow_task_with_self_heal_off_runs_nothing_and_stays_claimed() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        let outcome = crate::worker::execution::confirm_ownership_and_set_running(
+            &broker,
+            task_id,
+            "worker-1",
+            1,
+            "localhost",
+            true,
+            test_claim_generation(),
+            false,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            crate::worker::execution::OwnershipOutcome::Aborted
+        ));
+        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        let (status, _, _) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "CLAIMED");
     }
 
     #[tokio::test]
