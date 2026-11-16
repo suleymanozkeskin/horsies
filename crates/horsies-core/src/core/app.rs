@@ -28,8 +28,8 @@ pub struct ResolvedEnqueue {
     pub queue_name: String,
     /// The resolved priority (from task, queue config, or default).
     pub priority: u32,
-    /// Queue-mapped retention class; `None` is explicit forever.
-    pub retention_class_key: Option<String>,
+    /// The queue-mapped retention of the send.
+    pub retention: crate::core::config::EnqueueRetention,
 }
 
 /// Main horsies application.
@@ -55,6 +55,16 @@ pub struct Horsies {
     role: String,
     /// When true, task sends are suppressed (used during import/discovery).
     suppress_sends: Arc<AtomicBool>,
+}
+
+/// The environment variable that suppresses sends in this process when it
+/// is `1` (Python `HORSIES_SUPPRESS_SENDS`).
+pub const SUPPRESS_SENDS_ENV: &str = "HORSIES_SUPPRESS_SENDS";
+
+/// Whether a value of [`SUPPRESS_SENDS_ENV`] asks for suppression: `1`,
+/// with surrounding whitespace ignored. Unset and any other value do not.
+fn suppression_requested(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("1")
 }
 
 impl Horsies {
@@ -211,8 +221,6 @@ impl Horsies {
                 Some(crate::core::workflow::node::TaskDefaults {
                     queue_name: queue,
                     priority,
-                    expects_input: t.expects_input(),
-                    input_type_name: t.input_type_name(),
                 })
             },
             &|queue_name| self.effective_priority(queue_name, None),
@@ -299,9 +307,8 @@ impl Horsies {
         F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
     {
         let name_owned = name.to_owned();
-        let wrapped = Arc::new(move |args_json: Option<&str>, kwargs_json: Option<&str>| {
-            let params =
-                decode_parameterized_workflow_input::<P>(&name_owned, args_json, kwargs_json)?;
+        let wrapped = Arc::new(move |input_json: &str| {
+            let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
             builder(params)
         });
 
@@ -335,9 +342,8 @@ impl Horsies {
         F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
     {
         let name_owned = name.to_owned();
-        let wrapped = Arc::new(move |args_json: Option<&str>, kwargs_json: Option<&str>| {
-            let params =
-                decode_parameterized_workflow_input::<P>(&name_owned, args_json, kwargs_json)?;
+        let wrapped = Arc::new(move |input_json: &str| {
+            let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
             builder(params)
         });
 
@@ -446,11 +452,17 @@ impl Horsies {
         self.suppress_sends.store(value, Ordering::Relaxed);
     }
 
-    /// Whether sends are currently suppressed.
+    /// Whether sends are currently suppressed: [`Self::suppress_sends`] was
+    /// called with `true` (import phase, `check()`, builder execution), or the
+    /// environment variable [`SUPPRESS_SENDS_ENV`] is `1` (surrounding
+    /// whitespace ignored). The variable is read at each call, so a change
+    /// takes effect at the next send. Process-local.
     ///
-    /// Mirrors Python's `Horsies.are_sends_suppressed()`.
+    /// Mirrors Python's `Horsies.are_sends_suppressed()`
+    /// (`horsies/core/app.py:2269-2280`).
     pub fn are_sends_suppressed(&self) -> bool {
         self.suppress_sends.load(Ordering::Relaxed)
+            || suppression_requested(std::env::var(SUPPRESS_SENDS_ENV).ok().as_deref())
     }
 
     /// Shared suppression flag used by producer-side task facades.
@@ -510,8 +522,6 @@ impl Horsies {
                     crate::core::workflow::node::TaskDefaults {
                         queue_name: queue.to_owned(),
                         priority,
-                        expects_input: task.expects_input(),
-                        input_type_name: task.input_type_name(),
                     },
                 );
             }
@@ -604,30 +614,17 @@ impl Horsies {
         Ok(())
     }
 
-    /// Dry-run a task's typed input deserialization for raw args/kwargs JSON,
-    /// using the same envelope path as execution, without running the task.
+    /// Dry-run a task's typed input deserialization for one encoded input,
+    /// using the same input path as execution, without running the task.
     ///
     /// Returns the structured deserialize error on mismatch. Shared by
     /// schedule validation and workflow-node validation.
     fn dry_run_task_input(
         task: &crate::core::task::fn_trait::RegisteredTask,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
     ) -> Result<(), crate::core::task::error::TaskError> {
-        let envelope = crate::worker::execution::build_envelope_from_parts(args, kwargs, false)?;
-        task.validate_input(&envelope)
-    }
-
-    /// Compact JSON string for a schedule's args/kwargs `Value`, mapping
-    /// `Null` to `None` so it follows the same "no payload" path as a
-    /// `ClaimedTaskRow` with a NULL column. Shape-preserving: a non-object
-    /// kwargs `Value` serializes to JSON and is rejected by the shared
-    /// envelope builder exactly as at execution.
-    fn payload_value_to_json(value: &serde_json::Value) -> Option<String> {
-        match value {
-            serde_json::Value::Null => None,
-            other => Some(other.to_string()),
-        }
+        let task_input = crate::worker::execution::build_task_input(input, false)?;
+        task.validate_input(&task_input)
     }
 
     /// Extract a human-readable detail from a typed-input deserialize error.
@@ -650,10 +647,12 @@ impl Horsies {
     /// (reported by registration checks), nodes with runtime-injected fields
     /// (`args_from`, or `workflow_ctx_from` which makes the engine inject the
     /// reserved context kwarg — their static payload is intentionally partial
-    /// and would false-positive on the injected fields), and nodes with no
-    /// static payload. A mixed node (static kwargs plus `args_from`) is
-    /// therefore skipped entirely; its static portion is not validated at
-    /// check-time, and any mismatch still surfaces at execution.
+    /// and would false-positive on the injected fields). A mixed node (static
+    /// kwargs plus `args_from`) is therefore skipped entirely; its static
+    /// portion is not validated at check-time, and any mismatch still
+    /// surfaces at execution. Every other node carries its full input, so a
+    /// node input that does not decode as the task's input type (for example
+    /// `null` for a task whose input type has fields) is reported here.
     ///
     /// The context skip is gated on the node-level `workflow_ctx_from`, not the
     /// task-level `accepts_workflow_ctx`: the engine injects context only when
@@ -676,11 +675,8 @@ impl Horsies {
         if !node.args_from.is_empty() || injects_ctx {
             return None;
         }
-        if node.args_json.is_none() && node.kwargs_json.is_none() {
-            return None;
-        }
-        match Self::dry_run_task_input(task, node.args_json.as_deref(), node.kwargs_json.as_deref())
-        {
+        let input = node.input_json.as_str();
+        match Self::dry_run_task_input(task, input) {
             Ok(()) => None,
             Err(task_error) => Some(
                 HorsiesError::new(format!(
@@ -696,7 +692,7 @@ impl Horsies {
                     Self::input_error_detail(&task_error)
                 ))
                 .with_help(
-                    "ensure the node's kwargs match the task's declared input fields \
+                    "ensure the node's input matches the task's declared input type \
                      (names and types)",
                 ),
             ),
@@ -759,14 +755,11 @@ impl Horsies {
                 );
             }
 
-            // 3. Validate args/kwargs against the task's declared input type.
+            // 3. Validate the input against the task's declared input type.
             // Only when the task is registered (existence reported above).
             if let Ok(task) = self.registry.get(&task_schedule.task_name) {
-                let args = Self::payload_value_to_json(&task_schedule.args);
-                let kwargs = Self::payload_value_to_json(&task_schedule.kwargs);
-                if let Err(task_error) =
-                    Self::dry_run_task_input(task, args.as_deref(), kwargs.as_deref())
-                {
+                let input = task_schedule.input.to_string();
+                if let Err(task_error) = Self::dry_run_task_input(task, &input) {
                     report.add(
                         HorsiesError::new(format!(
                             "schedule '{}' input does not match task '{}' declared input type",
@@ -778,8 +771,8 @@ impl Horsies {
                             Self::input_error_detail(&task_error),
                         ))
                         .with_help(
-                            "ensure the schedule's args/kwargs match the task's declared \
-                             input fields (names and types)",
+                            "ensure the schedule's input matches the task's declared \
+                             input type (names and types)",
                         ),
                     );
                 }
@@ -862,7 +855,7 @@ impl Horsies {
         // Phase 2.9: Workflow node queue validation.
         // After registration resolves queue/priority, every non-subworkflow
         // node should have a valid queue. Catches unresolved queues (e.g.
-        // TaskNode::raw("name") without registered task defaults) and
+        // TaskNode::raw("name", "null") without registered task defaults) and
         // invalid queue overrides (e.g. .queue("wrong")).
         for registered in self.workflow_registry.iter() {
             for node in &registered.spec.tasks {
@@ -902,51 +895,6 @@ impl Horsies {
                             );
                         }
                     }
-                }
-            }
-        }
-
-        // Phase 2.10: Workflow node missing-input validation.
-        // Every non-subworkflow node that references a task with expects_input=true
-        // must have at least one of: args_json, kwargs_json, or args_from.
-        // Catches missing root input and non-root nodes with no data source.
-        //
-        // This same validation also runs at start-time via
-        // WorkflowSpecRegistry::resolve_and_validate_spec(), which is
-        // called by WorkflowStarter, WorkflowFunction::bound_spec, and
-        // child spec_builder paths.
-        for registered in self.workflow_registry.iter() {
-            for node in &registered.spec.tasks {
-                if node.is_subworkflow {
-                    continue;
-                }
-                let task = match self.registry.get(&node.task_name) {
-                    Ok(t) => t,
-                    Err(_) => continue, // unregistered tasks caught by Phase 2.8
-                };
-                if !task.expects_input() {
-                    continue;
-                }
-                let has_input = node.args_json.is_some()
-                    || node.kwargs_json.is_some()
-                    || !node.args_from.is_empty();
-                if !has_input {
-                    let type_name = task.input_type_name().unwrap_or("non-unit type");
-                    report.add(
-                        HorsiesError::new(format!(
-                            "workflow '{}' node '{}' (task '{}') requires input `{}` \
-                             but has no args, kwargs, or args_from",
-                            registered.spec.name,
-                            node.node_id.as_deref().unwrap_or("?"),
-                            node.task_name,
-                            type_name,
-                        ))
-                        .with_code(ErrorCode::WorkflowMissingRequiredParams)
-                        .with_help(
-                            "use task_name::node()?.set_input(input) for whole inputs, \
-                             or use typed .set(...) / .arg_from(...) on the node",
-                        ),
-                    );
                 }
             }
         }
@@ -1036,7 +984,9 @@ impl Horsies {
     }
 
     fn check_workflow_builders(&self) -> Vec<HorsiesError> {
-        let previous = self.are_sends_suppressed();
+        // Restore the flag itself, not the environment's verdict, so a set
+        // environment variable never leaves the flag on after the check.
+        let previous = self.suppress_sends.load(Ordering::Relaxed);
         self.suppress_sends(true);
 
         let mut errors = Vec::new();
@@ -1274,7 +1224,7 @@ impl Horsies {
             task_name: task_name.to_string(),
             queue_name: queue.to_string(),
             priority: resolved_priority,
-            retention_class_key: self.config.retention.resolve_queue_class(queue),
+            retention: self.config.retention.resolve_queue_retention(queue),
         })
     }
 }
@@ -1376,8 +1326,6 @@ where
                         Some(crate::core::workflow::node::TaskDefaults {
                             queue_name: queue,
                             priority,
-                            expects_input: t.expects_input(),
-                            input_type_name: t.input_type_name(),
                         })
                     },
                     &|queue_name| app.effective_priority(queue_name, None),
@@ -1419,41 +1367,6 @@ where
                     }
                 }
 
-                // Validate missing input: same as Phase 2.10 for registered specs.
-                for node in &spec.tasks {
-                    if node.is_subworkflow {
-                        continue;
-                    }
-                    let task = match app.registry().get(&node.task_name) {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    };
-                    if !task.expects_input() {
-                        continue;
-                    }
-                    let has_input = node.args_json.is_some()
-                        || node.kwargs_json.is_some()
-                        || !node.args_from.is_empty();
-                    if !has_input {
-                        let type_name = task.input_type_name().unwrap_or("non-unit type");
-                        errors.push(
-                            HorsiesError::new(format!(
-                                "workflow builder '{}' node '{}' (task '{}') requires input `{}` \
-                                 but has no args, kwargs, or args_from",
-                                self.name,
-                                node.node_id.as_deref().unwrap_or("?"),
-                                node.task_name,
-                                type_name,
-                            ))
-                            .with_code(ErrorCode::WorkflowMissingRequiredParams)
-                            .with_help(
-                                "use task_name::node()?.set_input(input) for whole inputs, \
-                                 or use typed .set(...) / .arg_from(...) on the node",
-                            ),
-                        );
-                    }
-                }
-
                 // Typed-input validation: same as Phase 2.11 for registered specs.
                 for node in &spec.tasks {
                     if let Some(err) = app.validate_node_static_input(&self.name, node) {
@@ -1478,32 +1391,33 @@ where
     }
 }
 
+/// Decode a child workflow's params from the parent node's encoded input, as
+/// the client encoded it. The text must pass the core's strict JSON read rule;
+/// it is then decoded as stored, with no conversion.
 fn decode_parameterized_workflow_input<P>(
     workflow_name: &str,
-    args_json: Option<&str>,
-    kwargs_json: Option<&str>,
+    input_json: &str,
 ) -> Result<P, HorsiesError>
 where
     P: DeserializeOwned,
 {
-    if args_json.is_some() && kwargs_json.is_some() {
-        return Err(HorsiesError::new(format!(
-            "parameterized child workflow '{}' received both args_json and kwargs_json",
-            workflow_name,
-        ))
-        .with_help(
-            "provide either a whole params value via .set_input(...), or object fields via .set(...) / .arg_from(...), but not both",
-        ));
-    }
-
-    let raw = kwargs_json.or(args_json).unwrap_or("null");
-    serde_json::from_str(raw).map_err(|e| {
+    crate::core::codec::check_json_text(input_json).map_err(|e| {
         HorsiesError::new(format!(
-            "failed to decode params for workflow '{}': {}",
+            "params of workflow '{}' are refused: {}",
             workflow_name, e,
         ))
-        .with_help("ensure the child workflow params type matches the parent-provided input shape")
-    })
+    })?;
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .and_then(serde_json::from_value::<P>)
+        .map_err(|e| {
+            HorsiesError::new(format!(
+                "failed to decode params for workflow '{}': {}",
+                workflow_name, e,
+            ))
+            .with_help(
+                "ensure the child workflow params type matches the parent-provided input shape",
+            )
+        })
 }
 
 /// Builder for registering typed workflow builders on the app.
@@ -1748,18 +1662,6 @@ mod tests {
         dummy_registered().with_task_options(opts)
     }
 
-    /// Dummy task that expects non-unit input (for missing-input validation tests).
-    fn dummy_registered_with_input() -> RegisteredTask {
-        RegisteredTask::Blocking {
-            task: std::sync::Arc::new(DummyTask),
-            meta: TaskMeta {
-                expects_input: true,
-                input_type_name: Some("TestInput"),
-                ..TaskMeta::default()
-            },
-        }
-    }
-
     // -- Real typed tasks for input-validation tests. Unlike DummyTask (which
     // uses the default no-op validate_input), these go through the macro's
     // decode_task_input::<T> dry-run, so their validate_input is the real one.
@@ -1970,7 +1872,7 @@ mod tests {
     fn register_workflow_spec_simple() {
         let mut app = Horsies::new(valid_config()).unwrap();
         let mut builder = WorkflowSpecBuilder::new("my_pipeline");
-        builder.task(TaskNode::<()>::raw("step_a"));
+        builder.task(TaskNode::<()>::raw("step_a", "null"));
         let spec = builder.build().unwrap();
         assert!(app.register_workflow_spec(spec).is_ok());
         assert!(app.workflow_registry().contains("my_pipeline"));
@@ -1997,8 +1899,8 @@ mod tests {
 
         // Build a workflow using both tasks WITHOUT .task_options() on nodes.
         let mut builder = WorkflowSpecBuilder::new("pipeline");
-        let a = builder.task(TaskNode::<()>::raw("retryable_task"));
-        builder.task(TaskNode::<()>::raw("plain_task").waits_for(a));
+        let a = builder.task(TaskNode::<()>::raw("retryable_task", "null"));
+        builder.task(TaskNode::<()>::raw("plain_task", "null").waits_for(a));
         let spec = builder.build().unwrap();
 
         // Verify task_options_json is None before registration.
@@ -2056,7 +1958,7 @@ mod tests {
         // Build a workflow with EXPLICIT task_options on the node (override).
         let custom_opts = r#"{"retry_policy":{"max_retries":1,"intervals":[10],"backoff_strategy":"fixed","jitter":false}}"#;
         let mut builder = WorkflowSpecBuilder::new("pipeline_explicit");
-        builder.task(TaskNode::<()>::raw("retryable_task").task_options(custom_opts));
+        builder.task(TaskNode::<()>::raw("retryable_task", "null").task_options(custom_opts));
         let spec = builder.build().unwrap();
 
         app.register_workflow_spec(spec).unwrap();
@@ -2072,11 +1974,11 @@ mod tests {
         let mut app = Horsies::new(valid_config()).unwrap();
 
         let mut b1 = WorkflowSpecBuilder::new("dup_wf");
-        b1.task(TaskNode::<()>::raw("a"));
+        b1.task(TaskNode::<()>::raw("a", "null"));
         app.register_workflow_spec(b1.build().unwrap()).unwrap();
 
         let mut b2 = WorkflowSpecBuilder::new("dup_wf");
-        b2.task(TaskNode::<()>::raw("b"));
+        b2.task(TaskNode::<()>::raw("b", "null"));
         let result = app.register_workflow_spec(b2.build().unwrap());
         assert!(result.is_err());
     }
@@ -2088,8 +1990,8 @@ mod tests {
         let mut app = Horsies::new(valid_config()).unwrap();
         {
             let mut wb = app.workflow("pipeline");
-            let a = wb.task(TaskNode::<()>::raw("fetch_data"));
-            wb.task(TaskNode::<()>::raw("process").waits_for(a));
+            let a = wb.task(TaskNode::<()>::raw("fetch_data", "null"));
+            wb.task(TaskNode::<()>::raw("process", "null").waits_for(a));
             wb.build_and_register().unwrap();
         }
         assert!(app.workflow_registry().contains("pipeline"));
@@ -2110,12 +2012,12 @@ mod tests {
         let mut app = Horsies::new(valid_config()).unwrap();
         {
             let mut wb = app.workflow("wf_dup");
-            wb.task(TaskNode::<()>::raw("a"));
+            wb.task(TaskNode::<()>::raw("a", "null"));
             wb.build_and_register().unwrap();
         }
         {
             let mut wb = app.workflow("wf_dup");
-            wb.task(TaskNode::<()>::raw("b"));
+            wb.task(TaskNode::<()>::raw("b", "null"));
             let result = wb.build_and_register();
             assert!(result.is_err());
         }
@@ -2132,7 +2034,7 @@ mod tests {
             counter.fetch_add(1, Ordering::Relaxed);
             let mut builder = WorkflowSpecBuilder::new("zero_pipeline");
             builder.definition_key("tests.zero.v1");
-            builder.task(TaskNode::<()>::raw("step_a"));
+            builder.task(TaskNode::<()>::raw("step_a", "null"));
             builder.build()
         })
         .unwrap()
@@ -2151,7 +2053,7 @@ mod tests {
         app.workflow_builder("build_param", |_app, region: &String| {
             let mut builder = WorkflowSpecBuilder::new(format!("wf_{region}"));
             builder.definition_key(format!("tests.{region}.v1"));
-            builder.task(TaskNode::<()>::raw("step_a"));
+            builder.task(TaskNode::<()>::raw("step_a", "null"));
             builder.build()
         })
         .unwrap()
@@ -2176,7 +2078,7 @@ mod tests {
                 seen_in_builder.lock().unwrap().push(region.clone());
                 let mut builder = WorkflowSpecBuilder::new(format!("wf_{region}"));
                 builder.definition_key(format!("tests.{region}.v1"));
-                builder.task(TaskNode::<()>::raw("step_a"));
+                builder.task(TaskNode::<()>::raw("step_a", "null"));
                 builder.build()
             })
             .unwrap();
@@ -2300,6 +2202,25 @@ mod tests {
         assert!(rendered.contains("bad config"));
     }
 
+    /// Python `test_suppress_sends_env.py`: only `1` suppresses, with
+    /// surrounding whitespace ignored.
+    #[test]
+    fn only_the_value_one_suppresses_sends() {
+        for value in ["1", " 1 ", "1\n"] {
+            assert!(suppression_requested(Some(value)), "{value:?}");
+        }
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some("11"),
+        ] {
+            assert!(!suppression_requested(value), "{value:?}");
+        }
+    }
+
     #[test]
     fn workflow_builder_runs_under_send_suppression() {
         let mut app = Horsies::new(valid_config()).unwrap();
@@ -2311,7 +2232,7 @@ mod tests {
             seen_in_builder.store(app.are_sends_suppressed(), Ordering::Relaxed);
             let mut builder = WorkflowSpecBuilder::new("suppressed_pipeline");
             builder.definition_key("tests.suppressed.v1");
-            builder.task(TaskNode::<()>::raw("step_a"));
+            builder.task(TaskNode::<()>::raw("step_a", "null"));
             builder.build()
         })
         .unwrap()
@@ -2351,8 +2272,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2384,8 +2304,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2418,8 +2337,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2463,8 +2381,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("fast".to_owned()),
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2496,8 +2413,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("nonexistent_queue".to_owned()),
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2542,8 +2458,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("high_priority".to_owned()),
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2577,8 +2492,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2611,8 +2525,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("nonexistent_queue".to_owned()),
                 enabled: false,
                 timezone: "UTC".to_owned(),
@@ -2905,27 +2818,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 2.10: Missing-input validation tests
+    // Node inputs are checked as given: no default, no conversion
     // -----------------------------------------------------------------------
 
     #[test]
-    fn check_catches_missing_input_in_registered_workflow() {
+    fn check_catches_a_null_input_for_a_task_with_fields() {
+        // A node carries the input it was given; `null` for a task whose input
+        // type has fields does not decode, and check reports it.
         let mut app = Horsies::new(valid_config()).unwrap();
-        app.register("needs_input", dummy_registered_with_input())
-            .unwrap();
-        app.register("no_input", dummy_registered()).unwrap();
+        app.register("counter", typed_count_task()).unwrap();
+        app.register("ping", typed_unit_task()).unwrap();
 
-        // Workflow with a node that needs input but has none.
-        let mut builder = WorkflowSpecBuilder::new("missing_input_wf");
-        builder.definition_key("tests.missing_input.v1");
+        let mut builder = WorkflowSpecBuilder::new("null_input_wf");
+        builder.definition_key("tests.null_input.v1");
         let bad_node = builder.task(
-            TaskNode::<()>::raw("needs_input")
+            TaskNode::<()>::raw("counter", "null")
                 .node_id("bad")
                 .queue("default"),
         );
-        // A node that doesn't need input is fine without args.
+        // A unit task takes `null`, its own encoding.
         builder.task(
-            TaskNode::<()>::raw("no_input")
+            TaskNode::<()>::raw("ping", "null")
                 .node_id("ok")
                 .queue("default")
                 .waits_for(bad_node),
@@ -2935,56 +2848,42 @@ mod tests {
 
         let err = app.check().unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("requires input"),
-            "should report missing input, got: {}",
-            msg
-        );
-        assert!(
-            msg.contains("TestInput"),
-            "should include input type name, got: {}",
-            msg
-        );
+        assert!(msg.contains("does not match"), "got: {}", msg);
+        assert!(msg.contains("node 'bad'"), "got: {}", msg);
+        assert!(!msg.contains("node 'ok'"), "got: {}", msg);
     }
 
     #[test]
-    fn check_passes_when_node_has_args_from() {
+    fn check_refuses_an_empty_object_for_a_unit_task() {
+        // `{}` is never read as `null`: a unit task given `{}` does not
+        // decode, and check reports it.
         let mut app = Horsies::new(valid_config()).unwrap();
-        app.register("needs_input", dummy_registered_with_input())
-            .unwrap();
-        app.register("producer", dummy_registered()).unwrap();
+        app.register("ping", typed_unit_task()).unwrap();
 
-        let mut builder = WorkflowSpecBuilder::new("has_args_from_wf");
-        builder.definition_key("tests.has_args_from.v1");
-        let producer = builder.task(
-            TaskNode::<()>::raw("producer")
-                .node_id("producer")
-                .queue("default"),
-        );
+        let mut builder = WorkflowSpecBuilder::new("empty_object_wf");
+        builder.definition_key("tests.empty_object.v1");
         builder.task(
-            TaskNode::<()>::raw("needs_input")
-                .node_id("consumer")
-                .queue("default")
-                .waits_for(producer)
-                .raw_arg_from("data", producer.into()),
+            TaskNode::<()>::raw("ping", "{}")
+                .node_id("ping")
+                .queue("default"),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();
 
-        assert!(app.check().is_ok());
+        let err = app.check().unwrap_err();
+        assert!(err.to_string().contains("does not match"), "got: {}", err);
     }
 
     #[test]
-    fn check_catches_missing_input_in_builder_produced_spec() {
+    fn check_catches_a_null_input_in_builder_produced_spec() {
         let mut app = Horsies::new(valid_config()).unwrap();
-        app.register("needs_input", dummy_registered_with_input())
-            .unwrap();
+        app.register("counter", typed_count_task()).unwrap();
 
         app.workflow_builder0("bad_builder", |_app| {
-            let mut builder = WorkflowSpecBuilder::new("builder_missing_input");
-            builder.definition_key("tests.builder_missing_input.v1");
+            let mut builder = WorkflowSpecBuilder::new("builder_null_input");
+            builder.definition_key("tests.builder_null_input.v1");
             builder.task(
-                TaskNode::<()>::raw("needs_input")
+                TaskNode::<()>::raw("counter", "null")
                     .node_id("bad")
                     .queue("default"),
             );
@@ -2995,16 +2894,10 @@ mod tests {
         .unwrap();
 
         let err = app.check().unwrap_err();
-        let msg = err.to_string();
         assert!(
-            msg.contains("requires input"),
-            "builder check should report missing input, got: {}",
-            msg
-        );
-        assert!(
-            msg.contains("TestInput"),
-            "should include input type name, got: {}",
-            msg
+            err.to_string().contains("does not match"),
+            "builder check should report the input mismatch, got: {}",
+            err
         );
     }
 
@@ -3026,8 +2919,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs,
+                input: kwargs,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -3091,10 +2983,10 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new("node_mismatch_wf");
         builder.definition_key("tests.node_mismatch.v1");
         builder.task(
-            TaskNode::<()>::raw("counter")
+            TaskNode::<()>::raw("counter", "null")
                 .node_id("c")
                 .queue("default")
-                .kwargs(r#"{"count": "not-an-int"}"#.to_owned()),
+                .input_json(r#"{"count": "not-an-int"}"#.to_owned()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();
@@ -3115,10 +3007,10 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new("node_ok_wf");
         builder.definition_key("tests.node_ok.v1");
         builder.task(
-            TaskNode::<()>::raw("counter")
+            TaskNode::<()>::raw("counter", "null")
                 .node_id("c")
                 .queue("default")
-                .kwargs(r#"{"count": 7}"#.to_owned()),
+                .input_json(r#"{"count": 7}"#.to_owned()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();
@@ -3138,12 +3030,12 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new("node_args_from_wf");
         builder.definition_key("tests.node_args_from.v1");
         let producer = builder.task(
-            TaskNode::<()>::raw("producer")
+            TaskNode::<()>::raw("producer", "null")
                 .node_id("p")
                 .queue("default"),
         );
         builder.task(
-            TaskNode::<()>::raw("counter")
+            TaskNode::<()>::raw("counter", "{}")
                 .node_id("c")
                 .queue("default")
                 .waits_for(producer)
@@ -3167,10 +3059,10 @@ mod tests {
         let mut builder = WorkflowSpecBuilder::new("ctx_node_no_ctx_from_wf");
         builder.definition_key("tests.ctx_node_no_ctx_from.v1");
         builder.task(
-            TaskNode::<()>::raw("counter_ctx")
+            TaskNode::<()>::raw("counter_ctx", "null")
                 .node_id("c")
                 .queue("default")
-                .kwargs(r#"{"count": "not-an-int"}"#.to_owned()),
+                .input_json(r#"{"count": "not-an-int"}"#.to_owned()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();

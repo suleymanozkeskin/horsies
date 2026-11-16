@@ -446,7 +446,19 @@ async fn create_heartbeat_leaf_in_own_transaction(
     ))
 }
 
-/// Ensure coverage with one short transaction for each leaf.
+/// How a damaged coverage pass is serialized against other passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageSerialization {
+    /// Worker startup: a damaged pass takes the coverage gate first; a pass
+    /// that finds it busy repairs nothing.
+    Gated,
+    /// The reaper's periodic pass: no gate. The per-leaf try-locks contain any
+    /// overlap with a worker's startup pass.
+    PerLeafLocks,
+}
+
+/// Ensure coverage with one short transaction for each leaf, serialized by the
+/// coverage gate (the startup rule).
 ///
 /// `pool` must use a direct or session-capable PostgreSQL endpoint because
 /// this function runs partition DDL.
@@ -456,6 +468,46 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
     heartbeat_horizon_hours: u32,
     declared_periods: &[RetentionDays],
     publisher: &P,
+) -> Result<CoverageOutcome, HistoryError> {
+    ensure_coverage_in_pool(
+        pool,
+        history_horizon_days,
+        heartbeat_horizon_hours,
+        declared_periods,
+        publisher,
+        CoverageSerialization::Gated,
+    )
+    .await
+}
+
+/// Ensure coverage for the reaper's periodic pass: the same steps as
+/// `ensure_partition_coverage_in_pool` without the coverage gate, so a pass
+/// during a worker's startup repair still repairs under the per-leaf locks.
+pub async fn ensure_periodic_coverage_in_pool<P: LoaderPublication>(
+    pool: &PgPool,
+    history_horizon_days: u32,
+    heartbeat_horizon_hours: u32,
+    declared_periods: &[RetentionDays],
+    publisher: &P,
+) -> Result<CoverageOutcome, HistoryError> {
+    ensure_coverage_in_pool(
+        pool,
+        history_horizon_days,
+        heartbeat_horizon_hours,
+        declared_periods,
+        publisher,
+        CoverageSerialization::PerLeafLocks,
+    )
+    .await
+}
+
+async fn ensure_coverage_in_pool<P: LoaderPublication>(
+    pool: &PgPool,
+    history_horizon_days: u32,
+    heartbeat_horizon_hours: u32,
+    declared_periods: &[RetentionDays],
+    publisher: &P,
+    serialization: CoverageSerialization,
 ) -> Result<CoverageOutcome, HistoryError> {
     EnsureLeafCoverage::new(FOREVER_CLASS_KEY, history_horizon_days)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
@@ -486,7 +538,10 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
     }
     drop(connection);
 
-    let gate = acquire_coverage_maintenance_gate(pool).await?;
+    let gate = match serialization {
+        CoverageSerialization::Gated => acquire_coverage_maintenance_gate(pool).await?,
+        CoverageSerialization::PerLeafLocks => CoverageMaintenanceGate::Ungated,
+    };
     if matches!(gate, CoverageMaintenanceGate::Busy) {
         let mut connection = pool.acquire().await?;
         let current = probe_partition_coverage(

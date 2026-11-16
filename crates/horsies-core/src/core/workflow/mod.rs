@@ -15,8 +15,8 @@ pub use definition::{WorkflowDefConfig, WorkflowDefinition};
 pub use handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 pub use meta::WorkflowMeta;
 pub use node::{
-    resolve_node_task_options, AnyNode, InputField, JoinType, NodeKey, NodeRef, TaskNode,
-    TypedNodeRef,
+    resolve_node_task_options, AnyNode, InputField, JoinType, NodeKey, NodeRef, SubWorkflowParams,
+    TaskNode, TypedNodeRef,
 };
 pub use policy::{SuccessCase, SuccessPolicy};
 pub use spec::{WorkflowSpec, WorkflowSpecBuilder};

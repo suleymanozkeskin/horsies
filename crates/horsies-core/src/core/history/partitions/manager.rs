@@ -178,7 +178,16 @@ impl LeafBlockerQuarantine for NoQuarantine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetachExpiredLeafOutcome {
-    Busy { leaf_name: String },
+    Busy {
+        leaf_name: String,
+    },
+    /// This call detached the leaf, recorded the detach in the catalog and
+    /// republished the readers.
+    Detached {
+        leaf_name: String,
+    },
+    /// This call did not detach the leaf; the inspection names the state that
+    /// kept it. `LeafInspection::Detached` means an earlier call detached it.
     Inspection(LeafInspection),
     QuarantineRefused(QuarantineRefused),
 }
@@ -376,7 +385,14 @@ pub(crate) enum IndexRepairRemoval {
     Absent,
     Removed,
     Foreign,
+    /// The index relation lock was not granted within
+    /// `INDEX_REPAIR_LOCK_TIMEOUT_MS`.
+    Busy,
 }
+
+/// Lock wait of the index rename and drop of a repair; a longer wait is
+/// `IndexRepairRemoval::Busy`.
+const INDEX_REPAIR_LOCK_TIMEOUT_MS: u64 = 2_000;
 
 pub(crate) async fn index_relation_state(
     connection: &mut PgConnection,
@@ -433,7 +449,31 @@ pub(crate) async fn remove_attached_index_for_repair(
         IndexRelationState::Foreign => return Ok(IndexRepairRemoval::Foreign),
         IndexRelationState::Attached => {}
     }
+    let prior_lock_timeout: String = sqlx::query_scalar("SELECT current_setting('lock_timeout')")
+        .fetch_one(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{INDEX_REPAIR_LOCK_TIMEOUT_MS}ms"))
+        .execute(&mut *connection)
+        .await?;
+    let removal = claim_and_drop_index(connection, leaf_name, index_name).await;
+    let restored = sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(&prior_lock_timeout)
+        .execute(&mut *connection)
+        .await;
+    let removal = removal?;
+    restored?;
+    Ok(removal)
+}
 
+/// Rename the index to a private name, which takes its relation lock, check
+/// its owner again under that lock, and drop it. A savepoint restores the name
+/// when the owner changed or the lock was not granted.
+async fn claim_and_drop_index(
+    connection: &mut PgConnection,
+    leaf_name: &str,
+    index_name: &str,
+) -> Result<IndexRepairRemoval, HistoryError> {
     let claim_name = format!("horsies_index_repair_{}", Uuid::new_v4().simple());
     sqlx::query("SAVEPOINT horsies_index_repair_claim")
         .execute(&mut *connection)
@@ -463,9 +503,17 @@ pub(crate) async fn remove_attached_index_for_repair(
                 .await?;
             Ok(IndexRepairRemoval::Removed)
         }
-        Ok(outcome @ (IndexRepairRemoval::Absent | IndexRepairRemoval::Foreign)) => {
+        Ok(
+            outcome @ (IndexRepairRemoval::Absent
+            | IndexRepairRemoval::Foreign
+            | IndexRepairRemoval::Busy),
+        ) => {
             rollback_index_repair_claim(connection).await?;
             Ok(outcome)
+        }
+        Err(HistoryError::Database(error)) if is_lock_not_available(&error) => {
+            rollback_index_repair_claim(connection).await?;
+            Ok(IndexRepairRemoval::Busy)
         }
         Err(error) => {
             rollback_index_repair_claim(connection).await?;
@@ -584,11 +632,44 @@ async fn create_leaf<P: LoaderPublication>(
                     leaf_name: leaf.leaf_name().to_owned(),
                 });
             }
+            // Read the state again under the relation lock: another session
+            // can have repaired, detached or replaced the leaf meanwhile.
+            let physical = read_leaf_physical_state(
+                connection,
+                leaf.leaf_name(),
+                &parent_name,
+                &id_index_name,
+                LeafPartitionBoundExpectation::Requested(leaf.bounds()),
+                LeafIndexKind::History,
+            )
+            .await?;
+            if !physical.relation_exists
+                || physical.detach_pending != Some(false)
+                || !physical.partition_bound_matches_expected
+            {
+                return Ok(LeafCreation::CatalogConflict {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                    kind: CatalogConflictKind::PhysicalNonconformant,
+                    detail: "the leaf changed before its index repair took the relation lock"
+                        .to_owned(),
+                });
+            }
+            let ordering = read_leaf_ordering_index_exists(connection, leaf.leaf_name()).await?;
+            if physical.id_index_conformant && ordering {
+                return Ok(LeafCreation::AlreadyConformant {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                });
+            }
             if !physical.id_index_conformant {
                 match remove_attached_index_for_repair(connection, leaf.leaf_name(), &id_index_name)
                     .await?
                 {
                     IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
+                    IndexRepairRemoval::Busy => {
+                        return Ok(LeafCreation::Busy {
+                            leaf_name: leaf.leaf_name().to_owned(),
+                        });
+                    }
                     IndexRepairRemoval::Foreign => {
                         return Ok(LeafCreation::CatalogConflict {
                             leaf_name: leaf.leaf_name().to_owned(),
@@ -611,6 +692,11 @@ async fn create_leaf<P: LoaderPublication>(
                     .await?
                 {
                     IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
+                    IndexRepairRemoval::Busy => {
+                        return Ok(LeafCreation::Busy {
+                            leaf_name: leaf.leaf_name().to_owned(),
+                        });
+                    }
                     IndexRepairRemoval::Foreign => {
                         return Ok(LeafCreation::CatalogConflict {
                             leaf_name: leaf.leaf_name().to_owned(),
@@ -945,9 +1031,9 @@ where
         PhysicalDetach::Busy => Ok(DetachExpiredLeafOutcome::Busy {
             leaf_name: leaf.leaf_name().to_owned(),
         }),
-        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Inspection(
-            inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
-        )),
+        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Detached {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }),
     }
 }
 
