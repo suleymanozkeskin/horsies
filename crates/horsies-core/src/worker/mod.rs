@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod execution;
 pub mod executor;
+pub mod finalize_batch;
 pub mod heartbeat;
 pub mod recovery;
 pub mod retry;

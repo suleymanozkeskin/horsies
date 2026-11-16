@@ -47,6 +47,8 @@ mod isolated_verdict_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod placement_tests;
 #[cfg(test)]
+mod plain_success_tests;
+#[cfg(test)]
 mod scripted;
 #[cfg(test)]
 mod settle_tests;

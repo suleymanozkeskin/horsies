@@ -3,23 +3,20 @@ use std::time::Duration;
 use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, FromRow, Postgres, Transaction};
+use sqlx::{ConnectOptions, Postgres, Transaction};
 use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope;
 use crate::core::history::enqueue::prepare_enqueue_facts;
-use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
-use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
-use crate::core::history::reads::detail::{
-    read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
-};
+use crate::core::history::identity::reservations::ReservationClaim;
+use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
-    read_task_result, HistoryResultPayload, HistoryTaskResult, TaskResultRead,
+    HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
@@ -29,19 +26,23 @@ use crate::core::{
 };
 
 use crate::broker::core_rows::{
-    expired_task_row, one_row, read_rows, stale_task_row, worker_state_snapshot, RowDecodeError,
+    checkout_batch, column, execute_in, expired_task_row, one_row, query_in, query_on, read_rows,
+    roll_back, scalar, stale_task_row, task_attempt_row, task_info_row, task_result_row,
+    worker_state_snapshot, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
+use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow,
+    TaskResultRow, TaskRunningContextRow,
 };
 
 use crate::broker::client_family::ClientFamily;
@@ -53,8 +54,8 @@ use crate::broker::wait_limit::WaitLimit;
 
 use crate::broker::pools::{BrokerPools, PoolProfile};
 use crate::db::{
-    BoundStatement, CheckoutClass, ParameterType, Row, StatementBound, StatementFailure,
-    TypedStatement,
+    BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
+    StatementFailure, Transaction as CoreTransaction, TypedStatement,
 };
 
 #[cfg(test)]
@@ -95,6 +96,53 @@ FROM horsies_tasks WHERE id = $1";
 const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
 SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
 FROM horsies_tasks WHERE id = $1 FOR UPDATE";
+
+/// The enqueue insert. Parameters in order: id, task name, queue name,
+/// priority, input, task options, execution, retention class key, sent at,
+/// fingerprint version, fingerprint, key digest, enqueued at, delay
+/// seconds, max retries, good until, retain rerun input.
+static ENQUEUE: TypedStatement = TypedStatement::new(
+    "enqueue",
+    ENQUEUE_SQL,
+    &[
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
+        ParameterType::Int2,
+        ParameterType::Bytea,
+        ParameterType::Bytea,
+        ParameterType::Timestamptz,
+        ParameterType::Int8,
+        ParameterType::Int4,
+        ParameterType::Timestamptz,
+        ParameterType::Bool,
+    ],
+);
+
+static READ_SEND_IDENTITY: TypedStatement = TypedStatement::new(
+    "read_send_identity",
+    READ_SEND_IDENTITY_SQL,
+    &[ParameterType::Uuid],
+);
+
+static READ_SEND_IDENTITY_FOR_KEY: TypedStatement = TypedStatement::new(
+    "read_send_identity_for_key",
+    READ_SEND_IDENTITY_FOR_KEY_SQL,
+    &[ParameterType::Uuid],
+);
+
+/// Binds a key digest (`$1`) to a task (`$2`) that has none.
+static BIND_IDEMPOTENCY_KEY: TypedStatement = TypedStatement::new(
+    "bind_idempotency_key",
+    "UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2",
+    &[ParameterType::Bytea, ParameterType::Uuid],
+);
 
 // Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
 // its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
@@ -260,6 +308,21 @@ const GET_RAW_RESULT_RECORD_SQL: &str = "\
 SELECT id, task_name, status, result
 FROM horsies_tasks
 WHERE id = $1";
+
+static GET_RESULT: TypedStatement =
+    TypedStatement::new("get_result", GET_RESULT_SQL, &[ParameterType::Uuid]);
+
+static GET_RAW_RESULT_PROBE: TypedStatement = TypedStatement::new(
+    "get_raw_result_probe",
+    GET_RAW_RESULT_PROBE_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_RAW_RESULT_RECORD: TypedStatement = TypedStatement::new(
+    "get_raw_result_record",
+    GET_RAW_RESULT_RECORD_SQL,
+    &[ParameterType::Uuid],
+);
 
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
@@ -444,6 +507,40 @@ SELECT task_id, attempt, outcome, will_retry,
 FROM horsies_task_attempts
 WHERE task_id = $1
 ORDER BY attempt DESC";
+
+static SELECT_TASK_ATTEMPTS: TypedStatement = TypedStatement::new(
+    "select_task_attempts",
+    SELECT_TASK_ATTEMPTS_SQL,
+    &[ParameterType::Uuid],
+);
+
+/// Whether the live table holds the task id `$1`.
+static LIVE_TASK_EXISTS: TypedStatement = TypedStatement::new(
+    "live_task_exists",
+    "SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)",
+    &[ParameterType::Uuid],
+);
+
+static GET_TASK_INFO: TypedStatement =
+    TypedStatement::new("get_task_info", GET_TASK_INFO_SQL, &[ParameterType::Uuid]);
+
+static GET_TASK_INFO_MINIMAL: TypedStatement = TypedStatement::new(
+    "get_task_info_minimal",
+    GET_TASK_INFO_MINIMAL_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_TASK_INFO_RESULT_ONLY: TypedStatement = TypedStatement::new(
+    "get_task_info_result_only",
+    GET_TASK_INFO_RESULT_ONLY_SQL,
+    &[ParameterType::Uuid],
+);
+
+static GET_TASK_INFO_REASON_ONLY: TypedStatement = TypedStatement::new(
+    "get_task_info_reason_only",
+    GET_TASK_INFO_REASON_ONLY_SQL,
+    &[ParameterType::Uuid],
+);
 
 // ---------------------------------------------------------------------------
 // Monitoring / observability SQL
@@ -799,24 +896,6 @@ pub enum SchemaInitializationMode {
     ObserveOnly,
 }
 
-/// Whether the broker logs each core statement it runs
-/// (`PostgresConfig::echo`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatementLog {
-    Off,
-    /// Statement name and SQL text at debug level, target `horsies.sql`.
-    Debug,
-}
-
-impl StatementLog {
-    fn from_echo(echo: bool) -> Self {
-        match echo {
-            true => Self::Debug,
-            false => Self::Off,
-        }
-    }
-}
-
 /// PostgreSQL-backed task broker.
 ///
 /// Two sets of pools on the same URLs:
@@ -1127,6 +1206,19 @@ impl PostgresBroker {
         &self.session_pool
     }
 
+    /// The core pool on `database_url`, for the lifecycle writers that run
+    /// on the statement layer ([`crate::broker::attempt_writes`]). In a
+    /// worker it is the worker profile pool.
+    pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
+        self.core.main()
+    }
+
+    /// Whether this broker logs each core statement it runs, for the
+    /// lifecycle writers that run on [`PostgresBroker::core_main_pool`].
+    pub(crate) fn statement_log(&self) -> StatementLog {
+        self.statement_log
+    }
+
     /// Runs one statement on the main core pool and reads every row.
     ///
     /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
@@ -1176,15 +1268,7 @@ impl PostgresBroker {
     }
 
     fn log_statement(&self, statement: &TypedStatement) {
-        match self.statement_log {
-            StatementLog::Off => {}
-            StatementLog::Debug => tracing::debug!(
-                target: "horsies.sql",
-                statement = statement.name(),
-                sql = statement.sql(),
-                "statement",
-            ),
-        }
+        self.statement_log.log(statement);
     }
 
     /// Whether this broker's runtime pool is configured for PgBouncer
@@ -1302,33 +1386,30 @@ impl PostgresBroker {
             fingerprint: Some(facts.command_fingerprint.to_vec()),
             sent_at: effective_sent_at,
         };
-        let mut transaction = self.pool.begin().await.map_err(BrokerError::Database)?;
+        let mut connection = checkout_batch(self.core.main(), &ENQUEUE).await?;
+        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
                 &mut transaction,
-                &key_digest,
-                IDEMPOTENCY_SCOPE_VERSION,
-                self.idempotency_reservation_window_seconds,
-                facts.command_fingerprint_version,
-                &facts.command_fingerprint,
-                task_id,
+                self.statement_log,
+                &KeyClaim {
+                    key_digest: &key_digest,
+                    key_scope_version: IDEMPOTENCY_SCOPE_VERSION,
+                    reservation_window_seconds: self.idempotency_reservation_window_seconds,
+                    fingerprint_version: facts.command_fingerprint_version,
+                    fingerprint: &facts.command_fingerprint,
+                    task_id,
+                },
             )
-            .await
-            .map_err(map_history_enqueue_error)?;
+            .await?;
             match claim {
                 ReservationClaim::Applied { .. } => {}
                 ReservationClaim::Replay { task_id } => {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(BrokerError::Database)?;
+                    roll_back(transaction).await?;
                     return Ok(task_id);
                 }
                 ReservationClaim::Conflict { task_id, .. } => {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(BrokerError::Database)?;
+                    roll_back(transaction).await?;
                     return Err(BrokerError::IdempotencyKeyConflict {
                         task_name: task_name.to_owned(),
                         task_id,
@@ -1337,35 +1418,40 @@ impl PostgresBroker {
             }
         }
 
-        let row: Option<(Uuid,)> = sqlx::query_as(ENQUEUE_SQL)
-            .bind(task_id)
-            .bind(task_name)
-            .bind(queue_name)
-            .bind(priority)
-            .bind(input)
-            .bind(task_options)
-            .bind(facts.execution.as_str())
-            .bind(&facts.retention_class_key)
-            .bind(effective_sent_at)
-            .bind(facts.command_fingerprint_version)
-            .bind(facts.command_fingerprint.as_slice())
-            .bind(
-                facts
-                    .idempotency_key_digest
-                    .as_ref()
-                    .map(<[u8; 32]>::as_slice),
-            )
-            .bind(enqueued_at)
-            .bind(enqueue_delay_seconds)
-            .bind(max_retries)
-            .bind(good_until)
-            .bind(facts.retain_rerun_input)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(BrokerError::Database)?;
+        let execution = facts.execution.as_str();
+        let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
+        let bound_key_digest: Option<&[u8]> = facts
+            .idempotency_key_digest
+            .as_ref()
+            .map(<[u8; 32]>::as_slice);
+        let inserted = query_in(
+            &mut transaction,
+            self.statement_log,
+            &ENQUEUE
+                .bind()
+                .value(&task_id)
+                .value(&task_name)
+                .value(&queue_name)
+                .value(&priority)
+                .value(&input)
+                .value(&task_options)
+                .value(&execution)
+                .value(&facts.retention_class_key)
+                .value(&effective_sent_at)
+                .value(&facts.command_fingerprint_version)
+                .value(&fingerprint)
+                .value(&bound_key_digest)
+                .value(&enqueued_at)
+                .value(&enqueue_delay_seconds)
+                .value(&max_retries)
+                .value(&good_until)
+                .value(&facts.retain_rerun_input)
+                .finish(),
+        )
+        .await?;
 
-        if row.is_some() {
-            transaction.commit().await.map_err(BrokerError::Database)?;
+        if !inserted.is_empty() {
+            transaction.commit().await?;
             tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
             return Ok(task_id);
         }
@@ -1382,31 +1468,31 @@ impl PostgresBroker {
                 .await;
         }
 
-        transaction
-            .rollback()
-            .await
-            .map_err(BrokerError::Database)?;
+        roll_back(transaction).await?;
 
         // Conflict: task_id already exists. Compare the fingerprint and sent_at.
         tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
 
-        let stored: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>)> =
-            sqlx::query_as(READ_SEND_IDENTITY_SQL)
-                .bind(task_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
-
-        let outcome = classify_enqueue_conflict(
-            stored.map(|(fingerprint_version, fingerprint, sent_at)| SendIdentity {
-                fingerprint_version,
-                fingerprint,
-                sent_at,
+        let stored_rows = query_on(
+            &mut connection,
+            self.statement_log,
+            &READ_SEND_IDENTITY.bind().value(&task_id).finish(),
+        )
+        .await?;
+        let stored = match stored_rows.first() {
+            Some(row) => Some(SendIdentity {
+                fingerprint_version: column(
+                    row,
+                    &READ_SEND_IDENTITY,
+                    "command_fingerprint_version",
+                )?,
+                fingerprint: column(row, &READ_SEND_IDENTITY, "command_fingerprint")?,
+                sent_at: column(row, &READ_SEND_IDENTITY, "sent_at")?,
             }),
-            &sent,
-            task_id,
-            task_name,
-        );
+            None => None,
+        };
+
+        let outcome = classify_enqueue_conflict(stored, &sent, task_id, task_name);
         if matches!(
             outcome,
             Err(BrokerError::EnqueueConflictUnverifiable { .. })
@@ -1420,40 +1506,39 @@ impl PostgresBroker {
         outcome
     }
 
+    /// The keyed enqueue whose task id already exists: in the same
+    /// transaction, lock the row, compare its send identity, and bind the key
+    /// when the row has none.
     async fn bind_key_after_task_id_conflict(
         &self,
-        mut transaction: Transaction<'_, Postgres>,
+        mut transaction: CoreTransaction<'_>,
         task_id: Uuid,
         task_name: &str,
         sent: &SendIdentity,
         key_digest: &[u8; 32],
     ) -> Result<Uuid, BrokerError> {
-        let existing: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>, Option<Vec<u8>>)> =
-            sqlx::query_as(READ_SEND_IDENTITY_FOR_KEY_SQL)
-                .bind(task_id)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(BrokerError::Database)?;
-        let Some((fingerprint_version, fingerprint, sent_at, bound_digest)) = existing else {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+        let statement: &TypedStatement = &READ_SEND_IDENTITY_FOR_KEY;
+        let existing = query_in(
+            &mut transaction,
+            self.statement_log,
+            &statement.bind().value(&task_id).finish(),
+        )
+        .await?;
+        let Some(row) = existing.first() else {
+            roll_back(transaction).await?;
             return Err(BrokerError::EnqueueConflictUnverifiable {
                 task_id,
                 task_name: task_name.to_owned(),
             });
         };
         let stored = SendIdentity {
-            fingerprint_version,
-            fingerprint,
-            sent_at,
+            fingerprint_version: column(row, statement, "command_fingerprint_version")?,
+            fingerprint: column(row, statement, "command_fingerprint")?,
+            sent_at: column(row, statement, "sent_at")?,
         };
+        let bound_digest: Option<Vec<u8>> = column(row, statement, "idempotency_key_digest")?;
         if &stored != sent {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+            roll_back(transaction).await?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
         // The task id is bound to another key: the same command with a changed
@@ -1463,21 +1548,23 @@ impl PostgresBroker {
             .as_deref()
             .is_some_and(|digest| digest != key_digest.as_slice())
         {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+            roll_back(transaction).await?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
         if bound_digest.is_none() {
-            sqlx::query("UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2")
-                .bind(key_digest.as_slice())
-                .bind(task_id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(BrokerError::Database)?;
+            let key: &[u8] = key_digest.as_slice();
+            let _bound = execute_in(
+                &mut transaction,
+                self.statement_log,
+                &BIND_IDEMPOTENCY_KEY
+                    .bind()
+                    .value(&key)
+                    .value(&task_id)
+                    .finish(),
+            )
+            .await?;
         }
-        transaction.commit().await.map_err(BrokerError::Database)?;
+        transaction.commit().await?;
         Ok(task_id)
     }
 
@@ -1769,21 +1856,20 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<Vec<TaskAttemptRow>, BrokerError> {
-        let rows: Vec<TaskAttemptRow> = sqlx::query_as(SELECT_TASK_ATTEMPTS_SQL)
-            .bind(task_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+        let rows = self
+            .read_main(
+                &SELECT_TASK_ATTEMPTS.bind().value(&task_id).finish(),
+                task_attempt_row,
+            )
+            .await?;
         if !rows.is_empty() {
             return Ok(rows);
         }
 
-        let live: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)")
-                .bind(task_id)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
+        let live_rows = self
+            .query_main(&LIVE_TASK_EXISTS.bind().value(&task_id).finish())
+            .await?;
+        let live: bool = scalar(&one_row(live_rows, &LIVE_TASK_EXISTS)?, &LIVE_TASK_EXISTS)?;
         if live {
             return Ok(rows);
         }
@@ -1988,22 +2074,23 @@ impl PostgresBroker {
         include_failed_reason: bool,
         include_attempts: bool,
     ) -> BrokerResult<Option<TaskInfo>> {
-        let sql = match (include_result, include_failed_reason) {
-            (true, true) => GET_TASK_INFO_SQL,
-            (true, false) => GET_TASK_INFO_RESULT_ONLY_SQL,
-            (false, true) => GET_TASK_INFO_REASON_ONLY_SQL,
-            (false, false) => GET_TASK_INFO_MINIMAL_SQL,
+        let statement: &'static TypedStatement = match (include_result, include_failed_reason) {
+            (true, true) => &GET_TASK_INFO,
+            (true, false) => &GET_TASK_INFO_RESULT_ONLY,
+            (false, true) => &GET_TASK_INFO_REASON_ONLY,
+            (false, false) => &GET_TASK_INFO_MINIMAL,
         };
 
-        let row: Option<TaskInfoRow> = sqlx::query_as(sql)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
+        let row = self
+            .read_main(&statement.bind().value(&task_id).finish(), task_info_row)
             .await
-            .map_err(|e| BrokerOperationError {
+            .map_err(|error| BrokerOperationError {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
-                message: format!("{}", e),
-                retryable: is_retryable_sqlx_error(&e),
-            })?;
+                message: error.to_string(),
+                retryable: error.is_retryable(),
+            })?
+            .into_iter()
+            .next();
 
         match row {
             Some(r) => {
@@ -2745,11 +2832,7 @@ impl PostgresBroker {
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        let read = read_task_result(&mut connection, task_id)
-            .await
-            .map_err(map_history_read_error)?;
-        drop(connection);
+        let read = read_task_result(self.core.main(), self.statement_log, task_id).await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
@@ -2781,24 +2864,24 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<ResultRowProbe, BrokerError> {
-        let live: Option<TaskResultRow> = sqlx::query_as(GET_RESULT_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        if let Some(row) = live {
+        let live = self
+            .read_main(&GET_RESULT.bind().value(&task_id).finish(), task_result_row)
+            .await?;
+        if let Some(row) = live.into_iter().next() {
             return Ok(ResultRowProbe::Row(row));
         }
         self.confirm_result_absence(task_id).await
     }
 
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
-        let live: Option<RawResultProbeRow> = sqlx::query_as(GET_RAW_RESULT_PROBE_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
+        let live = self
+            .read_main(
+                &GET_RAW_RESULT_PROBE.bind().value(&task_id).finish(),
+                raw_result_probe_row,
+            )
             .await
-            .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
-        if let Some(row) = live {
+            .map_err(raw_result_operation_error)?;
+        if let Some(row) = live.into_iter().next() {
             let status: crate::core::TaskStatus = row
                 .status
                 .parse()
@@ -2809,12 +2892,14 @@ impl PostgresBroker {
                     | crate::core::TaskStatus::Failed
                     | crate::core::TaskStatus::Expired
             ) {
-                let terminal: Option<RawResultDbRow> = sqlx::query_as(GET_RAW_RESULT_RECORD_SQL)
-                    .bind(task_id)
-                    .fetch_optional(&self.pool)
+                let terminal = self
+                    .read_main(
+                        &GET_RAW_RESULT_RECORD.bind().value(&task_id).finish(),
+                        raw_result_db_row,
+                    )
                     .await
-                    .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
-                let Some(terminal) = terminal else {
+                    .map_err(raw_result_operation_error)?;
+                let Some(terminal) = terminal.into_iter().next() else {
                     return self.history_raw_result_probe(task_id).await;
                 };
                 let terminal_status: crate::core::TaskStatus =
@@ -2856,17 +2941,7 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
     ) -> Result<Option<TaskDetailResult>, BrokerError> {
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        if !staged_detail_published(&mut connection)
-            .await
-            .map_err(map_history_read_error)?
-        {
-            return Ok(None);
-        }
-        read_task_detail(&mut connection, task_id)
-            .await
-            .map(Some)
-            .map_err(map_history_read_error)
+        read_history_detail(self.core.main(), self.statement_log, task_id).await
     }
 
     /// Poll the result row once for the wait loop.
@@ -2924,13 +2999,6 @@ fn idempotency_reservation_window_seconds(
     Ok(window.num_seconds())
 }
 
-fn map_history_enqueue_error(error: HistoryError) -> BrokerError {
-    match error {
-        HistoryError::Database(error) => BrokerError::Database(error),
-        other => BrokerError::EnqueueContract(other.to_string()),
-    }
-}
-
 /// The rerun error of a failed client-family check.
 ///
 /// # Panics
@@ -2947,13 +3015,6 @@ fn rerun_family_error(error: BrokerError) -> RerunError {
             "ensure_client_family_for_write failed with {other:?}, which is neither a database \
              error nor a family mismatch"
         ),
-    }
-}
-
-fn map_history_read_error(error: HistoryError) -> BrokerError {
-    match error {
-        HistoryError::Database(error) => BrokerError::Database(error),
-        other => BrokerError::HistoryReadContract(other.to_string()),
     }
 }
 
@@ -2982,19 +3043,42 @@ enum ResultRowProbe {
     Absent,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct RawResultProbeRow {
     id: Uuid,
     task_name: String,
     status: String,
 }
 
-#[derive(Debug, FromRow)]
+fn raw_result_probe_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<RawResultProbeRow, RowDecodeError> {
+    Ok(RawResultProbeRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+    })
+}
+
+#[derive(Debug)]
 struct RawResultDbRow {
     id: Uuid,
     task_name: String,
     status: String,
     result: Option<String>,
+}
+
+fn raw_result_db_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<RawResultDbRow, RowDecodeError> {
+    Ok(RawResultDbRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+        result: column(row, statement, "result")?,
+    })
 }
 
 enum RawResultProbe {
@@ -6626,6 +6710,26 @@ mod task_info_code_tests {
 
         assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
         assert!(mapped.retryable);
+    }
+
+    #[test]
+    fn a_core_statement_failure_is_task_info_query_failed_with_its_transience() {
+        let timed_out =
+            task_info_history_error(BrokerError::Statement(StatementFailure::NotSent {
+                statement: "select_task_attempts",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: Duration::from_secs(30),
+                }),
+            }));
+        assert_eq!(timed_out.code, BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(timed_out.retryable);
+
+        let undecodable = task_info_history_error(BrokerError::RowDecode(RowDecodeError::NoRow {
+            statement: "live_task_exists",
+        }));
+        assert_eq!(undecodable.code, BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(!undecodable.retryable);
     }
 }
 
