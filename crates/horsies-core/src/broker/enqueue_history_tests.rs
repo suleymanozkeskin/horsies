@@ -10,10 +10,8 @@ use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::config::retention::{RetentionClassConfig, RetentionConfig};
-use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage, CoverageOutcome, DeclaredRetentionClass,
-};
+use crate::core::config::retention::RetentionConfig;
+use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 fn test_db_url() -> String {
@@ -322,7 +320,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             None,
-            Some("q_bulk_36h"),
+            Some("standard_2d"),
             Some(false),
         )
         .await
@@ -340,7 +338,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             Some("bind-key"),
-            Some("q_bulk_36h"),
+            Some("standard_2d"),
             Some(false),
         )
         .await
@@ -380,7 +378,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             Some("different-bind-key"),
-            Some("q_bulk_36h"),
+            Some("standard_2d"),
             Some(false),
         )
         .await
@@ -415,7 +413,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some(task_id),
             None,
             Some("rejected-bind-key"),
-            Some("q_bulk_36h"),
+            Some("standard_2d"),
             Some(false),
         )
         .await
@@ -432,24 +430,14 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     );
 
     let config = RetentionConfig {
-        retention_classes: vec![RetentionClassConfig {
-            key: "audit_7d".to_owned(),
-            duration: Duration::days(7),
-        }],
+        retention_periods: vec![Duration::days(7)],
         queue_retention: std::collections::HashMap::from([(
             "bulk".to_owned(),
-            Some(Duration::hours(36)),
+            Some(Duration::days(2)),
         )]),
         ..Default::default()
     };
-    let declared: Vec<_> = config
-        .registrable_classes()
-        .into_iter()
-        .map(|class| DeclaredRetentionClass {
-            class_key: class.key,
-            duration: class.duration,
-        })
-        .collect();
+    let declared = config.registrable_periods();
     let mut transaction = pool.begin().await.unwrap();
     let coverage = ensure_partition_coverage(
         &mut transaction,
@@ -466,10 +454,10 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     );
     transaction.commit().await.unwrap();
 
-    let registered: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT class_key, EXTRACT(EPOCH FROM duration)::bigint
+    let registered: Vec<(String, String, Option<i16>)> = sqlx::query_as(
+        "SELECT class_key, class_kind::text, retention_days
          FROM horsies_retention_classes
-         WHERE class_key IN ('audit_7d', 'q_bulk_36h')
+         WHERE class_key IN ('standard_2d', 'standard_7d')
          ORDER BY class_key",
     )
     .fetch_all(&pool)
@@ -478,8 +466,8 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     assert_eq!(
         registered,
         vec![
-            ("audit_7d".to_owned(), Duration::days(7).num_seconds()),
-            ("q_bulk_36h".to_owned(), Duration::hours(36).num_seconds()),
+            ("standard_2d".to_owned(), "PERIOD".to_owned(), Some(2)),
+            ("standard_7d".to_owned(), "PERIOD".to_owned(), Some(7)),
         ],
     );
 }
@@ -541,6 +529,10 @@ fn every_core_task_insert_names_the_baseline_columns() {
     // the core must rerun this inventory and update the exact count. The
     // baseline schema has no column defaults, so every insert names these.
     const SOURCES: &[(&str, &str)] = &[
+        (
+            "broker/attempt_writes/tests.rs",
+            include_str!("attempt_writes/tests.rs"),
+        ),
         ("broker/migrations.rs", include_str!("migrations.rs")),
         (
             "broker/monitoring_schema_tests.rs",
@@ -577,6 +569,10 @@ fn every_core_task_insert_names_the_baseline_columns() {
             include_str!("../worker/finalizing_tests.rs"),
         ),
         ("worker/recovery.rs", include_str!("../worker/recovery.rs")),
+        (
+            "worker/runner_beats.rs",
+            include_str!("../worker/runner_beats.rs"),
+        ),
         ("worker/worker.rs", include_str!("../worker/worker.rs")),
         (
             "workflow_engine/engine.rs",
@@ -635,7 +631,7 @@ fn every_core_task_insert_names_the_baseline_columns() {
         }
     }
 
-    assert_eq!(insert_count, 38, "classify every core task insert");
+    assert_eq!(insert_count, 42, "classify every core task insert");
 }
 
 #[test]

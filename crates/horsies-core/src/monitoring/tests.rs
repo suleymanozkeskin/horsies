@@ -896,8 +896,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
              enqueued_at = NOW() - INTERVAL '7 minutes',
              started_at = NOW() - INTERVAL '6 minutes',
              created_at = NOW() - INTERVAL '7 minutes',
-             terminal_at = NOW() - INTERVAL '5 minutes',
-             retention_anchor_at = NOW() - INTERVAL '5 minutes'
+             terminal_at = NOW() - INTERVAL '5 minutes'
          WHERE task_id = $1",
     )
     .bind(outside_window.id)
@@ -1420,7 +1419,10 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let error = get_task_detail(&broker, task.id)
         .await
         .expect_err("digest corruption must fail closed");
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code,
+        MonitoringQueryErrorCode::HistoryContractViolation
+    );
     assert!(!error.retryable);
     assert!(error.message.contains("digest"));
 

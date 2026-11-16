@@ -20,10 +20,10 @@ from tests.integration.task_history_harness import register_class
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-CLASS_KEY = 'catalog_active_probe'
+CLASS_KEY = 'standard_30d'
 DROPPED_RECORDS = 6_000
 ACTIVE_RECORDS = 20
-ACTIVE_INDEX: Final = 'idx_horsies_history_catalog_active'
+ACTIVE_INDEX: Final = 'horsies_task_history_leaf_catalog_active'
 MAX_PLAN_NODES: Final = 256
 """Upper bound of the plan nodes the walk reads; a larger plan fails the test."""
 
@@ -31,14 +31,13 @@ type PlanNode = dict[str, object]
 
 SEED_CATALOG_SQL = text(f"""
     INSERT INTO {LEAF_CATALOG} (
-        leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-        index_schema_version, id_index_name, partition_bound,
-        min_birth_at, min_birth_verified, created_at, detached_at, dropped_at
+        leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+        index_schema_version, created_at, detached_at, dropped_at
     )
-    SELECT 'catalog_probe_leaf_' || day, :parent, :class_key,
+    SELECT 'catalog_probe_leaf_' || day, :class_key, 'AT',
            TIMESTAMPTZ '2000-01-01 00:00:00+00' + day * interval '1 day',
            TIMESTAMPTZ '2000-01-02 00:00:00+00' + day * interval '1 day',
-           1, 'catalog_probe_idx_' || day, 'probe', NULL, FALSE, NOW(),
+           1, NOW(),
            CASE WHEN day < :dropped THEN NOW() END,
            CASE WHEN day < :dropped THEN NOW() END
     FROM generate_series(0, :total - 1) AS day

@@ -664,11 +664,20 @@ async fn cleanup_workflow(pool: &PgPool, wf_id: &str) {
         .ok();
 }
 
-fn owned(worker: &str, claimed_at: Option<DateTime<Utc>>) -> OwnedClaim {
+fn owned(worker: &str, claimed_at: DateTime<Utc>) -> OwnedClaim {
     OwnedClaim {
         worker_id: worker.to_owned(),
         claimed_at,
     }
+}
+
+/// The claim generation a seeded live row carries.
+async fn seeded_generation(pool: &PgPool, id: &str) -> DateTime<Utc> {
+    sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
+        .bind(uuid(id))
+        .fetch_one(pool)
+        .await
+        .expect("seeded claim generation")
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +744,7 @@ async fn complete_replay_within_class_is_already_applied() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", None),
+            fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
             notify_payload: "x".to_owned(),
@@ -848,7 +857,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", Some(claimed_at)),
+            fence: owned("w1", claimed_at),
             result_json: "{\"Ok\":7}".to_owned(),
             notify_channel: channel.clone(),
             notify_payload: format!("capacity:{id}"),
@@ -960,7 +969,7 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", None),
+            fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
             notify_payload: "x".to_owned(),
@@ -1006,7 +1015,7 @@ async fn fused_stale_generation_is_lost_claim() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", Some(stale)),
+            fence: owned("w1", stale),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
             notify_payload: "x".to_owned(),
@@ -1051,7 +1060,7 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", Some(claimed_at)),
+            fence: owned("w1", claimed_at),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
             notify_payload: "x".to_owned(),
@@ -1189,7 +1198,7 @@ async fn legacy_kind_is_foreign_and_never_inferred_as_a_wire_replay() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", None),
+            fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
             notify_payload: "x".to_owned(),
@@ -1694,7 +1703,7 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&done),
-            fence: owned("w1", None),
+            fence: owned("w1", seeded_generation(&pool, &done).await),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
             notify_payload: "x".to_owned(),
@@ -1788,7 +1797,7 @@ async fn cancel_owned_orphan_applies_only_without_runnable_linkage() {
 
     let command = |task_id: &str| TerminalizationCommand::CancelOwnedOrphan {
         task_id: uuid(task_id),
-        fence: owned("w1", Some(claimed_at)),
+        fence: owned("w1", claimed_at),
     };
 
     let outcomes = terminalize(&pool, &command(&orphan))
@@ -2483,7 +2492,7 @@ async fn abandon_owned_node_applies_and_fences_generation() {
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
             task_id: uuid(&id),
-            fence: owned("w1", Some(claimed_at - Duration::hours(1))),
+            fence: owned("w1", claimed_at - Duration::hours(1)),
         },
     )
     .await
@@ -2498,7 +2507,7 @@ async fn abandon_owned_node_applies_and_fences_generation() {
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
             task_id: uuid(&id),
-            fence: owned("w1", Some(claimed_at)),
+            fence: owned("w1", claimed_at),
         },
     )
     .await
@@ -2568,7 +2577,7 @@ async fn abandon_owned_nodes_reports_per_ordinal_in_caller_order() {
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
             task_id: uuid(&done),
-            fence: owned("w1", Some(claimed_at)),
+            fence: owned("w1", claimed_at),
         },
     )
     .await
@@ -2577,10 +2586,10 @@ async fn abandon_owned_nodes_reports_per_ordinal_in_caller_order() {
     let fence = OwnedClaimBatch::new(
         "w1".to_owned(),
         vec![
-            (uuid(&mine), Some(claimed_at)),
-            (uuid(&absent), None),
-            (uuid(&theirs), Some(claimed_at)),
-            (uuid(&done), Some(claimed_at)),
+            (uuid(&mine), claimed_at),
+            (uuid(&absent), claimed_at),
+            (uuid(&theirs), claimed_at),
+            (uuid(&done), claimed_at),
         ],
     )
     .unwrap();
@@ -2746,7 +2755,7 @@ async fn cancel_owned_node_honors_requeued_pending_carveout() {
         &pool,
         &TerminalizationCommand::CancelOwnedNode {
             task_id: uuid(&requeued),
-            fence: owned("w1", None),
+            fence: owned("w1", Utc::now()),
             accepts_requeued_pending: false,
         },
     )
@@ -2762,7 +2771,7 @@ async fn cancel_owned_node_honors_requeued_pending_carveout() {
         &pool,
         &TerminalizationCommand::CancelOwnedNode {
             task_id: uuid(&requeued),
-            fence: owned("w1", None),
+            fence: owned("w1", Utc::now()),
             accepts_requeued_pending: true,
         },
     )
@@ -2812,11 +2821,8 @@ async fn cancel_owned_nodes_batch_applies_owned_claims() {
     )
     .await;
 
-    let fence = OwnedClaimBatch::new(
-        "w1".to_owned(),
-        vec![(uuid(&a), Some(gen_a)), (uuid(&b), Some(gen_b))],
-    )
-    .unwrap();
+    let fence =
+        OwnedClaimBatch::new("w1".to_owned(), vec![(uuid(&a), gen_a), (uuid(&b), gen_b)]).unwrap();
     let outcomes = terminalize(&pool, &TerminalizationCommand::CancelOwnedNodes { fence })
         .await
         .expect("terminalize");
@@ -3039,7 +3045,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
             task_id: uuid(&nondeferred),
-            fence: owned("w1", Some(claimed_at)),
+            fence: owned("w1", claimed_at),
         },
     )
     .await

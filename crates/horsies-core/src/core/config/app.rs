@@ -13,7 +13,10 @@ use crate::core::defaults::{DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS};
 ///
 /// Validated on construction via [`AppConfig::validate`]. Collects all
 /// independent errors and returns them together (gated validation).
+/// Deserialization refuses an unknown key in this struct and in every nested
+/// config struct (Python `extra='forbid'`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     /// Queue routing mode.
     #[serde(default = "default_queue_mode")]
@@ -115,17 +118,32 @@ pub enum AppConfigError {
 }
 
 impl AppConfigError {
+    /// The catalog code of the refusal, as Python's config models report it.
+    ///
+    /// `Payload` has none: Python refuses a payload threshold below 1 through
+    /// a field bound (`Field(ge=1)`), which carries no catalog code.
     pub fn error_code(&self) -> Option<crate::core::error::ErrorCode> {
+        use crate::core::error::ErrorCode;
         match self {
-            Self::Retention(_) => Some(crate::core::error::ErrorCode::ConfigInvalidRetention),
-            Self::QueueMode(_)
-            | Self::ClusterCap(_)
-            | Self::Prefetch(_)
-            | Self::Broker(_)
-            | Self::Recovery(_)
-            | Self::Resilience(_)
-            | Self::Schedule(_)
-            | Self::Payload(_) => None,
+            Self::QueueMode(_) => Some(ErrorCode::ConfigInvalidQueueMode),
+            Self::ClusterCap(_) => Some(ErrorCode::ConfigInvalidClusterCap),
+            Self::Prefetch(_) => Some(ErrorCode::ConfigInvalidPrefetch),
+            Self::Broker(_) => Some(ErrorCode::BrokerInvalidUrl),
+            Self::Recovery(_) => Some(ErrorCode::ConfigInvalidRecovery),
+            Self::Retention(_) => Some(ErrorCode::ConfigInvalidRetention),
+            Self::Resilience(_) => Some(ErrorCode::ConfigInvalidResilience),
+            Self::Schedule(_) => Some(ErrorCode::ConfigInvalidSchedule),
+            Self::Payload(_) => None,
+        }
+    }
+
+    /// The refusal as a [`crate::core::error::HorsiesError`] that carries
+    /// its catalog code.
+    pub fn to_horsies_error(&self) -> crate::core::error::HorsiesError {
+        let converted = crate::core::error::HorsiesError::new(self.to_string());
+        match self.error_code() {
+            Some(code) => converted.with_code(code),
+            None => converted,
         }
     }
 }
@@ -266,8 +284,8 @@ impl AppConfig {
             self.retention.heartbeat_leaf_horizon_hours,
         ));
         lines.push(format!(
-            "    retention_classes: {}",
-            self.retention.retention_classes.len(),
+            "    retention_periods: {}",
+            self.retention.retention_periods.len(),
         ));
         lines.push(format!(
             "    queue_retention: {}",
@@ -422,11 +440,13 @@ impl AppConfig {
             )));
         }
 
-        // max_claim_renew_age_ms must be >= effective lease.
-        if lease_value_valid
-            && self.max_claim_renew_age_ms > 0
-            && self.max_claim_renew_age_ms < effective_lease_ms
-        {
+        // max_claim_renew_age_ms must be positive (0 would renew no claim)
+        // and >= effective lease.
+        if self.max_claim_renew_age_ms == 0 {
+            errors.push(AppConfigError::Prefetch(
+                "max_claim_renew_age_ms must be positive".to_owned(),
+            ));
+        } else if lease_value_valid && self.max_claim_renew_age_ms < effective_lease_ms {
             errors.push(AppConfigError::Prefetch(format!(
                 "max_claim_renew_age_ms must be >= effective claim lease: \
                  max_claim_renew_age_ms={}ms, effective lease={}ms",
@@ -459,6 +479,14 @@ impl AppConfig {
         // Payload guardrail validation
         for e in self.payload.validate() {
             errors.push(AppConfigError::Payload(e));
+        }
+
+        // Schedule section: checked with the app config, every error
+        // collected (Python validates ScheduleConfig when AppConfig is built).
+        if let Some(schedule) = &self.schedule {
+            for e in schedule.errors() {
+                errors.push(AppConfigError::Schedule(e));
+            }
         }
 
         errors
@@ -1135,5 +1163,152 @@ mod tests {
         let config = default_config();
         let output = config.format_for_logging();
         assert!(!output.contains("schedule:"));
+    }
+
+    // --- Refusals ported from Python test_app_config.py ---
+
+    /// Python `test_app_config.py` (match `max_claim_renew_age_ms must be
+    /// positive`): 0 would renew no claim, so it is refused.
+    #[test]
+    fn max_claim_renew_age_ms_zero_is_refused() {
+        let mut config = default_config();
+        config.max_claim_renew_age_ms = 0;
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(matches!(errors[0], AppConfigError::Prefetch(_)));
+        assert!(errors[0]
+            .to_string()
+            .contains("max_claim_renew_age_ms must be positive"));
+        assert_eq!(
+            errors[0].error_code(),
+            Some(crate::core::error::ErrorCode::ConfigInvalidPrefetch),
+        );
+    }
+
+    /// Every config refusal carries Python's catalog code.
+    #[test]
+    fn every_refusal_carries_its_catalog_code() {
+        use crate::core::error::ErrorCode;
+        let cases = [
+            (
+                AppConfigError::QueueMode(String::new()),
+                Some(ErrorCode::ConfigInvalidQueueMode),
+            ),
+            (
+                AppConfigError::ClusterCap(String::new()),
+                Some(ErrorCode::ConfigInvalidClusterCap),
+            ),
+            (
+                AppConfigError::Prefetch(String::new()),
+                Some(ErrorCode::ConfigInvalidPrefetch),
+            ),
+            (
+                AppConfigError::Broker(String::new()),
+                Some(ErrorCode::BrokerInvalidUrl),
+            ),
+            (
+                AppConfigError::Recovery(String::new()),
+                Some(ErrorCode::ConfigInvalidRecovery),
+            ),
+            (
+                AppConfigError::Retention(String::new()),
+                Some(ErrorCode::ConfigInvalidRetention),
+            ),
+            (
+                AppConfigError::Resilience(String::new()),
+                Some(ErrorCode::ConfigInvalidResilience),
+            ),
+            (
+                AppConfigError::Schedule(String::new()),
+                Some(ErrorCode::ConfigInvalidSchedule),
+            ),
+            (AppConfigError::Payload(String::new()), None),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.error_code(), code, "{error:?}");
+            assert_eq!(error.to_horsies_error().code, code, "{error:?}");
+        }
+
+        let mut config = default_config();
+        config.cluster_wide_cap = Some(0);
+        config.resilience.db_retry_initial_ms = 1;
+        let codes: Vec<_> = config
+            .validate()
+            .iter()
+            .map(AppConfigError::error_code)
+            .collect();
+        assert!(
+            codes.contains(&Some(ErrorCode::ConfigInvalidClusterCap)),
+            "{codes:?}"
+        );
+        assert!(
+            codes.contains(&Some(ErrorCode::ConfigInvalidResilience)),
+            "{codes:?}"
+        );
+    }
+
+    /// Python validates `ScheduleConfig` when `AppConfig` is built
+    /// (`core/models/app.py:60-62`): a bad schedule refuses the app config,
+    /// and every schedule error is reported.
+    #[test]
+    fn schedule_section_is_checked_with_the_app_config() {
+        use crate::core::config::schedule::*;
+        let schedule = |name: &str| {
+            TaskSchedule::new(
+                name,
+                "my_task",
+                SchedulePattern::Interval(IntervalSchedule {
+                    seconds: Some(60),
+                    ..IntervalSchedule::default()
+                }),
+            )
+        };
+        let mut config = default_config();
+        config.schedule = Some(ScheduleConfig::new(vec![
+            schedule("bad_tz").timezone("Not/A_Timezone"),
+            schedule("no_catch_up").max_catch_up_runs(0),
+        ]));
+        let errors = config.validate();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors
+            .iter()
+            .all(|error| matches!(error, AppConfigError::Schedule(_))));
+        assert!(errors[0].to_string().contains("invalid timezone"));
+        assert!(errors[1].to_string().contains("max_catch_up_runs"));
+
+        config.schedule = Some(ScheduleConfig::new(vec![schedule("good")]));
+        assert!(config.validate().is_empty());
+    }
+
+    /// Python `test_config_models_forbid_extra.py`: an unknown key in the app
+    /// config or in a nested config is refused, not dropped.
+    #[test]
+    fn unknown_keys_are_refused_at_every_level() {
+        let accepted = r#"{"broker": {"database_url": "postgresql://localhost/db"}}"#;
+        let config: AppConfig = serde_json::from_str(accepted).expect("known keys only");
+        assert!(config.validate().is_empty());
+
+        let refused = [
+            r#"{"broker": {"database_url": "postgresql://localhost/db"}, "prefetch": 1}"#,
+            r#"{"broker": {"database_url": "postgresql://localhost/db", "pool": 1}}"#,
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "queue_mode": "custom", "custom_queues": [{"name": "a", "prio": 1}]}"#,
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "payload": {"reject": 10}}"#,
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "resilience": {"db_retry_initial": 500}}"#,
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "recovery": {"check_interval": 500}}"#,
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "schedule": {"schedules": [], "interval": 1}}"#,
+        ];
+        for json in refused {
+            let error = serde_json::from_str::<AppConfig>(json)
+                .expect_err("an unknown key must be refused");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{json}: {error}"
+            );
+        }
     }
 }

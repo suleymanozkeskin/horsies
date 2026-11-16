@@ -10,11 +10,13 @@ use super::operations::{
 use super::provenance::RERUN_FIELD_PROVENANCE;
 use crate::broker::terminalization::terminalize;
 use crate::broker::PostgresBroker;
-use crate::core::history::ddl::classes::register_finite_retention_class;
+use crate::core::history::ddl::classes::register_period_class;
 use crate::core::history::identity::fingerprint::EnqueueCommandV1;
 use crate::core::history::identity::keys::{ScopedIdempotencyKey, IDEMPOTENCY_SCOPE_VERSION};
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::periods::RetentionDays;
+use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{
     CallerHoldsRowLock, PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
@@ -24,7 +26,7 @@ use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
 
 const WORKER: &str = "p8-rerun-worker";
 const SOURCE_CLASS: &str = "forever";
-const CURRENT_POLICY_CLASS: &str = "p8_current_policy";
+const CURRENT_POLICY_CLASS: &str = "standard_14d";
 const PAYLOAD_INPUT: &str = "{\"k\":\"v\"}";
 const PAYLOAD_OPTIONS: &str = "{\"timeout_ms\":5}";
 
@@ -253,9 +255,12 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let mut registration = pool.acquire().await.unwrap();
-    register_finite_retention_class(&mut registration, CURRENT_POLICY_CLASS, Duration::days(14))
-        .await
-        .unwrap();
+    register_period_class(
+        &mut registration,
+        RetentionDays::parse_period(Duration::days(14)).unwrap(),
+    )
+    .await
+    .unwrap();
     drop(registration);
     let deadline = (Utc::now() + Duration::hours(2))
         .duration_trunc(Duration::microseconds(1))
@@ -496,8 +501,6 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     sqlx::query(
         "UPDATE horsies_task_history
          SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
-             rerun_input_codec = 'json-utf8',
-             rerun_input_content_type = 'application/json',
              rerun_input_digest = decode(repeat('00', 32), 'hex'),
              rerun_input_inline = 'corrupt'::bytea
          WHERE task_id = ANY($1)",
@@ -613,7 +616,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             .unwrap(),
         RerunOutcome::SourceAbsent {
             task_id,
-            predates_retained_floor: None,
+            reason: TaskAbsenceReason::NotClassified,
         } if task_id == absent
     ));
 
@@ -621,12 +624,19 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let milliseconds = old_birth.timestamp_millis() as u128;
     let raw = (milliseconds << 80) | (0x7_u128 << 76) | (0b10_u128 << 62) | 1;
     let old_absent = Uuid::from_u128(raw);
+    // Retention removed a period-class leaf that ended after the id's birth:
+    // the record of that removal is a detached catalog row.
     let mut transaction = pool.begin().await.unwrap();
     sqlx::query(
-        "UPDATE horsies_task_history_leaf_catalog
-         SET min_birth_at = NOW(), min_birth_verified = TRUE
-         WHERE detached_at IS NULL AND dropped_at IS NULL
-           AND class_key <> 'heartbeats'",
+        "INSERT INTO horsies_task_history_leaf_catalog (
+             leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+             index_schema_version, created_at, detached_at, dropped_at
+         ) VALUES (
+             'p8_removed_standard_30d_leaf', 'standard_30d', 'AT',
+             date_trunc('day', NOW(), 'UTC') - interval '2 days',
+             date_trunc('day', NOW(), 'UTC') - interval '1 day',
+             1, NOW(), NOW(), NOW()
+         )",
     )
     .execute(&mut *transaction)
     .await
@@ -642,7 +652,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         outcome,
         RerunOutcome::SourceAbsent {
             task_id: old_absent,
-            predates_retained_floor: Some(true),
+            reason: TaskAbsenceReason::PredatesRetainedHistory,
         }
     );
     transaction.rollback().await.unwrap();
@@ -661,25 +671,17 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    for (disposition, reference) in [
-        ("DECLINED_BY_POLICY", None),
-        ("OVER_BOUND", None),
-        ("NEVER_ELIGIBLE", None),
-        ("REFERENCE", Some("s3://caller-owned/p8")),
-    ] {
+    for disposition in ["DECLINED_BY_POLICY", "OVER_BOUND", "NEVER_ELIGIBLE"] {
         sqlx::query(
             "UPDATE horsies_task_history
              SET rerun_input_disposition = $2,
-                 rerun_input_version = CASE WHEN $2 = 'REFERENCE' THEN 1 END,
-                 rerun_input_codec = CASE WHEN $2 = 'REFERENCE' THEN 'json-utf8' END,
-                 rerun_input_content_type = CASE WHEN $2 = 'REFERENCE' THEN 'application/json' END,
-                 rerun_input_digest = CASE WHEN $2 = 'REFERENCE' THEN decode(repeat('01', 32), 'hex') END,
-                 rerun_input_inline = NULL, rerun_input_reference = $3
+                 rerun_input_version = NULL,
+                 rerun_input_digest = NULL,
+                 rerun_input_inline = NULL
              WHERE task_id = $1",
         )
         .bind(source)
         .bind(disposition)
-        .bind(reference)
         .execute(&pool)
         .await
         .unwrap();
@@ -694,7 +696,6 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             RerunOutcome::InputUnavailable {
                 task_id: source,
                 disposition: disposition.to_owned(),
-                reference_locator: reference.map(str::to_owned),
             }
         );
     }
@@ -714,10 +715,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     sqlx::query(
         "UPDATE horsies_task_history
          SET rerun_input_disposition = 'INLINE', rerun_input_version = NULL,
-             rerun_input_codec = 'json-utf8',
-             rerun_input_content_type = 'application/json',
-             rerun_input_digest = $2, rerun_input_inline = $3,
-             rerun_input_reference = NULL
+             rerun_input_digest = $2, rerun_input_inline = $3
          WHERE task_id = $1",
     )
     .bind(source)
@@ -742,10 +740,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     sqlx::query(
         "UPDATE horsies_task_history
          SET rerun_input_disposition = 'INLINE', rerun_input_version = 2,
-             rerun_input_codec = 'json-utf8',
-             rerun_input_content_type = 'application/json',
-             rerun_input_digest = $2, rerun_input_inline = $3,
-             rerun_input_reference = NULL
+             rerun_input_digest = $2, rerun_input_inline = $3
          WHERE task_id = $1",
     )
     .bind(source)
@@ -771,10 +766,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         sqlx::query(
             "UPDATE horsies_task_history
              SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
-                 rerun_input_codec = 'json-utf8',
-                 rerun_input_content_type = 'application/json',
-                 rerun_input_digest = $2, rerun_input_inline = $3,
-                 rerun_input_reference = NULL
+                 rerun_input_digest = $2, rerun_input_inline = $3
              WHERE task_id = $1",
         )
         .bind(source)
@@ -1154,9 +1146,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     let non_object = b"[]".to_vec();
     sqlx::query(
         "UPDATE horsies_task_history
-         SET result_payload = $2, result_digest = sha256($2),
-             result_codec = 'json-utf8',
-             result_content_type = 'application/json'
+         SET result_payload = $2, result_digest = sha256($2)
          WHERE task_id = $1",
     )
     .bind(completed)
@@ -1170,22 +1160,8 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(shape_error.code, crate::BrokerErrorCode::InvalidJsonPayload);
 
-    sqlx::query(
-        "UPDATE horsies_task_history SET result_content_type = 'text/plain'
-         WHERE task_id = $1",
-    )
-    .bind(completed)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let content_error = broker
-        .get_raw_result_record(completed, None)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        content_error.code,
-        crate::BrokerErrorCode::InvalidJsonPayload
-    );
+    // The baseline stores no result content type: format version 1 implies
+    // it, so a stored content type cannot disagree with the version.
 
     let attempt_payload: Vec<u8> =
         sqlx::query_scalar("SELECT attempt_snapshot FROM horsies_task_history WHERE task_id = $1")

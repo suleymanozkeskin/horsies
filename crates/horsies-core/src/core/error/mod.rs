@@ -71,6 +71,8 @@ pub enum ErrorCode {
     WorkflowCheckCaseInvalid,
     WorkflowCheckBuilderException,
     WorkflowCheckUndecoratedBuilder,
+    /// A workflow spec has more than `MAX_WORKFLOW_NODES` (10,000) nodes.
+    WorkflowTooManyNodes,
 
     // Task definition (HRS-100–HRS-199)
     TaskNoReturnType,
@@ -87,6 +89,7 @@ pub enum ErrorCode {
     ConfigInvalidSchedule,
     CliInvalidArgs,
     WorkerInvalidLocator,
+    ConfigInvalidResilience,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -127,6 +130,7 @@ impl ErrorCode {
             Self::WorkflowCheckCaseInvalid => "HRS-028",
             Self::WorkflowCheckBuilderException => "HRS-029",
             Self::WorkflowCheckUndecoratedBuilder => "HRS-030",
+            Self::WorkflowTooManyNodes => "HRS-038",
             Self::TaskNoReturnType => "HRS-100",
             Self::TaskInvalidReturnType => "HRS-101",
             Self::TaskInvalidOptions => "HRS-102",
@@ -139,6 +143,7 @@ impl ErrorCode {
             Self::ConfigInvalidSchedule => "HRS-205",
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
+            Self::ConfigInvalidResilience => "HRS-208",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -181,7 +186,8 @@ impl ErrorCode {
             | Self::WorkflowCheckCasesRequired
             | Self::WorkflowCheckCaseInvalid
             | Self::WorkflowCheckBuilderException
-            | Self::WorkflowCheckUndecoratedBuilder => ErrorCategory::Workflow,
+            | Self::WorkflowCheckUndecoratedBuilder
+            | Self::WorkflowTooManyNodes => ErrorCategory::Workflow,
 
             Self::TaskNoReturnType
             | Self::TaskInvalidReturnType
@@ -196,6 +202,7 @@ impl ErrorCode {
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
+            | Self::ConfigInvalidResilience
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -236,6 +243,7 @@ impl ErrorCode {
                 | Self::WorkflowCheckCaseInvalid
                 | Self::WorkflowCheckBuilderException
                 | Self::WorkflowCheckUndecoratedBuilder
+                | Self::WorkflowTooManyNodes
         )
     }
 
@@ -262,6 +270,7 @@ impl ErrorCode {
                 | Self::ConfigInvalidSchedule
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
+                | Self::ConfigInvalidResilience
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
@@ -455,6 +464,8 @@ mod tests {
             ErrorCategory::Config,
         );
         assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
+        assert_eq!(ErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
+        assert!(ErrorCode::ConfigInvalidResilience.is_config_error());
     }
 
     #[test]

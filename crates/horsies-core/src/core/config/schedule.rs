@@ -22,6 +22,7 @@ pub enum Weekday {
 /// At least one time unit must be specified.
 /// Total interval is the sum of all specified units.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntervalSchedule {
     /// Seconds component (1–86400).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,6 +124,7 @@ impl IntervalSchedule {
 
 /// Run task every hour at a specific minute and second.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HourlySchedule {
     /// Minute of the hour (0–59).
     pub minute: u32,
@@ -154,6 +156,7 @@ impl HourlySchedule {
 
 /// Run task every day at a specific time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DailySchedule {
     /// Time of day to run (HH:MM:SS).
     pub time: NaiveTime,
@@ -161,6 +164,7 @@ pub struct DailySchedule {
 
 /// Run task on specific days of the week at a specific time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WeeklySchedule {
     /// Days of week to run (at least one).
     pub days: Vec<Weekday>,
@@ -187,6 +191,7 @@ impl WeeklySchedule {
 
 /// Run task on a specific day of the month at a specific time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MonthlySchedule {
     /// Day of month (1–31).
     pub day: u32,
@@ -294,7 +299,7 @@ fn default_cron_step() -> u32 {
 /// names the offending field — the variants are domain-agnostic. Wire tags
 /// match the Python implementation (`every`/`step`/`values`/`range`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CronNumericTerm {
     /// `*` — every value in the field's domain.
     Every,
@@ -318,7 +323,7 @@ pub enum CronNumericTerm {
 /// Wire tags match the Python implementation
 /// (`every`/`enum_values`/`enum_range`/`enum_step`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CronEnumTerm<T> {
     /// `*` — every value in the field's domain.
     Every,
@@ -340,7 +345,7 @@ pub enum CronEnumTerm<T> {
 /// A single sum type forces an explicit choice when both day-of-month and
 /// day-of-week are restricted, eliminating cron's silent OR ambiguity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DaySelector {
     /// Both day-of-month and day-of-week unrestricted.
     EveryDay,
@@ -369,6 +374,7 @@ pub enum DaySelector {
 /// second :00 (minute granularity). The `day` field collapses day-of-month and
 /// day-of-week into an explicit [`DaySelector`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CronSchedule {
     /// Minute field terms (0–59).
     pub minute: Vec<CronNumericTerm>,
@@ -698,7 +704,7 @@ impl CronSchedule {
 
 /// Union of all schedule pattern types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SchedulePattern {
     Interval(IntervalSchedule),
     Hourly(HourlySchedule),
@@ -710,6 +716,7 @@ pub enum SchedulePattern {
 
 /// Definition of a scheduled task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskSchedule {
     /// Unique schedule identifier.
     pub name: String,
@@ -804,6 +811,7 @@ fn default_timezone() -> String {
 
 /// Scheduler configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleConfig {
     /// Master scheduler enable switch.
     #[serde(default = "default_true")]
@@ -846,17 +854,31 @@ impl ScheduleConfig {
         self
     }
 
-    /// Validate the schedule configuration.
+    /// Validate the schedule configuration and return the first error.
+    ///
+    /// The same checks as [`ScheduleConfig::errors`].
+    pub fn validate(&self) -> Result<(), String> {
+        match self.errors().into_iter().next() {
+            Some(first) => Err(first),
+            None => Ok(()),
+        }
+    }
+
+    /// Every error of the schedule configuration, in config order.
     ///
     /// Checks:
     /// - `check_interval_seconds` is between 1 and 60 (matching Python `Field(ge=1, le=60)`)
     /// - All schedule names are unique
     /// - Individual schedule patterns are valid (interval bounds, hourly/monthly ranges,
     ///   weekly day uniqueness)
-    pub fn validate(&self) -> Result<(), String> {
+    /// - Each timezone is an IANA name
+    /// - Each `max_catch_up_runs` is between 1 and 10,000 (Python `Field(ge=1, le=10000)`)
+    pub fn errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
         // check_interval_seconds bounds (Python: ge=1, le=60)
-        if self.check_interval_seconds == 0 || self.check_interval_seconds > 60 {
-            return Err(format!(
+        if !(1..=60).contains(&self.check_interval_seconds) {
+            errors.push(format!(
                 "check_interval_seconds must be between 1 and 60, got {}",
                 self.check_interval_seconds,
             ));
@@ -866,36 +888,57 @@ impl ScheduleConfig {
         let mut seen_names = HashSet::with_capacity(self.schedules.len());
         for schedule in &self.schedules {
             if !seen_names.insert(&schedule.name) {
-                return Err(format!(
+                errors.push(format!(
                     "duplicate schedule name '{}' — each schedule must have a unique name",
                     schedule.name,
                 ));
             }
         }
 
-        // Validate individual schedule patterns and timezones
+        // Validate individual schedule patterns, timezones and catch-up bounds
         for schedule in &self.schedules {
-            match &schedule.pattern {
-                SchedulePattern::Interval(interval) => interval.validate()?,
-                SchedulePattern::Hourly(hourly) => hourly.validate()?,
-                SchedulePattern::Weekly(weekly) => weekly.validate()?,
-                SchedulePattern::Monthly(monthly) => monthly.validate()?,
-                SchedulePattern::Cron(cron) => cron.validate()?,
-                SchedulePattern::Daily(_) => {} // NaiveTime handles its own bounds
+            let pattern_check = match &schedule.pattern {
+                SchedulePattern::Interval(interval) => interval.validate(),
+                SchedulePattern::Hourly(hourly) => hourly.validate(),
+                SchedulePattern::Weekly(weekly) => weekly.validate(),
+                SchedulePattern::Monthly(monthly) => monthly.validate(),
+                SchedulePattern::Cron(cron) => cron.validate(),
+                SchedulePattern::Daily(_) => Ok(()), // NaiveTime handles its own bounds
+            };
+            if let Err(pattern_error) = pattern_check {
+                errors.push(format!("schedule '{}': {}", schedule.name, pattern_error));
             }
 
             if schedule.timezone.parse::<Tz>().is_err() {
-                return Err(format!(
+                errors.push(format!(
                     "schedule '{}': invalid timezone '{}' — \
                      use an IANA timezone name (e.g. 'America/New_York', 'UTC')",
                     schedule.name, schedule.timezone,
                 ));
             }
+
+            if !(MAX_CATCH_UP_RUNS_MIN..=MAX_CATCH_UP_RUNS_MAX)
+                .contains(&schedule.max_catch_up_runs)
+            {
+                errors.push(format!(
+                    "schedule '{}': max_catch_up_runs must be between {} and {}, got {}",
+                    schedule.name,
+                    MAX_CATCH_UP_RUNS_MIN,
+                    MAX_CATCH_UP_RUNS_MAX,
+                    schedule.max_catch_up_runs,
+                ));
+            }
         }
 
-        Ok(())
+        errors
     }
 }
+
+/// Smallest `TaskSchedule::max_catch_up_runs` (Python `Field(ge=1)`).
+pub const MAX_CATCH_UP_RUNS_MIN: u32 = 1;
+
+/// Largest `TaskSchedule::max_catch_up_runs` (Python `Field(le=10000)`).
+pub const MAX_CATCH_UP_RUNS_MAX: u32 = 10_000;
 
 fn default_check_interval() -> u32 {
     1
@@ -1990,5 +2033,104 @@ mod tests {
             check_interval_seconds: 1,
         };
         assert!(config.validate().is_err());
+    }
+
+    // -- Bounds and collected errors (Python test_schedule_models.py) --
+
+    fn interval_schedule(name: &str) -> TaskSchedule {
+        TaskSchedule::new(
+            name,
+            "my_task",
+            SchedulePattern::Interval(IntervalSchedule {
+                seconds: Some(10),
+                ..IntervalSchedule::default()
+            }),
+        )
+    }
+
+    /// Python `test_schedule_models.py::test_max_catch_up_runs_validation`:
+    /// `max_catch_up_runs` is between 1 and 10,000.
+    #[test]
+    fn max_catch_up_runs_validation() {
+        for accepted in [MAX_CATCH_UP_RUNS_MIN, MAX_CATCH_UP_RUNS_MAX] {
+            let config = ScheduleConfig::new(vec![
+                interval_schedule("bounded").max_catch_up_runs(accepted)
+            ]);
+            assert!(
+                config.errors().is_empty(),
+                "{accepted}: {:?}",
+                config.errors()
+            );
+        }
+        for refused in [0, MAX_CATCH_UP_RUNS_MAX + 1] {
+            let config =
+                ScheduleConfig::new(vec![interval_schedule("bounded").max_catch_up_runs(refused)]);
+            let errors = config.errors();
+            assert_eq!(errors.len(), 1, "{refused}: {errors:?}");
+            assert!(errors[0].contains("max_catch_up_runs"), "{}", errors[0]);
+        }
+    }
+
+    /// Every schedule error is collected, not only the first (Python's
+    /// `ValidationReport` collects the errors of the schedule section).
+    #[test]
+    fn errors_collects_every_schedule_error() {
+        let config = ScheduleConfig {
+            enabled: true,
+            schedules: vec![
+                interval_schedule("twice"),
+                interval_schedule("twice"),
+                interval_schedule("bad_tz").timezone("Not/A_Timezone"),
+                interval_schedule("no_catch_up").max_catch_up_runs(0),
+                TaskSchedule::new(
+                    "empty_interval",
+                    "my_task",
+                    SchedulePattern::Interval(IntervalSchedule::default()),
+                ),
+            ],
+            check_interval_seconds: 0,
+        };
+        let errors = config.errors();
+        assert_eq!(errors.len(), 5, "{errors:?}");
+        assert!(errors[0].contains("check_interval_seconds"));
+        assert!(errors[1].contains("duplicate schedule name 'twice'"));
+        assert!(errors[2].contains("invalid timezone 'Not/A_Timezone'"));
+        assert!(errors[3].contains("schedule 'no_catch_up': max_catch_up_runs"));
+        assert!(errors[4].contains("schedule 'empty_interval'"));
+        assert_eq!(config.validate(), Err(errors[0].clone()));
+    }
+
+    /// Python `test_config_models_forbid_extra.py`: a misspelled key in a
+    /// schedule config struct is refused, not dropped.
+    #[test]
+    fn unknown_keys_in_schedule_config_are_refused() {
+        let refused = [
+            r#"{"enabled": true, "check_intervals": 5}"#,
+            r#"{"schedules": [{"name": "a", "task_name": "t",
+                "pattern": {"type": "interval", "seconds": 5}, "queue": "q"}]}"#,
+            r#"{"schedules": [{"name": "a", "task_name": "t",
+                "pattern": {"type": "interval", "second": 5}}]}"#,
+            r#"{"schedules": [{"name": "a", "task_name": "t",
+                "pattern": {"type": "monthly", "day": 1, "time": "00:00:00", "days": 2}}]}"#,
+            r#"{"schedules": [{"name": "a", "task_name": "t",
+                "pattern": {"type": "cron", "minute": [{"kind": "step", "step": 5, "steps": 1}],
+                "hour": [{"kind": "every"}], "month": [{"kind": "every"}],
+                "day": {"kind": "every_day"}}}]}"#,
+        ];
+        for json in refused {
+            let error = serde_json::from_str::<ScheduleConfig>(json)
+                .expect_err("an unknown key must be refused");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{json}: {error}"
+            );
+        }
+
+        let accepted = r#"{"schedules": [{"name": "a", "task_name": "t",
+            "pattern": {"type": "cron", "minute": [{"kind": "step", "step": 5}],
+            "hour": [{"kind": "every"}], "month": [{"kind": "every"}],
+            "day": {"kind": "every_day"}}}]}"#;
+        let config = serde_json::from_str::<ScheduleConfig>(accepted).expect("known keys only");
+        assert_eq!(config.schedules.len(), 1);
     }
 }

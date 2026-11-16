@@ -67,11 +67,7 @@ impl Horsies {
         if !errors.is_empty() {
             let mut report = crate::core::error::ValidationReport::new("config");
             for error in errors {
-                let mut converted = HorsiesError::new(error.to_string());
-                if let Some(code) = error.error_code() {
-                    converted = converted.with_code(code);
-                }
-                report.add(converted);
+                report.add(error.to_horsies_error());
             }
             return report.into_result().map(|_| unreachable!());
         }
@@ -702,17 +698,9 @@ impl Horsies {
 
         let mut report = crate::core::error::ValidationReport::new("schedule");
 
-        // 0. Validate schedule config (unique names, pattern constraints).
-        if let Err(e) = schedule_config.validate() {
-            report.add(
-                HorsiesError::new(e)
-                    .with_code(ErrorCode::ConfigInvalidSchedule)
-                    .with_help(
-                        "check schedule names for duplicates and pattern fields for valid ranges",
-                    ),
-            );
-        }
-
+        // The schedule section itself (unique names, patterns, timezones,
+        // catch-up bounds) is part of `AppConfig::validate`, which
+        // `Horsies::new` runs: a constructed app holds a valid section.
         for task_schedule in &schedule_config.schedules {
             if !task_schedule.enabled {
                 continue;
@@ -793,7 +781,7 @@ impl Horsies {
         // Phase 1: Config validation (already run at construction, but re-check for safety).
         let config_errors = self.config.validate();
         for error in config_errors {
-            report.add(HorsiesError::new(error.to_string()));
+            report.add(error.to_horsies_error());
         }
 
         // Phase 2: Schedule validation.
@@ -976,7 +964,7 @@ impl Horsies {
             for child_key in &registered.declared_children {
                 if self
                     .workflow_registry
-                    .resolve_child_registration("", Some(child_key.as_str()))
+                    .resolve_child_registration(child_key.as_str())
                     .is_none()
                 {
                     report.add(

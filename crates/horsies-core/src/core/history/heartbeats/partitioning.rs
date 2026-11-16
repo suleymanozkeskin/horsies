@@ -14,8 +14,9 @@ use crate::core::history::names::{
 };
 use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation, LeafDrop, LeafInspection};
 use crate::core::history::partitions::catalog::{
-    capture_partition_bound_utc, database_now, read_leaf_catalog_row, read_leaf_physical_state,
-    read_retention_class, LeafIndexKind, LeafPartitionBoundExpectation, INDEX_SCHEMA_VERSION,
+    database_now, read_leaf_catalog_row, read_leaf_physical_state, read_retention_class,
+    LeafIndexKind, LeafPartitionBoundExpectation, RetentionClassKind, AT_LOWER_BOUND_KIND,
+    INDEX_SCHEMA_VERSION,
 };
 use crate::core::history::partitions::locks::{
     try_lock_leaf_for_transaction, try_lock_relation_exclusive_for_transaction, LeafLockAttempt,
@@ -25,6 +26,7 @@ use crate::core::history::partitions::manager::{
     DetachExpiredLeafOutcome, IndexRepairRemoval, NoQuarantine,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::periods::HeartbeatHorizonHours;
 
 const HOURLY: Duration = Duration::hours(1);
 const HORIZON_FLOOR: Duration = Duration::hours(1);
@@ -54,30 +56,32 @@ pub fn heartbeat_horizon(
     Ok(derived.max(HORIZON_FLOOR))
 }
 
+/// `horsies_retention_classes.class_kind` of the heartbeat class.
+pub const HEARTBEAT_CLASS_KIND: &str = "HEARTBEAT";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatClassRegistration {
     Registered {
-        horizon: Duration,
+        horizon: HeartbeatHorizonHours,
     },
     Verified {
-        horizon: Duration,
+        horizon: HeartbeatHorizonHours,
     },
     HorizonUpdated {
-        previous_horizon: Duration,
-        horizon: Duration,
+        previous_horizon: HeartbeatHorizonHours,
+        horizon: HeartbeatHorizonHours,
     },
     ParentUnpartitioned,
 }
 
+/// Create the heartbeat class row, verify it, or update its stored horizon,
+/// inside the caller's transaction. The horizon is the only class value that
+/// changes in place: configuration sets it at every registration. Does not
+/// commit.
 pub async fn register_heartbeat_class(
     connection: &mut PgConnection,
-    horizon: Duration,
+    horizon: HeartbeatHorizonHours,
 ) -> Result<HeartbeatClassRegistration, HistoryError> {
-    if horizon < HORIZON_FLOOR {
-        return Err(HistoryError::contract(
-            "heartbeat horizon is floored at one hour",
-        ));
-    }
     let partitioned: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM pg_partitioned_table WHERE partrelid = to_regclass($1)
@@ -91,53 +95,41 @@ pub async fn register_heartbeat_class(
     }
     match read_retention_class(connection, HEARTBEAT_CLASS_KEY).await? {
         None => {
-            let duration_us = horizon
-                .num_microseconds()
-                .ok_or_else(|| HistoryError::contract("heartbeat horizon is out of range"))?;
             let sql = format!(
                 "INSERT INTO {RETENTION_CLASSES} (
-                     class_key, duration, partition_interval, finite_parent_name, created_at
-                 ) VALUES ($1, $2::bigint * interval '1 microsecond', interval '1 hour',
-                           $3, statement_timestamp())"
+                     class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
+                 ) VALUES ($1, '{HEARTBEAT_CLASS_KIND}', NULL, $2, statement_timestamp())"
             );
             sqlx::query(&sql)
                 .bind(HEARTBEAT_CLASS_KEY)
-                .bind(duration_us)
-                .bind(HEARTBEATS_TABLE)
+                .bind(horizon.as_stored())
                 .execute(connection)
                 .await?;
             Ok(HeartbeatClassRegistration::Registered { horizon })
         }
-        Some(existing)
-            if existing.partition_interval == Some(HOURLY)
-                && existing.finite_parent_name.as_deref() == Some(HEARTBEATS_TABLE) =>
-        {
-            let stored = existing
-                .duration
-                .ok_or_else(|| HistoryError::contract("heartbeat class has no horizon"))?;
-            if stored == horizon {
-                return Ok(HeartbeatClassRegistration::Verified { horizon });
+        Some(existing) => match existing.kind {
+            RetentionClassKind::Heartbeat(stored) if stored == horizon => {
+                Ok(HeartbeatClassRegistration::Verified { horizon })
             }
-            let duration_us = horizon
-                .num_microseconds()
-                .ok_or_else(|| HistoryError::contract("heartbeat horizon is out of range"))?;
-            let sql = format!(
-                "UPDATE {RETENTION_CLASSES}
-                 SET duration = $1::bigint * interval '1 microsecond' WHERE class_key = $2"
-            );
-            sqlx::query(&sql)
-                .bind(duration_us)
-                .bind(HEARTBEAT_CLASS_KEY)
-                .execute(connection)
-                .await?;
-            Ok(HeartbeatClassRegistration::HorizonUpdated {
-                previous_horizon: stored,
-                horizon,
-            })
-        }
-        Some(_) => Err(HistoryError::contract(
-            "heartbeat class row carries a non-heartbeat shape",
-        )),
+            RetentionClassKind::Heartbeat(stored) => {
+                let sql = format!(
+                    "UPDATE {RETENTION_CLASSES}
+                     SET heartbeat_horizon_hours = $1 WHERE class_key = $2"
+                );
+                sqlx::query(&sql)
+                    .bind(horizon.as_stored())
+                    .bind(HEARTBEAT_CLASS_KEY)
+                    .execute(connection)
+                    .await?;
+                Ok(HeartbeatClassRegistration::HorizonUpdated {
+                    previous_horizon: stored,
+                    horizon,
+                })
+            }
+            RetentionClassKind::Forever | RetentionClassKind::Period(_) => Err(
+                HistoryError::contract("heartbeat class row carries a non-heartbeat shape"),
+            ),
+        },
     }
 }
 
@@ -246,9 +238,7 @@ pub async fn create_hourly_heartbeat_leaf(
         connection,
         leaf.leaf_name(),
         HEARTBEATS_TABLE,
-        catalog
-            .as_ref()
-            .map_or(index_name.as_str(), |row| row.id_index_name.as_str()),
+        &index_name,
         LeafPartitionBoundExpectation::Requested(leaf.bounds()),
         LeafIndexKind::Heartbeat,
     )
@@ -265,10 +255,7 @@ pub async fn create_hourly_heartbeat_leaf(
         });
     }
     if let Some(catalog) = catalog {
-        if catalog.parent_name != HEARTBEATS_TABLE
-            || catalog.class_key != leaf.class_key()
-            || catalog.lower_anchor != leaf.bounds().lower()
-            || catalog.upper_anchor != leaf.bounds().upper()
+        if !catalog.describes(leaf.class_key(), leaf.bounds())
             || catalog.detached_at.is_some()
             || catalog.dropped_at.is_some()
         {
@@ -278,13 +265,11 @@ pub async fn create_hourly_heartbeat_leaf(
                 detail: "existing leaf metadata differs from the request".to_owned(),
             });
         }
-        if physical.partition_bound.as_deref() != Some(catalog.partition_bound.as_str())
-            || !physical.partition_bound_matches_expected
-        {
+        if !physical.partition_bound_matches_expected {
             return Ok(LeafCreation::CatalogConflict {
                 leaf_name: leaf.leaf_name().to_owned(),
                 kind: CatalogConflictKind::PhysicalNonconformant,
-                detail: "attached leaf partition bound differs from catalog or requested bounds"
+                detail: "attached leaf partition bound differs from the requested bounds"
                     .to_owned(),
             });
         }
@@ -305,12 +290,8 @@ pub async fn create_hourly_heartbeat_leaf(
                     leaf_name: leaf.leaf_name().to_owned(),
                 });
             }
-            match remove_attached_index_for_repair(
-                connection,
-                leaf.leaf_name(),
-                &catalog.id_index_name,
-            )
-            .await?
+            match remove_attached_index_for_repair(connection, leaf.leaf_name(), &index_name)
+                .await?
             {
                 IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
                 IndexRepairRemoval::Foreign => {
@@ -323,15 +304,14 @@ pub async fn create_hourly_heartbeat_leaf(
                 }
             }
             sqlx::query(&format!(
-                "CREATE INDEX {} ON {} (task_id, role, sent_at DESC)",
-                catalog.id_index_name,
+                "CREATE INDEX {index_name} ON {} (task_id, role, sent_at DESC)",
                 leaf.leaf_name()
             ))
             .execute(connection)
             .await?;
             return Ok(LeafCreation::IndexRepaired {
                 leaf_name: leaf.leaf_name().to_owned(),
-                id_index_name: catalog.id_index_name,
+                id_index_name: index_name,
             });
         }
         return Ok(LeafCreation::AlreadyConformant {
@@ -349,26 +329,18 @@ pub async fn create_hourly_heartbeat_leaf(
     sqlx::query(&render_daily_leaf_ddl(HEARTBEATS_TABLE, leaf)?)
         .execute(&mut *connection)
         .await?;
-    let bound = capture_partition_bound_utc(connection, leaf.leaf_name())
-        .await?
-        .ok_or_else(|| HistoryError::contract("new heartbeat partition has no bound"))?;
     let sql = format!(
         "INSERT INTO {LEAF_CATALOG} (
-             leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
-             index_schema_version, id_index_name, partition_bound,
-             min_birth_at, min_birth_verified, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                   NULL, TRUE, statement_timestamp())"
+             leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+             index_schema_version, created_at, detached_at, dropped_at
+         ) VALUES ($1, $2, '{AT_LOWER_BOUND_KIND}', $3, $4, $5, statement_timestamp(), NULL, NULL)"
     );
     sqlx::query(&sql)
         .bind(leaf.leaf_name())
-        .bind(HEARTBEATS_TABLE)
         .bind(leaf.class_key())
         .bind(leaf.bounds().lower())
         .bind(leaf.bounds().upper())
         .bind(INDEX_SCHEMA_VERSION)
-        .bind(&index_name)
-        .bind(bound)
         .execute(&mut *connection)
         .await?;
     sqlx::query(&format!(
@@ -390,10 +362,7 @@ async fn heartbeat_leaf_is_conformant(
     let Some(catalog) = read_leaf_catalog_row(connection, leaf.leaf_name()).await? else {
         return Ok(false);
     };
-    if catalog.parent_name != HEARTBEATS_TABLE
-        || catalog.class_key != leaf.class_key()
-        || catalog.lower_anchor != leaf.bounds().lower()
-        || catalog.upper_anchor != leaf.bounds().upper()
+    if !catalog.describes(leaf.class_key(), leaf.bounds())
         || catalog.detached_at.is_some()
         || catalog.dropped_at.is_some()
     {
@@ -403,7 +372,7 @@ async fn heartbeat_leaf_is_conformant(
         connection,
         leaf.leaf_name(),
         HEARTBEATS_TABLE,
-        &catalog.id_index_name,
+        &probe_index_name(leaf.leaf_name())?,
         LeafPartitionBoundExpectation::Requested(leaf.bounds()),
         LeafIndexKind::Heartbeat,
     )
@@ -411,7 +380,6 @@ async fn heartbeat_leaf_is_conformant(
     Ok(physical.relation_exists
         && physical.id_index_conformant
         && physical.detach_pending == Some(false)
-        && physical.partition_bound.as_deref() == Some(catalog.partition_bound.as_str())
         && physical.partition_bound_matches_expected)
 }
 
@@ -471,8 +439,10 @@ pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
         "SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
          FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
            ON r.class_key = c.class_key
-         WHERE c.class_key = $1 AND c.dropped_at IS NULL
-           AND c.upper_anchor + r.duration <= statement_timestamp()
+         WHERE c.class_key = $1 AND r.class_kind = '{HEARTBEAT_CLASS_KIND}'
+           AND c.lower_bound_kind = '{AT_LOWER_BOUND_KIND}' AND c.dropped_at IS NULL
+           AND c.upper_anchor + make_interval(hours => r.heartbeat_horizon_hours)
+               <= statement_timestamp()
          ORDER BY c.lower_anchor"
     );
     let rows: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&sql)

@@ -36,17 +36,16 @@ pub use crate::core::{
     OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig, PostgresConfigError,
     QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
-    RetentionChoice, RetentionClassConfig, RetentionConfig, RetentionConfigError, RetrievalCode,
-    RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn,
-    SubWorkflowError, SubWorkflowNode, SubWorkflowSummary, SuccessCase, SuccessPolicy,
-    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions,
-    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendResult, TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule,
-    WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta,
-    WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
-    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
-    WORKFLOW_TERMINAL_STATES,
+    RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError,
+    SubWorkflowNode, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
+    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions, TaskRegistry,
+    TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
+    TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -62,10 +61,14 @@ pub use crate::broker::{
 
 // worker re-exports
 pub use crate::worker::{
-    cli::LogLevel, config::WorkerConfig, scheduler::service::spawn_scheduler, worker::Worker,
+    cli::LogLevel,
+    config::WorkerConfig,
+    scheduler::service::{spawn_scheduler, SchedulerStartError},
+    worker::Worker,
     WorkerError,
 };
 
+pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };

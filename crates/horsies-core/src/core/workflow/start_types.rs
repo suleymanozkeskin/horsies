@@ -10,10 +10,10 @@ pub enum WorkflowStartErrorCode {
     BrokerNotConfigured,
     /// Programmer error: bad DAG, bad args, serialization failure.
     ValidationFailed,
+    /// The workflow id exists for another workflow name; nothing was written. Not retryable.
+    WorkflowIdConflict,
     /// Infrastructure error: schema init, DB transaction. Conditionally retryable.
     EnqueueFailed,
-    /// Bug / catch-all.
-    InternalFailed,
 }
 
 impl std::fmt::Display for WorkflowStartErrorCode {
@@ -21,8 +21,8 @@ impl std::fmt::Display for WorkflowStartErrorCode {
         match self {
             Self::BrokerNotConfigured => write!(f, "BROKER_NOT_CONFIGURED"),
             Self::ValidationFailed => write!(f, "VALIDATION_FAILED"),
+            Self::WorkflowIdConflict => write!(f, "WORKFLOW_ID_CONFLICT"),
             Self::EnqueueFailed => write!(f, "ENQUEUE_FAILED"),
-            Self::InternalFailed => write!(f, "INTERNAL_FAILED"),
         }
     }
 }
@@ -129,6 +129,10 @@ mod tests {
             WorkflowStartErrorCode::EnqueueFailed.to_string(),
             "ENQUEUE_FAILED",
         );
+        assert_eq!(
+            WorkflowStartErrorCode::WorkflowIdConflict.to_string(),
+            "WORKFLOW_ID_CONFLICT",
+        );
     }
 
     #[test]
@@ -198,10 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_retry_rejects_internal_failed() {
+    fn validate_retry_rejects_workflow_id_conflict() {
         let error = WorkflowStartError {
-            code: WorkflowStartErrorCode::InternalFailed,
-            message: "Bug".to_owned(),
+            code: WorkflowStartErrorCode::WorkflowIdConflict,
+            message: "id belongs to another workflow".to_owned(),
             retryable: false,
             workflow_name: "test-wf".to_owned(),
             workflow_id: Some(Uuid::new_v4()),

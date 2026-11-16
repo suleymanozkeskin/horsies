@@ -13,15 +13,14 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage_in_pool, CoverageOutcome, DeclaredRetentionClass,
+    ensure_partition_coverage_in_pool, CoverageOutcome,
 };
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::retry_utils::check_retry_eligibility;
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
 
-use crate::worker::retry::calculate_retry_delay;
+use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
 /// Releases immediately so workers can finalize between scan and per-task lock.
@@ -111,9 +110,7 @@ mod p7_maintenance_tests {
     use super::*;
     use crate::broker::terminalization::terminalize;
     use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
-    use crate::core::history::ddl::classes::{
-        finite_class_parent_name, register_finite_retention_class,
-    };
+    use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
     use crate::core::history::heartbeats::partitioning::{
         create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
@@ -124,6 +121,7 @@ mod p7_maintenance_tests {
     use crate::core::history::partitions::catalog::database_now;
     use crate::core::history::partitions::manager::create_daily_leaf;
     use crate::core::history::partitions::publication::LoaderPublication;
+    use crate::core::history::periods::RetentionDays;
     use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
     use chrono::Timelike;
     use serial_test::serial;
@@ -295,12 +293,10 @@ mod p7_maintenance_tests {
         let mut retention = RetentionConfig::default();
         retention.worker_state_retention_hours = None;
         retention.terminal_record_retention_hours = None;
-        retention
-            .retention_classes
-            .push(crate::core::config::retention::RetentionClassConfig {
-                key: "unsafe-class-key".to_owned(),
-                duration: chrono::Duration::days(7),
-            });
+        // Below the coverage floor of two future leaves: the coverage call
+        // fails before any write. Config validation refuses this value, so
+        // the pass sees it only when a config bypasses validation.
+        retention.history_leaf_horizon_days = 1;
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut next_partition_maintenance = tokio::time::Instant::now();
@@ -418,8 +414,13 @@ mod p7_maintenance_tests {
         let mut retention = RetentionConfig::default();
         retention.worker_state_retention_hours = Some(1);
         retention.terminal_record_retention_hours = Some(1);
-        let blocked_class = "p7_pass_blocked_1d";
-        let valid_class = "p7_pass_valid_1d";
+        // Two short periods that no other test of this database registers.
+        let blocked_period = RetentionDays::parse_period(chrono::Duration::days(1)).unwrap();
+        let valid_period = RetentionDays::parse_period(chrono::Duration::days(2)).unwrap();
+        let blocked_class_key = blocked_period.class_key();
+        let valid_class_key = valid_period.class_key();
+        let blocked_class = blocked_class_key.as_str();
+        let valid_class = valid_class_key.as_str();
 
         // Settle all pre-existing classes at the same horizons so the pass's
         // creation counts are attributable to the two classes introduced here.
@@ -437,10 +438,8 @@ mod p7_maintenance_tests {
         baseline.commit().await.unwrap();
 
         let mut setup = pool.begin().await.unwrap();
-        for class_key in [blocked_class, valid_class] {
-            register_finite_retention_class(&mut setup, class_key, chrono::Duration::days(1))
-                .await
-                .unwrap();
+        for period in [blocked_period, valid_period] {
+            register_period_class(&mut setup, period).await.unwrap();
         }
         let now = database_now(&mut setup).await.unwrap();
         let old_day = (now - chrono::Duration::days(6))
@@ -484,29 +483,41 @@ mod p7_maintenance_tests {
         let workflow_id = Uuid::new_v4();
         let node_id = Uuid::new_v4();
         let blocker_task_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO horsies_workflows (id, name, status, on_error, depth, root_workflow_id, sent_at, created_at, updated_at) VALUES ($1, 'p7 pass blocker', 'PENDING', 'fail', 0, $1, NOW(), NOW(), NOW())")
-            .bind(workflow_id)
-            .execute(&mut *setup)
-            .await
-            .unwrap();
         sqlx::query(
-            "INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name, input, queue_name, priority, dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at, max_retries, execution, retention_class_key)
-             VALUES ($1, $2, 0, 'p7 pass blocker', 'null', 'default', 100, '{}', FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d')",
+            "INSERT INTO horsies_workflows (
+                 id, name, definition_key, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'p7 pass blocker', NULL, 'RUNNING', 'fail', 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
         )
-        .bind(node_id)
         .bind(workflow_id)
         .execute(&mut *setup)
         .await
         .unwrap();
         sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                 id, workflow_id, task_index, task_name, input, queue_name, priority,
+                 dependencies, allow_failed_deps, join_type, max_retries, execution,
+                 retention_class_key, status, is_subworkflow, created_at
+             ) VALUES ($1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
+                       '{}', FALSE, 'all', 0, 'ISOLATED',
+                       $3, 'RUNNING', FALSE, NOW())",
+        )
+        .bind(node_id)
+        .bind(workflow_id)
+        .bind(blocked_class)
+        .execute(&mut *setup)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO horsies_workflow_phase2_pending (
-                 task_id, workflow_id, workflow_node_row_id, terminal_status,
-                 terminal_at, terminalization_kind, recovery_source,
-                 history_class, history_anchor, history_schema_version,
-                 result_digest, phase2_generation, created_at, attempt_count
-             ) VALUES ($1, $2, $3, 'COMPLETED', $4, 'COMPLETE_LOCKED',
-                       'HISTORY', $5, $4, 1, $6, $7,
-                       NOW() - INTERVAL '2 hours', $8)",
+                 task_id, workflow_id, workflow_node_row_id, terminalization_kind,
+                 recovery_source, history_class, history_anchor, history_schema_version,
+                 result_digest, quarantine_task_id, created_at, attempt_count,
+                 last_attempt_at, last_failure_class
+             ) VALUES ($1, $2, $3, 'COMPLETE_LOCKED',
+                       'HISTORY', $5, $4, 1, $6, NULL,
+                       NOW() - INTERVAL '2 hours', $7, NULL, NULL)",
         )
         .bind(blocker_task_id)
         .bind(workflow_id)
@@ -514,7 +525,6 @@ mod p7_maintenance_tests {
         .bind(history_leaves[0].bounds().lower() + chrono::Duration::hours(1))
         .bind(blocked_class)
         .bind(vec![31_u8; 32])
-        .bind(Uuid::new_v4())
         .bind(recovery.phase2_quarantine_after_attempts as i32)
         .execute(&mut *setup)
         .await
@@ -542,16 +552,9 @@ mod p7_maintenance_tests {
         }
         setup.commit().await.unwrap();
 
-        retention.retention_classes.extend([
-            crate::core::config::retention::RetentionClassConfig {
-                key: blocked_class.to_owned(),
-                duration: chrono::Duration::days(1),
-            },
-            crate::core::config::retention::RetentionClassConfig {
-                key: valid_class.to_owned(),
-                duration: chrono::Duration::days(1),
-            },
-        ]);
+        retention
+            .retention_periods
+            .extend([blocked_period.as_duration(), valid_period.as_duration()]);
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
@@ -851,8 +854,9 @@ pub fn spawn_reaper(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let check_interval = Duration::from_millis(config.check_interval_ms);
-        let mut next_retention_cleanup =
-            tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
+        // The first pass runs at start and includes the retention cleanup
+        // (Python `_ReaperPassState(next_retention_cleanup_at=time.monotonic())`).
+        let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
 
@@ -864,26 +868,52 @@ pub fn spawn_reaper(
             "reaper started",
         );
 
-        loop {
+        // The first pass runs at start, then one per check interval (Python
+        // `_reaper_loop`: pass, then wait).
+        while !cancel.is_cancelled() {
+            // Cluster-wide gate: only one worker runs a pass per interval.
+            // The passes are safe to run concurrently (SKIP LOCKED), but
+            // redundant across a cluster; the gate elides the duplicate work.
+            match acquire_gate(&runtime_pool, advisory_key_reaper()).await {
+                GatePass::Skip => {
+                    tracing::debug!("reaper pass skipped: another worker holds the gate");
+                }
+                GatePass::Ungated => {
+                    run_reaper_pass(
+                        &runtime_pool,
+                        &maintenance_pool,
+                        &registry,
+                        &config,
+                        &payload,
+                        &retention,
+                        &health,
+                        &mut next_retention_cleanup,
+                        &mut next_partition_maintenance,
+                        &mut orphan_state,
+                    )
+                    .await;
+                }
+                GatePass::Held(tx) => {
+                    run_reaper_pass(
+                        &runtime_pool,
+                        &maintenance_pool,
+                        &registry,
+                        &config,
+                        &payload,
+                        &retention,
+                        &health,
+                        &mut next_retention_cleanup,
+                        &mut next_partition_maintenance,
+                        &mut orphan_state,
+                    )
+                    .await;
+                    release_gate(tx).await;
+                }
+            }
+
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(check_interval) => {
-                    // Cluster-wide gate: only one worker runs a pass per interval.
-                    // The passes are safe to run concurrently (SKIP LOCKED), but
-                    // redundant across a cluster; the gate elides the duplicate work.
-                    match acquire_gate(&runtime_pool, advisory_key_reaper()).await {
-                        GatePass::Skip => {
-                            tracing::debug!("reaper pass skipped: another worker holds the gate");
-                        }
-                        GatePass::Ungated => {
-                            run_reaper_pass(&runtime_pool, &maintenance_pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
-                        }
-                        GatePass::Held(tx) => {
-                            run_reaper_pass(&runtime_pool, &maintenance_pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
-                            release_gate(tx).await;
-                        }
-                    }
-                }
+                _ = tokio::time::sleep(check_interval) => {}
             }
         }
     })
@@ -965,8 +995,9 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
     }
 }
 
-/// Run one reaper pass: stale-RUNNING recovery, PENDING expiry, stale-CLAIMED
-/// requeue, and periodic retention cleanup.
+/// Run one reaper pass, in Python's order: stale-CLAIMED requeue, orphan
+/// audit, stale-RUNNING recovery, PENDING expiry, workflow recovery, then
+/// periodic retention cleanup and partition maintenance.
 async fn run_reaper_pass(
     runtime_pool: &PgPool,
     maintenance_pool: &PgPool,
@@ -979,38 +1010,11 @@ async fn run_reaper_pass(
     next_partition_maintenance: &mut tokio::time::Instant,
     orphan_state: &mut OrphanSweepState,
 ) {
-    if config.auto_fail_stale_running {
-        let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
-        let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
-        match mark_stale_running_as_failed(
-            runtime_pool,
-            threshold_secs,
-            finalizing_threshold_secs,
-            STALE_RUNNING_SCAN_LIMIT,
-        )
-        .await
-        {
-            Ok(count) if count > 0 => {
-                tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
-            }
-            _ => {}
-        }
-    }
-
-    // Expire unclaimed PENDING tasks whose good_until has passed.
-    match expire_pending_tasks(runtime_pool).await {
-        Ok(count) if count > 0 => {
-            tracing::info!(count, "reaper expired unclaimed PENDING tasks");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
-        }
-        _ => {}
-    }
-
+    // Python's order (`reaper.py:144-638`): requeue stale CLAIMED rows,
+    // audit orphaned workflow tasks, fail stale RUNNING rows, expire PENDING
+    // rows, then the workflow and maintenance steps. No step stops for the
+    // life of the process: a step that keeps failing logs an error on every
+    // pass and its health keeps reporting the failure.
     if config.auto_requeue_stale_claimed {
         let threshold_secs = config.claimed_stale_threshold_ms as f64 / 1000.0;
         match requeue_stale_claimed(runtime_pool, threshold_secs).await {
@@ -1028,7 +1032,7 @@ async fn run_reaper_pass(
     // cannot reach RUNNING, so the requeue above skips them and they would
     // otherwise stay CLAIMED forever; cancelling frees claim budget and lets
     // retention sweep them.
-    if config.auto_terminate_orphaned_workflow_tasks && !orphan_state.disabled {
+    if config.auto_terminate_orphaned_workflow_tasks {
         let now = tokio::time::Instant::now();
         if orphan_state.schedule_if_due(
             now,
@@ -1070,29 +1074,53 @@ async fn run_reaper_pass(
                             );
                         }
                         OrphanAuditFailureKind::Permanent => {
-                            orphan_state.permanent_failures += 1;
-                            if orphan_state.permanent_failures
-                                >= ORPHAN_SWEEP_MAX_PERMANENT_FAILURES
-                            {
-                                orphan_state.disabled = true;
-                                tracing::error!(
-                                    %error,
-                                    failures = orphan_state.permanent_failures,
-                                    "reaper orphan audit disabled after consecutive permanent failures",
-                                );
-                            } else {
-                                tracing::error!(
-                                    %error,
-                                    failures = orphan_state.permanent_failures,
-                                    max = ORPHAN_SWEEP_MAX_PERMANENT_FAILURES,
-                                    "reaper orphan audit failed",
-                                );
-                            }
+                            // The audit never stops on a live worker: each
+                            // failing pass logs, and the health snapshot
+                            // above keeps reporting the failure.
+                            orphan_state.permanent_failures =
+                                orphan_state.permanent_failures.saturating_add(1);
+                            tracing::error!(
+                                %error,
+                                consecutive_failures = orphan_state.permanent_failures,
+                                "reaper orphan audit failed and will run again on its next schedule",
+                            );
                         }
                     }
                 }
             }
         }
+    }
+
+    if config.auto_fail_stale_running {
+        let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
+        let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
+        match mark_stale_running_as_failed(
+            runtime_pool,
+            threshold_secs,
+            finalizing_threshold_secs,
+            STALE_RUNNING_SCAN_LIMIT,
+        )
+        .await
+        {
+            Ok(count) if count > 0 => {
+                tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
+            }
+            _ => {}
+        }
+    }
+
+    // Expire unclaimed PENDING tasks whose good_until has passed.
+    match expire_pending_tasks(runtime_pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(count, "reaper expired unclaimed PENDING tasks");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
+        }
+        _ => {}
     }
 
     // Exact outbox recovery. Each candidate owns its transaction; retaining
@@ -1101,6 +1129,7 @@ async fn run_reaper_pass(
         runtime_pool,
         registry,
         config.crashed_worker_recovery_grace_ms,
+        config.workflow_recovery_failure_limit,
         payload,
         retention,
     )
@@ -1165,14 +1194,7 @@ async fn run_reaper_pass(
     }
 
     if tokio::time::Instant::now() >= *next_partition_maintenance {
-        let declared: Vec<DeclaredRetentionClass> = retention
-            .registrable_classes()
-            .into_iter()
-            .map(|class| DeclaredRetentionClass {
-                class_key: class.key,
-                duration: class.duration,
-            })
-            .collect();
+        let declared = retention.registrable_periods();
         let coverage_health = match ensure_partition_coverage_in_pool(
             maintenance_pool,
             retention.history_leaf_horizon_days,
@@ -1333,20 +1355,31 @@ async fn process_single_stale_task(
         threshold_ms, threshold_secs,
     );
 
-    // Check retry eligibility using fresh DB timestamp.
-    let eligible = check_retry_eligibility(
+    // The one retry rule of the core, shared with the worker (Python
+    // `check_retry_eligibility`): the stored policy must name the crash code
+    // by its value, retries must remain, and `good_until` must be after the
+    // database time of this capture. horsies-rust #68: the reaper used a
+    // second rule that never matched a built-in code.
+    let stored_options = read_stored_options(row.task_options.as_deref());
+    let admitted = match admit_retry(
         row.retry_count,
         row.max_retries,
-        row.task_options.as_deref(),
-        error_code_str,
-        row.good_until,
-        detected_at,
-    );
+        stored_options.retry(),
+        Some(error_code_str),
+    ) {
+        RetryAdmission::Admitted(rule) => match row.good_until {
+            Some(deadline) if deadline <= detected_at => None,
+            Some(_) | None => Some(rule),
+        },
+        RetryAdmission::RetriesSpent | RetryAdmission::NoPolicy | RetryAdmission::CodeNotListed => {
+            None
+        }
+    };
 
-    if eligible {
+    if let Some(rule) = admitted {
         // Retry path: attempt requeue, fall through to fail if good_until blocks.
         let new_count = row.retry_count + 1;
-        let delay = calculate_retry_delay(new_count as u32, row.task_options.as_deref());
+        let delay = rule.delay_seconds(new_count.unsigned_abs());
         let next_retry_at = detected_at + chrono::Duration::milliseconds((delay * 1000.0) as i64);
 
         let schedule_result = sqlx::query(SCHEDULE_STALE_TASK_RETRY_SQL)
@@ -1483,16 +1516,13 @@ const EXPIRE_MAX_BATCHES_PER_PASS: u32 = 200;
 
 /// Maximum rows examined by one orphan-task audit page.
 const ORPHAN_BATCH_SIZE: i32 = 500;
-/// Consecutive permanent failures before the orphan sweep disables itself.
-const ORPHAN_SWEEP_MAX_PERMANENT_FAILURES: u32 = 3;
 
-/// Per-reaper state for the orphan sweep's disable-after-permanent-failures
-/// guard: a sweep that keeps failing non-retryably (a contract breach, not a
-/// network blip) stops burning every cycle on it.
+/// Per-reaper state of the orphan audit: when it next runs, and how many
+/// permanent failures in a row it had (for the log only; the audit never
+/// stops on a live worker).
 struct OrphanSweepState {
     next_audit: tokio::time::Instant,
     permanent_failures: u32,
-    disabled: bool,
 }
 
 impl Default for OrphanSweepState {
@@ -1500,7 +1530,6 @@ impl Default for OrphanSweepState {
         Self {
             next_audit: tokio::time::Instant::now(),
             permanent_failures: 0,
-            disabled: false,
         }
     }
 }
@@ -1525,12 +1554,51 @@ mod orphan_audit_schedule_tests {
         let mut state = OrphanSweepState {
             next_audit: now,
             permanent_failures: 0,
-            disabled: false,
         };
         let interval = Duration::from_secs(60);
         assert!(state.schedule_if_due(now, interval));
         assert!(!state.schedule_if_due(now + Duration::from_secs(59), interval));
         assert!(state.schedule_if_due(now + Duration::from_secs(60), interval));
+    }
+
+    /// The orphan audit never stops on a live worker: permanent failures in
+    /// a row do not change its schedule (Python stops it after 3; the core
+    /// does not).
+    #[test]
+    fn orphan_audit_stays_scheduled_after_permanent_failures() {
+        let now = tokio::time::Instant::now();
+        let mut state = OrphanSweepState {
+            next_audit: now,
+            permanent_failures: u32::MAX,
+        };
+        let interval = Duration::from_secs(60);
+        assert!(state.schedule_if_due(now, interval));
+        assert!(state.schedule_if_due(now + interval, interval));
+    }
+
+    /// The reaper pass runs Python's order (`reaper.py:144-638`): requeue
+    /// stale CLAIMED, orphan audit, stale RUNNING, expire PENDING, then
+    /// workflow recovery.
+    #[test]
+    fn reaper_pass_runs_the_steps_in_python_order() {
+        let source = include_str!("recovery.rs");
+        let pass = &source[source
+            .find(&["async fn ", "run_reaper_pass("].concat())
+            .expect("run_reaper_pass source")..];
+        let pass = &pass[..pass.find("\n}\n").expect("end of run_reaper_pass")];
+        let position = |call: &str| {
+            pass.find(call)
+                .unwrap_or_else(|| panic!("{call} not called in run_reaper_pass"))
+        };
+        let order = [
+            position("requeue_stale_claimed(runtime_pool"),
+            position("terminate_orphaned_workflow_tasks(runtime_pool"),
+            position("mark_stale_running_as_failed("),
+            position("expire_pending_tasks(runtime_pool)"),
+            position("recover_stuck_workflows_observed("),
+        ];
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+        assert!(!pass.contains(&["orphan_state", ".disabled"].concat()));
     }
 
     #[test]

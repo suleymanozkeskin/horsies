@@ -88,7 +88,7 @@ class TestRenderedReadersAreStamped:
         renderers = set(
             re.findall(r'render_staged_\w+_function', republish_source)
         )
-        empty = LookupManifest(leaves=(), birth_floor=None)
+        empty = LookupManifest(leaves=())
         rendered: set[str] = set()
         for renderer in renderers:
             source = getattr(lookup_generation, renderer)(empty)
@@ -141,9 +141,9 @@ class TestPruningWiring:
 
 class TestPruningDiscoveryFilters:
     def test_forever_is_structurally_excluded(self) -> None:
-        """Both discovery statements require a non-NULL duration; the
-        forever class carries NULL and can never become a candidate,
-        by filter rather than by NULL interval arithmetic."""
+        """Both discovery statements select classes by kind and leaves with
+        an anchored lower bound; the forever class and its static leaf can
+        never become a candidate."""
         from horsies.core.history.maintenance.pruning import (
             EXPIRED_FINITE_LEAVES_SQL,
             EXPIRED_HISTORY_LEAVES_SQL,
@@ -153,7 +153,8 @@ class TestPruningDiscoveryFilters:
             EXPIRED_FINITE_LEAVES_SQL,
             EXPIRED_HISTORY_LEAVES_SQL,
         ):
-            assert 'r.duration IS NOT NULL' in statement
+            assert "'FOREVER'" not in statement
+            assert "c.lower_bound_kind = 'AT'" in statement
             assert 'c.dropped_at IS NULL' in statement
 
     def test_history_discovery_excludes_the_heartbeat_class(self) -> None:
@@ -163,7 +164,4 @@ class TestPruningDiscoveryFilters:
             EXPIRED_HISTORY_LEAVES_SQL,
         )
 
-        assert (
-            'c.class_key <> :heartbeat_class_key'
-            in EXPIRED_HISTORY_LEAVES_SQL
-        )
+        assert "r.class_kind = 'PERIOD'" in EXPIRED_HISTORY_LEAVES_SQL

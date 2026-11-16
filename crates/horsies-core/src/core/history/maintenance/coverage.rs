@@ -5,8 +5,8 @@ use sqlx::{Acquire, PgConnection, PgPool, Postgres, Transaction};
 
 use crate::core::history::commands::EnsureLeafCoverage;
 use crate::core::history::ddl::classes::{
-    register_finite_retention_class, ClassRegistration, DEFAULT_RETENTION_CLASS_KEY,
-    DEFAULT_RETENTION_DURATION_DAYS, FOREVER_CLASS_KEY,
+    register_period_class, ClassRegistration, DEFAULT_RETENTION_DAYS, FOREVER_CLASS_KEY,
+    PERIOD_CLASS_KIND,
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::heartbeats::partitioning::{
@@ -21,14 +21,9 @@ use crate::core::history::partitions::manager::{
     create_planned_leaf, ensure_leaf_coverage, PlannedLeaf,
 };
 use crate::core::history::partitions::publication::{LoaderPublication, UnpublishedLoader};
+use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 
 use super::coverage_probe::{probe_partition_coverage, CoverageLeafRepair, CoverageProbe};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeclaredRetentionClass {
-    pub class_key: String,
-    pub duration: Duration,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageEnsured {
@@ -87,15 +82,15 @@ pub async fn heartbeat_coverage_present(
         .await?)
 }
 
+/// The `forever` class and every period class, by key.
 async fn history_class_keys(connection: &mut PgConnection) -> Result<Vec<String>, HistoryError> {
     let sql = format!(
         "SELECT class_key FROM {RETENTION_CLASSES}
-         WHERE (duration IS NOT NULL OR class_key = $1) AND class_key <> $2
+         WHERE class_kind = '{PERIOD_CLASS_KIND}' OR class_key = $1
          ORDER BY class_key"
     );
     Ok(sqlx::query_scalar(&sql)
         .bind(FOREVER_CLASS_KEY)
-        .bind(HEARTBEAT_CLASS_KEY)
         .fetch_all(connection)
         .await?)
 }
@@ -103,13 +98,11 @@ async fn history_class_keys(connection: &mut PgConnection) -> Result<Vec<String>
 async fn register_partition_coverage(
     connection: &mut PgConnection,
     heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
 ) -> Result<Option<CoverageEnsureFailed>, HistoryError> {
-    let heartbeat_registration = register_heartbeat_class(
-        connection,
-        Duration::hours(i64::from(heartbeat_horizon_hours)),
-    )
-    .await?;
+    let horizon = HeartbeatHorizonHours::new(heartbeat_horizon_hours)
+        .map_err(|refused| HistoryError::contract(refused.to_string()))?;
+    let heartbeat_registration = register_heartbeat_class(connection, horizon).await?;
     if matches!(
         heartbeat_registration,
         HeartbeatClassRegistration::ParentUnpartitioned
@@ -123,53 +116,37 @@ async fn register_partition_coverage(
         }));
     }
 
-    let default_registration = register_finite_retention_class(
-        connection,
-        DEFAULT_RETENTION_CLASS_KEY,
-        Duration::days(DEFAULT_RETENTION_DURATION_DAYS),
-    )
-    .await?;
-    if !matches!(
-        default_registration,
-        ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
-    ) {
-        return Ok(Some(CoverageEnsureFailed {
-            stage: "register_default_class",
-            class_key: Some(DEFAULT_RETENTION_CLASS_KEY.to_owned()),
-            refusal: format!("{default_registration:?}"),
-            heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-            absent_leaves: Vec::new(),
-        }));
-    }
-    for declared in declared_classes {
-        let registration =
-            register_finite_retention_class(connection, &declared.class_key, declared.duration)
-                .await?;
-        if !matches!(
-            registration,
-            ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
-        ) {
-            return Ok(Some(CoverageEnsureFailed {
-                stage: "register_declared_class",
-                class_key: Some(declared.class_key.clone()),
-                refusal: format!("{registration:?}"),
-                heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-                absent_leaves: Vec::new(),
-            }));
+    // A class key fixes its period, so registration cannot conflict: every
+    // outcome is a registered class.
+    for days in registered_periods(declared_periods) {
+        match register_period_class(connection, days).await? {
+            ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. } => {}
         }
     }
     Ok(None)
+}
+
+/// The default period and every declared period, each once, in day order.
+pub(crate) fn registered_periods(declared_periods: &[RetentionDays]) -> Vec<RetentionDays> {
+    let mut periods: Vec<RetentionDays> = declared_periods
+        .iter()
+        .copied()
+        .chain(std::iter::once(DEFAULT_RETENTION_DAYS))
+        .collect();
+    periods.sort_unstable();
+    periods.dedup();
+    periods
 }
 
 pub async fn ensure_partition_coverage<P: LoaderPublication>(
     connection: &mut PgConnection,
     history_horizon_days: u32,
     heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
     publisher: &P,
 ) -> Result<CoverageOutcome, HistoryError> {
     if let Some(failed) =
-        register_partition_coverage(connection, heartbeat_horizon_hours, declared_classes).await?
+        register_partition_coverage(connection, heartbeat_horizon_hours, declared_periods).await?
     {
         return Ok(CoverageOutcome::Failed(failed));
     }
@@ -477,7 +454,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
     pool: &PgPool,
     history_horizon_days: u32,
     heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
     publisher: &P,
 ) -> Result<CoverageOutcome, HistoryError> {
     EnsureLeafCoverage::new(FOREVER_CLASS_KEY, history_horizon_days)
@@ -488,7 +465,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
         &mut connection,
         history_horizon_days,
         heartbeat_horizon_hours,
-        declared_classes,
+        declared_periods,
     )
     .await?;
     if initial_probe.is_conformant() {
@@ -516,7 +493,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
             &mut connection,
             history_horizon_days,
             heartbeat_horizon_hours,
-            declared_classes,
+            declared_periods,
         )
         .await?;
         if current.is_conformant() {
@@ -538,7 +515,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
         &mut connection,
         history_horizon_days,
         heartbeat_horizon_hours,
-        declared_classes,
+        declared_periods,
     )
     .await?;
     drop(connection);
@@ -560,7 +537,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
         let registration_failure = register_partition_coverage(
             registration.as_mut(),
             heartbeat_horizon_hours,
-            declared_classes,
+            declared_periods,
         )
         .await?;
         registration.commit().await?;
@@ -573,7 +550,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
             &mut connection,
             history_horizon_days,
             heartbeat_horizon_hours,
-            declared_classes,
+            declared_periods,
         )
         .await?;
     }
@@ -619,7 +596,7 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
         &mut connection,
         history_horizon_days,
         heartbeat_horizon_hours,
-        declared_classes,
+        declared_periods,
     )
     .await?;
     drop(connection);
@@ -647,14 +624,14 @@ pub async fn ensure_startup_coverage<P: LoaderPublication>(
     connection: &mut PgConnection,
     history_horizon_days: u32,
     heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
     publisher: &P,
 ) -> Result<StartupCoverageOutcome, HistoryError> {
     let outcome = ensure_partition_coverage(
         connection,
         history_horizon_days,
         heartbeat_horizon_hours,
-        declared_classes,
+        declared_periods,
         publisher,
     )
     .await?;
@@ -670,14 +647,14 @@ pub async fn ensure_startup_coverage_in_pool<P: LoaderPublication>(
     pool: &PgPool,
     history_horizon_days: u32,
     heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
     publisher: &P,
 ) -> Result<StartupCoverageOutcome, HistoryError> {
     let outcome = ensure_partition_coverage_in_pool(
         pool,
         history_horizon_days,
         heartbeat_horizon_hours,
-        declared_classes,
+        declared_periods,
         publisher,
     )
     .await?;

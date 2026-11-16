@@ -127,16 +127,10 @@ pub fn spawn_worker_state_loop(
         );
         sys.refresh_memory();
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(snapshot_interval) => {}
-            }
-
-            if cancel.is_cancelled() {
-                break;
-            }
-
+        // The first snapshot is written at start, then one per interval
+        // (Python `_worker_state_heartbeat_loop`: write, then wait), so the
+        // fleet check sees a starting worker at once.
+        while !cancel.is_cancelled() {
             let tasks_running = (total_permits - semaphore.available_permits()) as i32;
 
             let tasks_claimed = match query_tasks_claimed(&pool, &worker_id).await {
@@ -203,6 +197,11 @@ pub fn spawn_worker_state_loop(
                 .await
             {
                 tracing::warn!(error = %e, "failed to insert worker state");
+            }
+
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(snapshot_interval) => {}
             }
         }
 
@@ -313,5 +312,61 @@ mod tests {
         assert!(metrics.memory_usage_mb.is_some());
         assert!(metrics.memory_percent.is_some());
         assert!(metrics.cpu_percent.is_some());
+    }
+
+    /// The first snapshot is written at start, not after one interval
+    /// (Python `_worker_state_heartbeat_loop`), so the fleet check sees a
+    /// starting worker at once.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn first_snapshot_is_written_at_start() {
+        use crate::worker::recovery::new_reaper_health;
+        use std::time::Duration;
+
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
+        let worker_config = WorkerConfig {
+            concurrency: 1,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let task = spawn_worker_state_loop(
+            pool.clone(),
+            worker_id.clone(),
+            "first-snapshot-test".to_owned(),
+            std::process::id() as i32,
+            worker_config,
+            app_config,
+            new_reaper_health(),
+            Arc::new(Semaphore::new(1)),
+            Utc::now(),
+            cancel.clone(),
+        );
+        let written = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1",
+                )
+                .bind(&worker_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if count > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        task.await.unwrap();
+        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        written.expect("the first snapshot must land well before one 60 s interval");
     }
 }

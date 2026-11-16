@@ -62,8 +62,9 @@ from tests.integration.task_history_harness import (
 pytestmark = [pytest.mark.integration]
 
 UTC = timezone.utc
-CLASS_A = 'it_lookup_a'
-CLASS_B = 'it_lookup_b'
+CLASS_A = 'standard_30d'
+CLASS_B = 'standard_31d'
+CLASS_DAYS = {CLASS_A: 30, CLASS_B: 31}
 
 history_schema = task_history_schema_fixture('task_history_it_lookup')
 
@@ -82,7 +83,9 @@ async def seed_class_with_row(
     day: datetime,
 ) -> str:
     """Register a class, create the day's leaf, insert one retained row."""
-    parent = await register_class(connection, class_key)
+    parent = await register_class(
+        connection, class_key, duration_days=CLASS_DAYS[class_key]
+    )
     lower, upper = day_bounds(day)
     ref = LeafRef(
         leaf_name=daily_leaf_name(parent, lower),

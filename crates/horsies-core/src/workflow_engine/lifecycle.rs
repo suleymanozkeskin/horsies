@@ -13,7 +13,9 @@ use uuid::Uuid;
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
-use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
+use crate::workflow_engine::start::{
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -930,7 +932,15 @@ async fn reevaluate_and_enqueue(
     for task in &ready_tasks {
         if task.is_subworkflow {
             // Sub-workflow READY task: launch child workflow.
-            match enqueue_subworkflow_on_resume(pool, workflow_id, task, registry, retention).await
+            match enqueue_subworkflow_on_resume(
+                pool,
+                workflow_id,
+                task,
+                registry,
+                payload,
+                retention,
+            )
+            .await
             {
                 Ok(()) => enqueued += 1,
                 Err(e) => {
@@ -1043,11 +1053,16 @@ async fn reevaluate_and_enqueue(
 ///
 /// Resolves the spec from the registry, supports dynamic parameterization
 /// via `spec_builder`, starts the child workflow, and links the parent task.
+///
+/// A child past the depth limit, or a child definition that is not registered under the node's key, fails
+/// the node (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `SUBWORKFLOW_LOAD_FAILED`) and applies the workflow's
+/// `on_error`, as Python's resume does through `enqueue_subworkflow_task`.
 async fn enqueue_subworkflow_on_resume(
     pool: &PgPool,
     workflow_id: Uuid,
     task: &ReadyTaskRow,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let spec_name = task
@@ -1056,15 +1071,42 @@ async fn enqueue_subworkflow_on_resume(
         .or(task.sub_workflow_name.as_deref())
         .unwrap_or(&task.task_name);
 
-    // Resolve by definition_key first, then fall back to name.
-    let registered = registry
-        .resolve_child_registration(spec_name, task.sub_definition_key.as_deref())
-        .ok_or_else(|| {
-            WorkflowError::Validation(format!(
-                "sub-workflow spec not found (definition_key={:?}, name='{}')",
-                task.sub_definition_key, spec_name,
-            ))
-        })?;
+    let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await?;
+    let child_depth =
+        match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
+            Ok(child_depth) => child_depth,
+            Err(error) => {
+                return engine::fail_subworkflow_node(
+                    pool,
+                    workflow_id,
+                    task.task_index,
+                    error,
+                    registry,
+                    payload,
+                    retention,
+                )
+                .await;
+            }
+        };
+    let Some(registered) = task
+        .sub_definition_key
+        .as_deref()
+        .and_then(|key| registry.resolve_child_registration(key))
+    else {
+        return engine::fail_subworkflow_node(
+            pool,
+            workflow_id,
+            task.task_index,
+            engine::subworkflow_load_failed_error(spec_name, task.sub_definition_key.as_deref()),
+            registry,
+            payload,
+            retention,
+        )
+        .await;
+    };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
     let has_child_inputs = task.input != NO_NODE_INPUT || task.args_from.is_some();
@@ -1079,13 +1121,6 @@ async fn enqueue_subworkflow_on_resume(
     .await?;
     let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
 
-    // Get parent depth and root_workflow_id.
-    let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
-        .bind(workflow_id)
-        .fetch_one(pool)
-        .await?;
-
-    let parent_depth = depth_row.depth.unwrap_or(0);
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
     // Start child workflow + link parent in a single transaction.
@@ -1096,7 +1131,7 @@ async fn enqueue_subworkflow_on_resume(
         &child_spec,
         workflow_id,
         task.task_index,
-        parent_depth + 1,
+        child_depth,
         root_wf_id,
         registry,
         retention,
@@ -1332,7 +1367,7 @@ mod resume_idempotency_tests {
         .fetch_one(&pool)
         .await
         .expect("read resume enqueue facts");
-        assert_eq!(facts.0, "q_bulk_7d");
+        assert_eq!(facts.0, "standard_7d");
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
         assert!(!facts.3);

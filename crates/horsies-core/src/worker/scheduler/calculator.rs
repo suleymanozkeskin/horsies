@@ -127,10 +127,11 @@ fn next_monthly(monthly: &MonthlySchedule, local: DateTime<Tz>, tz: Tz) -> Optio
     let target_day = monthly.day;
     let target_time = monthly.time;
 
-    // Scan forward month by month, skipping a month whose target wall-clock time
+    // Scan forward month by month, skipping a month that has no such day (day 31
+    // in a 30-day month, days 29-31 in February) or whose target wall-clock time
     // falls in a DST gap (`try_monthly_candidate` is `None`), until a candidate
-    // strictly after `local` resolves. A satisfiable monthly pattern resolves
-    // within a month or two.
+    // strictly after `local` resolves. Python `_calculate_monthly` skips the
+    // same months. A satisfiable monthly pattern resolves within a few months.
     let mut year = local.year();
     let mut month = local.month();
     for _ in 0..MONTHLY_SCAN_MONTHS {
@@ -148,6 +149,8 @@ fn next_monthly(monthly: &MonthlySchedule, local: DateTime<Tz>, tz: Tz) -> Optio
     None
 }
 
+/// The run of `day` at `time` in the given month, or `None` when the month
+/// has no such day or the wall-clock time falls in a DST gap.
 fn try_monthly_candidate(
     year: i32,
     month: u32,
@@ -155,24 +158,9 @@ fn try_monthly_candidate(
     time: NaiveTime,
     tz: Tz,
 ) -> Option<DateTime<Tz>> {
-    // Clamp day to the last day of the month.
-    let days_in_month = days_in_month(year, month);
-    let actual_day = day.min(days_in_month);
-    let date = chrono::NaiveDate::from_ymd_opt(year, month, actual_day)?;
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
     let datetime = date.and_time(time);
     tz.from_local_datetime(&datetime).earliest()
-}
-
-fn days_in_month(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    let first_of_next =
-        chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid date");
-    let first_of_current = chrono::NaiveDate::from_ymd_opt(year, month, 1).expect("valid date");
-    (first_of_next - first_of_current).num_days() as u32
 }
 
 /// Build a per-date predicate from a [`DaySelector`].
@@ -400,31 +388,42 @@ mod tests {
         assert_eq!(next, utc(2025, 2, 5, 10, 0, 0));
     }
 
+    /// Python `test_schedule_calculator.py::test_day_doesnt_exist_skips_to_next_valid_month`:
+    /// day=31 in February skips to March 31.
     #[test]
-    fn monthly_day_31_in_february_clamps() {
+    fn monthly_day_doesnt_exist_skips_to_next_valid_month() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
             day: 31,
-            time: NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            time: NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         });
-        // After Jan 31 → Feb should clamp to 28
         let after = utc(2025, 2, 1, 0, 0, 0);
         let next = next_run_at(&pattern, after, "UTC").unwrap();
-        assert_eq!(next, utc(2025, 2, 28, 10, 0, 0));
+        assert_eq!(next, utc(2025, 3, 31, 0, 0, 0));
     }
 
+    /// Python `test_schedule_calculator.py::test_day_30_skips_february_lands_on_march`.
     #[test]
-    fn days_in_month_february_non_leap() {
-        assert_eq!(days_in_month(2025, 2), 28);
+    fn monthly_day_30_skips_february_lands_on_march() {
+        let pattern = SchedulePattern::Monthly(MonthlySchedule {
+            day: 30,
+            time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+        });
+        let after = utc(2025, 1, 31, 0, 0, 0);
+        let next = next_run_at(&pattern, after, "UTC").unwrap();
+        assert_eq!(next, utc(2025, 3, 30, 12, 0, 0));
     }
 
+    /// Day 29 fires on 29 February in a leap year and skips February otherwise.
     #[test]
-    fn days_in_month_february_leap() {
-        assert_eq!(days_in_month(2024, 2), 29);
-    }
-
-    #[test]
-    fn days_in_month_december() {
-        assert_eq!(days_in_month(2025, 12), 31);
+    fn monthly_day_29_fires_in_february_of_a_leap_year_only() {
+        let pattern = SchedulePattern::Monthly(MonthlySchedule {
+            day: 29,
+            time: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
+        });
+        let leap = next_run_at(&pattern, utc(2024, 2, 1, 0, 0, 0), "UTC").unwrap();
+        assert_eq!(leap, utc(2024, 2, 29, 8, 0, 0));
+        let common = next_run_at(&pattern, utc(2025, 2, 1, 0, 0, 0), "UTC").unwrap();
+        assert_eq!(common, utc(2025, 3, 29, 8, 0, 0));
     }
 
     // --- should_run_now tests ---

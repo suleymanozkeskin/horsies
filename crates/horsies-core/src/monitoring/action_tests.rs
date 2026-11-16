@@ -232,7 +232,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
     assert_eq!(success.status_code(), 200);
     assert_eq!(
         body_json(&success),
-        r#"{"outcome":"cancelled","was_status":"PENDING","next_attempt_number":null,"warning":null}"#
+        r#"{"outcome":"cancelled","was_status":"PENDING","warning":null}"#
     );
 
     let error = |code, status, message: &str| TaskActionError {
@@ -266,6 +266,11 @@ fn action_models_and_task_mapping_serialize_exactly() {
             error(TaskActionErrorCode::DbOperationFailed, None, "database"),
             503,
             r#"{"detail":"database"}"#,
+        ),
+        (
+            error(TaskActionErrorCode::StoredDataInvalid, None, "stored"),
+            500,
+            r#"{"detail":"stored"}"#,
         ),
     ];
     for (error, status_code, expected_json) in cases {
@@ -496,7 +501,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     assert_eq!(paused.status_code(), 200);
     assert_eq!(
         body_json(&paused),
-        r#"{"outcome":"paused","was_status":null,"next_attempt_number":null,"warning":null}"#
+        r#"{"outcome":"paused","was_status":null,"warning":null}"#
     );
     assert_eq!(workflow_status(&pool, running_to_pause).await, "PAUSED");
 
@@ -506,7 +511,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     assert_eq!(resumed.status_code(), 200);
     assert_eq!(
         body_json(&resumed),
-        r#"{"outcome":"resumed","was_status":null,"next_attempt_number":null,"warning":null}"#
+        r#"{"outcome":"resumed","was_status":null,"warning":null}"#
     );
 
     let running_to_cancel = seed_workflow(&pool, WorkflowStatus::Running).await;
@@ -514,7 +519,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     assert_eq!(cancelled.status_code(), 200);
     assert_eq!(
         body_json(&cancelled),
-        r#"{"outcome":"cancelled","was_status":null,"next_attempt_number":null,"warning":null}"#
+        r#"{"outcome":"cancelled","was_status":null,"warning":null}"#
     );
     assert_eq!(workflow_status(&pool, running_to_cancel).await, "CANCELLED");
 
@@ -553,4 +558,115 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     }
 
     clean_w3(&pool).await;
+}
+
+/// A PENDING plain task with the columns of the baseline schema.
+async fn seed_baseline_pending_task(pool: &PgPool) -> Uuid {
+    let task_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+             id, task_name, queue_name, priority, input, task_options, execution,
+             retention_class_key, sent_at, created_at, command_fingerprint_version,
+             command_fingerprint, status, enqueued_at, retry_count, max_retries,
+             is_workflow_task, updated_at, retain_rerun_input
+         ) VALUES (
+             $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
+             'forever', NOW(), NOW(), 1,
+             decode(repeat('0c', 32), 'hex'), 'PENDING', NOW(), 0, 0,
+             FALSE, NOW(), FALSE
+         )",
+    )
+    .bind(task_id)
+    .bind(format!("w3_task_{}", task_id.simple()))
+    .execute(pool)
+    .await
+    .expect("seed a baseline PENDING task");
+    task_id
+}
+
+/// Bounds the wait for the cancel backend to block on the advisory lock.
+const LOCK_WAIT_POLLS: usize = 250;
+const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Python `test_task_lock_order.py` (a monitoring cancel against a
+/// finalize): the cancel takes the task advisory lock before the row lock,
+/// the order of every move function. While another transaction holds the
+/// advisory lock, the cancel waits for it and holds no row lock, so the
+/// holder can still lock the row. With the row lock first, the holder's
+/// `FOR UPDATE NOWAIT` fails with 55P03 and a finalize deadlocks (40P01).
+#[tokio::test]
+#[serial]
+async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
+    let pool = migrated_pool().await;
+    clean_w3(&pool).await;
+    let broker = std::sync::Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let task_id = seed_baseline_pending_task(&pool).await;
+
+    let mut holder = pool.begin().await.expect("holder transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))")
+        .bind(task_id)
+        .execute(holder.as_mut())
+        .await
+        .expect("hold the task advisory lock");
+
+    let cancel = tokio::spawn({
+        let broker = std::sync::Arc::clone(&broker);
+        async move { cancel_task(&broker, task_id, false).await }
+    });
+
+    let mut cancel_waits = false;
+    for _ in 0..LOCK_WAIT_POLLS {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'
+               AND query LIKE '%pg_advisory_xact_lock(hashtextextended($1::text, $2))%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read lock waits");
+        if waiting == 1 {
+            cancel_waits = true;
+            break;
+        }
+        tokio::time::sleep(LOCK_WAIT_POLL).await;
+    }
+    assert!(
+        cancel_waits,
+        "the cancel must wait on the task advisory lock"
+    );
+
+    sqlx::query("SELECT 1 FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(task_id)
+        .execute(holder.as_mut())
+        .await
+        .expect("the waiting cancel holds no row lock");
+    holder.rollback().await.expect("release the holder's locks");
+
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(10), cancel)
+        .await
+        .expect("the cancel ends once the advisory lock is free")
+        .expect("the cancel task does not panic")
+        .expect("the cancel applies");
+    assert_eq!(cancelled.was_status, TaskStatus::Pending);
+    clean_w3(&pool).await;
+}
+
+/// Python `test_monitoring_task_actions.py::TestCancelTaskRefuses::
+/// test_history_row_with_an_unknown_status_is_stored_data_invalid`, at the
+/// mapping level: stored data that does not parse is 500, not 503.
+#[test]
+fn stored_data_invalid_is_a_server_error() {
+    let outcome = task_action_outcome(Err(TaskActionError {
+        code: TaskActionErrorCode::StoredDataInvalid,
+        message: "stored data does not parse".to_owned(),
+        retryable: false,
+        task_id: Uuid::nil(),
+        current_status: None,
+    }));
+
+    assert_eq!(outcome.status_code(), 500);
+    assert_eq!(
+        serde_json::to_string(&TaskActionErrorCode::StoredDataInvalid).unwrap(),
+        r#""STORED_DATA_INVALID""#
+    );
 }

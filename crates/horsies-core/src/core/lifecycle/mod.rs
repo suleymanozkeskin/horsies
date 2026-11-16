@@ -9,11 +9,16 @@
 //! projection of this vocabulary; the catalog-conformance test pins the two
 //! against each other.
 
+pub mod attempt_outcomes;
 pub mod commands;
 pub mod fences;
 pub mod operations;
 pub mod outcomes;
 
+pub use attempt_outcomes::{
+    decode_failed_attempt_row, decode_workflow_success_row, AfterFailure, AttemptWriteRefusal,
+    FailedAttemptOutcome, PhaseTwoOwed, RetryRefusal, WorkflowSuccessOutcome,
+};
 pub use commands::{BatchSize, TerminalizationCommand};
 pub use fences::{
     CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead, TerminalFence, WorkerOwned,
@@ -71,14 +76,15 @@ mod tests {
     }
 
     fn sample_commands() -> Vec<(&'static str, TerminalizationCommand)> {
+        let generation = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
         let owned = OwnedClaim {
             worker_id: "w1".to_owned(),
-            claimed_at: None,
+            claimed_at: generation,
         };
         let prior = PriorLockedRead {
             worker_id: "w1".to_owned(),
         };
-        let batch = OwnedClaimBatch::new("w1".to_owned(), vec![(Uuid::nil(), None)]).unwrap();
+        let batch = OwnedClaimBatch::new("w1".to_owned(), vec![(Uuid::nil(), generation)]).unwrap();
         let bound = BatchSize::new(500).unwrap();
         vec![
             (
@@ -202,7 +208,10 @@ mod tests {
     fn duplicate_task_id_in_batch_rejected() {
         let result = OwnedClaimBatch::new(
             "w1".to_owned(),
-            vec![(Uuid::nil(), None), (Uuid::nil(), None)],
+            vec![
+                (Uuid::nil(), chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+                (Uuid::nil(), chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+            ],
         );
         assert_eq!(
             result.unwrap_err(),

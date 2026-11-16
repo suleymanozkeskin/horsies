@@ -14,7 +14,7 @@ use crate::core::history::identity::keys::{
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 use crate::core::history::names::{LIVE_TASKS, RETENTION_CLASSES};
-use crate::core::history::reads::detail::{read_task_detail, TaskDetailResult};
+use crate::core::history::reads::detail::{read_task_detail, TaskAbsenceReason, TaskDetailResult};
 use crate::core::history::rerun::input_envelope::{
     decode_framed_rerun_input, InputEnvelopeDecodeError,
 };
@@ -118,7 +118,7 @@ pub enum RerunOutcome {
     },
     SourceAbsent {
         task_id: Uuid,
-        predates_retained_floor: Option<bool>,
+        reason: TaskAbsenceReason,
     },
     NotEligible {
         task_id: Uuid,
@@ -127,7 +127,6 @@ pub enum RerunOutcome {
     InputUnavailable {
         task_id: Uuid,
         disposition: String,
-        reference_locator: Option<String>,
     },
     InputCorrupt {
         task_id: Uuid,
@@ -183,14 +182,8 @@ pub async fn rerun_task_in_tx(
 
     let detail = match read_task_detail(connection, command.source_task_id).await? {
         TaskDetailResult::Live { task_id } => return Ok(RerunOutcome::SourceLive { task_id }),
-        TaskDetailResult::Absent {
-            task_id,
-            predates_retained_floor,
-        } => {
-            return Ok(RerunOutcome::SourceAbsent {
-                task_id,
-                predates_retained_floor,
-            });
+        TaskDetailResult::Absent { task_id, reason } => {
+            return Ok(RerunOutcome::SourceAbsent { task_id, reason });
         }
         TaskDetailResult::History(detail) => detail,
     };
@@ -211,7 +204,6 @@ pub async fn rerun_task_in_tx(
         return Ok(RerunOutcome::InputUnavailable {
             task_id: command.source_task_id,
             disposition: detail.rerun_input_disposition,
-            reference_locator: detail.rerun_input_reference,
         });
     }
     let (Some(version), Some(payload), Some(digest)) = (
