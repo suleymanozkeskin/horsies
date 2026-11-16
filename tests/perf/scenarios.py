@@ -29,10 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
-from horsies.core.brokers.postgres import (
-    _EXPIRE_BATCH_SIZE,
-    SELECT_STALE_TASK_FOR_UPDATE_SQL,
-)
+from horsies.core.brokers.postgres import _EXPIRE_BATCH_SIZE
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
@@ -60,12 +57,11 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
-from horsies.core.worker.sql import (
-    NOTIFY_TASK_QUEUE_SQL,
-    UPSERT_TASK_ATTEMPT_SQL,
-)
+from horsies.core.worker.sql import NOTIFY_TASK_QUEUE_SQL
 from horsies.core.workflows.engine import on_workflow_task_complete
 from tests.perf.legacy_terminalization_sql import (
+    SELECT_STALE_TASK_FOR_UPDATE_SQL,
+    UPSERT_TASK_ATTEMPT_SQL,
     EXPIRE_CLAIMED_TASK_BEFORE_START_SQL as _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
     EXPIRE_PENDING_TASKS_SQL,
     FINALIZE_TASK_COMPLETED_SQL,
