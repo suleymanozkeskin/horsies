@@ -522,7 +522,13 @@ class TestPromotionWrite:
             assert row.created_at == promoted_at
             assert row.updated_at == promoted_at
             assert row.completed_at is None
-            expected.extend((channel, str(row.task_id)) for channel in _TASK_CHANNELS)
+            expected.extend(
+                (channel, str(row.task_id))
+                for channel in ('task_new', 'horsies_task_status')
+            )
+        # The queue wake carries the constant payload 'new'; PostgreSQL
+        # delivers identical notifications of one transaction once.
+        expected.append(('task_queue_default', 'new'))
         assert sorted(received) == sorted(expected)
 
     async def test_the_promotion_write_moves_only_pending_nodes(
