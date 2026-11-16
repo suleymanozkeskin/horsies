@@ -12,16 +12,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from unittest.mock import AsyncMock, patch
+
+import psycopg
 import pytest
 from pydantic import SecretStr
-from sqlalchemy.exc import OperationalError
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.schemas.migrations import SCHEMA_VERSION
 from horsies.web.schema import (
+    EXPECTED_SCHEMA_VERSION,
     SCHEMA_INCOMPATIBLE,
     SCHEMA_UNKNOWN,
     SchemaIncompatible,
@@ -60,16 +62,15 @@ class StubProbe(SchemaProbe):
 
 def status(state: SchemaState, version: int | None) -> SchemaStatus:
     """A probe result for the given state."""
-    return SchemaStatus(state=state, version=version, expected_version=SCHEMA_VERSION)
+    return SchemaStatus(state=state, version=version, expected_version=EXPECTED_SCHEMA_VERSION)
 
 
 class TestSchemaStatus:
     """Only an exact version match permits writing."""
 
     def test_only_match_is_compatible(self) -> None:
-        assert status(SchemaState.MATCH, SCHEMA_VERSION).compatible is True
-        assert status(SchemaState.MISMATCH, SCHEMA_VERSION - 1).compatible is False
-        assert status(SchemaState.CUTOVER_REQUIRED, SCHEMA_VERSION).compatible is False
+        assert status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION).compatible is True
+        assert status(SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION - 1).compatible is False
         assert status(SchemaState.ABSENT, None).compatible is False
         assert status(SchemaState.UNKNOWN, None).compatible is False
 
@@ -80,7 +81,7 @@ class TestProbeCaching:
     pytestmark = [asyncio_tests]
 
     async def test_repeated_calls_reuse_one_read(self) -> None:
-        probe = StubProbe([status(SchemaState.MATCH, SCHEMA_VERSION)])
+        probe = StubProbe([status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION)])
 
         for _ in range(5):
             assert (await probe.status()).state is SchemaState.MATCH
@@ -91,7 +92,7 @@ class TestProbeCaching:
         probe = StubProbe(
             [
                 status(SchemaState.MISMATCH, 13),
-                status(SchemaState.MATCH, SCHEMA_VERSION),
+                status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION),
             ]
         )
         assert (await probe.status()).state is SchemaState.MISMATCH
@@ -127,14 +128,14 @@ class TestProbeFailureHandling:
 
     async def test_a_blip_keeps_the_last_known_answer(self) -> None:
         """A transient outage must not report the schema as missing."""
-        probe = StubProbe([status(SchemaState.MATCH, SCHEMA_VERSION), None])
+        probe = StubProbe([status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION), None])
         assert (await probe.status()).state is SchemaState.MATCH
         probe.expire()
 
         assert (await probe.status()).state is SchemaState.MATCH
 
     async def test_a_failed_read_is_not_cached(self) -> None:
-        probe = StubProbe([status(SchemaState.MATCH, SCHEMA_VERSION), None])
+        probe = StubProbe([status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION), None])
         await probe.status()
         probe.expire()
         await probe.status()
@@ -150,7 +151,7 @@ class TestSchemaGuard:
     pytestmark = [asyncio_tests]
 
     async def test_match_passes(self) -> None:
-        guard = schema_guard(StubProbe([status(SchemaState.MATCH, SCHEMA_VERSION)]))
+        guard = schema_guard(StubProbe([status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION)]))
 
         assert await guard() is None
 
@@ -161,7 +162,7 @@ class TestSchemaGuard:
             await guard()
 
         assert 'v11' in raised.value.detail
-        assert f'v{SCHEMA_VERSION}' in raised.value.detail
+        assert f'v{EXPECTED_SCHEMA_VERSION}' in raised.value.detail
 
     async def test_unknown_reports_reachability_not_a_missing_schema(self) -> None:
         """The copy must never send an operator to initialize a live database."""
@@ -183,17 +184,6 @@ class TestSchemaGuard:
         assert raised.value.code == SCHEMA_INCOMPATIBLE
         assert 'no horsies schema' in raised.value.detail
         assert 'never modifies the database schema' in raised.value.detail
-
-    async def test_current_version_without_cutover_marker_refuses_actions(self) -> None:
-        guard = schema_guard(
-            StubProbe([status(SchemaState.CUTOVER_REQUIRED, SCHEMA_VERSION)])
-        )
-
-        with pytest.raises(SchemaIncompatible) as raised:
-            await guard()
-
-        assert raised.value.code == SCHEMA_INCOMPATIBLE
-        assert 'cutover is incomplete' in raised.value.detail
 
 
 class TestNoDdlConstructionFlag:
@@ -230,9 +220,13 @@ class TestNoDdlConstructionFlag:
 
         class ExplodingEngine:
             def begin(self) -> Any:
-                raise AssertionError('the migration seam opened a transaction')
+                raise AssertionError('the install seam opened a transaction')
 
-        await broker._run_schema_migrations(ExplodingEngine())  # type: ignore[arg-type]
+        with patch(
+            'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+            new=AsyncMock(side_effect=AssertionError('the install seam connected')),
+        ):
+            await broker._maybe_run_schema_init(ExplodingEngine())  # type: ignore[arg-type]
 
     @asyncio_tests
     async def test_enabled_broker_still_reaches_the_database(self) -> None:
@@ -241,5 +235,5 @@ class TestNoDdlConstructionFlag:
             PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True
         )
 
-        with pytest.raises(OperationalError):
-            await broker._run_schema_migrations((await resources_of(broker)).engine)
+        with pytest.raises(psycopg.OperationalError):
+            await broker._maybe_run_schema_init((await resources_of(broker)).engine)

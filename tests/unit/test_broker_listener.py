@@ -1551,10 +1551,14 @@ class TestCallerUnwrapContract:
     @pytest.mark.asyncio
     async def test_broker_ensure_initialized_does_not_start_listener(self) -> None:
         """Schema initialization should not eagerly start listener connections."""
-        from horsies.core.types.result import is_ok as is_ok_
+        from horsies.core.types.result import Ok, is_ok as is_ok_
         from horsies.core.models.broker import PostgresConfig
         from horsies.core.brokers.postgres import PostgresBroker
-        from horsies.core.schemas.migrations import SCHEMA_VERSION
+        from horsies.core.baseline.install import (
+            BaselineCurrent,
+            ClientFamily,
+            FamilyRecorded,
+        )
 
         with (
             patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
@@ -1563,28 +1567,22 @@ class TestCallerUnwrapContract:
                 'horsies.core.brokers.postgres.PostgresListener'
             ) as mock_listener_cls,
             patch(
-                'horsies.core.brokers.postgres.cutover_complete',
-                new=AsyncMock(return_value=True),
+                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+                new=AsyncMock(return_value=AsyncMock()),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.read_database_state',
+                new=AsyncMock(
+                    return_value=Ok(
+                        BaselineCurrent(
+                            family=FamilyRecorded(family=ClientFamily.PYTHON)
+                        )
+                    )
+                ),
             ),
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.dispose = AsyncMock()
-            mock_engine.return_value.begin = MagicMock()
-
-            # begin() as async context manager for schema init
-            mock_conn_ctx = AsyncMock()
-            mock_conn_ctx.run_sync = AsyncMock()
-            version_table_exists = MagicMock()
-            version_table_exists.scalar.return_value = True
-            schema_version = MagicMock()
-            schema_version.scalar_one.return_value = SCHEMA_VERSION
-            mock_conn_ctx.execute = AsyncMock(
-                side_effect=[version_table_exists, schema_version]
-            )
-            mock_begin_ctx = MagicMock()
-            mock_begin_ctx.__aenter__ = AsyncMock(return_value=mock_conn_ctx)
-            mock_begin_ctx.__aexit__ = AsyncMock(return_value=None)
-            mock_engine.return_value.begin.return_value = mock_begin_ctx
 
             mock_listener = AsyncMock()
             mock_listener_cls.return_value = mock_listener

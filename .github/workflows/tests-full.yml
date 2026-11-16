@@ -140,7 +140,6 @@ jobs:
           uv run pytest \
             tests/integration/test_pgbouncer_contract.py \
             tests/integration/test_pgbouncer_prepared_statements.py \
-            tests/integration/test_pgbouncer_rolling_upgrade.py \
             -v --tb=short
 
       - name: PgBouncer e2e smoke

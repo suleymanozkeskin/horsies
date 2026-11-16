@@ -30,7 +30,7 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.schemas.migrations import SCHEMA_VERSION
+from horsies.web.schema import EXPECTED_SCHEMA_VERSION
 from horsies.web import (
     INTENT_HEADER,
     INTENT_VALUE,
@@ -135,7 +135,7 @@ class TestMeta:
         assert body['base_path'] == '/'
         assert body['can_act'] is True
         assert body['schema_version'] is None
-        assert body['expected_schema_version'] == SCHEMA_VERSION
+        assert body['expected_schema_version'] == EXPECTED_SCHEMA_VERSION
         assert body['schema_compatible'] is False
         assert body['schema_state'] == 'UNKNOWN'
         assert body['actions_enabled'] is False
@@ -154,8 +154,8 @@ class TestMeta:
             async def status(self) -> SchemaStatus:
                 return SchemaStatus(
                     state=state,
-                    version=None if state is SchemaState.ABSENT else SCHEMA_VERSION,
-                    expected_version=SCHEMA_VERSION,
+                    version=None if state is SchemaState.ABSENT else EXPECTED_SCHEMA_VERSION,
+                    expected_version=EXPECTED_SCHEMA_VERSION,
                 )
 
         monkeypatch.setattr(web_app_module, 'SchemaProbe', FixedProbe)

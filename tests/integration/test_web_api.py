@@ -1254,8 +1254,8 @@ class TestSchemaMatch:
     async def test_meta_round_trips_the_stored_version(self, api: AsyncClient) -> None:
         body = (await api.get('/api/meta')).json()
 
-        assert body['schema_version'] == schema_module.SCHEMA_VERSION
-        assert body['expected_schema_version'] == schema_module.SCHEMA_VERSION
+        assert body['schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
+        assert body['expected_schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
         assert body['schema_compatible'] is True
         assert body['actions_enabled'] is True
         assert body['actions_disabled_reason'] is None
@@ -1278,7 +1278,7 @@ class TestSchemaMismatch:
     @pytest.fixture(autouse=True)
     def expect_a_different_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Make this build expect a version the database does not carry."""
-        monkeypatch.setattr(schema_module, 'SCHEMA_VERSION', 9999)
+        monkeypatch.setattr(schema_module, 'EXPECTED_SCHEMA_VERSION', 9999)
 
     async def test_meta_reports_the_mismatch(self, api: AsyncClient) -> None:
         body = (await api.get('/api/meta')).json()
