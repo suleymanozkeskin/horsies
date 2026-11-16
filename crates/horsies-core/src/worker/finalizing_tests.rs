@@ -1,4 +1,4 @@
-use super::mark_task_finalizing;
+use super::{mark_task_finalizing, FinalizingMark, MARK_FINALIZING_SQL};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serial_test::serial;
 use sqlx::postgres::PgPoolOptions;
@@ -6,19 +6,30 @@ use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// A RUNNING plain task held by `current-worker`, with every column of the
+/// baseline task row named. Returns the id and the claim generation.
 async fn seed(pool: &PgPool) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
     let generation = sqlx::query_scalar(
         "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, status, started_at, claimed_at,
-            claimed_by_worker_id, finalizing_at, finalizing_by_worker_id,
-            enqueue_sha, command_fingerprint_version, command_fingerprint,
-            retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          ) VALUES (
-            $1, 'finalizing_test', 'default', 'RUNNING', NOW() - interval '1 hour',
-            NOW() - interval '1 hour', 'current-worker', NOW() - interval '1 hour',
-            'current-worker', 'fixture', 1, decode(repeat('00', 32), 'hex'),
-            'forever', FALSE, 'NEVER_ELIGIBLE'
+            $1, 'finalizing_test', 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW() - interval '1 hour', NOW() - interval '1 hour',
+            1, decode(repeat('00', 32), 'hex'), NULL,
+            'RUNNING', NOW() - interval '1 hour', NOW() - interval '1 hour',
+            'current-worker', NULL,
+            NOW() - interval '1 hour', NOW() - interval '1 hour', 'current-worker',
+            4242, 'finalizing-host', 'finalizing-process',
+            0, 0, NULL, NULL, FALSE,
+            NOW() - interval '1 hour', FALSE, NULL, NULL
          ) RETURNING claimed_at",
     )
     .bind(id)
@@ -51,17 +62,17 @@ async fn finalizing_handoff_rejects_stale_owner_and_generation() {
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     for (worker, claimed_at) in [
-        ("stale-worker", Some(generation)),
-        (
-            "current-worker",
-            Some(generation - ChronoDuration::seconds(1)),
-        ),
-        ("stale-worker", None),
+        ("stale-worker", generation),
+        ("current-worker", generation - ChronoDuration::seconds(1)),
     ] {
-        let changed = mark_task_finalizing(&pool, id, worker, claimed_at)
+        let mark = mark_task_finalizing(&pool, id, worker, claimed_at)
             .await
             .unwrap();
-        assert_eq!(changed, 0, "stale handoff must not refresh recovery grace");
+        assert_eq!(
+            mark,
+            FinalizingMark::NotHeld,
+            "stale handoff must not refresh recovery grace"
+        );
         assert_eq!(snapshot(&pool, id).await, before);
     }
     remove(&pool, id).await;
@@ -74,10 +85,10 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     assert_eq!(
-        mark_task_finalizing(&pool, id, "current-worker", Some(generation))
+        mark_task_finalizing(&pool, id, "current-worker", generation)
             .await
             .unwrap(),
-        1
+        FinalizingMark::Marked
     );
     let marked = snapshot(&pool, id).await;
     assert_ne!(marked["finalizing_at"], before["finalizing_at"]);
@@ -110,16 +121,56 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     remove(&pool, id).await;
 }
 
+/// Python `test_finalize_status_guard.py::test_the_finalizing_marker_has_no_null_fence`:
+/// the marker compares the claim time with no NULL branch, so a NULL claim
+/// time matches no row and nothing can turn off the generation half.
 #[tokio::test]
 #[serial]
-async fn finalizing_handoff_accepts_current_owner_without_generation() {
+async fn the_finalizing_marker_has_no_null_fence() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let (id, _) = seed(&pool).await;
-    assert_eq!(
-        mark_task_finalizing(&pool, id, "current-worker", None)
-            .await
-            .unwrap(),
-        1
+    let before = snapshot(&pool, id).await;
+    let changed = sqlx::query(MARK_FINALIZING_SQL)
+        .bind(id)
+        .bind("current-worker")
+        .bind(None::<DateTime<Utc>>)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(changed, 0, "a NULL generation must match no row");
+    assert_eq!(snapshot(&pool, id).await, before);
+    remove(&pool, id).await;
+}
+
+/// The marker reads its row through the primary key whatever the
+/// statistics say, as Python's
+/// `test_task_row_plans.py::test_the_finalizing_marker_reads_its_row_through_the_primary_key`.
+#[tokio::test]
+#[serial]
+async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let (id, generation) = seed(&pool).await;
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(transaction.as_mut())
+        .await
+        .unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (FORMAT JSON) {}",
+        MARK_FINALIZING_SQL
+            .replace("$1", &format!("'{id}'::uuid"))
+            .replace("$2", "'current-worker'")
+            .replace("$3", &format!("'{}'::timestamptz", generation.to_rfc3339()))
+    ))
+    .fetch_one(transaction.as_mut())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    let plan_text = plan.to_string();
+    assert!(
+        plan_text.contains("horsies_tasks_pkey"),
+        "the marker must read its row through the primary key: {plan_text}"
     );
     remove(&pool, id).await;
 }
@@ -130,27 +181,33 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
     for status in ["PENDING", "CLAIMED"] {
-        sqlx::query("UPDATE horsies_tasks SET status = $2 WHERE id = $1")
-            .bind(id)
-            .bind(status)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET status = $2,
+                 claim_expires_at = CASE WHEN $2 = 'CLAIMED'
+                     THEN NOW() + interval '1 minute' END
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap();
         let before = snapshot(&pool, id).await;
         assert_eq!(
-            mark_task_finalizing(&pool, id, "current-worker", Some(generation))
+            mark_task_finalizing(&pool, id, "current-worker", generation)
                 .await
                 .unwrap(),
-            0
+            FinalizingMark::NotHeld
         );
         assert_eq!(snapshot(&pool, id).await, before);
     }
     remove(&pool, id).await;
     assert_eq!(
-        mark_task_finalizing(&pool, id, "current-worker", Some(generation))
+        mark_task_finalizing(&pool, id, "current-worker", generation)
             .await
             .unwrap(),
-        0
+        FinalizingMark::NotHeld
     );
 }
 
@@ -196,7 +253,7 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
 
         let waiter_pool = waiting_pool.clone();
         let waiter = tokio::spawn(async move {
-            mark_task_finalizing(&waiter_pool, id, "current-worker", Some(generation)).await
+            mark_task_finalizing(&waiter_pool, id, "current-worker", generation).await
         });
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -220,7 +277,7 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(changed, 0);
+        assert_eq!(changed, FinalizingMark::NotHeld);
         assert_eq!(snapshot(&pool, id).await, replacement);
         remove(&pool, id).await;
     }

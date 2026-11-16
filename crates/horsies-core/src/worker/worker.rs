@@ -847,7 +847,7 @@ impl Worker {
         if claimed_rows.iter().any(|r| r.is_workflow_task) {
             // The claim generations travel with their ids: one batch can span
             // claim transactions, so each task fences on its own claimed_at.
-            let claims: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+            let claims: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
                 claimed_rows.iter().map(|r| (r.id, r.claimed_at)).collect();
             let filtered_ids = self
                 .broker
@@ -1179,6 +1179,14 @@ mod tests {
         Arc::new(PostgresBroker::from_pool(test_pool().await))
     }
 
+    /// The claim generation of every row that `insert_claimed_task` seeds and
+    /// of every dispatch row that `claimed_task_row` builds, so a test's
+    /// dispatch fences on the generation its row carries.
+    fn test_claim_generation() -> chrono::DateTime<Utc> {
+        static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
+        *GENERATION.get_or_init(Utc::now)
+    }
+
     async fn insert_claimed_task(
         pool: &PgPool,
         task_id: &Uuid,
@@ -1196,7 +1204,7 @@ mod tests {
                 retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'finalize_test', $2, 100, '[]', '{}', 'CLAIMED',
-                NOW(), NOW(), NOW(), NOW(), TRUE,
+                NOW(), $6, NOW(), NOW(), TRUE,
                 'worker-1', $3, $4, $5,
                 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
@@ -1207,6 +1215,7 @@ mod tests {
         .bind(retry_count)
         .bind(max_retries)
         .bind(task_options)
+        .bind(test_claim_generation())
         .execute(pool)
         .await
         .unwrap();
@@ -1262,7 +1271,7 @@ mod tests {
             queue_name: queue_name.to_owned(),
             is_workflow_task: false,
             task_options,
-            claimed_at: None,
+            claimed_at: test_claim_generation(),
         }
     }
 
