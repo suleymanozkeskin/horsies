@@ -223,7 +223,7 @@ class TestHistoryFallback:
                 broker_module,
                 'GET_TASK_RESULT_RECORD_SQL',
                 text(
-                    'SELECT task_name, status, result '
+                    'SELECT task_name, status, NULL::text AS result '
                     'FROM horsies_tasks WHERE FALSE'
                 ),
             )

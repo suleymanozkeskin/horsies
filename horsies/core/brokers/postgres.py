@@ -4051,18 +4051,20 @@ class PostgresBroker:
                     'enqueued_at',
                     'claimed_at',
                     'started_at',
-                    'completed_at',
-                    'failed_at',
+                    # A live row stores no terminal times, error code,
+                    # result or failed reason: those live in history.
+                    'NULL::timestamptz AS completed_at',
+                    'NULL::timestamptz AS failed_at',
                     'worker_hostname',
                     'worker_pid',
                     'worker_process_name',
-                    'error_code',
+                    'NULL::text AS error_code',
                     'execution',
                 ]
                 if include_result:
-                    base_columns.append('result')
+                    base_columns.append('NULL::text AS result')
                 if include_failed_reason:
-                    base_columns.append('failed_reason')
+                    base_columns.append('NULL::text AS failed_reason')
 
                 query = text(
                     f"""
