@@ -368,7 +368,8 @@ BEGIN
     END IF;
     -- One statement: build, insert through the helper, link. The ORDER BY of the materialized build runs before its
     -- volatile target list, so the ids are minted in index order (horsies_uuidv7 strictly increases within one
-    -- transaction). The aggregates of rows read the build in one scan, so their arrays are aligned element by element.
+    -- transaction). The aggregates of built_rows read the build in one scan, so their arrays are aligned element by
+    -- element.
     -- The link has no foreign key to the task row, so its order against the insert does not matter.
     WITH built AS MATERIALIZED (
         SELECT n.id AS node_row_id,
@@ -384,7 +385,7 @@ BEGIN
           AND n.task_id IS NULL
         ORDER BY n.task_index
     ),
-    rows AS (
+    built_rows AS (
         SELECT array_agg(b.task_id) AS task_ids,
                array_agg(b.task_name::text) AS task_names,
                array_agg(b.queue_name::text) AS queue_names,
@@ -401,17 +402,16 @@ BEGIN
     ),
     inserted AS (
         SELECT r.outcome
-        FROM rows
+        FROM built_rows b
         CROSS JOIN LATERAL horsies_insert_task_rows(
-            rows.task_ids, rows.task_names, rows.queue_names, rows.priorities, rows.inputs, rows.task_options,
-            rows.executions, rows.retention_class_keys, array_fill(FALSE, ARRAY[rows.row_count]), rows.max_retries,
-            rows.good_untils, array_fill(rows.sent_at, ARRAY[rows.row_count]),
-            array_fill(now(), ARRAY[rows.row_count]), array_fill(TRUE, ARRAY[rows.row_count]),
-            array_fill(NULL::smallint, ARRAY[rows.row_count]), array_fill(NULL::bytea, ARRAY[rows.row_count]),
-            array_fill(NULL::bytea, ARRAY[rows.row_count]), array_fill(NULL::uuid, ARRAY[rows.row_count]),
-            array_fill(NULL::uuid, ARRAY[rows.row_count]), 'NONE'
+            b.task_ids, b.task_names, b.queue_names, b.priorities, b.inputs, b.task_options, b.executions,
+            b.retention_class_keys, array_fill(FALSE, ARRAY[b.row_count]), b.max_retries, b.good_untils,
+            array_fill(b.sent_at, ARRAY[b.row_count]), array_fill(now(), ARRAY[b.row_count]),
+            array_fill(TRUE, ARRAY[b.row_count]), array_fill(NULL::smallint, ARRAY[b.row_count]),
+            array_fill(NULL::bytea, ARRAY[b.row_count]), array_fill(NULL::bytea, ARRAY[b.row_count]),
+            array_fill(NULL::uuid, ARRAY[b.row_count]), array_fill(NULL::uuid, ARRAY[b.row_count]), 'NONE'
         ) AS r
-        WHERE rows.row_count > 0
+        WHERE b.row_count > 0
     ),
     linked AS (
         UPDATE horsies_workflow_tasks wt
@@ -1833,9 +1833,9 @@ $$;
 -- Internal: refuses start arguments that do not describe one tree (22023): arrays of different lengths, NULL in a
 -- column that needs a value, a repeated workflow id or (workflow, index) pair, a first row that is not the top row
 -- of the tree (its parent pair and depth are p_top_parent_workflow_id, p_top_parent_task_index and p_top_depth: no
--- parent and depth 0 for a top-level start, the sub-workflow node and its workflow's depth plus one for a child
--- start), a later row without a parent in the tree or with a depth that is not its parent's plus one, a node or
--- failed record of a workflow outside the tree.
+-- parent and depth 0 for a top-level start; the sub-workflow node for a child start, whose caller checks the depth
+-- against the parent workflow under its lock), a later row without a parent in the tree or with a depth that is not
+-- its parent's plus one, a node or failed record of a workflow outside the tree.
 -- Locks: none. Returns nothing. Python: the in-memory prevalidation of start_workflow_async
 -- (core/workflows/lifecycle.py:298-351).
 CREATE FUNCTION horsies_workflow_start_check(
@@ -2138,7 +2138,8 @@ $$;
 
 -- Internal: the argument check of a tree (horsies_workflow_start_check over the lengths and NULL elements of every
 -- array), for a top-level start (p_top_parent_workflow_id and p_top_parent_task_index NULL, p_top_depth 0) and for a
--- child start (the sub-workflow node, and the depth of its workflow plus one). Refuses with 22023.
+-- child start (the sub-workflow node; horsies_workflow_child_start checks the depth of the child row against the
+-- parent workflow after it locks that row). Refuses with 22023.
 -- Locks: none. Returns nothing.
 CREATE FUNCTION horsies_workflow_tree_check(
     p_top_parent_workflow_id uuid,
@@ -2417,11 +2418,28 @@ BEGIN
                 'a TREE child start takes sent_at and no failure result'
             );
             PERFORM horsies_workflow_tree_check(
-                p_parent_workflow_id, p_parent_task_index, p_depths[1], p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
+                p_parent_workflow_id, p_parent_task_index, p_depths[1],
+                p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+                p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids, p_node_task_indexes,
+                p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities,
+                p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps,
+                p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions,
+                p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes,
+                p_failed_results
             );
         WHEN 'FAILURE' THEN
             PERFORM horsies_workflow_require(
-                p_sent_at IS NULL AND num_nonnulls(p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results) = 0,
+                p_sent_at IS NULL AND num_nonnulls(
+                    p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+                    p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids, p_node_task_indexes,
+                    p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities,
+                    p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps,
+                    p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions,
+                    p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                    p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids,
+                    p_failed_task_indexes, p_failed_results
+                ) = 0,
                 'a FAILURE child start takes the failure result alone'
             );
             PERFORM horsies_workflow_require(
