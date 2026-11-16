@@ -69,7 +69,7 @@ macro_rules! step_row_select {
             "SELECT row_kind, disposition, workflow_id, advance_child_workflow_id, detail, ",
             "task_index, node_input, args_from, sub_workflow_name, sub_definition_key, ",
             "sub_workflow_params, parent_depth, source_task_index, source_status, ",
-            "source_result FROM ",
+            "source_task_name, source_definition_key, source_result FROM ",
             $call
         )
     };
@@ -337,13 +337,19 @@ pub(crate) struct StepOutcome<D> {
 }
 
 /// A terminal dependency of an owed child start (a `SOURCE` row): the stored
-/// result that an `args_from` member naming it takes.
+/// result that an `args_from` member naming it takes, with the names that
+/// the member's wrap carries (`source_task_name`, `source_definition_key`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildStartSource {
     /// The index of the dependency node.
     pub(crate) task_index: i32,
     /// Its status: `COMPLETED`, `FAILED` or `SKIPPED`.
     pub(crate) status: String,
+    /// The task name of the dependency node.
+    pub(crate) task_name: String,
+    /// The definition key of a sub-workflow dependency; `None` for a task
+    /// node.
+    pub(crate) definition_key: Option<String>,
     /// Its stored result text, copied; `None` when the node stores none.
     pub(crate) result: Option<String>,
 }
@@ -962,6 +968,8 @@ pub(crate) fn step_rows<D: StepDisposition>(
                 ChildStartSource {
                     task_index: column(row, statement, "source_task_index")?,
                     status: column(row, statement, "source_status")?,
+                    task_name: column(row, statement, "source_task_name")?,
+                    definition_key: column(row, statement, "source_definition_key")?,
                     result: column(row, statement, "source_result")?,
                 },
             )),

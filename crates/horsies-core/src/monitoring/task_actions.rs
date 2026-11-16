@@ -26,6 +26,10 @@ pub enum TaskActionErrorCode {
     TaskNotCancellable,
     TaskIsWorkflowTask,
     DbOperationFailed,
+    /// The broker already holds resource sets for its limit of open event
+    /// loops, and this call ran on a new one. Nothing changed. Python client
+    /// only; removed before 0.8.0.
+    EventLoopLimit,
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the transaction did not commit. Not retryable: a repeat gives the
@@ -197,13 +201,14 @@ async fn diagnose_live_miss<T>(
         .await
         .map_err(|error| history_failure(task_id, error))?
     {
-        TaskDetailResult::History(detail) => {
-            let status = parse_stored_status(task_id, &detail.status)?;
-            match detail.is_workflow_task {
-                true => Err(workflow_bound(task_id, Some(status))),
-                false => Err(state_conflict(task_id, &detail.status, Some(status))),
-            }
-        }
+        TaskDetailResult::History(detail) => match detail.is_workflow_task {
+            true => Err(workflow_bound(task_id, Some(detail.status))),
+            false => Err(state_conflict(
+                task_id,
+                &detail.status.to_string(),
+                Some(detail.status),
+            )),
+        },
         TaskDetailResult::Live { .. } | TaskDetailResult::Absent { .. } => Err(not_found(task_id)),
     }
 }

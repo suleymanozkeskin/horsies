@@ -34,6 +34,7 @@ use crate::db::{
     PoolSizingError, Reserve, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
     DEFAULT_SOCKET_SETTINGS, WORKER_RESERVED_CONNECTIONS,
 };
+use crate::manifest::PoolRecycle;
 
 /// The longest [`CoreHandle::close`] waits for the writes in flight
 /// (Python's `CLOSE_HANDOFF_TIMEOUT`).
@@ -388,9 +389,20 @@ pub(crate) fn pool_plan(
             true => IdlePing::AfterIdle(DEFAULT_IDLE_PING_AFTER),
             false => IdlePing::Off,
         },
-        max_age: ConnectionAge::ReplaceAfter(Duration::from_secs(u64::from(config.pool_recycle))),
+        max_age: connection_age(config.pool_recycle),
         protocol,
     })
+}
+
+/// The age at which a pool replaces a connection: never, or after the
+/// recycle seconds. Pure.
+fn connection_age(recycle: PoolRecycle) -> ConnectionAge {
+    match recycle {
+        PoolRecycle::Never => ConnectionAge::Unlimited,
+        PoolRecycle::AfterSeconds { seconds } => {
+            ConnectionAge::ReplaceAfter(Duration::from_secs(u64::from(seconds.get())))
+        }
+    }
 }
 
 /// Parses one URL, loads its connection plan and builds the pool. Returns
@@ -446,6 +458,60 @@ pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
     .expect("the URL of a test pool is accepted by the statement layer")
 }
 
+/// A main core pool on the database of a test's sqlx pool, for the free
+/// lifecycle writers that tests call with a pool of their own. The same pool
+/// as the main pool of [`handle_for_test_pool`]; connects to nothing until
+/// the first checkout.
+#[cfg(test)]
+pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
+    let config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    let plan = pool_plan(
+        &config,
+        PoolRole::Main,
+        Reserve::NoReserve,
+        runtime_protocol(&config),
+    )
+    .expect("the size of a test pool is accepted by the statement layer");
+    let (core_pool, _masked_url) = open_pool(
+        &config.database_url,
+        plan,
+        &ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
+}
+
+/// The checkout wait of [`unpinged_single_connection_core_pool`].
+#[cfg(test)]
+const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
+
+/// A core pool of one connection on the URL of `options` that never pings a
+/// pooled connection at checkout (Python's worker pre-ping off) and never
+/// replaces it for its age. Once a statement is prepared on the connection,
+/// the statement is its only round trip. Connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn unpinged_single_connection_core_pool(
+    options: &sqlx::postgres::PgConnectOptions,
+) -> CorePool {
+    let plan = PoolPlan {
+        role: PoolRole::Main,
+        sizing: PoolSizing::new(1, Reserve::NoReserve)
+            .expect("one connection with no reserve is a valid size"),
+        checkout_wait: TEST_CHECKOUT_WAIT,
+        idle_ping: IdlePing::Off,
+        max_age: ConnectionAge::Unlimited,
+        protocol: StatementProtocol::PreparedPerConnection,
+    };
+    let (core_pool, _masked_url) = open_pool(
+        &test_url_of(options),
+        plan,
+        &ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,7 +523,7 @@ mod tests {
         config.pool_size = 5;
         config.max_overflow = 3;
         config.pool_timeout = 7;
-        config.pool_recycle = 1800;
+        config.pool_recycle = PoolRecycle::after_seconds(1800);
         config.pool_pre_ping = true;
         config
     }
@@ -481,6 +547,20 @@ mod tests {
         );
         assert_eq!(plan.idle_ping, IdlePing::AfterIdle(DEFAULT_IDLE_PING_AFTER));
         assert_eq!(plan.protocol, StatementProtocol::PreparedPerConnection);
+    }
+
+    #[test]
+    fn a_pool_that_never_recycles_keeps_its_connections() {
+        let mut config = config();
+        config.pool_recycle = PoolRecycle::Never;
+        let plan = pool_plan(
+            &config,
+            PoolRole::Main,
+            Reserve::NoReserve,
+            StatementProtocol::PreparedPerConnection,
+        )
+        .expect("valid plan");
+        assert_eq!(plan.max_age, ConnectionAge::Unlimited);
     }
 
     #[test]

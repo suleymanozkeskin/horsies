@@ -111,6 +111,8 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
             error.current_status.map(|status| status.to_string()),
         ),
         TaskActionErrorCode::DbOperationFailed => detail(503, error.message),
+        // Python answers it with 503 too; the core never produces it.
+        TaskActionErrorCode::EventLoopLimit => detail(503, error.message),
         // The request was valid, and a repeat gives the same answer until the
         // stored row changes (Python `horsies/web/routes/actions.py:110-130`).
         TaskActionErrorCode::StoredDataInvalid => detail(500, error.message),
@@ -122,11 +124,20 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
         HandleErrorCode::WorkflowNotFound => workflow_not_found(error.workflow_id),
         HandleErrorCode::DbOperationFailed
         | HandleErrorCode::LoopRunnerFailed
+        | HandleErrorCode::EventLoopLimit
         | HandleErrorCode::ResumeRecoveryFailed
         | HandleErrorCode::InternalFailed => detail(503, error.message),
         // Stored data that does not parse: the request was valid, and a repeat gets the same answer
         // (Python `_handle_failed`, `web/routes/actions.py`).
         HandleErrorCode::StoredDataInvalid => detail(500, error.message),
+        // Only a sync facade of the Python client returns it. The web actions call the core's async
+        // workflow functions, which never do, so reaching it is a defect (Python raises
+        // `AssertionError` in `_handle_failed`).
+        HandleErrorCode::AsyncContext => panic!(
+            "web workflow action for workflow {} got ASYNC_CONTEXT; the core's workflow functions \
+             never return it",
+            error.workflow_id
+        ),
     }
 }
 
@@ -191,6 +202,8 @@ fn resume_failure(error: HandleOperationError) -> ActionOutcome {
         | HandleErrorCode::DbOperationFailed
         | HandleErrorCode::StoredDataInvalid
         | HandleErrorCode::LoopRunnerFailed
+        | HandleErrorCode::EventLoopLimit
+        | HandleErrorCode::AsyncContext
         | HandleErrorCode::InternalFailed => handle_failed(error),
     }
 }
@@ -250,6 +263,7 @@ mod tests {
         for code in [
             HandleErrorCode::DbOperationFailed,
             HandleErrorCode::LoopRunnerFailed,
+            HandleErrorCode::EventLoopLimit,
             HandleErrorCode::ResumeRecoveryFailed,
             HandleErrorCode::InternalFailed,
         ] {
@@ -278,6 +292,7 @@ mod tests {
         for code in [
             HandleErrorCode::DbOperationFailed,
             HandleErrorCode::LoopRunnerFailed,
+            HandleErrorCode::EventLoopLimit,
             HandleErrorCode::InternalFailed,
         ] {
             let outcome = resume_failure(error(code));
@@ -295,5 +310,16 @@ mod tests {
             resume_failure(error(HandleErrorCode::StoredDataInvalid)).status_code(),
             500
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "got ASYNC_CONTEXT")]
+    fn async_context_is_a_defect_of_the_web_workflow_actions() {
+        let _outcome = handle_failed(HandleOperationError {
+            code: HandleErrorCode::AsyncContext,
+            message: "sync call inside a loop".to_owned(),
+            retryable: false,
+            workflow_id: Uuid::nil(),
+        });
     }
 }
