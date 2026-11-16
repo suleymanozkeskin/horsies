@@ -999,15 +999,33 @@ async fn reevaluate_and_enqueue(
                 })?;
             let max_retries = parse_max_retries(task.task_options.as_deref());
 
-            // Merge args_from if present.
-            let merged_input = merge_args_from_for_ready(
+            // Merge args_from if present. A key that the static input also sets fails the node
+            // (Python `core/workflows/engine.py:834-839`); the resume counts it as a handled node.
+            let merged_input = match merge_args_from_for_ready(
                 pool,
                 workflow_id,
                 &task.input,
                 &task.args_from,
                 &task.dependencies,
             )
-            .await?;
+            .await?
+            {
+                ArgsFromMerge::Merged(merged_input) => merged_input,
+                ArgsFromMerge::StaticMemberConflict(conflict) => {
+                    engine::fail_node_at_enqueue(
+                        pool,
+                        workflow_id,
+                        task.task_index,
+                        conflict.node_error(workflow_id, task.task_index, MergedNodeKind::Task),
+                        registry,
+                        payload,
+                        retention,
+                    )
+                    .await?;
+                    enqueued += 1;
+                    continue;
+                }
+            };
 
             // Inject workflow_ctx for ctx-capable nodes, matching the runtime
             // promotion path. Without this, a READY `workflow_ctx_from` task
@@ -1118,7 +1136,7 @@ async fn enqueue_subworkflow_on_resume(
         match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
             Ok(child_depth) => child_depth,
             Err(error) => {
-                return engine::fail_subworkflow_node(
+                return engine::fail_node_at_enqueue(
                     pool,
                     workflow_id,
                     task.task_index,
@@ -1135,7 +1153,7 @@ async fn enqueue_subworkflow_on_resume(
         .as_deref()
         .and_then(|key| registry.resolve_child_registration(key))
     else {
-        return engine::fail_subworkflow_node(
+        return engine::fail_node_at_enqueue(
             pool,
             workflow_id,
             task.task_index,
@@ -1150,14 +1168,29 @@ async fn enqueue_subworkflow_on_resume(
     // Build the child spec (supports dynamic parameterization via spec_builder).
     let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
 
-    let merged_input = merge_args_from_for_ready(
+    let merged_input = match merge_args_from_for_ready(
         pool,
         workflow_id,
         &task.input,
         &task.args_from,
         &task.dependencies,
     )
-    .await?;
+    .await?
+    {
+        ArgsFromMerge::Merged(merged_input) => merged_input,
+        ArgsFromMerge::StaticMemberConflict(conflict) => {
+            return engine::fail_node_at_enqueue(
+                pool,
+                workflow_id,
+                task.task_index,
+                conflict.node_error(workflow_id, task.task_index, MergedNodeKind::SubWorkflow),
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
     let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
@@ -1212,6 +1245,7 @@ async fn enqueue_subworkflow_on_resume(
 // ---------------------------------------------------------------------------
 
 use crate::workflow_engine::args_merge::merge_args_from_async as merge_args_from_for_ready;
+use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
 
 #[cfg(test)]
 mod resume_idempotency_tests {
@@ -1357,6 +1391,76 @@ mod resume_idempotency_tests {
         );
 
         cleanup(&pool, &[&id]).await;
+    }
+
+    /// A READY task node whose `args_from` names a member of its static input fails on resume with
+    /// Python's conflict error and gets no task row (`core/workflows/engine.py:834-839`).
+    #[tokio::test]
+    #[serial]
+    async fn resume_fails_a_ready_node_whose_args_from_names_a_static_member() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let workflow_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
+        for (index, status, dependencies, input, args_from) in [
+            (0, "COMPLETED", "{}", "null", None),
+            (1, "READY", "{0}", r#"{"x": 5}"#, Some(r#"{"x": 0}"#)),
+        ] {
+            sqlx::query(
+                "INSERT INTO horsies_workflow_tasks (
+                    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                    dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
+                    created_at, max_retries, execution, retention_class_key
+                ) VALUES (
+                    $1, $2::uuid, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[],
+                    $7::jsonb, FALSE, 'all', $8, FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+                )",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&workflow_id)
+            .bind(index)
+            .bind(format!("node_{index}"))
+            .bind(input)
+            .bind(dependencies)
+            .bind(args_from)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("insert node");
+        }
+
+        let handled = reevaluate_and_enqueue(
+            &pool,
+            Uuid::parse_str(&workflow_id).unwrap(),
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("resume enqueue path");
+        assert_eq!(handled, 1);
+
+        let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
+            "SELECT status, task_id, result FROM horsies_workflow_tasks
+             WHERE workflow_id = $1::uuid AND task_index = 1",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the node");
+        assert_eq!(status, "FAILED");
+        assert!(task_id.is_none());
+        let stored: crate::core::TaskResult<serde_json::Value> =
+            serde_json::from_str(&result.expect("the failed node stores its error"))
+                .expect("stored node result");
+        let crate::core::TaskResult::Err(error) = stored else {
+            panic!("the failed node must store an error");
+        };
+        assert_eq!(
+            error.message.as_deref(),
+            Some("args_from key 'x' conflicts with static kwarg (task 1)")
+        );
+
+        cleanup(&pool, &[&workflow_id]).await;
     }
 
     #[tokio::test]
