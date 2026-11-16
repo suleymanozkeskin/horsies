@@ -8,8 +8,8 @@ use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
 use super::outcome::{
-    killed_child_write, read_envelope, retry_request, task_error_write, timeout_recovery_write,
-    timeout_write, worker_failure_write, ReportedResult, WriteStage,
+    killed_child_write, retry_request, task_error_write, timeout_recovery_write, timeout_write,
+    worker_failure_write, WriteStage,
 };
 use super::pool::Answer;
 use super::*;
@@ -381,7 +381,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
 #[test]
 fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(
             &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),
@@ -390,36 +390,8 @@ fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     );
     let write = task_error_write(&claimed, "worker-1", &error, &envelope);
     assert_eq!(write.result_json, envelope.as_str());
-    assert_eq!(write.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(write.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
-}
-
-#[test]
-fn the_result_envelope_is_read_strictly() {
-    let ok = ResultEnvelopeText::new(r#"{"value": {"b": 1, "a": [2]}, "__type": "ok"}"#.to_owned());
-    match read_envelope(&ok) {
-        ReportedResult::Value(value) => assert_eq!(value.get(), r#"{"b": 1, "a": [2]}"#),
-        _ => panic!("expected a value"),
-    }
-    let err = ResultEnvelopeText::new(
-        r#"{"__type": "err", "value": {"error_code": "TASK_ERROR", "message": "m"}}"#.to_owned(),
-    );
-    assert!(matches!(read_envelope(&err), ReportedResult::Error(_)));
-    for text in [
-        "not json",
-        r#"{"__type": "ok", "value": 1, "value": 2}"#,
-        r#"{"__type": "maybe", "value": 1}"#,
-        r#"{"__type": "ok", "value": 1, "extra": 0}"#,
-        r#"{"__type": "ok", "value": NaN}"#,
-    ] {
-        assert!(
-            matches!(
-                read_envelope(&ResultEnvelopeText::new(text.to_owned())),
-                ReportedResult::Undecodable(_)
-            ),
-            "{text}"
-        );
-    }
 }
 
 #[test]
@@ -562,7 +534,7 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     let result = encode_child_frame(&ChildFrame::Result(ResultFrame {
         task_id: claimed.task_id,
         end: RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__type":"ok","value":3}"#.to_owned(),
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
@@ -576,7 +548,7 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     assert_eq!(
         run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,
         AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__type":"ok","value":3}"#.to_owned()
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned()
         )))
     );
 }
