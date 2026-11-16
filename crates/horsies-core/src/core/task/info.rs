@@ -133,8 +133,9 @@ mod tests {
         let result_field = json
             .get("result")
             .expect("expected 'result' field to be present");
-        // TaskResult serializes with __type tag
-        assert!(result_field.get("__type").is_some());
+        // TaskResult serializes as Python's envelope.
+        assert_eq!(result_field["__h_task_result__"], true);
+        assert_eq!(result_field["ok"]["answer"], 42);
     }
 
     #[test]
@@ -170,7 +171,7 @@ mod tests {
             "retry_count": 0,
             "max_retries": 1,
             "enqueued_at": "2025-01-01T00:00:00Z",
-            "result": {"__type": "ok", "value": "hello world"},
+            "result": {"__h_task_result__": true, "ok": "hello world", "err": null},
             "execution": "NOT_KEPT_IN_HISTORY"
         });
         let info: TaskInfo = serde_json::from_value(json).unwrap();
