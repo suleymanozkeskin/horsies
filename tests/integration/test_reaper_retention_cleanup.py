@@ -20,7 +20,6 @@ from tests.integration.conftest import compute_test_command_fingerprint
 
 from horsies.core.brokers.postgres import PostgresBroker
 
-from horsies.core.schemas.indexes import TASK_TERMINAL_STATUS_SQL_LITERALS
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
