@@ -303,22 +303,18 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
 /// any lock or write (differences ledger, row 3).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #697"]
 async fn fused_finalize_null_fence_is_refused() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     let before = live_row(&pool, task_id).await;
 
-    let refused =
-        sqlx::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, $4, $5)")
-            .bind(task_id)
-            .bind(WORKER)
-            .bind(r#"{"ok": 2}"#)
-            .bind("task_queue_default")
-            .bind(format!("capacity:{task_id}"))
-            .fetch_all(&pool)
-            .await
-            .map(|rows| rows.len());
+    let refused = sqlx::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, TRUE)")
+        .bind(task_id)
+        .bind(WORKER)
+        .bind(r#"{"ok": 2}"#)
+        .fetch_all(&pool)
+        .await
+        .map(|rows| rows.len());
 
     assert_refused(refused, "22023", Constraint::Unnamed);
     assert_eq!(live_row(&pool, task_id).await, before);
