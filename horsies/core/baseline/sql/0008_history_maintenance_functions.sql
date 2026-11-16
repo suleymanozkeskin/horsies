@@ -972,8 +972,9 @@ $$;
 -- Locks and indexes: horsies_create_partition_leaf; horsies_retention_classes_pkey.
 -- Returns: one row.
 -- Replaces: history/partitions/manager.py:323-367 (create_daily_leaf) and :423-598 (_create_or_verify_history_leaf):
--- about 15 statements per created leaf (class read, three state reads, try-lock, savepoint, LOCK, release, CREATE
--- TABLE, bound read, catalog INSERT, two CREATE INDEX, ANALYZE), and the publication of the pass for a leaf of today.
+-- 24 statements per created leaf (the class read; two state reads of 5 statements each, because the bound read pins
+-- and restores the session time zone; the try-lock; savepoint, LOCK and release; CREATE TABLE; the bound capture,
+-- 4 statements; the catalog INSERT; two CREATE INDEX; ANALYZE). Python publishes once at the end of the pass.
 CREATE FUNCTION horsies_create_history_leaf(p_class_key text, p_lower_anchor timestamp with time zone) RETURNS TABLE(outcome text, leaf_name text, conflict_kind text)
     LANGUAGE plpgsql
     SET "TimeZone" TO 'UTC'
@@ -1052,8 +1053,8 @@ $$;
 -- hour start.
 -- Locks and indexes: horsies_create_partition_leaf; horsies_retention_classes_pkey.
 -- Returns: one row.
--- Replaces: history/heartbeats/partitioning.py:319-445 (create_hourly_heartbeat_leaf): about 13 statements per
--- created leaf.
+-- Replaces: history/heartbeats/partitioning.py:319-445 (create_hourly_heartbeat_leaf): 22 statements per created
+-- leaf (as a history leaf, with one CREATE INDEX and no ANALYZE).
 CREATE FUNCTION horsies_create_heartbeat_leaf(p_lower_anchor timestamp with time zone) RETURNS TABLE(outcome text, leaf_name text, conflict_kind text)
     LANGUAGE plpgsql
     SET "TimeZone" TO 'UTC'
