@@ -34,7 +34,9 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
     );
     OutcomeWriter::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),

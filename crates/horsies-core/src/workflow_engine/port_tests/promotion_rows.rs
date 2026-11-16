@@ -42,7 +42,12 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(pool, workflow_spec, &WorkflowSpecRegistry::new()).await
+    start(
+        pool,
+        workflow_spec,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await
 }
 
 async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
@@ -51,7 +56,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
         workflow_id,
         index,
         &ok(value),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 }
@@ -207,7 +212,7 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     on_workflow_task_complete(
         &PostgresBroker::from_pool(db.pool.clone()),
         root_task,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .await
@@ -273,7 +278,7 @@ async fn the_promotion_moves_only_pending_nodes() {
         workflow_id,
         4,
         &err("PROMOTION_WRITE_FAIL", "forced"),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -358,7 +363,7 @@ async fn a_pause_after_the_dependents_read_leaves_the_promoted_nodes_ready_with_
 
     let _report = recover_stuck_workflows(
         &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         0,
         RECOVERY_FAILURE_LIMIT,
         &PayloadPolicy::default(),
@@ -526,7 +531,7 @@ async fn complete_the_root(pool: &PgPool, workflow_id: Uuid) {
         pool,
         root_task,
         &ok(serde_json::json!(0)),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
     .expect("phase 2 of the root applies; the bad node fails alone");
@@ -587,7 +592,7 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
     let resumed = resume_workflow(
         &broker(&db.pool),
         workflow_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -640,7 +645,7 @@ async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
             &db.pool,
             root_task,
             &ok(serde_json::json!(0)),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )
         .await;
 

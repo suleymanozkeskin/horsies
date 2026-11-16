@@ -88,7 +88,7 @@ async fn a_completed_child_advances_and_completes_its_parent() {
         child,
         "COMPLETED",
         Some(&stored),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -141,7 +141,7 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
 
     let report = recover_stuck_workflows(
         &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         0,
         RECOVERY_FAILURE_LIMIT,
         &PayloadPolicy::default(),
@@ -218,7 +218,7 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     run_phase2(
         &PostgresBroker::from_pool(db.pool.clone()),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         Phase2Work {
             task_id: child_task,
             queue_name: "default".to_owned(),

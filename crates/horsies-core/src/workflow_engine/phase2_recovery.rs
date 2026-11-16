@@ -15,17 +15,11 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, first_row, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::errors::HistoryError;
-use crate::core::history::phase2::consumption::{
-    consume_phase2, Phase2Disposition, Phase2DispositionKind,
-};
 use crate::core::lifecycle::TerminalizationKind;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
-use crate::workflow_engine::engine::apply_phase2_progression_in_tx;
 use crate::workflow_engine::recovery_limit::{
     recovery_limit_error, recovery_limit_payloads, run_catching_panic, CandidateFailure,
     FailureClass, RecoveryCase,
@@ -148,22 +142,6 @@ enum QuarantineResult {
     OutsideContract,
 }
 
-fn node_status_for_terminal_task(status: &str) -> Result<&'static str, WorkflowError> {
-    let status: TaskStatus = status
-        .parse()
-        .map_err(|error: String| WorkflowError::InvalidStatus(error))?;
-    if !status.is_terminal() {
-        return Err(WorkflowError::InvalidStatus(format!(
-            "node status requested for non-terminal task status {status}"
-        )));
-    }
-    Ok(if status == TaskStatus::Completed {
-        "COMPLETED"
-    } else {
-        "FAILED"
-    })
-}
-
 /// A phase-2 record names a kind whose terminal move writes no phase-2
 /// record. The pending CHECK admits five kinds, so this is a value that the
 /// table refuses or that a later schema added.
@@ -211,57 +189,6 @@ pub(crate) fn terminal_status_of_pending_kind(
     }
 }
 
-async fn apply_progression(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    disposition: &Phase2Disposition,
-    registry: &crate::core::registry::workflow::WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
-    let (Some(workflow_id), Some(task_index), Some(node_status)) = (
-        disposition.workflow_id,
-        disposition.task_index,
-        disposition.node_status.as_deref(),
-    ) else {
-        return Err(WorkflowError::Validation(
-            "APPLIED_TO_NODE omitted progression context".to_owned(),
-        ));
-    };
-    apply_phase2_progression_in_tx(
-        transaction,
-        workflow_id,
-        disposition.node_row_id,
-        task_index,
-        node_status,
-        disposition.terminal_status.as_deref(),
-        disposition.on_error.as_deref(),
-        disposition.workflow_status.as_deref(),
-        registry,
-        payload,
-        retention,
-    )
-    .await
-}
-
-/// A history error of the phase-2 consume or quarantine as a workflow error.
-///
-/// A database error keeps its cause, so `WorkflowError::Database` is
-/// classified by the SQLSTATE rule: a transient error (a lost connection, a
-/// lock timeout) is retried (Python `_finalize_workflow_phase` and
-/// `_phase2_error`, `core/worker/finalize.py:1645-1697`, with
-/// `is_retryable_connection_error`, `core/utils/db.py:232-247`). A contract
-/// or decode error is not transient and stays `WorkflowError::Validation`.
-fn workflow_error_of(error: HistoryError) -> WorkflowError {
-    match error {
-        HistoryError::Database(database_error) => WorkflowError::Database(database_error),
-        HistoryError::ArchiveDecode(_)
-        | HistoryError::Contract(_)
-        | HistoryError::LeafLockNotHeld
-        | HistoryError::LeafLockBusy { .. }
-        | HistoryError::HistoryParentAbsent(_) => WorkflowError::Validation(error.to_string()),
-    }
-}
-
 /// The statement of a phase-2 wake.
 const SEND_WAKE_SQL: &str = "SELECT pg_notify($1, $2)";
 
@@ -293,37 +220,6 @@ pub(crate) async fn send_phase2_wake(
             .map(|_notified| ()),
         Phase2Wake::NoWake => Ok(()),
     }
-}
-
-/// Healthy finalizer path: send `wake`, consume one pending row and apply
-/// every remaining workflow effect in one transaction. The outbox row is
-/// crash evidence, not a second progression mechanism for successful
-/// finalizers.
-///
-/// The wake is the first statement of the transaction (Python
-/// `core/worker/finalize.py:1645-1666`): PostgreSQL delivers it at COMMIT
-/// with the node write, and a rollback drops it. A wake that fails is
-/// `WorkflowError::Database`, and the transaction then writes nothing.
-pub async fn finalize_phase2(
-    pool: &PgPool,
-    task_id: Uuid,
-    terminal_status: &str,
-    wake: &Phase2Wake,
-    registry: &crate::core::registry::workflow::WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<Phase2Disposition, WorkflowError> {
-    let node_status = node_status_for_terminal_task(terminal_status)?;
-    let mut transaction = pool.begin().await?;
-    send_phase2_wake(transaction.as_mut(), wake).await?;
-    let disposition = consume_phase2(&mut transaction, task_id, node_status)
-        .await
-        .map_err(workflow_error_of)?;
-    if disposition.disposition == Phase2DispositionKind::AppliedToNode {
-        apply_progression(&mut transaction, &disposition, registry, payload, retention).await?;
-    }
-    transaction.commit().await?;
-    Ok(disposition)
 }
 
 /// One bounded pass over the phase-2 records.
@@ -651,11 +547,9 @@ fn count_raise(
 mod tests {
     use super::*;
     use crate::broker::terminalization::on_test_pool::terminalize;
-    use crate::core::config::payload::PayloadPolicy;
     use crate::core::config::retention::RetentionConfig;
-    use crate::core::history::phase2::quarantine::{quarantine_one, QuarantineVerdict};
+    use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
-    use crate::core::types::status::TASK_TERMINAL_STATES;
     use serial_test::serial;
 
     /// One recovery pass with the given grace, cap and attempt bound, and an
@@ -669,7 +563,9 @@ mod tests {
         drive_phase2_recovery(
             pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             grace_ms,
             max_rows,
             attempt_bound,
@@ -805,29 +701,6 @@ mod tests {
     }
 
     #[test]
-    fn every_terminal_task_status_maps_and_nonterminal_statuses_refuse() {
-        for status in TASK_TERMINAL_STATES {
-            let mapped = node_status_for_terminal_task(&status.to_string()).expect("terminal");
-            assert_eq!(
-                mapped,
-                if *status == TaskStatus::Completed {
-                    "COMPLETED"
-                } else {
-                    "FAILED"
-                }
-            );
-        }
-        for status in [
-            TaskStatus::Pending,
-            TaskStatus::Claimed,
-            TaskStatus::Running,
-        ] {
-            assert!(node_status_for_terminal_task(&status.to_string()).is_err());
-        }
-        assert!(node_status_for_terminal_task("UNKNOWN").is_err());
-    }
-
-    #[test]
     fn a_complete_locked_record_stands_for_a_completed_task() {
         assert_eq!(
             terminal_status_of_pending_kind("COMPLETE_LOCKED"),
@@ -903,83 +776,6 @@ mod tests {
             .await
             .expect_err("a failed discovery/count query must cross the containment seam");
         assert!(matches!(error, WorkflowError::Database(_)));
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn healthy_finalizer_consumes_outbox_promotes_dependent_and_replays_idempotently() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let workflow_id = Uuid::new_v4();
-        let task_id = Uuid::new_v4();
-        seed_workflow_task(&pool, workflow_id, task_id, true).await;
-        terminalize_workflow_task(&pool, task_id).await;
-
-        let live: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)")
-                .bind(task_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(!live, "phase 1 moved the terminal row before progression");
-
-        let disposition = finalize_phase2(
-            &pool,
-            task_id,
-            "COMPLETED",
-            &Phase2Wake::NoWake,
-            &crate::core::WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("healthy phase 2");
-        assert_eq!(
-            disposition.disposition,
-            Phase2DispositionKind::AppliedToNode
-        );
-
-        let statuses: Vec<(
-            i32,
-            String,
-            Option<Uuid>,
-            Option<chrono::DateTime<chrono::Utc>>,
-            Option<chrono::DateTime<chrono::Utc>>,
-        )> = sqlx::query_as(
-            "SELECT task_index, status, task_id, started_at, completed_at
-             FROM horsies_workflow_tasks
-             WHERE workflow_id = $1 ORDER BY task_index",
-        )
-        .bind(workflow_id)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(statuses[0].0, 0);
-        assert_eq!(statuses[0].1, "COMPLETED");
-        assert_eq!(statuses[0].2, Some(task_id));
-        assert_eq!(statuses[1].0, 1);
-        assert_eq!(statuses[1].1, "ENQUEUED");
-        assert_eq!(statuses[1].2.expect("dependent task").get_version_num(), 7);
-        assert!(statuses[0].4.is_some(), "source completion must be stamped");
-        // A promoted node starts at its enqueue: the time of the phase-2
-        // transaction that completed its dependency.
-        assert_eq!(
-            statuses[1].3, statuses[0].4,
-            "the dependent's started_at is the source's completed_at",
-        );
-
-        let replay = finalize_phase2(
-            &pool,
-            task_id,
-            "COMPLETED",
-            &Phase2Wake::NoWake,
-            &crate::core::WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("idempotent phase-2 replay");
-        assert_eq!(replay.disposition, Phase2DispositionKind::AlreadyApplied);
-        cleanup_case(&pool, workflow_id, task_id).await;
     }
 
     #[tokio::test]
@@ -1166,127 +962,12 @@ mod tests {
         cleanup_case(&pool, good_workflow, good_task).await;
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn pause_records_the_exact_phase2_node_failure_not_an_earlier_failure() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let workflow_id = Uuid::new_v4();
-        let prior_task = Uuid::new_v4();
-        let current_task = Uuid::new_v4();
-        seed_workflow_task(&pool, workflow_id, prior_task, false).await;
-        let prior_error =
-            crate::core::TaskError::new("PRIOR_FAILURE", "prior node failed").unwrap();
-        let current_error =
-            crate::core::TaskError::new("CURRENT_FAILURE", "current node failed").unwrap();
-        let prior_result = serde_json::to_string(
-            &crate::core::TaskResult::<serde_json::Value>::Err(prior_error),
-        )
-        .unwrap();
-        sqlx::query("UPDATE horsies_workflows SET on_error = 'pause' WHERE id = $1;")
-            .bind(workflow_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "UPDATE horsies_workflow_tasks
-             SET status = 'FAILED', result = $2, completed_at = NOW()
-             WHERE workflow_id = $1 AND task_index = 0",
-        )
-        .bind(workflow_id)
-        .bind(&prior_result)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
-                started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
-                max_retries, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, created_at, updated_at, execution
-            ) VALUES (
-                $1, 'p7_phase2_current', 'default', 100, 'null', 'RUNNING', NOW(), NOW(),
-                NOW(), NOW(), 'p7-worker', TRUE, 0, 0, NULL, NULL, 'forever', FALSE, NOW(),
-                NOW(), 'ISOLATED'
-            )",
-        )
-        .bind(current_task)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_workflow_tasks (
-                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
-                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
-                created_at, max_retries, execution, retention_class_key
-            ) VALUES (
-                'NONE', $1, $2, 1, 'current', 'p7_phase2_current', 'null', 'default', 100, '{}', FALSE,
-                'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
-            )",
-        )
-        .bind(Uuid::new_v4())
-        .bind(workflow_id)
-        .bind(current_task)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let current_result = serde_json::to_string(
-            &crate::core::TaskResult::<serde_json::Value>::Err(current_error.clone()),
-        )
-        .unwrap();
-        let outcomes = terminalize(
-            &pool,
-            &TerminalizationCommand::FailLockedTask {
-                task_id: current_task,
-                fence: PriorLockedRead {
-                    worker_id: "p7-worker".to_owned(),
-                },
-                result_json: current_result,
-                error_code: Some("CURRENT_FAILURE".to_owned()),
-                failed_reason: Some("current node failed".to_owned()),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            outcomes.as_slice(),
-            [TerminalizationOutcome::Applied { .. }]
-        ));
-        let disposition = finalize_phase2(
-            &pool,
-            current_task,
-            "FAILED",
-            &Phase2Wake::NoWake,
-            &crate::core::WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            disposition.disposition,
-            Phase2DispositionKind::AppliedToNode
-        );
-        let (status, error_json): (String, String) =
-            sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
-                .bind(workflow_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(status, "PAUSED");
-        let stored: crate::core::TaskError = serde_json::from_str(&error_json).unwrap();
-        assert_eq!(stored.error_code, current_error.error_code);
-        assert_eq!(stored.message, current_error.message);
-        cleanup_case(&pool, workflow_id, current_task).await;
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(prior_task)
-            .execute(&pool)
-            .await
-            .ok();
-    }
-
     /// Python `tests/integration/test_task_history_phase2_consumption.py::TestDurableDispositions::test_terminal_workflow_supersedes_without_touching_the_node`:
-    /// the consume function supersedes the record of an ended workflow and
-    /// leaves the node. The worker's phase 2 writes such a node (#998).
+    /// the supersede rule of `horsies_phase2_consume`, the function that
+    /// Python's phase 2 calls: the record of a node of an ended workflow is
+    /// deleted and the node is not written. The core's phase 2 writes the
+    /// node instead (`horsies_workflow_node_finish`;
+    /// `engine/task_complete_tests.rs::a_node_of_an_ended_workflow_completes_and_enqueues_nothing`).
     #[tokio::test]
     #[serial]
     async fn terminal_workflow_supersedes_pending_evidence_without_touching_the_node() {
@@ -1500,7 +1181,9 @@ mod tests {
         let summary = drive_phase2_recovery(
             &pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             0,
             1,
             25,
@@ -1619,7 +1302,9 @@ mod tests {
         let summary = drive_phase2_recovery(
             &pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             0,
             1,
             1,
@@ -1649,48 +1334,6 @@ mod tests {
         assert_eq!(attempts, 1);
         assert_eq!(failure_class.as_deref(), Some("SOURCE_VERSION_CONFLICT"));
         assert_eq!(copies, 1);
-        cleanup_case(&pool, workflow_id, task_id).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn quarantine_repoints_verified_evidence_and_consumer_drains_it() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let workflow_id = Uuid::new_v4();
-        let task_id = Uuid::new_v4();
-        seed_workflow_task(&pool, workflow_id, task_id, false).await;
-        terminalize_workflow_task(&pool, task_id).await;
-
-        let mut transaction = pool.begin().await.unwrap();
-        let quarantined = quarantine_one(&mut transaction, task_id).await.unwrap();
-        assert_eq!(quarantined.verdict, QuarantineVerdict::Repointed);
-        transaction.commit().await.unwrap();
-
-        let disposition = finalize_phase2(
-            &pool,
-            task_id,
-            "COMPLETED",
-            &Phase2Wake::NoWake,
-            &crate::core::WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            disposition.disposition,
-            Phase2DispositionKind::AppliedToNode
-        );
-        let evidence: (i64, i64) = sqlx::query_as(
-            "SELECT
-                (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1),
-                (SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1)",
-        )
-        .bind(task_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(evidence, (0, 0));
         cleanup_case(&pool, workflow_id, task_id).await;
     }
 
