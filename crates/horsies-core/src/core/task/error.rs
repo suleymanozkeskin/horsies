@@ -80,15 +80,20 @@ pub enum RetrievalCode {
     WorkflowNotFound,
     ResultNotAvailable,
     ResultNotReady,
+    /// An argument of the get call was refused before anything ran, for
+    /// example a wait limit above 2^32 - 1 ms. Never cached: a call with a
+    /// valid argument reads the value.
+    InvalidInput,
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
         Self::ResultNotAvailable,
         Self::ResultNotReady,
+        Self::InvalidInput,
     ];
 }
 
