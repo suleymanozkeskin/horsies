@@ -17,6 +17,7 @@ use super::budgets::SlotService;
 use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
 use super::route::IsolatedDeadline;
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
 };
@@ -70,6 +71,8 @@ pub struct IsolatedPoolConfig {
     pub tasks_per_child: TaskLimit,
     pub memory_per_child: MemoryLimit,
     pub exit_not_seen: ExitNotSeen,
+    /// The CPUs of each child, set before its init frame.
+    pub child_cpus: ChildCpus,
 }
 
 /// The answer to one submitted task. Exactly one end reaches the caller:

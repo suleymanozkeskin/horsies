@@ -1,6 +1,7 @@
 //! The start of the children of a worker: the wait for the first
-//! generation, and the memory baseline guard of each kind of child (Python
-//! `core/worker/worker.py`, `_start_slots`, `_check_memory_baseline`,
+//! generation, the placement of the worker's threads, and the memory
+//! baseline guard of each kind of child (Python `core/worker/worker.py`,
+//! `_start_slots`, `_place_worker_process`, `_check_memory_baseline`,
 //! `_check_baseline_against`, `_new_kind_baseline_loop`).
 //!
 //! The caller starts the pools on one [`PoolBoard`], then calls
@@ -14,6 +15,9 @@ use std::num::NonZeroU64;
 use super::board::{ChildBaseline, PoolBoard, PoolFailure, StartEnd};
 use super::dispatch::ExecutionClass;
 use super::pool::MemoryLimit;
+use crate::worker::executor::placement::{
+    place_worker_threads, CpuPlacement, WorkerNotPlaced, WorkerThreads,
+};
 use crate::worker::executor::protocol::RssReading;
 
 /// A baseline at or above this share of its limit leaves little room for
@@ -163,15 +167,40 @@ pub enum ChildrenStartFailed {
     #[error("worker child start failed: {0}")]
     Pool(PoolFailure),
     #[error(transparent)]
+    WorkerNotPlaced(WorkerNotPlaced),
+    #[error(transparent)]
     BaselineOverLimit(BaselineOverLimit),
 }
 
-/// Wait for the first generation of the pools on `board`, then run the
-/// memory baseline guard of each kind on its baselines (Python
-/// `_start_slots`). Starts nothing itself: the pools on `board` boot their
-/// children.
+/// Put every thread of the worker process on its core when the placement
+/// is [`CpuPlacement::OwnCore`] (Python `_place_worker_process`). Runs after
+/// the children started: each child got its own CPUs before its init
+/// frame.
+fn place_worker(placement: &CpuPlacement, threads: &WorkerThreads) -> Result<(), WorkerNotPlaced> {
+    let own = match placement {
+        CpuPlacement::SharedCpus => return Ok(()),
+        CpuPlacement::OwnCore(own) => own,
+    };
+    let placed = place_worker_threads(own.parent(), threads)?;
+    tracing::info!(
+        "the worker process runs on CPUs {} ({placed} threads); its children on CPUs {}",
+        own.parent(),
+        own.children(),
+    );
+    Ok(())
+}
+
+/// Wait for the first generation of the pools on `board`, place the
+/// threads of the worker process by `placement`, then run the memory
+/// baseline guard of each kind on its baselines (Python `_start_slots`).
+/// Starts nothing itself: the pools on `board` boot their children, on the
+/// CPUs of `placement` ([`CpuPlacement::child_cpus`] in their configs).
+/// `threads` lists the threads to place:
+/// [`WorkerThreads::of_this_process`] in a worker.
 pub async fn start_children(
     board: &PoolBoard,
+    placement: &CpuPlacement,
+    threads: &WorkerThreads,
     limits: &BaselineLimits,
 ) -> Result<ChildrenStart, ChildrenStartFailed> {
     let baselines = match board.first_generation().await {
@@ -184,6 +213,7 @@ pub async fn start_children(
         baselines.len(),
         board.slot_count()
     );
+    place_worker(placement, threads).map_err(ChildrenStartFailed::WorkerNotPlaced)?;
     check_memory_baselines(&baselines, limits).map_err(ChildrenStartFailed::BaselineOverLimit)?;
     Ok(ChildrenStart::Started { baselines })
 }

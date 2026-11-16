@@ -23,6 +23,7 @@ use super::pool::{
 };
 use super::route::IsolatedDeadline;
 use super::shared::{SharedPool, SharedPoolConfig};
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, BodyEnd, BootDetail,
     BootErrorName, BootFailedFrame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
@@ -447,6 +448,7 @@ pub(super) fn isolated_config(command: ChildCommand) -> IsolatedPoolConfig {
         tasks_per_child: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
+        child_cpus: ChildCpus::Inherited,
     }
 }
 
@@ -459,6 +461,7 @@ pub(super) fn shared_config(command: ChildCommand, init: InitFrame) -> SharedPoo
         tasks_per_seat: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
+        child_cpus: ChildCpus::Inherited,
     }
 }
 

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs, ChildFrame,
     ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber,
@@ -254,6 +255,7 @@ async fn run_one(
             tasks_per_seat: TaskLimit::Off,
             memory_per_child: MemoryLimit::Off,
             exit_not_seen: ExitNotSeen::LeaveToRecovery,
+            child_cpus: ChildCpus::Inherited,
         },
         Arc::new(PoolBoard::new(board_layout)),
         spawner.handle(),

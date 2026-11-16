@@ -165,6 +165,7 @@ async fn boot_and_serve(
         command: &pool.config.command,
         init: &pool.config.init,
         mailbox: MailboxBound::for_seats(pool.seats),
+        cpus: &pool.config.child_cpus,
     };
     match boot_child(&boot).await {
         Booted::Child(channel) => {

@@ -181,6 +181,7 @@ async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDef
         command: &shared.config.command,
         init: &shared.config.init,
         mailbox: MailboxBound::for_seats(NonZeroUsize::MIN),
+        cpus: &shared.config.child_cpus,
     };
     match boot_child(&boot).await {
         Booted::Child(channel) => {

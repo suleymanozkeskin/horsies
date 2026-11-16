@@ -15,6 +15,7 @@ use super::pool::Answer;
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel,
     ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
@@ -493,6 +494,7 @@ fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
         tasks_per_child: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
+        child_cpus: ChildCpus::Inherited,
     }
 }
 

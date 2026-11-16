@@ -26,6 +26,7 @@ use super::pool::{
 };
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     ChildKind, DispatchNumber, InitFrame, SharedRunFrame, SharedWork, TaskInputText,
 };
@@ -50,6 +51,8 @@ pub struct SharedPoolConfig {
     pub tasks_per_seat: TaskLimit,
     pub memory_per_child: MemoryLimit,
     pub exit_not_seen: ExitNotSeen,
+    /// The CPUs of each child, set before its init frame.
+    pub child_cpus: ChildCpus,
 }
 
 /// The kind of the shared children of an init frame. An isolated init

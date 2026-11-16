@@ -7,11 +7,12 @@ use std::time::Duration;
 use chrono::Utc;
 
 use super::board::{DownState, PoolBoard, PoolFailure, ReadyChild, SlotPhase};
+use crate::worker::executor::placement::{place_process, ChildCpus};
 use crate::worker::executor::protocol::{ChildFrame, InitFrame, ParentFrame, RssReading};
 use crate::worker::executor::supervisor::{
-    boot_end_of, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause, BootReply,
-    ChildChannel, ChildCommand, ChildLost, FrameWait, LossCause, MailboxBound, SpawnError,
-    SpawnerHandle, CHILD_KILL_WAIT, CHILD_READY_TIMEOUT,
+    boot_end_of, wait_for_exit, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause,
+    BootReply, ChildChannel, ChildCommand, ChildLost, FrameWait, LossCause, MailboxBound,
+    SpawnError, SpawnedChild, SpawnerHandle, CHILD_KILL_WAIT, CHILD_READY_TIMEOUT,
 };
 
 /// What a booting slot needs.
@@ -24,6 +25,8 @@ pub(super) struct BootSlot<'a> {
     /// The first frame of the slot's children; its kind is the slot's.
     pub init: &'a InitFrame,
     pub mailbox: MailboxBound,
+    /// The CPUs of the slot's children, set before the init frame.
+    pub cpus: &'a ChildCpus,
 }
 
 /// The end of a boot attempt.
@@ -209,6 +212,10 @@ async fn boot_attempt(slot: &BootSlot<'_>) -> BootAttempt {
             }
         }
     };
+    let spawned = match place_child(slot, spawned).await {
+        Ok(spawned) => spawned,
+        Err(failure) => return BootAttempt::Ended(BootEnd::Failed(failure)),
+    };
     let child_id = spawned.id;
     let mut channel = match ChildChannel::attach(spawned, slot.spawner.clone(), slot.mailbox) {
         Ok(channel) => channel,
@@ -234,6 +241,38 @@ async fn boot_attempt(slot: &BootSlot<'_>) -> BootAttempt {
         }
     };
     boot_reply(channel, reply).await
+}
+
+/// Set the CPUs of a started child before its init frame (Python
+/// `Child._attach_registered`). The child waits for the init frame before it
+/// starts a thread, so the CPUs hold for each thread it starts. A child
+/// whose CPUs the OS refuses is killed and waited for: its start failed
+/// (`SpawnFailed`), and the same placement fails again.
+async fn place_child(
+    slot: &BootSlot<'_>,
+    spawned: SpawnedChild,
+) -> Result<SpawnedChild, BootFailure> {
+    let cpus = match slot.cpus {
+        ChildCpus::Inherited => return Ok(spawned),
+        ChildCpus::Set(cpus) => cpus,
+    };
+    let refused = match place_process(spawned.pid, cpus) {
+        Ok(()) => return Ok(spawned),
+        Err(refused) => refused,
+    };
+    let SpawnedChild {
+        id,
+        socket,
+        mut exit,
+        ..
+    } = spawned;
+    drop(socket);
+    let _ = slot.spawner.kill_session(id).await;
+    let _ = wait_for_exit(&mut exit, CHILD_KILL_WAIT).await;
+    Err(BootFailure::new(
+        BootFailureCause::SpawnFailed,
+        &refused.to_string(),
+    ))
 }
 
 /// Read the first answer of a booting child.

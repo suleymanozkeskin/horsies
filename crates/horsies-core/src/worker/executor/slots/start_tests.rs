@@ -19,6 +19,7 @@ use super::scripted::{
     TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
+use crate::worker::executor::placement::{CpuPlacement, WorkerThreads};
 use crate::worker::executor::protocol::{ProcessId, RssMb, RssReading, ShortageErrno};
 use crate::worker::executor::supervisor::{BootFailureCause, Spawner};
 
@@ -56,6 +57,11 @@ fn baseline(class: ExecutionClass, rss: RssReading) -> ChildBaseline {
         pid: pid(1),
         rss,
     }
+}
+
+/// A listing of no thread: a start with shared CPUs never reads it.
+fn no_threads() -> WorkerThreads {
+    WorkerThreads::listed_in(std::path::PathBuf::from("/nonexistent/horsies-threads"))
 }
 
 async fn first_generation(board: &PoolBoard) -> Result<Vec<ChildBaseline>, StartEnd> {
@@ -106,9 +112,12 @@ async fn the_start_of_the_children_gives_the_first_generation() {
     );
     let off = limits(MemoryLimit::Off, MemoryLimit::Off, MemoryLimit::Off);
 
-    let started = tokio::time::timeout(START_WAIT, start_children(&board, &off))
-        .await
-        .unwrap();
+    let started = tokio::time::timeout(
+        START_WAIT,
+        start_children(&board, &CpuPlacement::SharedCpus, &no_threads(), &off),
+    )
+    .await
+    .unwrap();
 
     match started {
         Ok(ChildrenStart::Started { baselines }) => assert_eq!(baselines.len(), 1),
@@ -167,9 +176,12 @@ async fn a_failed_start_hook_ends_the_start_with_the_failure() {
     let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
     let off = limits(MemoryLimit::Off, MemoryLimit::Off, MemoryLimit::Off);
 
-    let started = tokio::time::timeout(START_WAIT, start_children(&board, &off))
-        .await
-        .unwrap();
+    let started = tokio::time::timeout(
+        START_WAIT,
+        start_children(&board, &CpuPlacement::SharedCpus, &no_threads(), &off),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         started,
@@ -187,7 +199,7 @@ async fn a_stop_during_the_start_ends_it_with_no_failure() {
     let off = limits(MemoryLimit::Off, MemoryLimit::Off, MemoryLimit::Off);
     board.begin_stop();
 
-    let started = start_children(&board, &off).await;
+    let started = start_children(&board, &CpuPlacement::SharedCpus, &no_threads(), &off).await;
 
     assert_eq!(started, Ok(ChildrenStart::Stopped));
 }
