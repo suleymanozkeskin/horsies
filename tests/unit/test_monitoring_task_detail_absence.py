@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
@@ -28,7 +29,7 @@ from tests.broker_resources_support import attach_resources, fake_resources
 
 pytestmark = [pytest.mark.unit]
 
-TASK_ID = '0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b'
+TASK_ID = UUID('0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b')
 WORKFLOW_ID = '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d'
 REPEATABLE_READ_BEGIN = call.connection(
     execution_options={'isolation_level': 'REPEATABLE READ'},
@@ -84,17 +85,6 @@ def _staged_read(
 
 class TestTaskDetailNotFound:
     @pytest.mark.asyncio
-    async def test_a_non_uuid_id_is_not_classified_and_reads_nothing(self) -> None:
-        broker = MagicMock()
-
-        result = await get_task_detail(broker, 'not-a-task-id')
-
-        assert result == Ok(TaskDetailNotFound(
-            task_id='not-a-task-id', reason=TaskAbsenceReason.NOT_CLASSIFIED,
-        ))
-        broker.select_resources.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_a_database_without_the_staged_read_is_not_classified(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -146,7 +136,7 @@ class TestLiveInTheSnapshotOfTheLiveMiss:
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
         assert isinstance(error.exception, HistoryContractError)
-        assert TASK_ID in error.message
+        assert str(TASK_ID) in error.message
         assert 'live in the snapshot' in error.message
 
     @pytest.mark.asyncio
@@ -157,7 +147,7 @@ class TestLiveInTheSnapshotOfTheLiveMiss:
             monkeypatch, published=True, detail=LiveTaskLocation(task_id=TASK_ID),
         )
         node = MagicMock()
-        node.task_id = TASK_ID
+        node.task_id = str(TASK_ID)
         broker = _broker_with_session(
             _session(_scalar_result(node), _scalar_result(None)),
         )

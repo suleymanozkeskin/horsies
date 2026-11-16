@@ -61,7 +61,7 @@ pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-7d2e'
 CAUSE_MARKER = 'cause-marker-7d2e'
-TASK_ID = '3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607'
+TASK_ID = uuid.UUID('3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607')
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 LOOP_LIMIT = EventLoopLimit(
     limit=5,
@@ -122,7 +122,7 @@ class TestVariantCatalog:
         assert MESSAGE_MARKER not in text
         assert CAUSE_MARKER not in text
         assert type(error).__name__ in text
-        assert TASK_ID in text
+        assert str(TASK_ID) in text
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('x')), ids=_variant_id,
@@ -153,7 +153,7 @@ class TestVariantCatalog:
 
 def _history_state(*, status: TaskStatus, is_workflow_task: bool) -> HistoryTaskState:
     return HistoryTaskState(
-        task_id=uuid.UUID(TASK_ID), status=status, is_workflow_task=is_workflow_task,
+        task_id=TASK_ID, status=status, is_workflow_task=is_workflow_task,
     )
 
 
@@ -253,7 +253,7 @@ class TestCancelLiveMiss:
         result = await _cancel_missed(
             monkeypatch,
             published=True,
-            read=TaskStateAbsent(task_id=uuid.UUID(TASK_ID)),
+            read=TaskStateAbsent(task_id=TASK_ID),
         )
 
         assert is_err(result)
@@ -264,7 +264,7 @@ class TestCancelLiveMiss:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         result = await _cancel_missed(
-            monkeypatch, published=True, read=LiveTaskLocation(task_id=uuid.UUID(TASK_ID)),
+            monkeypatch, published=True, read=LiveTaskLocation(task_id=TASK_ID),
         )
 
         assert is_err(result)
@@ -334,7 +334,7 @@ async def _cancel_locked(
 
 def _applied(status: TaskStatus | None) -> Applied:
     return Applied(
-        task_id=TASK_ID,
+        task_id=str(TASK_ID),
         ordinality=None,
         terminal_at=NOW,
         kind=TerminalizationKind.CANCEL_ADMIN,
@@ -344,7 +344,7 @@ def _applied(status: TaskStatus | None) -> Applied:
 
 def _conflict(status: TaskStatus) -> SourceStateConflict:
     return SourceStateConflict(
-        task_id=TASK_ID,
+        task_id=str(TASK_ID),
         ordinality=None,
         observed=_observed(status),
         evidence=ObservedClaim(worker_id=None, claimed_at=None),
@@ -384,7 +384,7 @@ class TestCancelLockedRow:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         outcome = AlreadyApplied(
-            task_id=TASK_ID,
+            task_id=str(TASK_ID),
             ordinality=None,
             terminal_at=NOW,
             kind=TerminalizationKind.CANCEL_ADMIN,
@@ -443,7 +443,7 @@ class TestCancelLockedRow:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         outcome = LostClaim(
-            task_id=TASK_ID, ordinality=None, observed=_observed(TaskStatus.CLAIMED),
+            task_id=str(TASK_ID), ordinality=None, observed=_observed(TaskStatus.CLAIMED),
         )
 
         with pytest.raises(RuntimeError, match='caller-held row lock'):
@@ -452,33 +452,23 @@ class TestCancelLockedRow:
 
 class TestCancelBoundaries:
     @pytest.mark.asyncio
-    async def test_an_id_that_is_not_a_uuid_is_not_found(self) -> None:
-        broker = MagicMock()
-
-        result = await cancel_task(broker, 'not-a-uuid')
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
-        assert result.err_value.task_id == 'not-a-uuid'
-
-    @pytest.mark.asyncio
-    async def test_a_uuid_form_the_database_refuses_reaches_it_as_canonical_text(
+    async def test_the_lock_read_binds_the_canonical_text_of_the_id(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         execute = AsyncMock(return_value=_missed_row())
         broker, _ = _broker_with_session(execute)
         _patch_history(monkeypatch, published=False, read=RuntimeError('not called'))
 
-        result = await cancel_task(broker, f'urn:uuid:{TASK_ID.upper()}')
+        result = await cancel_task(broker, TASK_ID)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskActionNotFound)
         assert result.err_value.task_id == TASK_ID
         assert execute.await_args is not None
-        assert execute.await_args.args[1] == {'id': TASK_ID}
+        assert execute.await_args.args[1] == {'id': str(TASK_ID)}
 
     @pytest.mark.asyncio
-    async def test_a_canonical_id_reaches_the_cancel_statement(
+    async def test_the_cancel_statement_gets_the_canonical_text_of_the_id(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         broker, _ = _broker_with_session(
@@ -487,17 +477,17 @@ class TestCancelBoundaries:
         apply = AsyncMock(return_value=_applied(TaskStatus.PENDING))
         monkeypatch.setattr(task_actions_module, 'apply_async', apply)
 
-        result = await cancel_task(broker, '{' + TASK_ID.replace('-', '') + '}')
+        result = await cancel_task(broker, TASK_ID)
 
         assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.PENDING))
         assert apply.await_args is not None
-        assert apply.await_args.args[1].task_id == TASK_ID
+        assert apply.await_args.args[1].task_id == str(TASK_ID)
 
     @pytest.mark.asyncio
     async def test_a_database_failure_keeps_the_cause(self) -> None:
         cause = OperationalError('SELECT 1', {}, Exception('connection lost'))
         broker, _ = _broker_with_session(AsyncMock(side_effect=cause))
-        task_id = str(uuid.uuid4())
+        task_id = uuid.uuid4()
 
         result = await cancel_task(broker, task_id)
 

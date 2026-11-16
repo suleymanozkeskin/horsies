@@ -505,7 +505,7 @@ async def test_a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_l
 
     with caplog.at_level(logging.ERROR):
         cancel = asyncio.ensure_future(
-            cancel_task(broker, task_id, include_running=True),
+            cancel_task(broker, uuid.UUID(task_id), include_running=True),
         )
         await asyncio.wait_for(gate.holding.wait(), WAIT_POLL_S * WAIT_POLLS)
         finalize = asyncio.ensure_future(_fail_by_worker(worker, task_id, claimed_at))

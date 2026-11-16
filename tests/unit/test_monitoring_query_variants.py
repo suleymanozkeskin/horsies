@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
@@ -42,7 +43,7 @@ pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-91af'
 CAUSE_MARKER = 'cause-marker-91af'
-TASK_ID = '0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718'
+TASK_ID = UUID('0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718')
 WORKFLOW_ID = '1c2d3e4f-5061-4b72-8c83-d4e5f6071829'
 LOOP_LIMIT = EventLoopLimit(
     limit=5,
@@ -187,7 +188,7 @@ class TestHistoryContractViolation:
         cause = HistoryContractError(CAUSE_MARKER)
         _refuse_history_read(monkeypatch, cause)
         node = MagicMock()
-        node.task_id = TASK_ID
+        node.task_id = str(TASK_ID)
         broker = _broker_with_session(
             _session(_scalar_result(node), _scalar_result(None)),
         )

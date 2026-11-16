@@ -1022,6 +1022,33 @@ class TestListTasks:
         assert len(result.ok_value.rows) == 2
         assert result.ok_value.total == 5
 
+    async def test_live_and_history_rows_carry_the_task_id_as_uuid(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        live = make_task(status=TaskStatus.PENDING)
+        ended = make_task(status=TaskStatus.FAILED, error_code='TASK_EXCEPTION')
+        await insert_rows(session, live, ended)
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='enqueued_at',
+            sort_dir='desc',
+            page=TaskPage(offset=0, limit=10),
+        )
+
+        assert is_ok(result)
+        assert {row.id for row in result.ok_value.rows} == {
+            uuid.UUID(live.id), uuid.UUID(ended.id),
+        }
+
     async def test_offset_walks_the_sorted_result(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
@@ -1680,7 +1707,7 @@ class TestGetTaskDetail:
     """Single task plus attempt history; absence is data, not an error."""
 
     async def test_missing_task_is_not_found(self, broker: PostgresBroker) -> None:
-        task_id = str(uuid.uuid4())
+        task_id = uuid.uuid4()
 
         result = await get_task_detail(broker, task_id)
 
@@ -1714,7 +1741,7 @@ class TestGetTaskDetail:
         )
 
         result = await asyncio.wait_for(
-            get_task_detail(broker, task.id), timeout=_SNAPSHOT_READ_TIMEOUT_S,
+            get_task_detail(broker, uuid.UUID(task.id)), timeout=_SNAPSHOT_READ_TIMEOUT_S,
         )
 
         assert is_ok(result), result
@@ -1723,7 +1750,7 @@ class TestGetTaskDetail:
         monkeypatch.setattr(
             queries_module, 'staged_detail_published', staged_detail_published,
         )
-        again = await get_task_detail(broker, task.id)
+        again = await get_task_detail(broker, uuid.UUID(task.id))
         assert is_ok(again)
         assert isinstance(again.ok_value, TaskDetail)
 
@@ -1738,7 +1765,7 @@ class TestGetTaskDetail:
             make_attempt(task_id=task.id, attempt=1, will_retry=True),
         )
 
-        result = await get_task_detail(broker, task.id)
+        result = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -1754,7 +1781,7 @@ class TestGetTaskDetail:
         await insert_rows(session, task)
 
         async with stored_history_status(session, task.id, 'NOT_KNOWN'):
-            result = await get_task_detail(broker, task.id)
+            result = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_err(result)
         error = result.err_value
@@ -1768,7 +1795,7 @@ class TestGetTaskDetail:
         task = make_task()
         await insert_rows(session, task)
 
-        result = await get_task_detail(broker, task.id)
+        result = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -1789,7 +1816,7 @@ class TestGetTaskDetail:
             make_node(workflow_id=run.id, task_index=3, task_id=task.id),
         )
 
-        result = await get_task_detail(broker, task.id)
+        result = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -1812,7 +1839,7 @@ class TestGetTaskDetail:
             make_node(workflow_id=run.id, task_index=0, task_id=linked.id),
         )
 
-        result = await get_task_detail(broker, unrelated.id)
+        result = await get_task_detail(broker, uuid.UUID(unrelated.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -1827,7 +1854,7 @@ class TestGetTaskDetail:
         task = make_task(is_workflow_task=True, good_until=expiry)
         await insert_rows(session, task)
 
-        result = await get_task_detail(broker, task.id)
+        result = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -1852,7 +1879,7 @@ class TestGetTaskDetail:
             ),
         )
 
-        result = await get_task_detail(broker, task.id)
+        result = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         detail = result.ok_value
@@ -2019,7 +2046,7 @@ class TestTaskDurations:
         await insert_rows(session, task)
 
         queue_s, exec_s = await self._only_row(broker)
-        detail = await get_task_detail(broker, task.id)
+        detail = await get_task_detail(broker, uuid.UUID(task.id))
 
         assert is_ok(detail)
         assert isinstance(detail.ok_value, TaskDetail)
@@ -2376,7 +2403,7 @@ class TestGetWorkflowNode:
         assert node.node_id == 'step-one'
         assert node.node_error == 'node blew up'
         assert node.leaf is not None
-        assert node.leaf.task_id == task.id
+        assert node.leaf.task_id == uuid.UUID(task.id)
         assert [a.attempt for a in node.attempts] == [1, 2]
 
     async def test_backing_history_row_with_an_unknown_status_is_a_contract_violation(
@@ -2490,13 +2517,14 @@ class TestListSchedules:
     ) -> None:
         soon = datetime.now(UTC) + timedelta(minutes=5)
         later = datetime.now(UTC) + timedelta(hours=3)
+        last_task_id = uuid.uuid4()
         await insert_rows(
             session,
             make_schedule(schedule_name='later', next_run_at=later),
             make_schedule(
                 schedule_name='soon',
                 next_run_at=soon,
-                last_run=LastRun(at=ago(60), task_id=str(uuid.uuid4()), run_count=4),
+                last_run=LastRun(at=ago(60), task_id=str(last_task_id), run_count=4),
             ),
         )
 
@@ -2508,6 +2536,8 @@ class TestListSchedules:
             'later',
         ]
         assert result.ok_value[0].run_count == 4
+        assert result.ok_value[0].last_task_id == last_task_id
+        assert result.ok_value[1].last_task_id is None
 
 
 # --------------------------------------------------------------------------- #
@@ -2557,7 +2587,7 @@ class TestDatabaseFailure:
     async def test_detail_failure_is_not_confused_with_absence(
         self, unreachable_broker: PostgresBroker
     ) -> None:
-        result = await get_task_detail(unreachable_broker, str(uuid.uuid4()))
+        result = await get_task_detail(unreachable_broker, uuid.uuid4())
 
         assert is_err(result)
         assert isinstance(result.err_value, MonitoringQueryDbOperationFailed)

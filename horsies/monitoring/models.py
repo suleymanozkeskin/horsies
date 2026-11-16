@@ -16,6 +16,7 @@ import enum
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -68,7 +69,7 @@ class LeafTaskInfo(BaseModel):
     for a task read from history, which does not keep the class.
     """
 
-    task_id: str
+    task_id: UUID
     status: str
     error_code: str | None
     failed_reason: str | None
@@ -161,7 +162,7 @@ class TaskSummary(BaseModel):
     error. ``worker_id`` is the claiming worker.
     """
 
-    id: str
+    id: UUID
     task_name: str
     queue_name: str
     status: str
@@ -215,7 +216,7 @@ class TaskDetail(BaseModel):
 class TaskDetailNotFound:
     """No live row and no history row has this task id."""
 
-    task_id: str
+    task_id: UUID
     reason: TaskAbsenceReason
 
 
@@ -479,6 +480,6 @@ class ScheduleStateInfo(BaseModel):
     schedule_name: str
     last_run_at: datetime | None
     next_run_at: datetime | None
-    last_task_id: str | None
+    last_task_id: UUID | None
     run_count: int
     updated_at: datetime

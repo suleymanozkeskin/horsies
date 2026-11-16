@@ -387,11 +387,11 @@ class TestCancelTaskSucceeds:
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
 
-        result = await cancel_task(broker, task.id)
+        result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         assert result.ok_value.was_status is TaskStatus.PENDING
-        assert result.ok_value.task_id == task.id
+        assert result.ok_value.task_id == uuid.UUID(task.id)
         row = await read_task(session, task.id)
         assert row.status == 'CANCELLED'
         assert row.error_code == 'TASK_CANCELLED'
@@ -406,7 +406,7 @@ class TestCancelTaskSucceeds:
         )
         await persist(session, task)
 
-        result = await cancel_task(broker, task.id)
+        result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         assert result.ok_value.was_status is TaskStatus.CLAIMED
@@ -433,14 +433,14 @@ class TestCancelTaskSucceeds:
         )
         await persist(session, task)
 
-        refused = await cancel_task(broker, task.id)
+        refused = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(refused)
         assert isinstance(refused.err_value, TaskActionNotCancellable)
         assert refused.err_value.current_status is TaskStatus.RUNNING
         assert (await read_task(session, task.id)).status == 'RUNNING'
 
-        allowed = await cancel_task(broker, task.id, include_running=True)
+        allowed = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
 
         assert is_ok(allowed)
         assert allowed.ok_value.was_status is TaskStatus.RUNNING
@@ -453,7 +453,7 @@ class TestCancelTaskSucceeds:
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
 
-        result = await cancel_task(broker, task.id)
+        result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         row = await read_task(session, task.id)
@@ -471,7 +471,7 @@ class TestCancelTaskSucceeds:
         )
         await persist(session, task)
 
-        result = await cancel_task(broker, task.id, include_running=True)
+        result = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
 
         assert is_ok(result)
         assert await attempt_rows(session, task.id) == []
@@ -484,7 +484,7 @@ class TestCancelTaskSucceeds:
         await persist(session, task)
 
         async def do_cancel() -> None:
-            result = await cancel_task(broker, task.id)
+            result = await cancel_task(broker, uuid.UUID(task.id))
             assert is_ok(result)
 
         notification = await next_notification('task_done', do_cancel)
@@ -501,7 +501,7 @@ class TestCancelTaskRefuses:
     """Each refusal names its cause and, for conflicts, the observed status."""
 
     async def test_missing_task(self, broker: PostgresBroker) -> None:
-        missing_id = str(uuid.uuid4())
+        missing_id = uuid.uuid4()
 
         result = await cancel_task(broker, missing_id)
 
@@ -517,7 +517,7 @@ class TestCancelTaskRefuses:
         task = make_task(status=TaskStatus.PENDING, is_workflow_task=True)
         await persist(session, task)
 
-        result = await cancel_task(broker, task.id)
+        result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskActionWorkflowTask)
@@ -539,7 +539,7 @@ class TestCancelTaskRefuses:
         task = make_task(status=status)
         await persist(session, task)
 
-        result = await cancel_task(broker, task.id, include_running=True)
+        result = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskActionNotCancellable)
@@ -550,11 +550,11 @@ class TestCancelTaskRefuses:
     ) -> None:
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
-        first = await cancel_task(broker, task.id)
+        first = await cancel_task(broker, uuid.UUID(task.id))
         assert is_ok(first)
         first_failed_at = (await read_task(session, task.id)).failed_at
 
-        second = await cancel_task(broker, task.id)
+        second = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(second)
         assert isinstance(second.err_value, TaskActionNotCancellable)
@@ -568,13 +568,13 @@ class TestCancelTaskRefuses:
         await persist(session, task)
 
         async with stored_history_status(session, task.id, 'NOT_KNOWN'):
-            result = await cancel_task(broker, task.id)
+            result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
         assert isinstance(error.exception, HistoryContractError)
-        assert error.task_id == task.id
+        assert error.task_id == uuid.UUID(task.id)
         assert error.retryable is False
         assert "'NOT_KNOWN'" in error.message
         assert (await read_task(session, task.id)).status == 'FAILED'
@@ -629,7 +629,7 @@ class TestCancelRunningVersusFinalize:
             started_at=ago(15),
         )
         await persist(session, task)
-        cancelled = await cancel_task(broker, task.id, include_running=True)
+        cancelled = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
         assert is_ok(cancelled)
 
         finalized = await complete_fused(
@@ -663,7 +663,7 @@ class TestClaimCancelRace:
         await persist(session, task)
         assert await claim_once(broker, WORKER_ID) == [task.id]
 
-        result = await cancel_task(broker, task.id)
+        result = await cancel_task(broker, uuid.UUID(task.id))
 
         assert is_ok(result)
         assert result.ok_value.was_status is TaskStatus.CLAIMED
@@ -678,7 +678,7 @@ class TestClaimCancelRace:
         await persist(session, task)
 
         cancelled, claimed_ids = await asyncio.gather(
-            cancel_task(broker, task.id),
+            cancel_task(broker, uuid.UUID(task.id)),
             claim_once(broker, OTHER_WORKER_ID),
         )
 
@@ -747,7 +747,7 @@ class TestWorkflowBoundRowsAreUntouched:
             ),
         )
 
-        cancelled = await cancel_task(broker, task.id, include_running=True)
+        cancelled = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
 
         assert is_err(cancelled)
         assert isinstance(cancelled.err_value, TaskActionWorkflowTask)
@@ -766,7 +766,7 @@ class TestDatabaseFailure:
     async def test_cancel_reports_a_retryable_db_failure(
         self, unreachable_broker: PostgresBroker
     ) -> None:
-        result = await cancel_task(unreachable_broker, str(uuid.uuid4()))
+        result = await cancel_task(unreachable_broker, uuid.uuid4())
 
         assert is_err(result)
         error = result.err_value

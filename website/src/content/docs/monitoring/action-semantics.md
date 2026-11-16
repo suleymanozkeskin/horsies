@@ -243,6 +243,7 @@ concurrency control.
 | 200 | The CAS matched and committed | Observe the entity |
 | 400 | The row is a workflow node; task actions do not apply | Use the workflow actions |
 | 404 | The row no longer exists | Retention may have removed it |
+| 422 | A task id in the path is not a UUID (`uuid_parsing`); nothing was read or changed | Send the id as UUID text |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
 | 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
 | 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |
