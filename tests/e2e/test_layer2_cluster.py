@@ -9,7 +9,7 @@ import signal
 import tempfile
 from pathlib import Path
 from typing import Protocol, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
 import pytest
@@ -78,7 +78,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
 
 async def _wait_for_claimed_owner(
     session_factory,
-    task_id: str,
+    task_id: UUID,
     timeout_s: float = 15.0,
     poll_interval: float = 0.1,
 ) -> str:
@@ -94,7 +94,7 @@ async def _wait_for_claimed_owner(
                     WHERE id = CAST(:id AS uuid)
                     """
                 ),
-                {'id': task_id},
+                {'id': str(task_id)},
             )
             row = result.fetchone()
             if row is not None and row[0] == 'CLAIMED' and row[1]:
@@ -160,7 +160,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
                 broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -225,7 +225,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
                 cluster_cap_broker.enqueue,
                 task_name='e2e_cluster_cap_slow',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -290,7 +290,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
                 custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name=queue_name,
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -402,7 +402,7 @@ async def test_softcap_db_ledger_race_single_execution(
             softcap_broker.enqueue,
             task_name='e2e_softcap_blocker',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
@@ -418,7 +418,7 @@ async def test_softcap_db_ledger_race_single_execution(
             softcap_broker.enqueue,
             task_name='e2e_softcap_db_ledger',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'token': token}),
@@ -514,7 +514,7 @@ async def test_stale_running_marked_failed_on_crash(
             recovery_broker.enqueue,
             task_name='e2e_recovery_slow',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -578,7 +578,7 @@ async def test_stale_claimed_requeued_and_completed(
         recovery_broker.enqueue,
         task_name='e2e_recovery_healthcheck',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
     )).unwrap()
@@ -651,7 +651,7 @@ async def test_cluster_cap_not_leaked_on_failure(
                 cluster_cap_broker.enqueue,
                 task_name='e2e_cluster_cap_fail',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -678,7 +678,7 @@ async def test_cluster_cap_not_leaked_on_failure(
                 cluster_cap_broker.enqueue,
                 task_name='e2e_cluster_cap_slow',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -745,13 +745,13 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
             # move archives into the record's snapshot as it purges the
             # live rows — so it is read from wherever it now lives.
             attempt_counts = {
-                task_id: len(await read_attempt_history(session, task_id))
+                task_id: len(await read_attempt_history(session, str(task_id)))
                 for task_id in task_ids
             }
 
             worker_ids_seen: set[str] = set()
             for task_id in task_ids:
-                worker_ids_seen |= await read_attempt_workers(session, task_id)
+                worker_ids_seen |= await read_attempt_workers(session, str(task_id))
 
         expected_attempts_per_task = 4  # initial attempt + 3 retries
         assert attempt_counts == {
@@ -796,7 +796,7 @@ async def test_per_queue_caps_independent_across_queues(
                 custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='high',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -808,7 +808,7 @@ async def test_per_queue_caps_independent_across_queues(
                 custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='normal',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -880,7 +880,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
             custom_broker.enqueue,
             task_name='e2e_custom_slow',
             queue_name='low',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -894,7 +894,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
             custom_broker.enqueue,
             task_name='e2e_custom_slow',
             queue_name='high',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -970,7 +970,7 @@ async def test_single_worker_crash_remaining_continue(
                 broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -1055,7 +1055,7 @@ async def test_concurrent_enqueue_during_processing(
                 broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -1077,7 +1077,7 @@ async def test_concurrent_enqueue_during_processing(
                 broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
@@ -1188,7 +1188,7 @@ async def test_softcap_expired_claim_requeued(
                 softcap_broker.enqueue,
                 task_name='e2e_softcap_slow_idempotent',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'token': token, 'duration_ms': 100}),
@@ -1285,7 +1285,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     softcap_broker.enqueue,
                     task_name='e2e_softcap_blocker',
                     queue_name='default',
-                    task_id=str(uuid4()),
+                    task_id=uuid4(),
                     enqueue_sha='test-sha',
                     sent_at=datetime.now(timezone.utc),
                     kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
@@ -1301,7 +1301,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     softcap_broker.enqueue,
                     task_name='e2e_softcap_slow_idempotent',
                     queue_name='default',
-                    task_id=str(uuid4()),
+                    task_id=uuid4(),
                     enqueue_sha='test-sha',
                     sent_at=datetime.now(timezone.utc),
                     kwargs_json=json.dumps({'token': token, 'duration_ms': 100}),

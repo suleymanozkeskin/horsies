@@ -18,7 +18,7 @@ Discriminators vs the pre-fix bug:
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
+from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
 import pytest
@@ -28,6 +28,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
+from horsies.core.utils.db import uuid_column_value
 
 from tests.e2e.helpers.assertions import start_ok_in_thread, unwrap_send
 from tests.e2e.helpers.db import wait_for_all_terminal, wait_for_status
@@ -66,7 +67,7 @@ async def _wait_for_task_row(
     task_name: str,
     *,
     timeout_s: float = 15.0,
-) -> str:
+) -> UUID:
     """Poll until a task row with the given name exists; return its id."""
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
@@ -78,7 +79,7 @@ async def _wait_for_task_row(
                 )
             ).fetchone()
             if row is not None:
-                return str(row[0])
+                return uuid_column_value(row[0], column='itest_task_rows.id')
         await asyncio.sleep(0.1)
     raise TimeoutError(f'task row {task_name!r} did not appear within {timeout_s}s')
 
@@ -99,7 +100,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             broker.enqueue,
             task_name='pb_blocker',
             queue_name='serial',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha=f'pb-blocker-{uuid4().hex[:8]}',
             sent_at=datetime.now(timezone.utc),
             kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
@@ -116,7 +117,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
         # 3. Direct-send a task on serial AFTER scrape exists (later enqueued_at).
         #    .send() resolves priority through the queue config (→ 30).
         direct_handle = unwrap_send(await pb.direct_task.send_async())
-        direct_id = str(direct_handle.task_id)
+        direct_id = direct_handle.task_id
 
         # 4. Drain: blocker finishes, worker claims scrape then direct.
         await wait_for_all_terminal(

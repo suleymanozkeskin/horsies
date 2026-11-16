@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
 import pytest
@@ -51,7 +51,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
 
 async def _wait_for_high_queue_saturated(
     broker: PostgresBroker,
-    high_ids: list[str],
+    high_ids: list[UUID],
     *,
     running: int,
     timeout_s: float = 10.0,
@@ -69,7 +69,7 @@ async def _wait_for_high_queue_saturated(
                         FROM horsies_tasks
                         WHERE id = ANY(:ids)
                     """),
-                    {'ids': high_ids},
+                    {'ids': [str(task_id) for task_id in high_ids]},
                 )
             ).one()
         last_snapshot = (int(row.running or 0), int(row.pending or 0))
@@ -85,8 +85,8 @@ async def _wait_for_high_queue_saturated(
 async def _wait_for_normal_started_before_high_drains(
     broker: PostgresBroker,
     *,
-    high_ids: list[str],
-    normal_ids: list[str],
+    high_ids: list[UUID],
+    normal_ids: list[UUID],
     timeout_s: float = 2.0,
 ) -> None:
     deadline = asyncio.get_running_loop().time() + timeout_s
@@ -112,7 +112,10 @@ async def _wait_for_normal_started_before_high_drains(
                                   )
                             ) AS high_not_terminal
                     """),
-                    {'high_ids': high_ids, 'normal_ids': normal_ids},
+                    {
+                        'high_ids': [str(task_id) for task_id in high_ids],
+                        'normal_ids': [str(task_id) for task_id in normal_ids],
+                    },
                 )
             ).one()
         last_snapshot = (
@@ -144,7 +147,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='high',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha=f'high-{idx}',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': 3000}),
@@ -161,7 +164,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='normal',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 enqueue_sha=f'normal-{idx}',
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': 1000}),

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
@@ -78,7 +79,7 @@ def loop_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return budget
 
 
-async def _attempt_count(broker: PostgresBroker, task_id: str) -> int:
+async def _attempt_count(broker: PostgresBroker, task_id: UUID) -> int:
     async with current_resources(broker).session_factory() as session:
         row = (
             await session.execute(
@@ -86,7 +87,7 @@ async def _attempt_count(broker: PostgresBroker, task_id: str) -> int:
                     'SELECT count(*) AS n FROM horsies_task_attempts '
                     'WHERE task_id = CAST(:id AS uuid)'
                 ),
-                {'id': task_id},
+                {'id': str(task_id)},
             )
         ).one()
         return int(row.n)
