@@ -551,6 +551,7 @@ pub async fn on_workflow_task_complete(
         pool,
         task_id,
         if is_success { "COMPLETED" } else { "FAILED" },
+        &crate::workflow_engine::phase2_recovery::Phase2Wake::NoWake,
         registry,
         payload,
         retention,

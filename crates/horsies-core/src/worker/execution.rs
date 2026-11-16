@@ -23,6 +23,7 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
     FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
+use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
@@ -38,6 +39,7 @@ use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::workflow_engine::phase2_recovery::{send_phase2_wake, Phase2Wake};
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -974,10 +976,18 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
     }
 }
 
-/// Phase 2 of finalization: workflow advancement and worker wake notifications.
+/// Phase 2 of finalization: workflow advancement and the capacity wake of
+/// the task's queue (Python `_finalize_workflow_phase`,
+/// `core/worker/finalize.py:1619-1674`).
 ///
 /// Separate transaction from Phase 1. If this fails after Phase 1 succeeded,
 /// the terminal task result is already durable and workflow recovery can resume.
+///
+/// A workflow task sends the wake as the first statement of its phase-2
+/// transaction; a plain task sends it as one statement. An error of the wake
+/// is a phase-2 error, never dropped: for a plain task it is retryable when
+/// the database error is transient (`is_retryable_sqlx_error`, Python
+/// `_phase2_error`, `core/worker/finalize.py:1676-1697`).
 pub(crate) async fn finalize_workflow_phase(
     pool: &sqlx::PgPool,
     workflow_registry: &WorkflowSpecRegistry,
@@ -989,18 +999,26 @@ pub(crate) async fn finalize_workflow_phase(
     payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), FinalizeError> {
+    // Skipped when Phase 1's statement already sent the wake in the same
+    // commit as the transition (waking twice would be harmless but wasteful).
+    let wake = match capacity_notified {
+        true => Phase2Wake::NoWake,
+        false => capacity_wake(queue_name, task_id),
+    };
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
-    if is_workflow_task {
-        crate::workflow_engine::phase2_recovery::finalize_phase2(
+    match is_workflow_task {
+        true => crate::workflow_engine::phase2_recovery::finalize_phase2(
             pool,
             task_id,
             if is_success { "COMPLETED" } else { "FAILED" },
+            &wake,
             workflow_registry,
             payload_policy,
             retention,
         )
         .await
+        .map(|_disposition| ())
         .map_err(|e| {
             let retryable = is_retryable_workflow_error(&e);
             FinalizeError {
@@ -1009,17 +1027,27 @@ pub(crate) async fn finalize_workflow_phase(
                 message: format!("workflow callback failed: {}", e),
                 retryable,
             }
-        })?;
+        }),
+        false => send_phase2_wake(pool, &wake)
+            .await
+            .map_err(|error| FinalizeError {
+                stage: FinalizeStage::Phase2Workflow,
+                task_id,
+                message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
+                retryable: is_retryable_sqlx_error(&error),
+            }),
     }
+}
 
-    // Capacity notification — non-fatal if it fails. Skipped when Phase 1's
-    // fused statement already fired the wake in the same commit as the
-    // transition (waking twice would be harmless but wasteful).
-    if !capacity_notified {
-        notify_worker_capacity(pool, queue_name, task_id).await;
+/// The capacity wake of `queue_name` for `task_id`: the workers of the
+/// queue check their capacity and backlog. It goes only to the queue's
+/// channel; workers do not listen on `task_new` (Python
+/// `core/worker/finalize.py:1657-1660`).
+pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
+    Phase2Wake::Queue {
+        channel: format!("task_queue_{queue_name}"),
+        payload: format!("capacity:{task_id}"),
     }
-
-    Ok(())
 }
 
 /// Read the durable phase-2 terminal status after a Phase-1 replay.
@@ -1054,27 +1082,6 @@ async fn load_pending_terminal_success(
             }),
         })
         .transpose()
-}
-
-pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
-    // Wake workers of this queue to re-check capacity/backlog. The capacity
-    // signal is sent only on the per-queue channel; workers no longer listen on
-    // task_new. Parity with horsies PR #101 cafc9200.
-    let payload = format!("capacity:{}", task_id);
-    let channel = format!("task_queue_{}", queue_name);
-    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(&channel)
-        .bind(&payload)
-        .execute(pool)
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            channel = %channel,
-            error = %e,
-            "queue-specific capacity NOTIFY failed; worker polling fallback will recover",
-        );
-    }
 }
 
 pub(crate) async fn finalize_pre_execution_failure(
