@@ -558,13 +558,13 @@ GET_DEPENDENTS_EVAL_SQL = text("""
 # rows another path already advanced simply drop out of RETURNING.
 SKIP_PENDING_TASKS_BATCH_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'PENDING'
     RETURNING task_index
 """)
 SKIP_READY_TASKS_BATCH_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = ANY(:idxs) AND status = 'READY'
     RETURNING task_index
 """)
@@ -634,7 +634,7 @@ GET_DEP_STATUS_COUNTS_SQL = text("""
 """)
 SKIP_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'PENDING'
 """)
 COUNT_CTX_TERMINAL_DEPS_SQL = text("""
@@ -652,7 +652,7 @@ MARK_TASK_READY_SQL = text("""
 """)
 SKIP_READY_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND task_index = :idx AND status = 'READY'
 """)
 SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
