@@ -28,7 +28,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db'),  # pyright: ignore[reportArgumentType]
+        broker=PostgresConfig(database_url='postgresql://u:p@localhost/db'),  # pyright: ignore[reportArgumentType]
     )
 )
 

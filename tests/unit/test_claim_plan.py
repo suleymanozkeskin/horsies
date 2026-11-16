@@ -360,7 +360,7 @@ class TestRegisteredClasses:
         app = Horsies(
             AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                    database_url=SecretStr('postgresql://u:p@localhost/db'),
                 ),
             ),
         )
@@ -398,6 +398,8 @@ _COLUMNS = [
     'is_workflow_task',
     'task_options',
     'claimed_at',
+    'retry_count',
+    'max_retries',
     'execution',
     'short_by',
 ]
@@ -461,6 +463,8 @@ def _row(task_id: str, task_name: str, execution: str) -> tuple[object, ...]:
         False,
         None,
         _claim_time(task_id),
+        0,
+        0,
         execution,
         None,
     )

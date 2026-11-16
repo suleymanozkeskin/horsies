@@ -102,7 +102,7 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
     broken = PostgresBroker(
         PostgresConfig(
             database_url=SecretStr(
-                'postgresql+psycopg://postgres:none@127.0.0.1:1/none'
+                'postgresql://postgres:none@127.0.0.1:1/none'
             )
         ),
         assume_initialized=True,
@@ -738,7 +738,7 @@ class TestWorkflowBoundRowsAreUntouched:
                 dependencies=(),
                 allow_failed_deps=False,
                 kind=TaskNode(task_id=task.id),
-                error=None,
+                result=None,
                 created_at=ago(120),
                 started_at=None,
                 completed_at=None,

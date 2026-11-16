@@ -32,7 +32,7 @@ _BLOCK_PROOF_TIMEOUT_S = 1.0
 def _make_worker(engine: AsyncEngine, *, queues: dict[str, int]) -> Worker:
     """Worker claiming the given capped queues (name -> max_concurrency)."""
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=list(queues),
         queue_priorities={name: 1 for name in queues},
@@ -114,7 +114,7 @@ class TestClaimLockScoping:
         queue blocks while the global key is held (the invariant is
         global, so per-queue scoping must not apply)."""
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['lock_qd'],
             cluster_wide_cap=5,

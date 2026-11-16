@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from uuid import UUID
 
 from typing import Any, Final
 
@@ -52,6 +53,7 @@ from ..identity.reservations import (
 )
 from ..identity.uuid7 import mint_task_id
 from ..names import LIVE_TASKS
+from ...utils.db import uuid_column_value
 from horsies.core.types.status import TaskStatus
 from ..archive.attempts import decode_attempt_snapshot
 from ..archive.versions import DecodedArchiveValue
@@ -74,7 +76,7 @@ class RerunTask:
     """One rerun request. The deadline is explicit: a value or the
     explicit no-deadline choice, never a silent default."""
 
-    source_task_id: str
+    source_task_id: UUID
     deadline: datetime | None
     caller_key: str | None = None
 
@@ -117,16 +119,16 @@ class NotEligibleReason(Enum):
 class RerunEnqueued:
     """The new request exists; the source record is untouched."""
 
-    new_task_id: str
-    source_task_id: str
-    rerun_root_task_id: str
+    new_task_id: UUID
+    source_task_id: UUID
+    rerun_root_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
 class RerunSourceLive:
     """The source is live; its own lifecycle owns retry."""
 
-    task_id: str
+    task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +138,7 @@ class RerunSourceAbsent:
     ``reason`` says whether retention can explain the absence. Nothing is
     written."""
 
-    task_id: str
+    task_id: UUID
     reason: TaskAbsenceReason
 
 
@@ -150,13 +152,13 @@ class RerunSourceCorrupt:
     define. Nothing is written. A repeat gives the same result until the
     stored row or the server changes."""
 
-    task_id: str
+    task_id: UUID
     exception: HistoryContractError
 
 
 @dataclass(frozen=True, slots=True)
 class RerunNotEligible:
-    task_id: str
+    task_id: UUID
     reason: NotEligibleReason
 
 
@@ -166,7 +168,7 @@ class RerunInputUnavailable:
     envelope. ``disposition`` is the stored reason, for example
     ``DECLINED_BY_POLICY`` or ``OVER_BOUND``."""
 
-    task_id: str
+    task_id: UUID
     disposition: str
 
 
@@ -174,7 +176,7 @@ class RerunInputUnavailable:
 class RerunInputCorrupt:
     """Stored envelope fails integrity or shape; fail closed."""
 
-    task_id: str
+    task_id: UUID
     detail: str
 
 
@@ -184,8 +186,8 @@ class RerunKeyConflict:
     including the source request itself, whose fingerprint differs
     from its rerun's by lineage. The contract working, not a defect."""
 
-    task_id: str
-    reserved_by_task_id: str
+    task_id: UUID
+    reserved_by_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +195,7 @@ class RerunKeyReplay:
     """The key already reserved this exact rerun command; the committed
     request is returned instead of a duplicate."""
 
-    existing_task_id: str
+    existing_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,14 +214,14 @@ class RerunSource:
     decoded; a source that fails either is ``RerunSourceCorrupt``.
     """
 
-    task_id: str
+    task_id: UUID
     task_name: str
     queue_name: str
     priority: int
     max_retries: int
     status: TaskStatus
     is_workflow_task: bool
-    rerun_root_task_id: str | None
+    rerun_root_task_id: UUID | None
     rerun_input_disposition: str
     rerun_input_version: int | None
     rerun_input_digest: bytes | None
@@ -244,10 +246,10 @@ def _optional_bytes(value: Any) -> bytes | None:
     return bytes(value) if value is not None else None
 
 
-def _history_source(task_id: str, row: Any) -> RerunSource | RerunSourceCorrupt:
+def _history_source(task_id: UUID, row: Any) -> RerunSource | RerunSourceCorrupt:
     """The history source of one rerun read row, or the corruption it carries."""
     try:
-        status = history_status(str(row.task_id), row.status)
+        status = history_status(task_id, row.status)
     except HistoryContractError as exc:
         return RerunSourceCorrupt(task_id=task_id, exception=exc)
     decoded = decode_attempt_snapshot(
@@ -266,7 +268,7 @@ def _history_source(task_id: str, row: Any) -> RerunSource | RerunSourceCorrupt:
                 ),
             )
     return RerunSource(
-        task_id=str(row.task_id),
+        task_id=uuid_column_value(row.task_id, column='task_id'),
         task_name=row.task_name,
         queue_name=row.queue_name,
         priority=row.priority,
@@ -274,7 +276,7 @@ def _history_source(task_id: str, row: Any) -> RerunSource | RerunSourceCorrupt:
         status=status,
         is_workflow_task=row.is_workflow_task,
         rerun_root_task_id=(
-            str(row.rerun_root_task_id)
+            uuid_column_value(row.rerun_root_task_id, column='rerun_root_task_id')
             if row.rerun_root_task_id is not None
             else None
         ),
@@ -287,7 +289,7 @@ def _history_source(task_id: str, row: Any) -> RerunSource | RerunSourceCorrupt:
 
 async def read_rerun_source(
     connection: AsyncConnection,
-    source_task_id: str,
+    source_task_id: UUID,
     class_key: str,
 ) -> RerunSourceRead:
     """Read the source of a rerun and the class of the new request: one statement.
@@ -442,8 +444,8 @@ async def rerun_task(
         task_options_json=options_json,
         retention_class_key=policy.retention_class_key,
         retain_rerun_input=policy.retain_rerun_input,
-        rerun_of_task_id=source.task_id,
-        rerun_root_task_id=root_task_id,
+        rerun_of_task_id=str(source.task_id),
+        rerun_root_task_id=str(root_task_id),
     ).fingerprint
 
     if command.caller_key is not None:
@@ -475,7 +477,7 @@ async def rerun_task(
     await connection.execute(
         _INSERT_RERUN_SQL,
         {
-            'id': new_task_id,
+            'id': str(new_task_id),
             'task_name': source.task_name,
             'queue_name': source.queue_name,
             'priority': source.priority,
@@ -495,8 +497,8 @@ async def rerun_task(
             'max_retries': source.max_retries,
             'good_until': command.deadline,
             'retain': policy.retain_rerun_input,
-            'rerun_of': source.task_id,
-            'rerun_root': root_task_id,
+            'rerun_of': str(source.task_id),
+            'rerun_root': str(root_task_id),
         },
     )
     return RerunEnqueued(

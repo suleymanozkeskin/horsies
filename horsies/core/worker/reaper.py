@@ -28,10 +28,7 @@ from horsies.core.worker.class_coverage_log import (
     CheckFailedKey,
     describe_uncovered,
 )
-from horsies.core.worker.runtime import (
-    _REAPER_MAX_PERMANENT_FAILURES,
-    _ReaperPassState,
-)
+from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
@@ -137,42 +134,27 @@ class ReaperMixin:
         ``resources`` is the set selected from ``temp_broker`` when the
         reaper loop started.
         """
-        # Auto-requeue stale CLAIMED tasks
-        if recovery_cfg.auto_requeue_stale_claimed and not state.requeue_disabled:
+        # Auto-requeue stale CLAIMED tasks. The step runs on every pass while
+        # the worker lives; each failing pass logs an error.
+        if recovery_cfg.auto_requeue_stale_claimed:
             match await temp_broker.requeue_stale_claimed(
                 stale_threshold_ms=recovery_cfg.claimed_stale_threshold_ms,
             ):
                 case Ok(requeued):
-                    state.requeue_permanent_failures = 0
                     if requeued > 0:
                         logger.info(
                             f'Reaper requeued {requeued} stale CLAIMED task(s)',
                         )
                 case Err(err) if err.retryable:
-                    state.requeue_permanent_failures = 0
-                    logger.warning(
-                        f'Reaper requeue_stale_claimed transient failure '
-                        f'(will retry next cycle): {err.message}',
+                    logger.error(
+                        f'Reaper requeue_stale_claimed failed transiently and '
+                        f'runs again on the next pass: {err.message}',
                     )
                 case Err(err):
-                    state.requeue_permanent_failures += 1
-                    if (
-                        state.requeue_permanent_failures
-                        >= _REAPER_MAX_PERMANENT_FAILURES
-                    ):
-                        state.requeue_disabled = True
-                        logger.critical(
-                            f'Reaper requeue_stale_claimed disabled after '
-                            f'{state.requeue_permanent_failures} consecutive permanent '
-                            f'failures. Last error: {err.message}. '
-                            f'Requires deploy or manual intervention.',
-                        )
-                    else:
-                        logger.error(
-                            f'Reaper requeue_stale_claimed permanent failure '
-                            f'({state.requeue_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
-                            f'before disable): {err.message}',
-                        )
+                    logger.error(
+                        f'Reaper requeue_stale_claimed failed and runs again '
+                        f'on the next pass: {err.message}',
+                    )
 
         # Cancel orphaned workflow tasks (no live workflow_task linkage). These
         # cannot reach RUNNING, so requeue (above) skips them and they would
@@ -180,14 +162,12 @@ class ReaperMixin:
         # retention sweep them.
         if (
             recovery_cfg.auto_terminate_orphaned_workflow_tasks
-            and not state.terminate_orphans_disabled
             and time.monotonic() >= state.next_orphan_task_audit_at
         ):
             orphan_audit_started = time.monotonic()
             try:
                 match await temp_broker.audit_orphaned_workflow_tasks():
                     case Ok(report):
-                        state.terminate_orphans_permanent_failures = 0
                         self._orphan_task_recovery_health = report.health()
                         if report.cancelled > 0:
                             logger.warning(
@@ -195,7 +175,6 @@ class ReaperMixin:
                                 f'task(s) (no live workflow_task linkage)',
                             )
                     case Err(err) if _operation_sqlstate(err) == '55P03':
-                        state.terminate_orphans_permanent_failures = 0
                         self._orphan_task_recovery_health = (
                             _orphan_audit_failure_health(
                                 err,
@@ -210,7 +189,6 @@ class ReaperMixin:
                             'the next scheduled audit will retry',
                         )
                     case Err(err) if err.retryable:
-                        state.terminate_orphans_permanent_failures = 0
                         self._orphan_task_recovery_health = (
                             _orphan_audit_failure_health(
                                 err,
@@ -235,37 +213,19 @@ class ReaperMixin:
                                 ),
                             )
                         )
-                        state.terminate_orphans_permanent_failures += 1
-                        if (
-                            state.terminate_orphans_permanent_failures
-                            >= _REAPER_MAX_PERMANENT_FAILURES
-                        ):
-                            state.terminate_orphans_disabled = True
-                            logger.critical(
-                                f'Reaper terminate_orphaned_workflow_tasks disabled '
-                                f'after {state.terminate_orphans_permanent_failures} '
-                                f'consecutive permanent failures. Last error: '
-                                f'{err.message}. Requires deploy or manual '
-                                f'intervention.',
-                            )
-                        else:
-                            logger.error(
-                                f'Reaper terminate_orphaned_workflow_tasks permanent '
-                                f'failure ({state.terminate_orphans_permanent_failures}/'
-                                f'{_REAPER_MAX_PERMANENT_FAILURES} before disable): '
-                                f'{err.message}',
-                            )
+                        logger.error(
+                            f'Reaper orphan workflow-task audit failed and '
+                            f'runs again on its next schedule: {err.message}',
+                        )
             finally:
                 state.next_orphan_task_audit_at = (
                     time.monotonic()
                     + recovery_cfg.orphan_task_audit_interval_ms / 1000.0
                 )
 
-        # Auto-fail stale RUNNING tasks
-        if (
-            recovery_cfg.auto_fail_stale_running
-            and not state.mark_failed_disabled
-        ):
+        # Auto-fail stale RUNNING tasks. The step runs on every pass while the
+        # worker lives; each failing pass logs an error.
+        if recovery_cfg.auto_fail_stale_running:
             match await temp_broker.mark_stale_tasks_as_failed(
                 stale_threshold_ms=recovery_cfg.running_stale_threshold_ms,
                 finalizing_stale_threshold_ms=(
@@ -273,36 +233,20 @@ class ReaperMixin:
                 ),
             ):
                 case Ok(failed):
-                    state.mark_failed_permanent_failures = 0
                     if failed > 0:
                         logger.warning(
                             f'Reaper marked {failed} stale RUNNING task(s) as FAILED',
                         )
                 case Err(err) if err.retryable:
-                    state.mark_failed_permanent_failures = 0
-                    logger.warning(
-                        f'Reaper mark_stale_tasks_as_failed transient failure '
-                        f'(will retry next cycle): {err.message}',
+                    logger.error(
+                        f'Reaper mark_stale_tasks_as_failed failed transiently '
+                        f'and runs again on the next pass: {err.message}',
                     )
                 case Err(err):
-                    state.mark_failed_permanent_failures += 1
-                    if (
-                        state.mark_failed_permanent_failures
-                        >= _REAPER_MAX_PERMANENT_FAILURES
-                    ):
-                        state.mark_failed_disabled = True
-                        logger.critical(
-                            f'Reaper mark_stale_tasks_as_failed disabled after '
-                            f'{state.mark_failed_permanent_failures} consecutive permanent '
-                            f'failures. Last error: {err.message}. '
-                            f'Requires deploy or manual intervention.',
-                        )
-                    else:
-                        logger.error(
-                            f'Reaper mark_stale_tasks_as_failed permanent failure '
-                            f'({state.mark_failed_permanent_failures}/{_REAPER_MAX_PERMANENT_FAILURES} '
-                            f'before disable): {err.message}',
-                        )
+                    logger.error(
+                        f'Reaper mark_stale_tasks_as_failed failed and runs '
+                        f'again on the next pass: {err.message}',
+                    )
 
         # Expire PENDING tasks past good_until deadline
         try:
@@ -723,10 +667,9 @@ class ReaperMixin:
         - Marks stale RUNNING tasks as FAILED (not safe to requeue)
         - Prunes old telemetry and terminal records based on retention settings
 
-        Non-retryable errors (schema drift, code bugs) are tracked per-operation.
-        After _REAPER_MAX_PERMANENT_FAILURES consecutive permanent failures, the
-        failing operation is disabled for the process lifetime to avoid spamming
-        logs every check_interval_ms forever.
+        No recovery step stops while the worker lives: a step that fails runs
+        again on the next pass (the orphan audit on its next schedule), and
+        each failing pass logs an error.
 
         Raises:
             AssertionError: the broker already serves its limit of event

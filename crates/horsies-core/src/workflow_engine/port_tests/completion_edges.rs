@@ -21,7 +21,7 @@ async fn complete(pool: &PgPool, workflow_id: Uuid) {
     check_workflow_completion(
         pool,
         workflow_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -144,7 +144,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
             child_id,
             "FAILED",
             None,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -203,7 +203,7 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
         child_id,
         "FAILED",
         None,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )

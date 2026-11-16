@@ -39,7 +39,6 @@ from ..names import (
     HEARTBEAT_CLASS_KEY,
     HEARTBEATS_TABLE,
     LEAF_CATALOG,
-    LEAF_LOCK_KEY_FUNCTION,
     RETENTION_CLASSES,
     TASK_HISTORY_FOREVER,
     TASK_HISTORY_PARENT,
@@ -47,46 +46,6 @@ from ..names import (
 
 INDEX_SCHEMA_VERSION = 1
 """Current per-leaf index layout version recorded on creation."""
-
-LEAF_CATALOG_DDL = f"""
-CREATE TABLE {LEAF_CATALOG} (
-    leaf_name text PRIMARY KEY,
-    parent_name text NOT NULL,
-    class_key text NOT NULL
-        REFERENCES {RETENTION_CLASSES}(class_key),
-    lower_anchor timestamptz NOT NULL,
-    upper_anchor timestamptz NOT NULL,
-    index_schema_version smallint NOT NULL,
-    id_index_name text NOT NULL,
-    partition_bound text NOT NULL,
-    min_birth_at timestamptz,
-    min_birth_verified boolean NOT NULL,
-    created_at timestamptz NOT NULL,
-    detached_at timestamptz,
-    dropped_at timestamptz,
-    CHECK (lower_anchor < upper_anchor),
-    CHECK (dropped_at IS NULL OR detached_at IS NOT NULL),
-    UNIQUE (class_key, lower_anchor, upper_anchor)
-)
-"""
-
-LEAF_LOCK_KEY_FUNCTION_DDL = f"""
-CREATE FUNCTION {LEAF_LOCK_KEY_FUNCTION}(
-    p_class_key text,
-    p_anchor timestamptz
-) RETURNS bigint
-LANGUAGE sql
-STABLE
-STRICT
-AS $function$
-    SELECT hashtextextended(
-        p_class_key || chr(31) ||
-        extract(epoch FROM date_trunc('day', p_anchor, 'UTC'))
-            ::bigint::text,
-        1601
-    )
-$function$
-"""
 
 
 @dataclass(frozen=True, slots=True)

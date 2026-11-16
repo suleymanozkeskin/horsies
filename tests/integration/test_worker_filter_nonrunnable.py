@@ -36,7 +36,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -107,12 +107,12 @@ async def _link_task_to_workflow(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  is_subworkflow, status, task_id, created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node_0', 'filter_test', '{}',
+                ('NONE', :id, :wf_id, 0, 'node_0', 'filter_test', '{}',
                  'default', 100, '{}', FALSE, 'all',
                  FALSE, :wt_status, :task_id, NOW(),
                  0, 'ISOLATED', 'standard_30d')
@@ -153,11 +153,11 @@ async def _get_terminalization_kind(
 
 
 async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str, bool, str | None]:
-    """Read task status/claim ownership fields for a task."""
+    """Read a task's status, whether it holds a claim lease, and its owner."""
     row = (
         await session.execute(
             text("""
-                SELECT status, claimed, claimed_by_worker_id
+                SELECT status, claim_expires_at IS NOT NULL, claimed_by_worker_id
                 FROM itest_task_rows
                 WHERE id = CAST(:id AS uuid)
             """),

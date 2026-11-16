@@ -16,8 +16,9 @@ pub mod operations;
 pub mod outcomes;
 
 pub use attempt_outcomes::{
-    decode_failed_attempt_row, decode_workflow_success_row, AfterFailure, AttemptWriteRefusal,
-    FailedAttemptOutcome, PhaseTwoOwed, ReleasedClaim, RetryRefusal, UnreportedAttemptOutcome,
+    decode_failed_attempt_row, decode_stale_attempt_row, decode_workflow_success_row, AfterFailure,
+    AfterStaleFailure, AttemptWriteRefusal, FailedAttemptOutcome, PhaseTwoOwed, PhaseTwoStep,
+    ReleasedClaim, RetryRefusal, StaleAttemptOutcome, UnreportedAttemptOutcome,
     WorkflowSuccessOutcome,
 };
 pub use commands::{BatchSize, TerminalizationCommand};
@@ -29,8 +30,8 @@ pub use operations::{
     EQUIVALENCE_CLASSES,
 };
 pub use outcomes::{
-    decode_outcome_row, GuardEvidence, GuardKind, ObservedTaskState, OutcomeDecodeError,
-    TerminalizationOutcome,
+    decode_outcome_pg_row, decode_outcome_row, GuardEvidence, GuardKind, ObservedTaskState,
+    OutcomeDecodeError, TerminalizationOutcome,
 };
 
 /// A command or fence could not be constructed from the given data.
@@ -54,7 +55,7 @@ pub enum LifecycleValidationError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::commands::{BatchSize, TerminalizationCommand};
     use super::fences::{OwnedClaim, OwnedClaimBatch, PriorLockedRead, WorkerOwned};
     use super::operations::{
@@ -76,7 +77,8 @@ mod tests {
         out
     }
 
-    fn sample_commands() -> Vec<(&'static str, TerminalizationCommand)> {
+    /// One command of each of the fifteen variants, with its variant name.
+    pub(crate) fn sample_commands() -> Vec<(&'static str, TerminalizationCommand)> {
         let generation = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
         let owned = OwnedClaim {
             worker_id: "w1".to_owned(),
@@ -102,8 +104,6 @@ mod tests {
                     task_id: Uuid::nil(),
                     fence: owned.clone(),
                     result_json: "{}".into(),
-                    notify_channel: "c".into(),
-                    notify_payload: "p".into(),
                 },
             ),
             (

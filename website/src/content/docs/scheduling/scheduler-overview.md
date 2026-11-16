@@ -14,9 +14,9 @@ tags: [scheduling, scheduler, process]
 │  Scheduler Process          │
 │  - Checks schedules         │
 │  - Calculates next run      │
-│  - Enqueues via broker      │
+│  - Fires due slots          │
 └──────────────┬──────────────┘
-               │ enqueue_async()
+               │ horsies_fire_schedule()
                ▼
 ┌─────────────────────────────┐
 │  PostgreSQL                 │
@@ -134,16 +134,40 @@ The `schedule_state` table tracks:
 This prevents duplicate executions when:
 
 - Scheduler restarts
-- Multiple schedulers run (advisory locks serialize)
+- Multiple schedulers run (the fire locks the state row)
 - Network issues cause delays
+
+### One fire, one statement
+
+Each due schedule fires in one statement, `horsies_fire_schedule`: it locks the state row, checks that
+`next_run_at` is still the value of the tick's due read, writes the task row of each slot, and moves the row,
+in one transaction. A committed slot therefore always has a moved row, and it never fires again, also after its
+task finished. A second scheduler that fires the same slot waits for that statement, then finds the row moved and
+writes nothing.
+
+- A connection failure during the fire: the slots stay due unless the statement committed; the next tick's due
+  read shows which one happened, and a repeat of a committed slot writes no second task.
+- The database refuses the fire (for example a CHECK violation of the task row): nothing is written, and a second
+  statement moves the row past the refused slot and records no run, so a refusal that repeats does not stop the
+  schedule.
+- The state row is gone (deleted after the due read): the scheduler creates it again, with its first run after
+  the database time of the tick.
+
+### Clock
+
+The scheduler takes its time from the database, not from the host it runs on. Each tick reads the due rows
+and the database time (`statement_timestamp()`) in one statement; the slots of that tick come from that time,
+and `last_run_at` is the database time of the fire. The start and the self-healing check compute
+`next_run_at` from the database time too. A host clock that is ahead of or behind the database does not make
+a slot fire early or late.
 
 ### A slot that already has a task
 
-Each slot has a deterministic task id, and the row stores a fingerprint of the enqueue. A scheduler that stops after the enqueue of a slot and before it saves the state fires that slot again at its next start. With the same command, the enqueue returns the existing task. With a different command, the broker returns `PAYLOAD_MISMATCH`. The command is different when the next start runs another horsies version, or when the schedule's kwargs or the task's options changed.
+Each slot has a deterministic task id: a UUIDv7 whose time is the slot time (in milliseconds) and whose other bits come from a hash of the schedule name and the slot time (in microseconds). The row stores a fingerprint of the command. When the slot's task id already holds a live task, the fire compares the stored command: the same command is the slot's own task; a different command is `PAYLOAD_MISMATCH`. The command is different when an earlier horsies version wrote the task, or when the schedule's kwargs or the task's options changed.
 
-The slot already has its task, so the scheduler counts the slot as fired:
+Either way the slot already has its task, so the scheduler counts the slot as fired:
 
-1. It logs one warning that names the schedule, the slot and the task id.
+1. On `PAYLOAD_MISMATCH` it logs one warning that names the schedule, the slot and the task id.
 2. It records the run with that task id and moves to the next slot.
 3. The existing task keeps the command that it was enqueued with.
 
@@ -155,8 +179,8 @@ creation fails there (for example a transient database error during
 recreates the missing row on a later tick** — each tick checks for
 enabled schedules without a state row and re-runs their initialization.
 The same check recovers a row deleted externally. The recreated row's
-`next_run_at` is computed from the current time, so no missed-slot
-backlog is replayed.
+`next_run_at` is computed from the database time of the tick, so no
+missed-slot backlog is replayed.
 
 ## Catch-Up Logic
 
@@ -172,7 +196,8 @@ TaskSchedule(
 ```
 
 If the scheduler was down for 3 hours, it will enqueue 3 tasks on restart
-(bounded by `max_catch_up_runs`).
+(bounded by `max_catch_up_runs`). The due slots of one tick fire in one
+statement: all of them or none, and the fire counts as one run.
 
 When `catch_up_missed=False` (default), missed runs are dropped: after
 downtime the scheduler fires at most one run — the most recent due slot —

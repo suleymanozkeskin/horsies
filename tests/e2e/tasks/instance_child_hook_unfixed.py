@@ -21,13 +21,14 @@ from horsies.core.models.tasks import TaskError, TaskResult
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
+from horsies.core.utils.url import sqlalchemy_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 APP_ENGINE_APPLICATION_NAME = 'e2e_hook_unfixed_engine'
 
 app_engine: Engine = create_engine(
-    DB_URL,
+    sqlalchemy_url(DB_URL),
     pool_size=3,
     max_overflow=2,
     connect_args={'application_name': APP_ENGINE_APPLICATION_NAME},

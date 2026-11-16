@@ -24,10 +24,6 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.schemas.terminalization import (
-    CREATE_ABANDON_OWNED_NODES_SQL,
-    CREATE_CANCEL_OWNED_NODES_SQL,
-)
 from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
@@ -40,14 +36,13 @@ from horsies.core.worker.sql import (
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-    READ_IN_FLIGHT_ATTEMPT_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
 )
+from tests.baseline_sql import baseline_function
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 BROKER = PostgresConfig(
-    database_url='postgresql+psycopg://user:pass@localhost/db',
+    database_url='postgresql://user:pass@localhost/db',
     pool_size=5,
     max_overflow=5,
 )
@@ -92,7 +87,7 @@ class TestLeaseAlwaysBounded:
         from horsies.core.worker.worker import Worker, WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             claim_lease_ms=None,
@@ -113,7 +108,7 @@ class TestLeaseAlwaysBounded:
         from horsies.core.worker.worker import Worker, WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             prefetch_buffer=2,
@@ -470,70 +465,40 @@ class TestLeaseRenewalSql:
 
 @pytest.mark.unit
 class TestUnclaimSqlClearsLeaseExpiry:
-    """Both unclaim SQL variants must clear claim_expires_at to prevent
-    stale lease timestamps from persisting on re-queued tasks.
+    """The paused-task cleanup must clear claim_expires_at, so no stale
+    lease timestamp persists on a re-queued task.
     """
 
-    def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
-        """Paused-task cleanup must SET claim_expires_at = NULL."""
-        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-        assert "status = 'CANCELLED'" in normalised
-        assert "error_code = 'TASK_CANCELLED'" in normalised
-
-    def test_unclaim_claimed_task_clears_claim_expires_at(self) -> None:
-        """UNCLAIM_CLAIMED_TASK_SQL must SET claim_expires_at = NULL."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at = NULL' in normalised
-
-    @pytest.mark.parametrize(
-        'statement',
-        [
-            UNCLAIM_CLAIMED_TASK_SQL,
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-        ],
-        ids=['release', 'in-flight read'],
-    )
-    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
-        """Each statement fences on the claim time of the dispatch. A NULL
-        claim time matches no row: nothing can turn the check off."""
-        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
-
-        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
-        assert 'IS NULL' not in where
-        assert 'COALESCE' not in where
-
-    def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
-        """Pre-execution unclaim must not reset potentially executed RUNNING rows."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "status = 'CLAIMED'" in normalised
-        assert "status IN ('CLAIMED', 'RUNNING')" not in normalised
-        assert 'claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+    def test_paused_task_cleanup_ends_the_claim(self) -> None:
+        """Paused-task cleanup moves the claimed row to history as CANCELLED
+        with TASK_CANCELLED and deletes the live row with its lease."""
+        normalised = ' '.join(
+            baseline_function('horsies_abandon_owned_nodes').split()
+        )
+        assert (
+            "horsies_move_tasks_to_history( v_applied_ids, 'CANCELLED', "
+            "'PAUSE_ABANDON_CLAIM_BATCH', v_terminal_at, NULL, 'TASK_CANCELLED',"
+        ) in normalised
+        stage = ' '.join(baseline_function('horsies_move_tasks_to_history').split())
+        assert 'DELETE FROM horsies_tasks AS t WHERE t.id = ANY(p_task_ids)' in stage
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "ctx.status = 'CLAIMED'" in normalised
+        normalised = ' '.join(baseline_function('horsies_abandon_owned_nodes').split())
+        assert "t.status = 'CLAIMED'" in normalised
         assert (
-            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
             in normalised
         )
-        assert 'RETURNING t.id' in normalised
 
     def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
         """Cancelled workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CREATE_CANCEL_OWNED_NODES_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert "ctx.status = 'CLAIMED'" in normalised
+        normalised = ' '.join(baseline_function('horsies_cancel_owned_nodes').split())
+        assert "t.status = 'CLAIMED'" in normalised
         assert (
-            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
             in normalised
         )
-        assert 'RETURNING t.id' in normalised
 
     def test_post_claim_guards_fence_on_the_claim_generation(self) -> None:
         """Both post-claim guards carry a pairwise claim-generation fence.
@@ -541,27 +506,19 @@ class TestUnclaimSqlClearsLeaseExpiry:
         The guard runs in its own transaction after the claim committed, so a
         lapsed-and-re-claimed row is CLAIMED by this worker again and the
         (status, worker) pair alone cannot reject it. Generations travel
-        alongside ids because one batch can span claim transactions.
+        alongside ids because one batch can span claim transactions. A NULL
+        generation is refused before any row is read, so the fence has no
+        NULL arm.
         """
-        for statement in (
-            CREATE_ABANDON_OWNED_NODES_SQL,
-            CREATE_CANCEL_OWNED_NODES_SQL,
-        ):
-            normalised = ' '.join(statement.text.split())
+        for name in ('horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'):
+            normalised = ' '.join(baseline_function(name).split())
             assert 'unnest(' in normalised
-            assert 'unnest(p_ids, p_claimed_ats) WITH ORDINALITY' in normalised
-            assert 'AS g(task_id, claimed_at, ordinality)' in normalised
             assert (
-                'ctx.expected_claimed_at IS NULL '
-                'OR ctx.claimed_at = ctx.expected_claimed_at'
-                in normalised
+                'FROM unnest(p_ids, p_claimed_ats) '
+                'AS input(task_id, expected_claimed_at)' in normalised
             )
-
-    def test_unclaim_claimed_task_clears_runtime_metadata(self) -> None:
-        """RUNNING task requeue must clear stale runtime metadata."""
-        sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'started_at = NULL' in normalised
-        assert 'worker_pid = NULL' in normalised
-        assert 'worker_hostname = NULL' in normalised
-        assert 'worker_process_name = NULL' in normalised
+            assert 'AND t.claimed_at = input.expected_claimed_at' in normalised
+            assert 'expected_claimed_at IS NULL' not in normalised
+            assert normalised.index('batch claim generations must be non-NULL') < (
+                normalised.index('FOR UPDATE')
+            )

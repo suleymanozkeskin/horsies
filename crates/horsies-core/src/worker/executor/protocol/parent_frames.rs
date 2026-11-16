@@ -18,6 +18,8 @@ use super::metadata::{
 };
 use super::values::{DispatchNumber, RefusalReason, TaskInputText};
 use super::PROTOCOL_VERSION;
+use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
+use crate::core::config::{PostgresConfig, PostgresConfigError};
 use crate::core::mask_database_url;
 
 /// The database URL a child connects with. It holds a password, so it
@@ -172,6 +174,68 @@ pub enum ChildKind {
     SharedThread(SharedThreadChild),
 }
 
+/// How the server sessions of `database_url` are pooled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerSessions {
+    /// A direct server or PgBouncer session pooling: each connection keeps
+    /// its server session.
+    Kept,
+    /// `database_url` is a PgBouncer transaction-pool endpoint: a connection
+    /// sends unnamed statements only (Python `prepare_threshold=None`).
+    /// `session_database_url` is the session URL of the parent's config,
+    /// which [`PostgresConfig::validate`] requires in this mode.
+    PgBouncerTransactionMode { session_database_url: DatabaseUrl },
+}
+
+/// The connection settings of the parent's config that each connection of
+/// a child takes (Python `PostgresConfig.pooled_connect_args`,
+/// `horsies/core/models/broker.py:384-395`, sent as the `connect_kwargs` of
+/// the init frame).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildConnection {
+    pub tcp_keepalives: TcpKeepalivesConfig,
+    pub tcp_user_timeout: TcpUserTimeoutConfig,
+    pub server_sessions: ServerSessions,
+}
+
+impl ChildConnection {
+    /// The connection settings of `config`.
+    ///
+    /// Errors: the [`PostgresConfigError`] of [`PostgresConfig::validate`].
+    pub fn of_config(config: &PostgresConfig) -> Result<Self, PostgresConfigError> {
+        config.validate()?;
+        let server_sessions = match (
+            config.pgbouncer_transaction_mode,
+            &config.session_database_url,
+        ) {
+            (false, _) => ServerSessions::Kept,
+            (true, Some(session_url)) => ServerSessions::PgBouncerTransactionMode {
+                session_database_url: DatabaseUrl::new(session_url.clone()),
+            },
+            (true, None) => unreachable!(
+                "PostgresConfig::validate refuses transaction mode without a session URL"
+            ),
+        };
+        Ok(Self {
+            tcp_keepalives: config.tcp_keepalives,
+            tcp_user_timeout: config.tcp_user_timeout,
+            server_sessions,
+        })
+    }
+}
+
+/// The defaults of [`PostgresConfig`]: keepalives on (30 s idle, 10 s
+/// interval, 3 probes), a 30 s TCP user timeout, and kept server sessions.
+impl Default for ChildConnection {
+    fn default() -> Self {
+        Self {
+            tcp_keepalives: TcpKeepalivesConfig::default(),
+            tcp_user_timeout: TcpUserTimeoutConfig::default(),
+            server_sessions: ServerSessions::Kept,
+        }
+    }
+}
+
 /// The first frame to a child: everything it needs to boot. The protocol
 /// version is always [`PROTOCOL_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +243,8 @@ pub struct InitFrame {
     pub program: ChildProgram,
     pub log_level: ChildLogLevel,
     pub database_url: DatabaseUrl,
+    /// The settings of each connection of the child's pool.
+    pub connection: ChildConnection,
     pub process_name: String,
     pub child_kind: ChildKind,
 }
@@ -188,7 +254,9 @@ pub struct InitFrame {
 /// before it resolves the task. No task code runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoredOptionsRefusal {
-    /// The stored `task_options` text does not parse, or is not an object.
+    /// The stored `task_options` text does not parse, or is not an object,
+    /// or its `retry_policy` does not validate (the reason starts with
+    /// `stored retry_policy does not validate: `, as Python's).
     OptionsUnreadable(RefusalReason),
     /// The stored `timeout_ms` is not a whole number inside its bounds, or a
     /// shared class has none.
@@ -295,6 +363,7 @@ enum ParentWire<'a> {
         program: ProgramWire<'a>,
         log_level: &'static str,
         database_url: &'a str,
+        connection: ConnectionWire<'a>,
         process_name: &'a str,
         child_kind: ChildKindWire,
     },
@@ -329,6 +398,41 @@ enum ProgramWire<'a> {
         parent_argv: &'a [String],
     },
     Rust,
+}
+
+#[derive(Serialize)]
+struct ConnectionWire<'a> {
+    tcp_keepalives: KeepalivesWire,
+    tcp_user_timeout: UserTimeoutWire,
+    server_sessions: ServerSessionsWire<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum KeepalivesWire {
+    Off,
+    On {
+        idle_seconds: u32,
+        interval_seconds: u32,
+        probes: u32,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum UserTimeoutWire {
+    SystemDefault,
+    After { milliseconds: u32 },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ServerSessionsWire<'a> {
+    Kept,
+    #[serde(rename = "pgbouncer_transaction_mode")]
+    PgBouncerTransactionMode {
+        session_database_url: &'a str,
+    },
 }
 
 #[derive(Serialize)]
@@ -404,6 +508,37 @@ fn program_wire(program: &ChildProgram) -> ProgramWire<'_> {
             parent_argv: &python.parent_argv,
         },
         ChildProgram::Rust => ProgramWire::Rust,
+    }
+}
+
+fn connection_wire(connection: &ChildConnection) -> ConnectionWire<'_> {
+    ConnectionWire {
+        tcp_keepalives: match connection.tcp_keepalives {
+            TcpKeepalivesConfig::Off => KeepalivesWire::Off,
+            TcpKeepalivesConfig::On {
+                idle_seconds,
+                interval_seconds,
+                probes,
+            } => KeepalivesWire::On {
+                idle_seconds: idle_seconds.get(),
+                interval_seconds: interval_seconds.get(),
+                probes: probes.get(),
+            },
+        },
+        tcp_user_timeout: match connection.tcp_user_timeout {
+            TcpUserTimeoutConfig::SystemDefault => UserTimeoutWire::SystemDefault,
+            TcpUserTimeoutConfig::After { milliseconds } => UserTimeoutWire::After {
+                milliseconds: milliseconds.get(),
+            },
+        },
+        server_sessions: match &connection.server_sessions {
+            ServerSessions::Kept => ServerSessionsWire::Kept,
+            ServerSessions::PgBouncerTransactionMode {
+                session_database_url,
+            } => ServerSessionsWire::PgBouncerTransactionMode {
+                session_database_url: session_database_url.as_str(),
+            },
+        },
     }
 }
 
@@ -486,6 +621,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 program: program_wire(&init.program),
                 log_level: init.log_level.as_str(),
                 database_url: init.database_url.as_str(),
+                connection: connection_wire(&init.connection),
                 process_name: &init.process_name,
                 child_kind: child_kind_wire(init.child_kind),
             },
@@ -554,6 +690,7 @@ fn decode_init(fields: &Fields<'_>) -> Result<InitFrame, MalformedFrame> {
         "program",
         "log_level",
         "database_url",
+        "connection",
         "process_name",
         "child_kind",
     ])?;
@@ -561,6 +698,7 @@ fn decode_init(fields: &Fields<'_>) -> Result<InitFrame, MalformedFrame> {
         program: decode_program(&fields.object("program")?)?,
         log_level: decode_log_level(fields)?,
         database_url: DatabaseUrl::new(fields.owned_text("database_url")?),
+        connection: decode_connection(&fields.object("connection")?)?,
         process_name: fields.owned_text("process_name")?,
         child_kind: decode_child_kind(&fields.object("child_kind")?)?,
     })
@@ -600,6 +738,76 @@ fn decode_log_level(fields: &Fields<'_>) -> Result<ChildLogLevel, MalformedFrame
             "is not one of debug, info, warning, error, critical",
         )
     })
+}
+
+/// A whole number read through the `TryFrom<u32>` of its config type, which
+/// holds its bounds.
+fn config_count<T: TryFrom<u32>>(fields: &Fields<'_>, key: &str) -> Result<T, MalformedFrame> {
+    u32::try_from(fields.whole(key)?)
+        .ok()
+        .and_then(|value| T::try_from(value).ok())
+        .ok_or_else(|| fields.out_of_bounds(key))
+}
+
+fn decode_connection(connection: &Fields<'_>) -> Result<ChildConnection, MalformedFrame> {
+    connection.only(&["tcp_keepalives", "tcp_user_timeout", "server_sessions"])?;
+    Ok(ChildConnection {
+        tcp_keepalives: decode_keepalives(&connection.object("tcp_keepalives")?)?,
+        tcp_user_timeout: decode_user_timeout(&connection.object("tcp_user_timeout")?)?,
+        server_sessions: decode_server_sessions(&connection.object("server_sessions")?)?,
+    })
+}
+
+fn decode_keepalives(keepalives: &Fields<'_>) -> Result<TcpKeepalivesConfig, MalformedFrame> {
+    match keepalives.kind()? {
+        "off" => {
+            keepalives.only(&["kind"])?;
+            Ok(TcpKeepalivesConfig::Off)
+        }
+        "on" => {
+            keepalives.only(&["kind", "idle_seconds", "interval_seconds", "probes"])?;
+            Ok(TcpKeepalivesConfig::On {
+                idle_seconds: config_count(keepalives, "idle_seconds")?,
+                interval_seconds: config_count(keepalives, "interval_seconds")?,
+                probes: config_count(keepalives, "probes")?,
+            })
+        }
+        other => Err(keepalives.unknown_kind(other)),
+    }
+}
+
+fn decode_user_timeout(timeout: &Fields<'_>) -> Result<TcpUserTimeoutConfig, MalformedFrame> {
+    match timeout.kind()? {
+        "system_default" => {
+            timeout.only(&["kind"])?;
+            Ok(TcpUserTimeoutConfig::SystemDefault)
+        }
+        "after" => {
+            timeout.only(&["kind", "milliseconds"])?;
+            Ok(TcpUserTimeoutConfig::After {
+                milliseconds: config_count(timeout, "milliseconds")?,
+            })
+        }
+        other => Err(timeout.unknown_kind(other)),
+    }
+}
+
+fn decode_server_sessions(sessions: &Fields<'_>) -> Result<ServerSessions, MalformedFrame> {
+    match sessions.kind()? {
+        "kept" => {
+            sessions.only(&["kind"])?;
+            Ok(ServerSessions::Kept)
+        }
+        "pgbouncer_transaction_mode" => {
+            sessions.only(&["kind", "session_database_url"])?;
+            Ok(ServerSessions::PgBouncerTransactionMode {
+                session_database_url: DatabaseUrl::new(
+                    sessions.owned_text("session_database_url")?,
+                ),
+            })
+        }
+        other => Err(sessions.unknown_kind(other)),
+    }
 }
 
 fn decode_pool(pool: &Fields<'_>) -> Result<ChildPool, MalformedFrame> {

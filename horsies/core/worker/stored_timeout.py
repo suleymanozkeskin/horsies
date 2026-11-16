@@ -7,6 +7,11 @@ is not dropped: the child sets the row RUNNING and returns
 persist path fails the task. The text of each refusal holds no stored value,
 because an int with more than 4300 digits cannot be converted to a string.
 
+The claim reads the row with `read_claimed_options`: a stored retry policy
+that does not validate (`stored_retry_policy`, the rule of enqueue) is
+refused with `OptionsUnreadable` before the timeout is read, so the task fails
+before it runs and no retry decision falls back to defaults.
+
 A `SHARED_ASYNC` row also needs a stored `cancel_grace_ms`, and a stored
 timeout. `dispatch_route` reads those, and refuses a row without them with
 `TimeoutValueInvalid` or `CancelGraceInvalid`; `read_stored_timeout` never
@@ -18,8 +23,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from horsies.core.codec.json_io import loads_json
-from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.codec.task_options import InvalidRetryPolicy, NoRetryPolicy
+from horsies.core.models.tasks import (
+    MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS,
+    RetryPolicy,
+)
 from horsies.core.types.result import Err, Ok
+from horsies.core.utils.retry import OptionsNotAnObject, read_stored_retry_policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +73,29 @@ the worker cannot use. The task fails with it."""
 
 type StoredTimeout = NoTimeout | TaskTimeout | TimeoutRefusal
 """Everything a claimed row can store as its timeout."""
+
+
+def read_claimed_options(task_options: object) -> StoredTimeout:
+    """Read the stored options of a claimed row that its run needs.
+
+    The retry policy must validate (``read_stored_retry_policy``); one that
+    does not is ``OptionsUnreadable`` naming ``retry_policy``. Then the
+    timeout is read (``read_stored_timeout``). Options text that does not
+    parse is refused by ``read_stored_timeout`` with its own reason. Does no
+    I/O and logs nothing.
+    """
+    match task_options:
+        case str():
+            match read_stored_retry_policy(task_options):
+                case InvalidRetryPolicy(detail=detail):
+                    return OptionsUnreadable(
+                        reason=f'stored retry_policy does not validate: {detail}',
+                    )
+                case RetryPolicy() | NoRetryPolicy() | OptionsNotAnObject():
+                    pass
+        case _:
+            pass
+    return read_stored_timeout(task_options)
 
 
 def read_stored_timeout(task_options: object) -> StoredTimeout:

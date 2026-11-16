@@ -1,9 +1,8 @@
 """Round trips of a failed attempt, counted at the wire.
 
-A failure finalize, a timeout write and their retries are one unlocked read
-of the retry facts and one call of ``horsies_finish_failed_attempt``, both
-in autocommit on one checkout. A worker-level failure is never retried, so
-it skips the read. Each test drives the real entry point through a
+A failure finalize, a timeout write and their retries are one call of
+``horsies_finish_failed_attempt`` in autocommit: the retry facts come with
+the claim of the dispatch. Each test drives the real entry point through a
 ``RoundTripProxy`` in the steady state of psycopg's prepared statements, as
 ``test_round_trips`` does, with the worker pre-ping off and on.
 """
@@ -14,7 +13,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Coroutine, Generator
-from datetime import datetime
 from typing import Any, Final
 from unittest.mock import MagicMock
 
@@ -28,6 +26,7 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import OutcomeCode, TaskError, TaskResult
 from horsies.core.types.result import Ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.runtime import _TimeoutSettled
 from horsies.core.worker.shared_stop import RetryPlacement
 from tests.integration.autocommit_support import (
@@ -56,7 +55,7 @@ def _ping_every_reused_connection(monkeypatch: pytest.MonkeyPatch) -> None:
 ERROR_CODE: Final = 'FLAKY'
 TIMEOUT_MS: Final = 1_000
 
-type Case = tuple[str, datetime]
+type Case = tuple[str, DispatchClaim]
 
 PRE_PING = pytest.mark.parametrize(
     'pre_ping', [False, True], ids=['pre_ping_off', 'pre_ping_on']
@@ -87,32 +86,36 @@ def _close_unstarted(coroutine: Coroutine[Any, Any, Any], **_: object) -> None:
 
 
 async def _running(session: AsyncSession, *, retry_code: str | None) -> Case:
-    """A RUNNING task of the proxied worker; with ``retry_code`` its policy
-    retries that code."""
+    """A RUNNING task of the proxied worker and its claim; with ``retry_code``
+    its policy retries that code."""
     task_id, claimed_at = await insert_task(session, status='RUNNING')
-    if retry_code is not None:
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET max_retries = 3, task_options = :options
-                WHERE id = CAST(:id AS uuid)
-            """),
-            {
-                'id': task_id,
-                'options': json.dumps(
-                    {
-                        'retry_policy': {
-                            'auto_retry_for': [retry_code],
-                            'intervals': [600],
-                            'backoff_strategy': 'fixed',
-                            'jitter': False,
-                        },
-                    }
-                ),
-            },
+    if retry_code is None:
+        return task_id, DispatchClaim(
+            claimed_at=claimed_at, retry_count=0, max_retries=0, task_options=None,
         )
-        await session.commit()
-    return task_id, claimed_at
+    options = json.dumps(
+        {
+            'retry_policy': {
+                'max_retries': 1,
+                'auto_retry_for': [retry_code],
+                'intervals': [600],
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+            },
+        }
+    )
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET max_retries = 3, task_options = :options
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id, 'options': options},
+    )
+    await session.commit()
+    return task_id, DispatchClaim(
+        claimed_at=claimed_at, retry_count=0, max_retries=3, task_options=options,
+    )
 
 
 async def _live_status(session: AsyncSession, task_id: str) -> str | None:
@@ -159,7 +162,7 @@ async def test_a_worker_level_failure_is_one_statement(
     pre_ping: bool,
 ) -> None:
     async def act(worker: Any, case: Case) -> None:
-        task_id, claimed_at = case
+        task_id, claim = case
         result = await worker._finalize_task_result(
             task_id,
             False,
@@ -168,7 +171,7 @@ async def test_a_worker_level_failure_is_one_statement(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim,
         )
         assert result == Ok(None)
 
@@ -187,7 +190,7 @@ async def test_a_worker_level_failure_is_one_statement(
 
 @PRE_PING
 @RETRY
-async def test_a_task_error_is_one_read_and_one_statement(
+async def test_a_task_error_is_one_statement(
     proxy: RoundTripProxy,
     db_url: str,
     broker: PostgresBroker,  # noqa: ARG001
@@ -197,7 +200,7 @@ async def test_a_task_error_is_one_read_and_one_statement(
     retries: bool,
 ) -> None:
     async def act(worker: Any, case: Case) -> None:
-        task_id, claimed_at = case
+        task_id, claim = case
         result = await worker._finalize_task_result(
             task_id,
             True,
@@ -206,7 +209,7 @@ async def test_a_task_error_is_one_read_and_one_statement(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim,
         )
         assert result == Ok(None)
 
@@ -219,13 +222,13 @@ async def test_a_task_error_is_one_read_and_one_statement(
         act_on=act,
     )
 
-    assert round_trips == 2 + (PING if pre_ping else 0), turns
+    assert round_trips == 1 + (PING if pre_ping else 0), turns
     assert await _live_status(session, task_id) == ('PENDING' if retries else None)
 
 
 @PRE_PING
 @RETRY
-async def test_a_timeout_is_one_read_and_one_statement(
+async def test_a_timeout_is_one_statement(
     proxy: RoundTripProxy,
     db_url: str,
     broker: PostgresBroker,  # noqa: ARG001
@@ -235,11 +238,11 @@ async def test_a_timeout_is_one_read_and_one_statement(
     retries: bool,
 ) -> None:
     async def act(worker: Any, case: Case) -> None:
-        task_id, claimed_at = case
+        task_id, claim = case
         settled = await worker._record_task_timeout(
             task_id,
             TIMEOUT_MS,
-            claimed_at,
+            claim,
             retry=RetryPlacement.SAME_CLASS,
         )
         assert settled == _TimeoutSettled()
@@ -253,5 +256,5 @@ async def test_a_timeout_is_one_read_and_one_statement(
         act_on=act,
     )
 
-    assert round_trips == 2 + (PING if pre_ping else 0), turns
+    assert round_trips == 1 + (PING if pre_ping else 0), turns
     assert await _live_status(session, task_id) == ('PENDING' if retries else None)

@@ -29,7 +29,7 @@ from horsies.core.utils.wait_timeout import (
 
 pytestmark = pytest.mark.unit
 
-_UNREACHABLE_URL = SecretStr('postgresql+psycopg://user:pass@127.0.0.1:1/none')
+_UNREACHABLE_URL = SecretStr('postgresql://user:pass@127.0.0.1:1/none')
 
 _REFUSED: list[Any] = [
     pytest.param(MAX_TASK_TIMEOUT_MS + 1, WAIT_TIMEOUT_ABOVE_LIMIT, id='limit+1'),
