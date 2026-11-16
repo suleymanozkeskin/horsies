@@ -33,6 +33,12 @@ pub enum WorkerError {
     /// within `bound`. Retryable: the start runs again after a backoff.
     #[error("worker start attempt did not finish within {bound:?}")]
     StartTimedOut { bound: std::time::Duration },
+
+    /// The runner heartbeats failed closed: no beat landed within half of
+    /// `running_stale_threshold_ms`. The watchdog killed every child that
+    /// held a task and stopped the worker (Python `RunnerHeartbeatLostError`).
+    #[error("runner heartbeats failed closed: {cause}; worker stopped")]
+    RunnerHeartbeatLost { cause: String },
 }
 
 impl WorkerError {
@@ -48,6 +54,7 @@ impl WorkerError {
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
             Self::StartTimedOut { .. } => true,
+            Self::RunnerHeartbeatLost { .. } => false,
         }
     }
 }

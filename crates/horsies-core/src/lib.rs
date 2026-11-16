@@ -68,6 +68,13 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
+// Child mode of a Rust worker binary: the entry checks `child_mode` first
+// and, in child mode, exits with the code of `run_child_host`.
+pub use crate::worker::executor::child_host::{
+    child_mode, run_child_host, ChildApp, ChildArgs, ChildArgsError, ChildHostExit, ChildMode,
+    OrphanSelfHeal, CHILD_MODE_ARGUMENT,
+};
+
 // worker re-exports
 pub use crate::worker::{
     cli::LogLevel,

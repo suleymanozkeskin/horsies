@@ -1,0 +1,555 @@
+//! Tests of the slots: routes, budgets, the writes of each end, the answer
+//! of each task, and isolated slots driven by scripted children.
+
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
+use chrono::{TimeZone, Utc};
+use uuid::Uuid;
+
+use super::outcome::{
+    killed_child_write, read_envelope, retry_request, task_error_write, worker_failure_write,
+    ReportedResult,
+};
+use super::pool::Answer;
+use super::*;
+use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
+use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::worker::executor::protocol::{
+    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel,
+    ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
+    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, ResultFrame,
+    RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskSendPool,
+    TaskTimeoutMs,
+};
+use crate::worker::executor::supervisor::{ChildCommand, Spawner};
+use crate::worker::retry::{read_stored_options, StoredOptions};
+use crate::worker::runner_beats::LiveDispatches;
+
+const TASK: &str = "0190f5a2-7b1c-7d3e-8f00-0000000000aa";
+
+fn options(text: &str) -> StoredOptions {
+    read_stored_options(Some(text))
+}
+
+fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
+    ClaimedTask {
+        task_id: Uuid::parse_str(TASK).unwrap(),
+        task_name: "app.tasks.work".to_owned(),
+        queue_name: "default".to_owned(),
+        claimed_at: Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap(),
+        execution,
+        kind: TaskKind::Plain,
+        retry: RetryFacts {
+            retry_count: 0,
+            max_retries: 2,
+        },
+        options: options(stored),
+    }
+}
+
+const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 2,
+    "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+
+// ---------------------------------------------------------------------------
+// Claim plan and routes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_worker_with_only_isolated_children_claims_every_class_into_isolated() {
+    let plan = ClaimPlan::for_children(4, 0, 0);
+    for class in ExecutionClass::ALL {
+        assert_eq!(
+            plan.route(class),
+            ClaimRoute::ServedBy(ExecutionClass::Isolated)
+        );
+    }
+    assert_eq!(plan.budgets(), vec![ExecutionClass::Isolated]);
+    assert_eq!(
+        plan.served_by(ExecutionClass::Isolated),
+        ExecutionClass::ALL.to_vec()
+    );
+}
+
+#[test]
+fn a_shared_class_with_children_of_its_own_keeps_its_budget() {
+    let plan = ClaimPlan::for_children(2, 1, 0);
+    assert_eq!(
+        plan.route(ExecutionClass::SharedAsync),
+        ClaimRoute::ServedBy(ExecutionClass::SharedAsync)
+    );
+    assert_eq!(
+        plan.route(ExecutionClass::SharedThread),
+        ClaimRoute::ServedBy(ExecutionClass::Isolated)
+    );
+}
+
+#[test]
+fn a_worker_without_isolated_children_serves_no_other_class() {
+    let plan = ClaimPlan::for_children(0, 1, 0);
+    assert_eq!(plan.route(ExecutionClass::Isolated), ClaimRoute::NotServed);
+    assert_eq!(
+        plan.route(ExecutionClass::SharedThread),
+        ClaimRoute::NotServed
+    );
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::SharedThread,
+            plan,
+            &options(r#"{"timeout_ms": 2000}"#)
+        ),
+        Err(UnservedClass {
+            class: ExecutionClass::SharedThread
+        })
+    );
+}
+
+#[test]
+fn an_isolated_row_runs_with_its_stored_deadline_or_none() {
+    let plan = ClaimPlan::for_children(1, 0, 0);
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            plan,
+            &options(r#"{"timeout_ms": 2000}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::After(TaskTimeoutMs::new(2000).unwrap()),
+        })
+    );
+    assert_eq!(
+        dispatch_route(ExecutionClass::Isolated, plan, &options("{}")),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::NoDeadline,
+        })
+    );
+    assert!(matches!(
+        dispatch_route(ExecutionClass::Isolated, plan, &options("{")),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Refusal(StoredOptionsRefusal::OptionsUnreadable(_)),
+            deadline: IsolatedDeadline::NoDeadline,
+        })
+    ));
+    assert!(matches!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            plan,
+            &options(r#"{"timeout_ms": 5}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(_)),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_shared_async_row_needs_a_timeout_and_a_cancel_grace() {
+    let plan = ClaimPlan::for_children(1, 1, 0);
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::SharedAsync,
+            plan,
+            &options(r#"{"timeout_ms": 3000, "cancel_grace_ms": 500}"#)
+        ),
+        Ok(DispatchRoute::SharedAsync(SharedWork::AsyncTask {
+            timeout_ms: TaskTimeoutMs::new(3000).unwrap(),
+            cancel_grace_ms: CancelGraceMs::new(500).unwrap(),
+        }))
+    );
+    match dispatch_route(
+        ExecutionClass::SharedAsync,
+        plan,
+        &options(r#"{"timeout_ms": 3000}"#),
+    ) {
+        Ok(DispatchRoute::SharedAsync(SharedWork::Refusal(
+            StoredOptionsRefusal::CancelGraceInvalid(reason),
+        ))) => assert_eq!(
+            reason.as_str(),
+            "stored cancel_grace_ms is absent for execution SHARED_ASYNC"
+        ),
+        other => panic!("expected a grace refusal, got {other:?}"),
+    }
+    match dispatch_route(ExecutionClass::SharedAsync, plan, &options("{}")) {
+        Ok(DispatchRoute::SharedAsync(SharedWork::Refusal(
+            StoredOptionsRefusal::TimeoutValueInvalid(reason),
+        ))) => assert_eq!(
+            reason.as_str(),
+            "stored timeout_ms is absent for execution SHARED_ASYNC"
+        ),
+        other => panic!("expected a timeout refusal, got {other:?}"),
+    }
+}
+
+/// A shared row on the isolated budget gets the timeout or the refusal of
+/// its seat work, so its outcome does not depend on the child kind.
+#[test]
+fn a_shared_row_on_the_isolated_budget_keeps_its_seat_rules() {
+    let plan = ClaimPlan::for_children(1, 0, 0);
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::SharedAsync,
+            plan,
+            &options(r#"{"timeout_ms": 3000, "cancel_grace_ms": 500}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::After(TaskTimeoutMs::new(3000).unwrap()),
+        })
+    );
+    assert!(matches!(
+        dispatch_route(ExecutionClass::SharedThread, plan, &options("{}")),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(_)),
+            deadline: IsolatedDeadline::NoDeadline,
+        })
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Budgets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn capacity_counts_what_can_serve() {
+    assert_eq!(
+        isolated_capacity(&[
+            SlotService::Booting,
+            SlotService::InService,
+            SlotService::Retiring,
+            SlotService::Down,
+        ]),
+        3
+    );
+    let shared = |service, seats| SharedSlotService { service, seats };
+    assert_eq!(
+        shared_capacity(&[
+            shared(SlotService::InService, 10),
+            shared(SlotService::Booting, 10),
+            shared(SlotService::Closing { runs: 3 }, 10),
+            shared(SlotService::Down, 10),
+        ]),
+        23
+    );
+    let pool = PoolService {
+        isolated: vec![SlotService::InService, SlotService::Down],
+        shared_async: vec![shared(SlotService::InService, 50)],
+        shared_thread: Vec::new(),
+    };
+    assert_eq!(
+        pool.capacities(),
+        vec![
+            BudgetCapacity {
+                budget: ExecutionClass::Isolated,
+                in_service: 1
+            },
+            BudgetCapacity {
+                budget: ExecutionClass::SharedAsync,
+                in_service: 50
+            },
+        ]
+    );
+    assert_eq!(pool.total_capacity(), 51);
+}
+
+// ---------------------------------------------------------------------------
+// The writes of each end
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_timeout_retries_when_the_policy_names_it() {
+    let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
+    match retry_request(&claimed, Some("TASK_TIMEOUT"), RetryPlacement::Isolated) {
+        RetryRequest::RetryAfter {
+            expected_retry_count,
+            placement,
+            delay_seconds,
+        } => {
+            assert_eq!(expected_retry_count, 0);
+            assert_eq!(placement, RetryPlacement::Isolated);
+            assert!(delay_seconds >= 1.0);
+        }
+        RetryRequest::NoRetry => panic!("the policy names TASK_TIMEOUT"),
+    }
+    assert_eq!(
+        retry_request(&claimed, Some("WORKER_CRASHED"), RetryPlacement::SameClass),
+        RetryRequest::NoRetry
+    );
+    let spent = ClaimedTask {
+        retry: RetryFacts {
+            retry_count: 2,
+            max_retries: 2,
+        },
+        ..claimed
+    };
+    assert_eq!(
+        retry_request(&spent, Some("TASK_TIMEOUT"), RetryPlacement::SameClass),
+        RetryRequest::NoRetry
+    );
+}
+
+#[test]
+fn a_killed_child_write_names_its_code() {
+    let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
+    let write = killed_child_write(
+        &claimed,
+        "worker-1",
+        OutcomeCode::TaskTimeout.into(),
+        "task exceeded timeout_ms=1000".to_owned(),
+        RetryPlacement::SameClass,
+    );
+    assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
+    assert_eq!(write.attempt.kind, AttemptFailureKind::Failed);
+    assert_eq!(write.fence.claimed_at, claimed.claimed_at);
+    assert!(matches!(write.retry, RetryRequest::RetryAfter { .. }));
+    let loop_write = killed_child_write(
+        &claimed,
+        "worker-1",
+        LoopKillCode::NeighbourBlockedLoop.code().into(),
+        "blocked".to_owned(),
+        RetryPlacement::SameClass,
+    );
+    assert_eq!(
+        loop_write.error_code.as_deref(),
+        Some("NEIGHBOUR_BLOCKED_LOOP")
+    );
+    assert_eq!(loop_write.retry, RetryRequest::NoRetry);
+}
+
+#[test]
+fn a_worker_failure_is_a_broker_error_that_never_retries() {
+    let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
+    let write = worker_failure_write(&claimed, "worker-1", "");
+    assert_eq!(write.error_code.as_deref(), Some("BROKER_ERROR"));
+    assert_eq!(write.retry, RetryRequest::NoRetry);
+    assert_eq!(write.attempt.kind, AttemptFailureKind::WorkerFailure);
+    assert_eq!(write.failed_reason.as_deref(), Some("Worker failure"));
+}
+
+#[test]
+fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
+    let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
+    let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+    let envelope = ResultEnvelopeText::new(
+        serde_json::to_string(
+            &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),
+        )
+        .unwrap(),
+    );
+    let write = task_error_write(&claimed, "worker-1", &error, &envelope);
+    assert_eq!(write.result_json, envelope.as_str());
+    assert_eq!(write.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(write.retry, RetryRequest::NoRetry);
+}
+
+#[test]
+fn the_result_envelope_is_read_strictly() {
+    let ok = ResultEnvelopeText::new(r#"{"value": {"b": 1, "a": [2]}, "__type": "ok"}"#.to_owned());
+    match read_envelope(&ok) {
+        ReportedResult::Value(value) => assert_eq!(value.get(), r#"{"b": 1, "a": [2]}"#),
+        _ => panic!("expected a value"),
+    }
+    let err = ResultEnvelopeText::new(
+        r#"{"__type": "err", "value": {"error_code": "TASK_ERROR", "message": "m"}}"#.to_owned(),
+    );
+    assert!(matches!(read_envelope(&err), ReportedResult::Error(_)));
+    for text in [
+        "not json",
+        r#"{"__type": "ok", "value": 1, "value": 2}"#,
+        r#"{"__type": "maybe", "value": 1}"#,
+        r#"{"__type": "ok", "value": 1, "extra": 0}"#,
+        r#"{"__type": "ok", "value": NaN}"#,
+    ] {
+        assert!(
+            matches!(
+                read_envelope(&ResultEnvelopeText::new(text.to_owned())),
+                ReportedResult::Undecodable(_)
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn every_task_gets_exactly_one_answer() {
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    drop(Answer::new(sender));
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        AttemptEnd::NotDispatched(NotRunCause::PoolStopping)
+    );
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    let mut answer = Answer::new(sender);
+    answer.child_took_it(ProcessId::new(77).unwrap());
+    drop(answer);
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        AttemptEnd::EndUnknown {
+            pid: ProcessId::new(77).unwrap()
+        }
+    );
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    Answer::new(sender).send(AttemptEnd::NotDispatched(NotRunCause::QueueFull));
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        AttemptEnd::NotDispatched(NotRunCause::QueueFull)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Isolated slots with scripted children
+// ---------------------------------------------------------------------------
+
+fn init_frame() -> InitFrame {
+    InitFrame {
+        program: ChildProgram::Rust,
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        process_name: "horsies-test-child".to_owned(),
+        child_kind: ChildKind::Isolated(IsolatedChild {
+            pool: ChildPool {
+                min_size: PoolMinSize::new(0).unwrap(),
+                max_size: PoolMaxSize::new(1).unwrap(),
+                check: true,
+            },
+            task_send_pool: TaskSendPool::new(1).unwrap(),
+        }),
+    }
+}
+
+/// `printf` text that writes `bytes`: one octal escape per byte.
+fn printf_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("\\{byte:03o}")).collect()
+}
+
+fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
+    encode_parent_frame(&ParentFrame::Run(RunFrame {
+        task_id: claimed.task_id,
+        task_name: claimed.task_name.clone(),
+        worker_id: "worker-1".to_owned(),
+        task_kind: claimed.kind,
+        claimed_at: claimed.claimed_at,
+        work: IsolatedWork::Run,
+        input: TaskInputText::new("{}".to_owned()),
+    }))
+    .unwrap()
+    .to_bytes()
+}
+
+/// A child script: take the init frame, send ready, take the run frame,
+/// then do `after_run`.
+fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
+    let init = encode_parent_frame(&ParentFrame::Init(init_frame()))
+        .unwrap()
+        .to_bytes();
+    let ready = encode_child_frame(&ChildFrame::Ready(ReadyFrame {
+        pid: ProcessId::new(1).unwrap(),
+        rss: RssReading::Unreadable,
+    }))
+    .unwrap()
+    .to_bytes();
+    let script = format!(
+        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; {after_run}"#,
+        init = init.len(),
+        ready = printf_bytes(&ready),
+        run = run_frame_bytes(claimed).len(),
+    );
+    ChildCommand {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), script.into()],
+    }
+}
+
+fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
+    IsolatedPoolConfig {
+        command,
+        init: init_frame(),
+        worker_id: "worker-1".to_owned(),
+        pending_limit: NonZeroUsize::new(4).unwrap(),
+        tasks_per_child: TaskLimit::Off,
+        memory_per_child: MemoryLimit::Off,
+        exit_not_seen: ExitNotSeen::LeaveToRecovery,
+    }
+}
+
+async fn run_through_pool(after_run: &str, deadline: IsolatedDeadline) -> AttemptEnd {
+    let claimed = task(ExecutionClass::Isolated, "{}");
+    let spawner = Spawner::start().unwrap();
+    let board = std::sync::Arc::new(PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    }));
+    let pool = IsolatedPool::start(
+        pool_config(scripted_child(&claimed, after_run)),
+        board,
+        spawner.handle(),
+        LiveDispatches::default(),
+    );
+    let receiver = match pool.submit(
+        &claimed,
+        TaskInputText::new("{}".to_owned()),
+        IsolatedWork::Run,
+        deadline,
+    ) {
+        Submitted::Queued(receiver) => receiver,
+        Submitted::NotDispatched(cause) => panic!("not dispatched: {cause}"),
+    };
+    let end = tokio::time::timeout(Duration::from_secs(30), receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = pool.stop(Duration::from_secs(5)).await;
+    let _ = spawner.stop(Duration::from_secs(10));
+    end
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_isolated_slot_reports_the_result_of_its_child() {
+    let claimed = task(ExecutionClass::Isolated, "{}");
+    let result = encode_child_frame(&ChildFrame::Result(ResultFrame {
+        task_id: claimed.task_id,
+        end: RunEnd::Result(ResultEnvelopeText::new(
+            r#"{"__type":"ok","value":3}"#.to_owned(),
+        )),
+        rss: RssReading::Unreadable,
+        task_loop: NoLeftWork::NoTaskLoop,
+    }))
+    .unwrap()
+    .to_bytes();
+    let after_run = format!(
+        r#"printf '{}' >&"$0"; head -c 27 <&"$0" >/dev/null; exit 0"#,
+        printf_bytes(&result)
+    );
+    assert_eq!(
+        run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,
+        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+            r#"{"__type":"ok","value":3}"#.to_owned()
+        )))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_deadline_kills_the_child_and_ends_the_task_as_timed_out() {
+    let timeout = TaskTimeoutMs::new(1000).unwrap();
+    assert_eq!(
+        run_through_pool("exec sleep 60", IsolatedDeadline::After(timeout)).await,
+        AttemptEnd::TimedOut {
+            timeout,
+            retry: RetryPlacement::SameClass,
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_that_dies_with_a_task_takes_the_crash_path() {
+    match run_through_pool("exit 3", IsolatedDeadline::NoDeadline).await {
+        AttemptEnd::Crashed { reason } => {
+            assert!(reason.as_str().contains("exit code 3"), "{reason}");
+        }
+        other => panic!("expected the crash path, got {other:?}"),
+    }
+}
