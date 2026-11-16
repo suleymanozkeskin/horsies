@@ -144,6 +144,19 @@ fn install_lock_key() -> i64 {
 const MIGRATION_MAX_ATTEMPTS: usize = 5;
 const DEADLOCK_SQLSTATE: &str = "40P01";
 
+/// Install the schema for a client of `family`: run the migrations, then
+/// record the family, or check the family that the database records
+/// (`crate::broker::client_family`). A database of the other family, or one
+/// that keeps no family row after the insert, is refused with
+/// `BrokerError::ClientFamilyMismatch`.
+pub async fn install_schema(
+    pool: &PgPool,
+    family: crate::broker::client_family::ClientFamily,
+) -> Result<(), BrokerError> {
+    run_horsies_migrations(pool).await?;
+    crate::broker::client_family::record_client_family(pool, family).await
+}
+
 /// Run all embedded horsies migrations against `pool`.
 ///
 /// Bookkeeps in [`MIGRATIONS_TABLE`] rather than `_sqlx_migrations`. A

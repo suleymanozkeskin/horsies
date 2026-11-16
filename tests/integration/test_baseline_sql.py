@@ -106,6 +106,15 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_requeue_stale_claims',
         'horsies_stale_running_scan',
         'horsies_start_attempt',
+        # 0007_scheduler_monitoring_functions.sql.
+        'horsies_fire_schedule',
+        'horsies_list_expired_tasks',
+        'horsies_list_stale_tasks',
+        'horsies_monitoring_check_scope',
+        'horsies_monitoring_task_detail',
+        'horsies_monitoring_task_facets',
+        'horsies_monitoring_task_list',
+        'horsies_schedule_slot_task_id',
     }
 )
 

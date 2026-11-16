@@ -277,7 +277,7 @@ class TestDetail:
                 terminalization_schema.engine, connection_capacity=2
             ),
             DetachExpiredHistoryLeaf(
-                leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
+                leaf=ref, statement_timeout_ms=None
             ),
             publisher,
         )
