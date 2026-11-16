@@ -2,7 +2,8 @@
 
 Reference side: the terminal writes before the switch, with the single move
 that takes the task advisory lock again and reads the live row again
-(``reference/interim_moves.sql``). Candidate side: the baseline, where each
+(``reference/interim_moves.sql``), and the array overload of the miss
+classifier that those writes call (``reference/interim_miss_classifier.sql``). Candidate side: the baseline, where each
 single write passes the row it locked to
 ``horsies_move_task_to_history(horsies_tasks, ...)`` and each batch write
 calls ``horsies_move_tasks_to_history``. The function-call script calls each
@@ -36,7 +37,10 @@ BOUNDARY_RETRY_LIMIT: Final = 1
 """A pair whose run window crosses an hour boundary runs again once."""
 
 BEFORE_THE_SWITCH: Final = FrozenDefinitions(
-    path=REFERENCE_FOLDER / 'interim_moves.sql'
+    paths=(
+        REFERENCE_FOLDER / 'interim_miss_classifier.sql',
+        REFERENCE_FOLDER / 'interim_moves.sql',
+    )
 )
 
 MakeDatabase = Callable[[], DualRunDatabase]
@@ -102,7 +106,7 @@ def test_a_write_that_stores_another_value_shows_in_the_diff(
     changed.write_text(_CHANGED_FAILED_REASON_SQL, encoding='utf-8')
 
     reference, candidate = _pair(
-        empty_database, BEFORE_THE_SWITCH, FrozenDefinitions(path=changed)
+        empty_database, BEFORE_THE_SWITCH, FrozenDefinitions(paths=(changed,))
     )
 
     diff = compare_snapshots(reference.snapshot, candidate.snapshot)

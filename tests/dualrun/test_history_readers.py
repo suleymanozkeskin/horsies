@@ -3,9 +3,10 @@
 Both sides seed the same database state on a fresh baseline: the default
 retention class, the history leaf of 2030-01-01, and live tasks. Then:
 
-- reference side: ``reference/history_readers.sql``, the statements that the
-  Python publisher sent for this catalog, with the composite types and the
-  array overload of the miss classifier;
+- reference side: ``reference/interim_miss_classifier.sql`` (the composite
+  types and the array overload of the miss classifier) and
+  ``reference/history_readers.sql`` (the statements that the Python
+  publisher sent for this catalog);
 - candidate side: ``StagedLoaderPublisher.republish``, which now calls
   ``horsies_publish_history_readers``.
 
@@ -56,7 +57,10 @@ from tests.dualrun.selfcheck import (
 
 pytestmark = [pytest.mark.integration]
 
-READERS_BEFORE_THE_SWITCH: Final = REFERENCE_FOLDER / 'history_readers.sql'
+READERS_BEFORE_THE_SWITCH: Final = (
+    REFERENCE_FOLDER / 'interim_miss_classifier.sql',
+    REFERENCE_FOLDER / 'history_readers.sql',
+)
 
 CLASS_KEY: Final = 'standard_30d'
 LEAF_LOWER: Final = datetime(2030, 1, 1, tzinfo=UTC)
@@ -276,9 +280,10 @@ def _write_seed(database: DualRunDatabase, connection: Connection, seed: Seed) -
 
 
 def _publish_before(database: DualRunDatabase, connection: Connection) -> None:
-    text = READERS_BEFORE_THE_SWITCH.read_text(encoding='utf-8')
-    with connection.transaction():
-        _ = connection.execute(text.encode('utf-8'))
+    for path in READERS_BEFORE_THE_SWITCH:
+        text = path.read_text(encoding='utf-8')
+        with connection.transaction():
+            _ = connection.execute(text.encode('utf-8'))
 
 
 async def _republish(database: DualRunDatabase) -> None:
