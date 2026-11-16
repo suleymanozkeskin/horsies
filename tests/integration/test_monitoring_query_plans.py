@@ -1,11 +1,11 @@
 """Plan tests for the monitoring read path.
 
-Each test EXPLAINs the statement production executes — compiled from the
-same builders ``list_tasks`` / ``task_facets`` use, or the worker's claim
-statement through auto_explain — and asserts the index the plan must ride. Any drift that
-falls off the index (an ordering wrapper the btree cannot satisfy, a
-projection change, a claim predicate rewrite) fails here, not on an
-adopter's dashboard.
+Each test reads the plans of the statements inside a database function
+through auto_explain (``horsies_monitoring_task_list``, the worker's claim
+statement) and asserts the index the plan must ride. Any drift that falls
+off the index (an ordering wrapper the btree cannot satisfy, a projection
+change, a claim predicate rewrite) fails here, not on an adopter's
+dashboard.
 
 Seeded tables fit in a few pages, where the planner prefers a seq scan and
 would hide the index choice a production-sized heap produces on its own;
@@ -20,12 +20,10 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
-from horsies.monitoring.queries import list_rows_statement
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -92,75 +90,12 @@ async def _seed_tasks(session: AsyncSession) -> None:
     await session.commit()
 
 
-async def _explain(
-    session: AsyncSession,
-    statement_sql: str,
-    params: dict[str, object] | None = None,
+async def _nested_plans(
+    session: AsyncSession, statement: Any, params: dict[str, object],
 ) -> str:
-    """EXPLAIN (no execution) with seq scans disabled, rolled back."""
-    await session.execute(text('SET enable_seqscan = off'))
-    rows = (
-        await session.execute(text('EXPLAIN ' + statement_sql), params or {})
-    ).fetchall()
-    plan = '\n'.join(str(row[0]) for row in rows)
-    await session.rollback()
-    return plan
-
-
-def _plan_nodes(plan: str) -> list[str]:
-    """The node names of an EXPLAIN text plan, in plan order.
-
-    A node line is the first line, or a line whose text starts with ``->``;
-    the name ends before the cost in parentheses.
-    """
-    nodes: list[str] = []
-    for position, line in enumerate(plan.splitlines()):
-        stripped = line.strip()
-        if position == 0 or stripped.startswith('->'):
-            nodes.append(stripped.removeprefix('->').strip().split('  (', 1)[0])
-    return nodes
-
-
-def _compiled(statement: Any) -> str:
-    """Render a SQLAlchemy statement with literal binds for EXPLAIN."""
-    return str(
-        statement.compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={'literal_binds': True},
-        )
-    )
-
-
-async def test_list_default_sort_plans_on_enqueued_at_index(
-    broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
-    session: AsyncSession,
-) -> None:
-    """Both directions of the default sort ride idx_horsies_tasks_enqueued_at.
-
-    The regression this pins: a ``nulls_last`` wrapper on the NOT NULL sort
-    column changes the requested ordering away from what the btree provides
-    and silently degrades the list to a full-table sort. The task id
-    tie-break is an incremental sort on the index order: it sorts only the
-    rows of one ``enqueued_at``, and no node sorts the whole table.
-    """
-    await _seed_tasks(session)
-
-    for sort_dir in ('desc', 'asc'):
-        statement = _compiled(
-            list_rows_statement(
-                scope=[], sort_by='enqueued_at', sort_dir=sort_dir,
-                offset=0, limit=50,
-            )
-        )
-        plan = await _explain(session, statement)
-        assert 'idx_horsies_tasks_enqueued_at' in plan, (sort_dir, plan)
-        assert 'Sort' not in _plan_nodes(plan), (sort_dir, plan)
-        assert 'Presorted Key: enqueued_at' in plan, (sort_dir, plan)
-
-
-async def _nested_plans(session: AsyncSession, params: dict[str, object]) -> str:
-    """Run one claim through HORSIES_CLAIM_SQL and return the plans of the
-    statements inside the claim functions, from auto_explain. Rolled back."""
+    """Run ``statement`` and return the plans of the statements inside the
+    functions it calls, from auto_explain, with seq scans disabled. Rolled
+    back."""
     connection = await session.connection()
     raw = await connection.get_raw_connection()
     driver = raw.driver_connection
@@ -180,11 +115,43 @@ async def _nested_plans(session: AsyncSession, params: dict[str, object]) -> str
             "auto_explain.log_level = 'notice'",
         ):
             await session.execute(text(f'SET LOCAL {setting}'))
-        await session.execute(HORSIES_CLAIM_SQL, params)
+        await session.execute(statement, params)
     finally:
         await session.rollback()
         driver.remove_notice_handler(_collect)
     return '\n'.join(notices)
+
+
+_DEFAULT_SORT_LIST_SQL = text("""
+    SELECT * FROM horsies_monitoring_task_list(
+        now() - interval '1 day', now(), '{}', '{}', '{}', '{}', '{}', '{}', FALSE,
+        '{}', '{}', 'enqueued_at', CAST(:direction AS text), 0, 50
+    )
+""")
+
+
+async def test_list_default_sort_plans_on_enqueued_at_index(
+    broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
+    session: AsyncSession,
+) -> None:
+    """Both directions of the default sort read the live side on idx_horsies_tasks_enqueued_at.
+
+    The regression this pins: a ``NULLS LAST`` on the NOT NULL sort column
+    changes the requested ordering away from what the btree provides and
+    degrades the live side to a full-table sort. The task id tie-break is
+    an incremental sort on the index order (presorted key ``enqueued_at``):
+    it sorts only the rows of one ``enqueued_at``.
+    """
+    await _seed_tasks(session)
+
+    for direction in ('DESC', 'ASC'):
+        plans = await _nested_plans(session, _DEFAULT_SORT_LIST_SQL, {'direction': direction})
+        page_plan = next(
+            plan for plan in plans.split('duration:') if 'WITH live AS' in plan
+        )
+        assert 'idx_horsies_tasks_enqueued_at' in page_plan, (direction, page_plan)
+        assert 'Presorted Key: t.enqueued_at' in page_plan, (direction, page_plan)
+        assert 'Seq Scan on horsies_tasks' not in page_plan, (direction, page_plan)
 
 
 async def test_claim_streams_plan_on_the_class_indexes(
@@ -200,6 +167,7 @@ async def test_claim_streams_plan_on_the_class_indexes(
 
     plans = await _nested_plans(
         session,
+        HORSIES_CLAIM_SQL,
         {
             'p_worker_id': 'plan-test-worker',
             'p_queues': '["default"]',

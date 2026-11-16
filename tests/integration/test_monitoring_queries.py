@@ -49,6 +49,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.reads.aggregates import plan_rows_from_explain
 from horsies.monitoring.queries import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
@@ -1626,57 +1627,36 @@ class TestListTasks:
         assert is_ok(result)
         assert result.ok_value.total == 5
 
-    async def test_list_page_does_not_fetch_payload_columns(
+    async def test_one_statement_reads_the_page_and_no_payload_column(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        """The list SELECT must not reference args/kwargs/result/task_options.
+        """One statement reads the page and the total; the function returns no payload column.
 
-        The wire statement is the contract: payload columns fetched here ship
-        every task's payload on every page and detoast large results.
+        A payload column on a list page would ship every task's payload on
+        every poll and detoast large values.
         """
-        await insert_rows(session, make_task())
-        captured: list[str] = []
+        await insert_rows(session, make_task(), make_task(status=TaskStatus.COMPLETED))
 
-        def capture_statement(
-            conn: Any,
-            cursor: Any,
-            statement: str,
-            parameters: Any,
-            context: Any,
-            executemany: bool,
-        ) -> None:
-            captured.append(statement)
-
-        sync_engine = current_resources(broker).engine.sync_engine
-        event.listen(sync_engine, 'before_cursor_execute', capture_statement)
-        try:
-            result = await list_tasks(
-                broker,
-            window=_test_window(),
-                statuses=[],
-                task_names=[],
-                queues=[],
-                workers=[],
-                error_codes=[],
-                error_categories=[],
-                retried_only=False,
-                sort_by='enqueued_at',
-                sort_dir='desc',
-                page=TaskPage(offset=0, limit=50),
-            )
-        finally:
-            event.remove(sync_engine, 'before_cursor_execute', capture_statement)
+        with _StatementCapture(broker) as capture:
+            result = await _unfiltered_list(broker)
 
         assert is_ok(result)
-        list_statements = [
-            s for s in captured if 'FROM horsies_tasks' in s and 'ORDER BY' in s
-        ]
-        assert len(list_statements) == 1
-        statement = list_statements[0]
-        for excluded in ('input', 'task_options'):
-            assert f'horsies_tasks.{excluded}' not in statement
-        for included in ('task_name', 'enqueued_at', 'worker_hostname'):
-            assert f'horsies_tasks.{included}' in statement
+        assert len(capture.statements) == 1
+        assert 'horsies_monitoring_task_list(' in capture.statements[0]
+        returned = (
+            await session.execute(
+                text(
+                    'SELECT pg_get_function_result(p.oid) FROM pg_proc AS p '
+                    "WHERE p.proname = 'horsies_monitoring_task_list'"
+                )
+            )
+        ).scalar_one()
+        columns = {
+            column.strip().split(' ', 1)[0]
+            for column in str(returned).removeprefix('TABLE(').removesuffix(')').split(',')
+        }
+        assert 'task_name' in columns
+        assert not columns & {'input', 'task_options', 'result_payload', 'attempt_snapshot'}
 
 
 # --------------------------------------------------------------------------- #
@@ -3045,14 +3025,21 @@ class TestUnfilteredHistoryTotalContract:
     """The documented total contract holds on the history side.
 
     ``TaskListPage`` documents the unfiltered total as a planner
-    estimate; the live side branches on scope and the history side must
-    branch with it — estimate together, exact together. The proof is
-    the statements themselves: which ran, and which provably did not.
+    estimate: the live side and the history side estimate together, and
+    count exactly together when any filter is active. The function answers
+    which one it ran in its TOTALS row; the history estimate is EXPLAIN
+    text that ``list_tasks`` decodes, so the decode runs only for the
+    estimate.
     """
 
     async def test_unfiltered_total_estimates_and_never_counts_history(
-        self, broker: PostgresBroker, session: AsyncSession
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from horsies.monitoring import queries as queries_module
+
         await insert_rows(
             session,
             make_task(),
@@ -3065,24 +3052,29 @@ class TestUnfilteredHistoryTotalContract:
             text('ANALYZE horsies_tasks, horsies_task_history')
         )
         await session.commit()
+        decoded: list[object] = []
 
-        with _StatementCapture(broker) as capture:
-            result = await _unfiltered_list(broker)
+        def _decode(payload: object) -> int:
+            decoded.append(payload)
+            return plan_rows_from_explain(payload)
+
+        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', _decode)
+
+        result = await _unfiltered_list(broker)
 
         assert is_ok(result)
-        assert isinstance(result.ok_value.total, int)
-        assert any(
-            statement.startswith('EXPLAIN (FORMAT JSON)')
-            for statement in capture.statements
-        ), capture.statements
-        assert not any(
-            'count(*) FROM horsies_task_history' in statement
-            for statement in capture.statements
-        ), 'the unfiltered view must never run the exact history count'
+        assert len(decoded) == 1
+        assert str(decoded[0]).startswith('[')
+        assert result.ok_value.total == 2 + plan_rows_from_explain(decoded[0])
 
     async def test_filtered_total_counts_history_exactly(
-        self, broker: PostgresBroker, session: AsyncSession
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from horsies.monitoring import queries as queries_module
+
         await insert_rows(
             session,
             make_task(),
@@ -3091,32 +3083,28 @@ class TestUnfilteredHistoryTotalContract:
             make_task(status=TaskStatus.COMPLETED),
         )
 
-        with _StatementCapture(broker) as capture:
-            result = await list_tasks(
-                broker,
-                window=_test_window(),
-                statuses=[TaskStatus.COMPLETED],
-                task_names=[],
-                queues=[],
-                workers=[],
-                error_codes=[],
-                error_categories=[],
-                retried_only=False,
-                sort_by='enqueued_at',
-                sort_dir='desc',
-                page=TaskPage(offset=0, limit=50),
-            )
+        def _refuse(payload: object) -> int:
+            raise AssertionError('a filtered total is exact; no estimate may be decoded')
+
+        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', _refuse)
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[TaskStatus.COMPLETED],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='enqueued_at',
+            sort_dir='desc',
+            page=TaskPage(offset=0, limit=50),
+        )
 
         assert is_ok(result)
         assert result.ok_value.total == 3
-        assert any(
-            'count(*) FROM horsies_task_history' in statement
-            for statement in capture.statements
-        ), capture.statements
-        assert not any(
-            statement.startswith('EXPLAIN')
-            for statement in capture.statements
-        ), 'a filtered total is exact; no estimate statement may run'
 
     async def test_truncated_history_reports_zero_not_stale_estimate(
         self, broker: PostgresBroker, session: AsyncSession

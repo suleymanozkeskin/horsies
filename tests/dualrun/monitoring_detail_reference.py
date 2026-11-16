@@ -53,13 +53,13 @@ from horsies.monitoring.queries import (
     _is_uuid_text,
     _loop_limit_err,
     _node_error,
-    _task_spans,
     nz,
     span_s,
 )
+from tests.dualrun.monitoring_list_reference import _task_spans
 
 
-# The exact column set ``_leaf_task`` reads, loaded as ``_SUMMARY_COLUMNS``.
+# The exact column set ``_leaf_task`` reads (``_SUMMARY_COLUMNS`` of the list reference).
 _LEAF_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     TaskModel.id,
     TaskModel.task_name,

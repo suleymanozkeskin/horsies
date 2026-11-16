@@ -16,12 +16,13 @@ states:
 
 Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
 error. ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the
-reason the reads know. ``get_task_detail`` and ``get_workflow_node`` each
-send one statement, so the live read and the history read see the same
-rows.
+reason the reads know. ``get_task_detail``, ``get_workflow_node`` and
+``list_tasks`` each send one statement, so the live read and the history
+read see the same rows.
 
-Sort and group columns are resolved through allowlist mappings keyed by
-``Literal`` types, so no caller-supplied string reaches SQL.
+Sort keys and group columns are ``Literal`` types; each passes as a bound
+argument, and the monitoring function maps it to a fixed column text, so no
+caller-supplied string reaches SQL text.
 
 The live table holds no end time, error code, failed reason or result: a
 task moves to history when it ends. The live side reads these facts as NULL,
@@ -43,35 +44,20 @@ import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Any, Final, Literal, NamedTuple
+from typing import Final, Literal
 
 import psycopg
 
 from sqlalchemy import (
-    ColumnElement,
-    DateTime,
-    Interval,
-    Select,
-    SQLColumnExpression,
     TextClause,
-    cast,
-    false,
-    func,
-    null,
-    nulls_last,
-    select,
     text,
 )
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import BrokerResources, EventLoopLimit
-from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.tasks import (
-    BUILTIN_CODE_REGISTRY,
     Execution,
     ContractCode,
     OperationalErrorCode,
@@ -90,17 +76,7 @@ from horsies.core.history.archive.versions import (
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.logging import get_logger
 from horsies.core.history.reads.aggregates import (
-    HISTORY_NONEMPTY_PROBE_SQL,
-    HistoryScope,
-    history_count_statement,
-    history_estimate_statement,
     plan_rows_from_explain,
-)
-from horsies.core.history.reads.pages import (
-    HistoryPageQuery,
-    HistoryWindow,
-    history_page_statement,
-    history_sort_expression,
 )
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
@@ -171,44 +147,6 @@ type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 
 type SortDirection = Literal['asc', 'desc']
 
-# Sort key -> the expression it orders by, tagged with nullability.
-# ``queue_s`` and ``exec_s`` sort by the pure-SQL spans (dispatch->start,
-# start->finish) so the table can be triaged by where time is spent. A live
-# row's displayed duration counts up while its sort key stays NULL; that
-# divergence is intentional.
-#
-# ``nulls_last`` wraps only nullable expressions: on a NOT NULL column the
-# wrapper is semantically inert but changes the requested ordering
-# (DESC NULLS LAST) away from what a plain btree provides (DESC implies
-# NULLS FIRST), which blocks index-order scans. Measured at 1M rows: the
-# wrapper alone keeps the default sort on a full seq scan + top-N sort with
-# idx_horsies_tasks_enqueued_at present.
-class _SortKey(NamedTuple):
-    expression: SQLColumnExpression[Any]
-    nullable: bool
-
-
-# A live row has no end time, so the sort keys built on one are NULL for every
-# live row: the live side sorts them as NULL, after every history row.
-_LIVE_END_TIME: SQLColumnExpression[Any] = cast(null(), DateTime(timezone=True))
-_LIVE_EXECUTION_SPAN: SQLColumnExpression[Any] = cast(null(), Interval())
-
-_SORT_COLUMNS: dict[str, _SortKey] = {
-    'enqueued_at': _SortKey(TaskModel.enqueued_at, nullable=False),
-    'started_at': _SortKey(TaskModel.started_at, nullable=True),
-    'completed_at': _SortKey(_LIVE_END_TIME, nullable=True),
-    'failed_at': _SortKey(_LIVE_END_TIME, nullable=True),
-    'status': _SortKey(TaskModel.status, nullable=False),
-    'task_name': _SortKey(TaskModel.task_name, nullable=False),
-    'queue_name': _SortKey(TaskModel.queue_name, nullable=False),
-    'priority': _SortKey(TaskModel.priority, nullable=False),
-    'retry_count': _SortKey(TaskModel.retry_count, nullable=False),
-    'queue_s': _SortKey(
-        TaskModel.started_at - TaskModel.enqueued_at, nullable=True
-    ),
-    'exec_s': _SortKey(_LIVE_EXECUTION_SPAN, nullable=True),
-}
-
 # Display order for the status overview cards. Stable rather than
 # count-ordered, so cards never reorder as counts shift between polls.
 _STATUS_ORDER: tuple[TaskStatus, ...] = (
@@ -243,25 +181,6 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     **{member.value: ErrorCategory.RETRIEVAL for member in RetrievalCode},
     **{member.value: ErrorCategory.OUTCOME for member in OutcomeCode},
 }
-
-# The codes each built-in family selects when filtering, inverted from the
-# mapping above so a filter selects exactly the codes that mapping labels.
-_CATEGORY_TO_CODES: dict[ErrorCategory, tuple[str, ...]] = {
-    category: tuple(
-        code for code, member in _CODE_TO_CATEGORY.items() if member is category
-    )
-    for category in (
-        ErrorCategory.OPERATIONAL,
-        ErrorCategory.CONTRACT,
-        ErrorCategory.RETRIEVAL,
-        ErrorCategory.OUTCOME,
-    )
-}
-
-# Every code horsies defines. DOMAIN is the complement of this set, read from
-# core's registry rather than a copy, so a code added to the library leaves the
-# DOMAIN filter the moment it is registered.
-_BUILTIN_CODES: tuple[str, ...] = tuple(BUILTIN_CODE_REGISTRY)
 
 
 # --------------------------------------------------------------------------- #
@@ -378,11 +297,6 @@ def _contract_err(
 # --------------------------------------------------------------------------- #
 # Row -> model mappers
 # --------------------------------------------------------------------------- #
-def _task_spans(task: TaskModel) -> tuple[int | None, int | None]:
-    """``(queue_s, exec_s)`` for a live task row. See ``_live_spans``."""
-    return _live_spans(task.status, task.enqueued_at, task.started_at)
-
-
 def _live_spans(
     status: TaskStatus,
     enqueued_at: datetime | None,
@@ -397,106 +311,6 @@ def _live_spans(
     queue_s = span_s(enqueued_at, started_at, live=status in _QUEUEING_STATUSES)
     exec_s = span_s(started_at, None, live=status is TaskStatus.RUNNING)
     return queue_s, exec_s
-
-
-# The exact column set ``_task_summary`` reads. ``list_tasks`` loads only
-# these; the payload columns (input, task_options) stay unfetched, so a list
-# page never ships or detoasts task payloads. ``raiseload=True`` turns any
-# future access to an unlisted column into an immediate error instead of a
-# silent lazy load.
-_SUMMARY_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
-    TaskModel.id,
-    TaskModel.task_name,
-    TaskModel.queue_name,
-    TaskModel.priority,
-    TaskModel.status,
-    TaskModel.retry_count,
-    TaskModel.max_retries,
-    TaskModel.is_workflow_task,
-    TaskModel.worker_hostname,
-    TaskModel.claimed_by_worker_id,
-    TaskModel.enqueued_at,
-    TaskModel.started_at,
-)
-
-
-def _task_summary(task: TaskModel) -> TaskSummary:
-    """Map a live task row to its list-view shape.
-
-    A live row has no error code and no end time, so these read None.
-    """
-    queue_s, exec_s = _task_spans(task)
-    return TaskSummary(
-        id=task.id,
-        task_name=task.task_name,
-        queue_name=task.queue_name,
-        status=task.status.value,
-        priority=task.priority,
-        retry_count=task.retry_count,
-        max_retries=task.max_retries,
-        is_workflow_task=task.is_workflow_task,
-        error_code=None,
-        error_category=None,
-        worker_hostname=task.worker_hostname,
-        worker_id=task.claimed_by_worker_id,
-        enqueued_at=task.enqueued_at,
-        started_at=task.started_at,
-        completed_at=None,
-        failed_at=None,
-        queue_s=queue_s,
-        exec_s=exec_s,
-    )
-
-
-def _history_summary(row: Any) -> TaskSummary:
-    """Map one history page row to the list-view shape."""
-    status = str(row.status)
-    completed_at = row.terminal_at if status == 'COMPLETED' else None
-    failed_at = row.terminal_at if status != 'COMPLETED' else None
-    return TaskSummary(
-        id=str(row.task_id),
-        task_name=row.task_name,
-        queue_name=row.queue_name,
-        status=status,
-        priority=row.priority,
-        retry_count=row.retry_count,
-        max_retries=row.max_retries,
-        is_workflow_task=row.is_workflow_task,
-        error_code=nz(row.error_code),
-        error_category=_category_value(row.error_code),
-        worker_hostname=row.last_worker_hostname,
-        worker_id=row.last_claimed_worker_id,
-        enqueued_at=row.enqueued_at,
-        started_at=row.started_at,
-        completed_at=completed_at,
-        failed_at=failed_at,
-        queue_s=span_s(
-            row.enqueued_at, row.started_at or row.terminal_at, live=False
-        ),
-        exec_s=span_s(row.started_at, row.terminal_at, live=False),
-    )
-
-
-def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
-    """The merge key for one allowlisted sort field.
-
-    ``queue_s``/``exec_s`` mirror the pure-SQL sort expressions
-    (start - enqueue, terminal end - start), not the displayed spans: a
-    live row's displayed duration counts up while its sort key stays
-    NULL, exactly as the SQL side orders.
-    """
-    match field:
-        case 'queue_s':
-            if summary.started_at is None or summary.enqueued_at is None:
-                return None
-            return summary.started_at - summary.enqueued_at
-        case 'exec_s':
-            end = summary.completed_at or summary.failed_at
-            if end is None or summary.started_at is None:
-                return None
-            return end - summary.started_at
-        case _:
-            return getattr(summary, field)
 
 
 def _node_exec_s(
@@ -520,80 +334,6 @@ def _node_exec_s(
             return elapsed_s(started_at, completed_at)
         case _:
             return None
-
-
-# --------------------------------------------------------------------------- #
-# Filter assembly
-# --------------------------------------------------------------------------- #
-def _history_scope(
-    *,
-    statuses: list[TaskStatus],
-    task_names: list[str],
-    queues: list[str],
-    workers: list[str],
-    error_codes: list[str],
-    error_categories: list[ErrorCategory],
-    retried_only: bool,
-) -> HistoryScope:
-    """The live filter set expressed in history-primitive terms.
-
-    Taxonomy families resolve to their code lists here — the primitive
-    carries codes, never the taxonomy — and DOMAIN becomes the
-    complement of every built-in code, exactly the live predicate's
-    semantics.
-    """
-    families: list[tuple[str, ...]] = []
-    domain_complement: tuple[str, ...] | None = None
-    for category in error_categories:
-        if category is ErrorCategory.DOMAIN:
-            domain_complement = _BUILTIN_CODES
-        else:
-            families.append(_CATEGORY_TO_CODES[category])
-    return HistoryScope(
-        statuses=tuple(status.value for status in statuses),
-        task_names=tuple(task_names),
-        queue_names=tuple(queues),
-        workers=tuple(workers),
-        error_codes=tuple(error_codes),
-        category_families=tuple(families),
-        domain_complement=domain_complement,
-        retried_only=retried_only,
-    )
-
-
-def _scope_conditions(
-    *,
-    statuses: list[TaskStatus],
-    task_names: list[str],
-    queues: list[str],
-    workers: list[str],
-    error_codes: list[str],
-    error_categories: list[ErrorCategory],
-    retried_only: bool,
-) -> list[ColumnElement[bool]]:
-    """Build the live-table WHERE conditions for the given task filters.
-
-    Each dimension is multi-select: values within a dimension are OR-combined
-    and dimensions are AND-combined. An empty list means no filter on that
-    dimension. ``error_codes`` and ``error_categories`` select by error code,
-    and a live row has none, so either filter selects no live row; the
-    history side applies them (``_history_scope``). ``retried_only`` keeps
-    only tasks retried at least once.
-    """
-    conditions: list[ColumnElement[bool]] = []
-    if statuses:
-        conditions.append(TaskModel.status.in_(statuses))
-    if task_names:
-        conditions.append(TaskModel.task_name.in_(task_names))
-    if queues:
-        conditions.append(TaskModel.queue_name.in_(queues))
-    if workers:
-        conditions.append(TaskModel.claimed_by_worker_id.in_(workers))
-    if error_codes or error_categories:
-        conditions.append(false())
-    if retried_only:
-        conditions.append(TaskModel.retry_count > 0)
-    return conditions
 
 
 # --------------------------------------------------------------------------- #
@@ -988,100 +728,132 @@ async def task_breakdown(
     return Ok(_breakdown(group_by, rows))
 
 
-def list_rows_statement(
-    *,
-    scope: list[ColumnElement[bool]],
-    sort_by: TaskSortField,
-    sort_dir: SortDirection,
-    offset: int,
-    limit: int,
-) -> Select[tuple[TaskModel]]:
-    """The list page's row statement.
-
-    Separated from ``list_tasks`` so the plan tests EXPLAIN exactly the
-    statement production executes — ordering form and projection included.
-    ``nulls_last`` wraps only nullable sort keys (see ``_SortKey``). Rows
-    of one sort value come by task id, ascending in both directions.
-    """
-    sort_key = _SORT_COLUMNS[sort_by]
-    directed = (
-        sort_key.expression.asc()
-        if sort_dir == 'asc'
-        else sort_key.expression.desc()
+# Rows come ordered by row_position: the TOTALS row (0), then the page rows.
+_TASK_LIST_SQL = text("""
+    SELECT row_kind, row_position, total_kind, live_total, history_total,
+           history_estimate_plan, location, task_id, task_name, queue_name,
+           priority, status, retry_count, max_retries, is_workflow_task,
+           error_code, worker_id, worker_hostname, enqueued_at, started_at,
+           terminal_at
+    FROM horsies_monitoring_task_list(
+        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
+        CAST(:statuses AS text[]), CAST(:task_names AS text[]),
+        CAST(:queue_names AS text[]), CAST(:worker_ids AS text[]),
+        CAST(:error_codes AS text[]), CAST(:error_categories AS text[]),
+        CAST(:retried_only AS boolean),
+        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[]),
+        CAST(:sort_key AS text), CAST(:sort_direction AS text),
+        CAST(:page_offset AS integer), CAST(:page_limit AS integer)
     )
-    ordering = nulls_last(directed) if sort_key.nullable else directed
-    return (
-        select(TaskModel)
-        .options(load_only(*_SUMMARY_COLUMNS, raiseload=True))
-        .where(*scope)
-        .order_by(ordering, TaskModel.id.asc())
-        .limit(limit)
-        .offset(offset)
+    ORDER BY row_position
+""")
+
+
+def _sort_direction(sort_dir: SortDirection) -> str:
+    """The sort direction as ``horsies_monitoring_task_list`` takes it."""
+    match sort_dir:
+        case 'asc':
+            return 'ASC'
+        case 'desc':
+            return 'DESC'
+
+
+def _list_total(row: RowMapping) -> int:
+    """The total of the TOTALS row.
+
+    ``EXACT``: the two counts. ``ESTIMATE_HISTORY_EMPTY``: the live
+    estimate (the history table has no row). ``ESTIMATE_HISTORY_PLAN``: the
+    live estimate plus the planner's row estimate of the history window.
+
+    Raises:
+        HistoryContractError: the EXPLAIN text of the history estimate does
+            not carry a top plan row estimate.
+    """
+    assert _column(row, 'row_kind', str) == 'TOTALS', row['row_kind']
+    live_total = _column(row, 'live_total', int)
+    match _column(row, 'total_kind', str):
+        case 'EXACT' | 'ESTIMATE_HISTORY_EMPTY':
+            return live_total + _column(row, 'history_total', int)
+        case 'ESTIMATE_HISTORY_PLAN':
+            return live_total + plan_rows_from_explain(
+                _column(row, 'history_estimate_plan', str),
+            )
+        case other:
+            raise AssertionError(f'task list total kind {other!r} is not known')
+
+
+def _live_list_row(row: RowMapping) -> TaskSummary:
+    """A LIVE page row: no error code and no end time."""
+    task_id = _column(row, 'task_id', str)
+    stored_status = _column(row, 'status', str)
+    status = _STATUS_BY_VALUE.get(stored_status)
+    assert status is not None, f'live task {task_id} has status {stored_status!r}'
+    enqueued_at = _column(row, 'enqueued_at', datetime)
+    started_at = _optional_time(row, 'started_at')
+    queue_s, exec_s = _live_spans(status, enqueued_at, started_at)
+    return TaskSummary(
+        id=task_id,
+        task_name=_column(row, 'task_name', str),
+        queue_name=_column(row, 'queue_name', str),
+        status=status.value,
+        priority=_column(row, 'priority', int),
+        retry_count=_column(row, 'retry_count', int),
+        max_retries=_column(row, 'max_retries', int),
+        is_workflow_task=_column(row, 'is_workflow_task', bool),
+        error_code=None,
+        error_category=None,
+        worker_hostname=_optional_text(row, 'worker_hostname'),
+        worker_id=_optional_text(row, 'worker_id'),
+        enqueued_at=enqueued_at,
+        started_at=started_at,
+        completed_at=None,
+        failed_at=None,
+        queue_s=queue_s,
+        exec_s=exec_s,
     )
 
 
-# Planner row estimate for the unfiltered task count. ``reltuples`` is
-# refreshed by VACUUM / ANALYZE / autovacuum; -1 means the table was never
-# sampled.
-_ESTIMATED_TOTAL_SQL = text(
-    'SELECT reltuples::bigint FROM pg_class WHERE oid = cast(:tablename AS regclass)'
-)
+def _history_list_row(row: RowMapping) -> TaskSummary:
+    """A HISTORY page row: the stored status text, and the terminal time as
+    ``completed_at`` for COMPLETED, else as ``failed_at``."""
+    status = _column(row, 'status', str)
+    terminal_at = _column(row, 'terminal_at', datetime)
+    enqueued_at = _column(row, 'enqueued_at', datetime)
+    started_at = _optional_time(row, 'started_at')
+    error_code = _optional_text(row, 'error_code')
+    completed = status == TaskStatus.COMPLETED.value
+    return TaskSummary(
+        id=_column(row, 'task_id', str),
+        task_name=_column(row, 'task_name', str),
+        queue_name=_column(row, 'queue_name', str),
+        status=status,
+        priority=_column(row, 'priority', int),
+        retry_count=_column(row, 'retry_count', int),
+        max_retries=_column(row, 'max_retries', int),
+        is_workflow_task=_column(row, 'is_workflow_task', bool),
+        error_code=nz(error_code),
+        error_category=_category_value(error_code),
+        worker_hostname=_optional_text(row, 'worker_hostname'),
+        worker_id=_optional_text(row, 'worker_id'),
+        enqueued_at=enqueued_at,
+        started_at=started_at,
+        completed_at=terminal_at if completed else None,
+        failed_at=None if completed else terminal_at,
+        queue_s=span_s(enqueued_at, started_at or terminal_at, live=False),
+        exec_s=span_s(started_at, terminal_at, live=False),
+    )
 
 
-async def _estimated_task_total(session: AsyncSession) -> int:
-    """Estimated row count of ``horsies_tasks``; exact only when unsampled.
-
-    Falls back to an exact count when the estimate is -1 (never sampled) —
-    the one case where the estimate carries no information.
-    """
-    estimate: int = (
-        await session.execute(
-            _ESTIMATED_TOTAL_SQL, {'tablename': TaskModel.__tablename__}
-        )
-    ).scalar_one()
-    if estimate >= 0:
-        return estimate
-    exact: int = (
-        await session.execute(select(func.count()).select_from(TaskModel))
-    ).scalar_one()
-    return exact
-
-
-async def _estimated_history_total(
-    session: AsyncSession,
-    window: HistoryWindow,
-    scope: HistoryScope,
-) -> int:
-    """Planner row estimate for the windowed history side.
-
-    The history sibling of ``_estimated_task_total``, by a different
-    mechanism: ``reltuples`` is whole-relation and the history side is
-    always window-scoped, so the estimate is the planner's own — EXPLAIN
-    over exactly the predicate the exact count would run. A provably
-    empty parent reports zero before any estimate: the planner clamps
-    every scanned relation to at least one row, so its figure there is
-    clamp noise, not information (the sibling of the live arm's
-    ``reltuples = -1`` rule). A payload the decoder does not recognize
-    raises ``HistoryContractError``; ``list_tasks`` returns it as
-    ``MonitoringQueryHistoryContractViolation``, never a silent exact
-    fallback.
-    """
-    nonempty = (
-        await session.execute(text(HISTORY_NONEMPTY_PROBE_SQL))
-    ).scalar_one()
-    if not bool(nonempty):
-        return 0
-    estimate_sql, estimate_params = history_estimate_statement(window, scope)
-    payload = (
-        await session.execute(text(estimate_sql), estimate_params)
-    ).scalar_one()
-    return plan_rows_from_explain(payload)
-
-
-# The side rank of the merged task list: on one sort value a live row comes
-# before a history row, in both directions.
-_LIVE_RANK: Final = 0
-_HISTORY_RANK: Final = 1
+def _list_row(row: RowMapping) -> TaskSummary:
+    """One TASK row of ``horsies_monitoring_task_list``, by its location."""
+    assert _column(row, 'row_kind', str) == 'TASK', row['row_kind']
+    match _column(row, 'location', str):
+        case 'LIVE':
+            return _live_list_row(row)
+        case 'HISTORY':
+            return _history_list_row(row)
+        case other:
+            raise AssertionError(f'task list location {other!r} is not LIVE or HISTORY')
 
 
 async def list_tasks(
@@ -1107,55 +879,36 @@ async def list_tasks(
     (an exact count would rescan the table on every poll for a number the
     UI only uses to size the pager).
 
-    Order: the sort value (NULL last in both directions), then a live row
-    before a history row, then the task id ascending. The order is total,
-    so a page does not reorder between polls.
-    """
-    scope = _scope_conditions(
-        statuses=statuses,
-        task_names=task_names,
-        queues=queues,
-        workers=workers,
-        error_codes=error_codes,
-        error_categories=error_categories,
-        retried_only=retried_only,
-    )
-    # Each side over-fetches the page's reach (offset + limit) sorted
-    # by the SAME key, and the merge re-sorts and slices — correct for
-    # any page within the capped reach, with cost bounded by the caps.
-    reach = page.reach
-    rows_stmt = list_rows_statement(
-        scope=scope,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-        offset=0,
-        limit=reach,
-    )
-    history_scope = _history_scope(
-        statuses=statuses,
-        task_names=task_names,
-        queues=queues,
-        workers=workers,
-        error_codes=error_codes,
-        error_categories=error_categories,
-        retried_only=retried_only,
-    )
-    page_sql, page_params = history_page_statement(
-        HistoryPageQuery(
-            window=window.history,
-            limit=reach,
-            offset=0,
-            scope=history_scope,
-            order_by=(
-                f'{history_sort_expression(sort_by, descending=sort_dir == "desc")}, '
-                'task_id ASC'
-            ),
-        )
-    )
-    count_sql, count_params = history_count_statement(
-        window.history, history_scope
-    )
+    Order: the sort value in the database collation (NULL last in both
+    directions), then a live row before a history row, then the task id
+    ascending. The order is total, so a page does not reorder between
+    polls.
 
+    Outcomes:
+        - ``Ok(TaskListPage)``: the page rows and the total.
+        - ``Err(MonitoringQueryHistoryContractViolation)``: the EXPLAIN text
+          of the unfiltered history estimate does not decode.
+        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed.
+        - ``Err(MonitoringQueryEventLoopLimit)``: nothing ran.
+
+    One statement (``horsies_monitoring_task_list``), so the page and the
+    total read one snapshot: a task that moves to history during the read is
+    on the page once or not at all.
+    """
+    parameters = _scope_parameters(
+        window,
+        statuses=statuses,
+        task_names=task_names,
+        queues=queues,
+        workers=workers,
+        error_codes=error_codes,
+        error_categories=error_categories,
+        retried_only=retried_only,
+    )
+    parameters['sort_key'] = sort_by
+    parameters['sort_direction'] = _sort_direction(sort_dir)
+    parameters['page_offset'] = page.offset
+    parameters['page_limit'] = page.limit
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task list query', loop_limit)
@@ -1163,59 +916,19 @@ async def list_tasks(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            # Both sides follow the documented total contract together:
-            # filters active means exact on both, the unfiltered view is
-            # a planner estimate on both. The branch is on ``scope`` —
-            # the history statements' terminal-domain predicate is not a
-            # filter.
-            match scope:
-                case []:
-                    live_total = await _estimated_task_total(session)
-                    history_total = await _estimated_history_total(
-                        session, window.history, history_scope
-                    )
-                case _:
-                    count_stmt = (
-                        select(func.count()).select_from(TaskModel).where(*scope)
-                    )
-                    live_total = (
-                        await session.execute(count_stmt)
-                    ).scalar_one()
-                    history_total = int(
-                        (
-                            await session.execute(
-                                text(count_sql), count_params
-                            )
-                        ).scalar_one()
-                    )
-            tasks = (await session.execute(rows_stmt)).scalars().all()
-            history_rows = (
-                await session.execute(text(page_sql), page_params)
-            ).all()
+        rows = await _call_function(resources, _TASK_LIST_SQL, parameters)
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
+    match rows:
+        case [totals_row, *task_rows]:
+            pass
+        case _:
+            raise AssertionError('the task list function answered no TOTALS row')
+    try:
+        total = _list_total(totals_row)
     except HistoryContractError as exc:
         return _contract_err('task list estimate decode', exc)
-
-    ranked = [(_LIVE_RANK, _task_summary(task)) for task in tasks]
-    ranked.extend((_HISTORY_RANK, _history_summary(row)) for row in history_rows)
-    # The tie order first, then a stable sort on the value: rows of one
-    # value keep LIVE before HISTORY and the task id ascending in both
-    # directions.
-    ranked.sort(key=lambda pair: (pair[0], pair[1].id))
-    keyed = [
-        (_summary_sort_value(summary, sort_by), summary)
-        for _, summary in ranked
-    ]
-    non_null = [pair for pair in keyed if pair[0] is not None]
-    nulls = [summary for value, summary in keyed if value is None]
-    non_null.sort(key=lambda pair: pair[0], reverse=sort_dir == 'desc')
-    # Nulls last in BOTH directions, matching the live SQL's
-    # nulls_last discipline.
-    ordered = [summary for _, summary in non_null] + nulls
-    rows = ordered[page.offset : page.reach]
-    return Ok(TaskListPage(rows=rows, total=live_total + history_total))
+    return Ok(TaskListPage(rows=[_list_row(row) for row in task_rows], total=total))
 
 
 # The detail columns that the task detail and the workflow node functions

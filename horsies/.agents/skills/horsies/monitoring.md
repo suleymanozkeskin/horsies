@@ -210,6 +210,11 @@ bounds is a defect and raises `AssertionError`.
 active, a planner estimate on the unfiltered view.** Do not present an
 unfiltered total as an exact count.
 
+`list_tasks` orders by the sort key in the database collation (NULL keys
+last in both directions), then a live task before an ended task with the
+same value, then the task id ascending. The order is total, so a page does
+not reorder between polls.
+
 ## Task Actions — `cancel_task`
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->

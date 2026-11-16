@@ -124,3 +124,57 @@ def node_row(task_index: int, detail: Mapping[str, object] | None, **columns: ob
             row['node_task_id'] = detail['task_id']
     row.update(columns)
     return row
+
+
+def list_totals_row(
+    kind: str,
+    *,
+    live_total: int,
+    history_total: int | None,
+    plan: str | None = None,
+) -> dict[str, object]:
+    """The TOTALS row (position 0) of the task list function."""
+    row: dict[str, object] = {name: None for name in list_task_row('LIVE', 'unused')}
+    row.update(
+        row_kind='TOTALS',
+        row_position=0,
+        total_kind=kind,
+        live_total=live_total,
+        history_total=history_total,
+        history_estimate_plan=plan,
+    )
+    return row
+
+
+def list_task_row(location: str, task_id: str, **columns: object) -> dict[str, object]:
+    """A TASK row of the task list function; ``columns`` replace columns.
+
+    A LIVE row is PENDING with no end time; a HISTORY row is COMPLETED at
+    ``DETAIL_TIME``.
+    """
+    history = location == 'HISTORY'
+    row: dict[str, object] = {
+        'row_kind': 'TASK',
+        'row_position': 1,
+        'total_kind': None,
+        'live_total': None,
+        'history_total': None,
+        'history_estimate_plan': None,
+        'location': location,
+        'task_id': task_id,
+        'task_name': 'unit.task',
+        'queue_name': 'default',
+        'priority': 100,
+        'status': 'COMPLETED' if history else 'PENDING',
+        'retry_count': 0,
+        'max_retries': 0,
+        'is_workflow_task': False,
+        'error_code': None,
+        'worker_id': None,
+        'worker_hostname': None,
+        'enqueued_at': DETAIL_TIME,
+        'started_at': None,
+        'terminal_at': DETAIL_TIME if history else None,
+    }
+    row.update(columns)
+    return row
