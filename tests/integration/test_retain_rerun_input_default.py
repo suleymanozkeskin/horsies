@@ -10,6 +10,7 @@ the cutover backfill later consults, so policy has exactly one owner.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import SecretStr
@@ -48,6 +49,7 @@ async def _enqueue(
         'policy.task',
         task_id=task_id,
         enqueue_sha='b' * 64,
+        sent_at=datetime.now(timezone.utc),
         args_json='[]',
         kwargs_json='{}',
         retain_rerun_input=retain,

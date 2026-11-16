@@ -709,6 +709,7 @@ class TestEnqueueAsync:
             'default',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             args_json='[]',
             kwargs_json='{"key": "val"}',
         )
@@ -759,6 +760,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options=task_options,
         )
 
@@ -782,6 +784,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options='NOT_VALID_JSON{{',
         )
 
@@ -804,6 +807,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options='{"x":1e9999}',
         )
 
@@ -827,6 +831,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json=r'{"x":"\ud800"}',
         )
 
@@ -851,6 +856,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json='{"x":' + '[' * 1_100 + ']' * 1_100 + '}',
         )
 
@@ -875,6 +881,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json='{"x":1e9999}',
         )
 
@@ -899,6 +906,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             enqueued_at=datetime.now(timezone.utc),
             enqueue_delay_seconds=30,
         )
@@ -923,6 +931,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             args_json='NOT_VALID_JSON{{',
         )
 
@@ -947,6 +956,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             good_until=expiry,
         )
 
@@ -965,6 +975,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options=task_options,
         )
 
@@ -989,6 +1000,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options=task_options,
         )
 
@@ -1242,6 +1254,7 @@ class TestEnqueueIdempotency:
             'my_task',
             task_id='dup-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )
 
         assert is_err(result)
@@ -1275,6 +1288,7 @@ class TestEnqueueIdempotency:
             'my_task',
             task_id='dup-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )
 
         assert is_err(result)
@@ -2900,6 +2914,7 @@ class TestSyncFacades:
             'queue',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json='{"k": "v"}',
             priority=50,
         )
@@ -3434,6 +3449,7 @@ class TestEnqueueAsyncErrorPaths:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )
 
         assert is_err(result)
@@ -3845,7 +3861,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', args_json=args_json,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), args_json=args_json,
         )
 
         assert is_err(result)
@@ -3859,7 +3875,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', kwargs_json=kwargs_json,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), kwargs_json=kwargs_json,
         )
 
         assert is_err(result)
@@ -3872,7 +3888,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', kwargs_json='"secret-value"',
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), kwargs_json='"secret-value"',
         )
 
         assert is_err(result)
@@ -3895,7 +3911,11 @@ class TestEnqueueInputRefusal:
         self, overrides: dict[str, Any],
     ) -> None:
         wiring = _DatabaseMustNotRun()
-        values: dict[str, Any] = {'task_name': 'my_task', 'queue_name': 'default'}
+        values: dict[str, Any] = {
+            'task_name': 'my_task',
+            'queue_name': 'default',
+            'sent_at': datetime.now(timezone.utc),
+        }
         values.update(overrides)
 
         result = await wiring.broker.enqueue_async(
@@ -3923,7 +3943,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', idempotency_key=key,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), idempotency_key=key,
         )
 
         assert is_err(result)
@@ -3938,12 +3958,16 @@ class TestEnqueueInputRefusal:
     @pytest.mark.parametrize('field', ['sent_at', 'enqueued_at'])
     async def test_naive_instant_is_refused(self, field: str) -> None:
         wiring = _DatabaseMustNotRun()
+        instants: dict[str, datetime] = {
+            'sent_at': datetime.now(timezone.utc),
+            field: datetime(2020, 1, 1),
+        }
 
         result = await wiring.broker.enqueue_async(
             'my_task',
             task_id='t',
             enqueue_sha='s',
-            **{field: datetime(2020, 1, 1)},
+            **instants,
         )
 
         assert is_err(result)
@@ -3989,7 +4013,7 @@ class TestEnqueueInputRefusal:
         )
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', priority=0,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), priority=0,
         )
 
         assert is_err(result)
@@ -4002,7 +4026,7 @@ class TestEnqueueInputRefusal:
         wiring.broker._ensure_initialized = AsyncMock()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', task_options='{bad',
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), task_options='{bad',
         )
 
         assert is_err(result)
@@ -4039,6 +4063,7 @@ class TestEnqueueAcceptedInput:
             'my_task',
             task_id='t',
             enqueue_sha='s',
+            sent_at=datetime.now(timezone.utc),
             args_json=args_json,
             kwargs_json=kwargs_json,
             retain_rerun_input=True,
@@ -4085,7 +4110,7 @@ class TestEnqueueCatch:
         state = RuntimeError(message)
         broker._ensure_initialized = AsyncMock(side_effect=state)
 
-        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -4120,7 +4145,7 @@ class TestEnqueueCatch:
         _set_resources(broker, engine=engine)
         conn.execute = AsyncMock(side_effect=error)
 
-        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -4142,7 +4167,7 @@ class TestEnqueueCatch:
             AsyncMock(side_effect=refusal),
         ):
             result = await broker.enqueue_async(
-                'my_task', task_id='t', enqueue_sha='s', idempotency_key='key',
+                'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), idempotency_key='key',
             )
 
         assert is_err(result)
@@ -4160,7 +4185,7 @@ class TestEnqueueCatch:
         conn.execute = AsyncMock(side_effect=TypeError('defect'))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+            await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc))
 
     @pytest.mark.asyncio
     async def test_defect_in_the_keyed_write_crashes_loud(self) -> None:
@@ -4171,7 +4196,7 @@ class TestEnqueueCatch:
 
         with pytest.raises(TypeError, match='defect'):
             await broker.enqueue_async(
-                'my_task', task_id='t', enqueue_sha='s', idempotency_key='key',
+                'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), idempotency_key='key',
             )
 
     @pytest.mark.asyncio
@@ -4183,4 +4208,4 @@ class TestEnqueueCatch:
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async('my_task', task_id='dup', enqueue_sha='s')
+            await broker.enqueue_async('my_task', task_id='dup', enqueue_sha='s', sent_at=datetime.now(timezone.utc))

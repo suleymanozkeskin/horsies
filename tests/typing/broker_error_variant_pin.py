@@ -19,7 +19,7 @@ and sync-call errors. Passing an operation error to it must fail.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import assert_never
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -113,10 +113,10 @@ def owner_only_on_the_conflict(
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
     declared: Result[str, BrokerEnqueueError] = await broker.enqueue_async(
-        'report', task_id='task-1', enqueue_sha='sha',
+        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha'):
+    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -129,10 +129,10 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
     declared: Result[str, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
-        'report', task_id='task-1', enqueue_sha='sha',
+        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha'):
+    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):

@@ -616,6 +616,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         queue_name='low',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
         priority=100,
         enqueued_at=enqueue_base,
     )).unwrap()
@@ -626,6 +627,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         queue_name='high',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
         priority=1,
         enqueued_at=enqueue_base + timedelta(milliseconds=50),
     )).unwrap()
@@ -683,6 +685,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
         good_until=expiry,
     )).unwrap()
 
@@ -721,6 +724,7 @@ async def test_task_completes_before_expiry(
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
         good_until=expiry,
     )).unwrap()
 
@@ -750,6 +754,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
         good_until=past,
     )).unwrap()
 
@@ -790,6 +795,7 @@ async def test_retry_blocked_by_good_until_expiry(
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
         good_until=good_until,
         task_options=task_options,
     )).unwrap()
@@ -838,6 +844,7 @@ async def test_retry_succeeds_within_good_until(
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             good_until=good_until,
             task_options=task_options,
         )).unwrap()
@@ -876,6 +883,7 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
     ).unwrap()
 
     with run_worker(
@@ -923,6 +931,7 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
     ).unwrap()
 
     # Wait with very short timeout - task never completes
@@ -1062,6 +1071,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        sent_at=datetime.now(timezone.utc),
     )).unwrap()
 
     # Cancel directly in DB (no cancel API exists)

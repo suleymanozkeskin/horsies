@@ -227,8 +227,7 @@ _ENQUEUE_WRITE_ERRORS: Final = (*_DRIVER_ERRORS, HistoryContractError)
 class _PreparedEnqueue:
     """The checked input of one enqueue. Only the database can refuse it now.
 
-    ``sent_at`` is the call-site instant the row stores: the caller's, else
-    the time of this preparation.
+    ``sent_at`` is the caller's call-site instant, which the row stores.
     """
 
     insert_params: dict[str, Any]
@@ -315,7 +314,7 @@ _SENT_AT_FUTURE_TOLERANCE: Final = timedelta(seconds=5)
 
 def _check_enqueue_timing(
     *,
-    sent_at: datetime | None,
+    sent_at: datetime,
     enqueued_at: datetime | None,
     enqueue_delay_seconds: int | None,
 ) -> Result[None, BrokerInvalidInput]:
@@ -339,8 +338,7 @@ def _check_enqueue_timing(
                 exception=NoCause(),
             ))
     if (
-        sent_at is not None
-        and sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
+        sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
         and enqueued_at is None
         and enqueue_delay_seconds is None
     ):
@@ -1644,7 +1642,7 @@ class PostgresBroker:
         priority: int,
         args_json: str | None,
         kwargs_json: str | None,
-        sent_at: Optional[datetime],
+        sent_at: datetime,
         enqueued_at: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         good_until: Optional[datetime],
@@ -1707,7 +1705,6 @@ class PostgresBroker:
                     message=f'idempotency key refused for {task_name}: {exc}',
                     exception=exc,
                 ))
-        call_site_sent_at = sent_at or datetime.now(timezone.utc)
         return Ok(_PreparedEnqueue(
             insert_params=PostgresBroker._enqueue_insert_params(
                 task_id=task_id,
@@ -1715,7 +1712,7 @@ class PostgresBroker:
                 queue_name=queue_name,
                 priority=priority,
                 stored_input=stored_input,
-                call_site_sent_at=call_site_sent_at,
+                call_site_sent_at=sent_at,
                 enqueued_at=enqueued_at,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
@@ -1728,7 +1725,7 @@ class PostgresBroker:
                 retain_rerun_input=retain_rerun_input,
             ),
             command_fingerprint=command_fingerprint,
-            sent_at=call_site_sent_at,
+            sent_at=sent_at,
             scoped_key_digest=scoped_key_digest,
         ))
 
@@ -1792,7 +1789,7 @@ class PostgresBroker:
         args_json: str | None = None,
         kwargs_json: str | None = None,
         priority: int = 100,
-        sent_at: Optional[datetime] = None,
+        sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
@@ -1804,9 +1801,11 @@ class PostgresBroker:
         """Write one PENDING task row, or answer the send that wrote it.
 
         The row stores ``kwargs_json`` as its ``input`` (``{}`` when there
-        are none) and the version-1 command fingerprint of the send.
-        ``enqueue_sha`` is not stored and not compared: the exact-id resend
-        check reads the stored command fingerprint and ``sent_at``.
+        are none), the version-1 command fingerprint of the send and
+        ``sent_at``, the call time of the send. A send that repeats a task id
+        is the same send only when the stored fingerprint and ``sent_at``
+        are equal; a resend passes the ``sent_at`` of the first send.
+        ``enqueue_sha`` is not stored and not compared.
         """
         match await self.select_resources():
             case Err(loop_limit):
@@ -3667,7 +3666,7 @@ class PostgresBroker:
         args_json: str | None,
         kwargs_json: str | None,
         priority: int,
-        sent_at: Optional[datetime],
+        sent_at: datetime,
         enqueued_at: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         good_until: Optional[datetime],
@@ -3765,7 +3764,7 @@ class PostgresBroker:
         args_json: str | None = None,
         kwargs_json: str | None = None,
         priority: int = 100,
-        sent_at: Optional[datetime] = None,
+        sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
