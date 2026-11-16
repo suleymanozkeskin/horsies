@@ -170,7 +170,7 @@ fn variant_value(attrs: &[Attribute]) -> syn::Result<Option<String>> {
 }
 
 /// The `///` lines of an item, one leading space removed, joined by newlines.
-fn doc_text(attrs: &[Attribute]) -> String {
+pub(crate) fn doc_text(attrs: &[Attribute]) -> String {
     let lines: Vec<String> = attrs
         .iter()
         .filter(|attr| attr.path().is_ident("doc"))
@@ -193,7 +193,7 @@ fn doc_text(attrs: &[Attribute]) -> String {
 
 /// serde's SCREAMING_SNAKE_CASE rule for a variant name: an underscore
 /// before each uppercase letter but the first, then all uppercase.
-fn screaming_snake_case(variant: &str) -> String {
+pub(crate) fn screaming_snake_case(variant: &str) -> String {
     let mut out = String::with_capacity(variant.len() + 8);
     for (position, character) in variant.char_indices() {
         if position > 0 && character.is_uppercase() {

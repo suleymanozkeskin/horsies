@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{mask_database_url, PostgresConfig};
+use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
 
 /// The one manifest version this core reads.
 pub const PRODUCER_MANIFEST_VERSION: u32 = 1;
@@ -25,10 +26,10 @@ pub const MAX_POOL_CONNECTIONS: u32 = 10_000;
 pub const MAX_RESERVATION_WINDOW_SECONDS: u32 = 30 * 24 * 60 * 60;
 
 /// The manifest of a process that sends tasks and reads their state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProducerManifest {
-    /// Always [`PRODUCER_MANIFEST_VERSION`].
+    /// Always `PRODUCER_MANIFEST_VERSION`, the one version this core reads.
     pub manifest_version: ManifestVersion,
     pub database: DatabaseManifest,
     pub schema: SchemaMode,
@@ -70,8 +71,16 @@ impl From<ManifestVersion> for u32 {
     }
 }
 
+impl ManifestValue for ManifestVersion {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "MANIFEST_VERSION",
+        min: PRODUCER_MANIFEST_VERSION as u64,
+        max: PRODUCER_MANIFEST_VERSION as u64,
+    });
+}
+
 /// Connection settings of the main pool and the session pool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseManifest {
     pub database_url: DatabaseUrl,
@@ -90,7 +99,7 @@ pub struct DatabaseManifest {
 }
 
 /// Where the session pool (schema work, LISTEN/NOTIFY) connects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SessionDatabase {
     /// The session pool uses `database_url`.
@@ -109,6 +118,10 @@ impl DatabaseUrl {
     pub fn expose(&self) -> &str {
         &self.0
     }
+}
+
+impl ManifestValue for DatabaseUrl {
+    const PYTHON: PythonValue = PythonValue::Str;
 }
 
 impl std::fmt::Debug for DatabaseUrl {
@@ -150,6 +163,14 @@ impl From<PoolConnections> for u32 {
     }
 }
 
+impl ManifestValue for PoolConnections {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "POOL_CONNECTIONS",
+        min: 0,
+        max: MAX_POOL_CONNECTIONS as u64,
+    });
+}
+
 /// A duration in whole seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -161,8 +182,18 @@ impl WholeSeconds {
     }
 }
 
+impl ManifestValue for WholeSeconds {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "WHOLE_SECONDS",
+        min: 0,
+        max: u32::MAX as u64,
+    });
+}
+
 /// Schema behaviour of a handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SchemaMode {
     /// The first operation applies the migrations and checks the schema
@@ -173,7 +204,9 @@ pub enum SchemaMode {
 }
 
 /// Send policy of a handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct SendManifest {
     /// Keep the rerun input at enqueue when the task does not choose.
@@ -214,6 +247,14 @@ impl From<ReservationWindowSeconds> for u32 {
     fn from(window: ReservationWindowSeconds) -> Self {
         window.0
     }
+}
+
+impl ManifestValue for ReservationWindowSeconds {
+    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+        name: "RESERVATION_WINDOW_SECONDS",
+        min: 1,
+        max: MAX_RESERVATION_WINDOW_SECONDS as u64,
+    });
 }
 
 impl DatabaseManifest {
