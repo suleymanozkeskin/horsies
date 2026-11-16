@@ -7,9 +7,6 @@
 //!   limits against the container limit or the host RAM.
 //! - Connections ([`crate::worker::connection_fit`]): the connections of one
 //!   worker of the profile against the server's usable slots.
-//!
-//! A worker that runs task bodies in its own process has no profile and logs
-//! neither.
 
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::WorkerProfile;
@@ -27,16 +24,6 @@ use crate::worker::memory_fit::{
 pub struct SelectedProfile {
     pub name: String,
     pub profile: WorkerProfile,
-}
-
-/// Whether the worker runs on a profile.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerProfileSelection {
-    /// The worker runs task bodies in its own process, with its
-    /// `WorkerConfig.concurrency`: no children, so no profile to fit.
-    InProcess,
-    /// The worker runs the children of this profile.
-    Selected(SelectedProfile),
 }
 
 /// Read the memory fit of `selected` and log it. Reads two or three small

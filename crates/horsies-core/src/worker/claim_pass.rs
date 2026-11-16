@@ -52,6 +52,11 @@ impl RegisteredClasses {
         RegisteredClasses { classes }
     }
 
+    /// The registered task names, in no set order.
+    pub fn task_names(&self) -> impl Iterator<Item = &str> {
+        self.classes.keys().map(String::as_str)
+    }
+
     fn class_of(&self, task_name: &str) -> Option<Execution> {
         self.classes.get(task_name).copied()
     }
