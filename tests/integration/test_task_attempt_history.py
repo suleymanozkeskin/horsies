@@ -308,8 +308,7 @@ async def _get_attempts(
     snapshot = (
         await session.execute(
             text("""
-                SELECT attempt_archive_version, attempt_snapshot_codec,
-                       attempt_snapshot_content_type, attempt_snapshot,
+                SELECT attempt_archive_version, attempt_snapshot,
                        attempt_snapshot_digest
                 FROM horsies_task_history
                 WHERE task_id = CAST(:task_id AS uuid)
@@ -321,8 +320,6 @@ async def _get_attempts(
         return []
     decoded = decode_attempt_snapshot(
         version=snapshot.attempt_archive_version,
-        codec=snapshot.attempt_snapshot_codec,
-        content_type=snapshot.attempt_snapshot_content_type,
         payload=bytes(snapshot.attempt_snapshot),
         digest=bytes(snapshot.attempt_snapshot_digest),
     )

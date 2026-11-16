@@ -2,32 +2,20 @@
 
 One client statement resolves a task to LIVE, a full decoded history
 detail, or a typed absence. The composite `task_row` expands in SQL —
-`(task_row).*` — so every frozen column arrives as a real column, not a
+`(task_row).*` — so every stored column arrives as a real column, not a
 composite the driver would hand back as text. Attempts on a history hit
-decode from the row's snapshot columns: post-cutover, a terminal task's
-attempt rows are deleted by the move, so the snapshot is the only home
-of attempt history and it purges with the row.
+decode from the row's snapshot columns: the move deletes a terminal
+task's attempt rows, so the snapshot is the only home of attempt history
+and it purges with the row.
 
-The stored status is parsed here, one time, into `TaskStatus`. Schema
-v49 drops the status CHECK of the history parent, so a value that is
-not a member can be stored out of band. The read raises
-`HistoryContractError` for it, as it does for an attempt snapshot that
-does not decode. A reader of `HistoryTaskDetail.status` gets a member.
+The stored status is parsed here, one time, into `TaskStatus`. The
+history parent has no status CHECK, so a value that is not a member can
+be stored out of band. The read raises `HistoryContractError` for it, as
+it does for an attempt snapshot that does not decode. A reader of
+`HistoryTaskDetail.status` gets a member.
 
-Absence classifies through the same birth-floor mechanism the generated
-functions use: a v7 birth before the retained-history floor means the
-task, if it ever existed, lies before all retained history — the typed
-expired presentation. Never-seen and purged are indistinguishable past
-that point by construction, and the classification says exactly what is
-known instead of guessing.
-
-The floor comes from the attached leaf catalog, not from the published
-probe manifest. The two differ by exactly the leaves whose relation was
-dropped out of band, and those leaves DID retain history — someone
-removed it. Reading the floor from the probe list would raise it over
-them and report their tasks as predating retained history, which
-presents an accidental drop as ordinary ageing. The catalog floor keeps
-the claim true; unreadable is not the same as never kept.
+An absence is NOT_CLASSIFIED: the leaf catalog records no birth floor,
+so no read can place an id before or within retained history.
 """
 
 from __future__ import annotations
@@ -72,7 +60,7 @@ class HistoryTaskDetail:
     retention_class_key: str
     enqueued_at: datetime
     created_at: datetime
-    sent_at: datetime | None
+    sent_at: datetime
     claimed_at: datetime | None
     started_at: datetime | None
     good_until: datetime | None
@@ -82,10 +70,7 @@ class HistoryTaskDetail:
     last_worker_hostname: str | None
     last_worker_pid: int | None
     result_envelope_version: int
-    result_codec: str
-    result_content_type: str
     result_payload: bytes | None
-    prior_result_payload: bytes | None
     result_digest: bytes | None
     error_code: str | None
     final_failed_reason: str | None
@@ -95,11 +80,8 @@ class HistoryTaskDetail:
     is_workflow_task: bool
     rerun_input_disposition: str
     rerun_input_version: int | None
-    rerun_input_codec: str | None
-    rerun_input_content_type: str | None
     rerun_input_digest: bytes | None
     rerun_input_inline: bytes | None
-    rerun_input_reference: str | None
     attempts: tuple[AttemptRecord, ...]
 
 
@@ -123,18 +105,9 @@ class TaskAbsenceReason(str, enum.Enum):
 
 @dataclass(frozen=True, slots=True)
 class TaskDetailAbsent:
-    """No row anywhere. `reason` is PREDATES_RETAINED_HISTORY when the v7
-    birth lies before the attached-catalog floor (the typed expired
-    presentation), WITHIN_RETAINED_HISTORY when it lies within retained
-    range, and NOT_CLASSIFIED when the identifier is not v7 or no
-    attached leaf carries a birth.
-
-    WITHIN_RETAINED_HISTORY is the answer for a task whose leaf was destroyed out of band:
-    its history was retained and then removed, so it does not predate
-    retained history. The row is gone either way, but the reason
-    published here stays true — an operator asking why a rerun is
-    impossible learns the partition is missing rather than that the task
-    aged out."""
+    """No row anywhere. `reason` says what the read knows about the id;
+    `read_task_detail` gives NOT_CLASSIFIED, because no attached leaf
+    records a birth floor."""
 
     task_id: str
     reason: TaskAbsenceReason
@@ -263,8 +236,6 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
     status = _history_status(str(row.task_id), row.status)
     decoded = decode_attempt_snapshot(
         version=row.attempt_archive_version,
-        codec=row.attempt_snapshot_codec,
-        content_type=row.attempt_snapshot_content_type,
         payload=bytes(row.attempt_snapshot),
         digest=bytes(row.attempt_snapshot_digest),
     )
@@ -296,16 +267,9 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
         last_worker_hostname=row.last_worker_hostname,
         last_worker_pid=row.last_worker_pid,
         result_envelope_version=row.result_envelope_version,
-        result_codec=row.result_codec,
-        result_content_type=row.result_content_type,
         result_payload=(
             bytes(row.result_payload)
             if row.result_payload is not None
-            else None
-        ),
-        prior_result_payload=(
-            bytes(row.prior_result_payload)
-            if row.prior_result_payload is not None
             else None
         ),
         result_digest=(
@@ -331,8 +295,6 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
         is_workflow_task=row.is_workflow_task,
         rerun_input_disposition=row.rerun_input_disposition,
         rerun_input_version=row.rerun_input_version,
-        rerun_input_codec=row.rerun_input_codec,
-        rerun_input_content_type=row.rerun_input_content_type,
         rerun_input_digest=(
             bytes(row.rerun_input_digest)
             if row.rerun_input_digest is not None
@@ -343,7 +305,6 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
             if row.rerun_input_inline is not None
             else None
         ),
-        rerun_input_reference=row.rerun_input_reference,
         attempts=decoded.value,
     )
 
