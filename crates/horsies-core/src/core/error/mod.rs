@@ -65,8 +65,13 @@ pub enum ErrorCode {
     WorkflowSubworkflowAppMissing,
     WorkflowInvalidKwargKey,
     WorkflowMissingRequiredParams,
-    WorkflowArgsWithInjection,
+    /// A node's input object and its `args_from` name the same member.
+    WorkflowKwargsArgsFromOverlap,
     WorkflowOutputTypeMismatch,
+    /// A node's input is positional (not a JSON object) while the node takes
+    /// `args_from` or `workflow_ctx_from` members, which merge only into an
+    /// object.
+    WorkflowPositionalArgsNotSupported,
     WorkflowCheckCasesRequired,
     WorkflowCheckCaseInvalid,
     WorkflowCheckBuilderException,
@@ -133,8 +138,9 @@ impl ErrorCode {
             Self::WorkflowSubworkflowAppMissing => "HRS-018",
             Self::WorkflowInvalidKwargKey => "HRS-019",
             Self::WorkflowMissingRequiredParams => "HRS-020",
-            Self::WorkflowArgsWithInjection => "HRS-032",
+            Self::WorkflowKwargsArgsFromOverlap => "HRS-021",
             Self::WorkflowOutputTypeMismatch => "HRS-025",
+            Self::WorkflowPositionalArgsNotSupported => "HRS-026",
             Self::WorkflowCheckCasesRequired => "HRS-027",
             Self::WorkflowCheckCaseInvalid => "HRS-028",
             Self::WorkflowCheckBuilderException => "HRS-029",
@@ -190,11 +196,12 @@ impl ErrorCode {
             | Self::WorkflowUnresolvedPriority
             | Self::WorkflowNoDefinitionKey
             | Self::WorkflowDuplicateDefinitionKey
-            | Self::WorkflowArgsWithInjection
             | Self::WorkflowSubworkflowAppMissing
             | Self::WorkflowInvalidKwargKey
             | Self::WorkflowMissingRequiredParams
+            | Self::WorkflowKwargsArgsFromOverlap
             | Self::WorkflowOutputTypeMismatch
+            | Self::WorkflowPositionalArgsNotSupported
             | Self::WorkflowCheckCasesRequired
             | Self::WorkflowCheckCaseInvalid
             | Self::WorkflowCheckBuilderException
@@ -249,11 +256,12 @@ impl ErrorCode {
                 | Self::WorkflowUnresolvedPriority
                 | Self::WorkflowNoDefinitionKey
                 | Self::WorkflowDuplicateDefinitionKey
-                | Self::WorkflowArgsWithInjection
                 | Self::WorkflowSubworkflowAppMissing
                 | Self::WorkflowInvalidKwargKey
                 | Self::WorkflowMissingRequiredParams
+                | Self::WorkflowKwargsArgsFromOverlap
                 | Self::WorkflowOutputTypeMismatch
+                | Self::WorkflowPositionalArgsNotSupported
                 | Self::WorkflowCheckCasesRequired
                 | Self::WorkflowCheckCaseInvalid
                 | Self::WorkflowCheckBuilderException
@@ -534,6 +542,29 @@ mod tests {
     }
 
     // --- ErrorCode category helper tests ---
+
+    /// Python `horsies/core/errors.py`: `HRS-021` is
+    /// `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` and `HRS-026` is
+    /// `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; `HRS-032` is
+    /// `WORKFLOW_INVALID_ID`, which the core does not raise.
+    #[test]
+    fn the_input_codes_have_python_meanings() {
+        assert_eq!(
+            ErrorCode::WorkflowKwargsArgsFromOverlap.as_code_str(),
+            "HRS-021"
+        );
+        assert_eq!(
+            ErrorCode::WorkflowPositionalArgsNotSupported.as_code_str(),
+            "HRS-026"
+        );
+        for code in [
+            ErrorCode::WorkflowKwargsArgsFromOverlap,
+            ErrorCode::WorkflowPositionalArgsNotSupported,
+        ] {
+            assert_eq!(code.category(), ErrorCategory::Workflow, "{code}");
+            assert!(code.is_workflow_error(), "{code}");
+        }
+    }
 
     #[test]
     fn workflow_code_is_workflow_error_only() {
