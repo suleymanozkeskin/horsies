@@ -372,6 +372,12 @@ impl ChildChannel {
         *self.exit.borrow() != ExitState::Running
     }
 
+    /// Whether the reader ended: EOF, a failed read, or a violation. A child
+    /// whose channel closed can never report a result.
+    pub fn channel_closed(&self) -> bool {
+        matches!(self.shared.lock().phase, ReaderPhase::Ended(_))
+    }
+
     /// Send one frame, bounded by [`FRAME_WRITE_BOUND`]. A body up to
     /// [`JOINED_WRITE_BODY_BYTES`] goes in one write with its header; a
     /// larger one in a write of its own, so it is not copied.
