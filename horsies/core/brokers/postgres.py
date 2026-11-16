@@ -130,13 +130,14 @@ from horsies.core.history.maintenance.database import (
     PartitionMaintenanceDatabase,
 )
 from horsies.core.baseline.install import (
+    CompleteInstall,
     InstallBaseline,
-    RecordFamily,
     RefuseInstall,
     SchemaReady,
     SchemaStatementFailed,
     decide_install,
     install_baseline,
+    publish_history_readers,
     read_database_state,
     record_client_family,
 )
@@ -1399,16 +1400,21 @@ class PostgresBroker:
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline schema when this broker runs migrations.
 
+        ``engine`` is the session URL's engine: the reader publication runs
+        on it. The state read, the lock and the migration use their own
+        direct session connection.
+
         A broker with migrations off runs no schema statement. Read-only
         consumers such as the monitoring service inspect the schema with their
         own probe and never change it.
         """
-        del engine  # the install uses its own direct session connection
         if self.run_schema_migrations:
-            await self._run_fleet_schema_init()
+            await self._run_fleet_schema_init(engine)
 
-    async def _run_fleet_schema_init(self) -> None:
+    async def _run_fleet_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline into an empty database, or check an installed one.
+
+        Returns after the published history readers exist.
 
         Raises:
             RuntimeError: the database holds something other than an empty
@@ -1425,7 +1431,7 @@ class PostgresBroker:
             case Ok(migration):
                 pass
         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
-            match await self._install_once(migration):
+            match await self._install_once(migration, engine):
                 case Ok():
                     return
                 case Err(failure):
@@ -1449,12 +1455,12 @@ class PostgresBroker:
                     await asyncio.sleep(backoff)
 
     async def _install_once(
-        self, migration: BaselineMigration,
+        self, migration: BaselineMigration, engine: AsyncEngine,
     ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
         """One pass: read the state, and only when a write is due, lock and act.
 
-        A database that already holds this build's baseline and family gets
-        no lock and no write.
+        A database that already holds this build's baseline, its published
+        readers and this client's family gets no lock and no write.
         """
         connection = await psycopg.AsyncConnection.connect(
             to_psycopg_url(self.config.effective_session_database_url),
@@ -1474,20 +1480,26 @@ class PostgresBroker:
                 return Ok(None)
             case RefuseInstall() as refused:
                 return Err(refused)
-            case InstallBaseline() | RecordFamily():
+            case InstallBaseline() | CompleteInstall():
                 pass
         async with self._schema_session_lock() as locked:
-            return await self._install_under_lock(locked, migration)
+            return await self._install_under_lock(locked, migration, engine)
 
     async def _install_under_lock(
         self,
         connection: psycopg.AsyncConnection[Any],
         migration: BaselineMigration,
+        engine: AsyncEngine,
     ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
         """Read the state again under the schema lock and do what it needs.
 
         Another installer may have finished while this one waited for the
         lock; the second read sees its work.
+
+        The migration (with the family row) and the reader publication are
+        two transactions. An install that stops between them leaves a
+        baseline with missing readers; the next install reads that state as
+        ``CompleteInstall`` and publishes them.
         """
         match await read_database_state(connection, migration):
             case Err(failed):
@@ -1503,8 +1515,20 @@ class PostgresBroker:
                 self.logger.info(
                     'Installing the baseline schema (migration %s)', migration.version,
                 )
-                return await install_baseline(connection, migration)
-            case RecordFamily():
+                match await install_baseline(connection, migration):
+                    case Err(failed):
+                        return Err(failed)
+                    case Ok():
+                        pass
+                # The family row committed with the migration, and no other
+                # installer writes while this one holds the lock.
+                return await publish_history_readers(engine)
+            case CompleteInstall():
+                match await publish_history_readers(engine):
+                    case Err(failed):
+                        return Err(failed)
+                    case Ok():
+                        pass
                 match await record_client_family(connection):
                     case Err(failed):
                         return Err(failed)
@@ -1521,9 +1545,9 @@ class PostgresBroker:
                 return Ok(None)
             case RefuseInstall() as refused:
                 return Err(refused)
-            case InstallBaseline() | RecordFamily():
+            case InstallBaseline() | CompleteInstall():
                 raise AssertionError(
-                    f'schema state after recording the client family: {after!r}'
+                    f'schema state after completing the install: {after!r}'
                 )
 
     @contextlib.asynccontextmanager

@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
-    FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
+    RetryRequest,
 };
 use crate::broker::terminalization::terminalize;
 use crate::core::lifecycle::{
@@ -109,7 +109,7 @@ async fn fail_guard_blocks_when_not_running() {
         .await
         .expect("requeue the row");
 
-    let outcome = finish_failed_attempt(
+    let outcome = write_failed_attempt(
         &pool,
         &failed_attempt(task_id, RetryRequest::NoRetry, AttemptFailureKind::Failed),
     )
@@ -144,7 +144,7 @@ async fn fail_worker_guard_blocks_when_not_running() {
     );
     command.failed_reason = Some("late worker failure".to_owned());
     command.attempt.failed_reason = Some("late worker failure".to_owned());
-    let outcome = finish_failed_attempt(&pool, &command)
+    let outcome = write_failed_attempt(&pool, &command)
         .await
         .expect("failure write");
 
@@ -164,7 +164,7 @@ async fn retry_guard_blocks_when_not_running() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     reaper_fails(&pool, task_id).await;
 
-    let outcome = finish_failed_attempt(
+    let outcome = write_failed_attempt(
         &pool,
         &failed_attempt(task_id, retry_after(0), AttemptFailureKind::Failed),
     )
@@ -186,7 +186,7 @@ async fn reaper_then_retry_race_sequence() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     reaper_fails(&pool, task_id).await;
 
-    let late_retry = finish_failed_attempt(
+    let late_retry = write_failed_attempt(
         &pool,
         &failed_attempt(task_id, retry_after(0), AttemptFailureKind::Failed),
     )
@@ -274,7 +274,7 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
         result_json: r#"{"ok": 1}"#.to_owned(),
     };
 
-    let refused = finish_workflow_success(&pool, &success(WORKER))
+    let refused = write_workflow_success(&pool, &success(WORKER))
         .await
         .expect("workflow success");
     assert!(
@@ -287,7 +287,7 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
     assert_eq!(status_of(&pool, task_id).await, "RUNNING");
     assert!(live_attempts(&pool, task_id).await.is_empty());
 
-    let owner = finish_workflow_success(&pool, &success(OTHER_WORKER))
+    let owner = write_workflow_success(&pool, &success(OTHER_WORKER))
         .await
         .expect("workflow success");
     assert!(

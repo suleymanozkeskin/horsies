@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+import psycopg
 import pytest
 from sqlalchemy import event
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from horsies.core.history.commands import CollectPartitionHealth, LeafRef
 from horsies.core.history.heartbeats.partitioning import hourly_leaf_ref
@@ -22,8 +24,8 @@ from horsies.core.history.maintenance.coverage import (
 from horsies.core.history.maintenance.database import (
     PartitionMaintenanceDatabase,
 )
-from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.names import (
+    FOREVER_LEAF,
     HEARTBEATS_TABLE,
     HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
@@ -33,7 +35,6 @@ from horsies.core.history.names import (
 from horsies.core.history.outcomes import LeafCreation
 from horsies.core.history.partitions import manager as partition_manager
 from horsies.core.history.partitions.catalog import (
-    capture_partition_bound_utc,
     database_now,
     leaf_enqueued_index_name,
 )
@@ -74,11 +75,9 @@ async def test_healthy_complete_set_has_constant_statement_budget(
     history_horizon: int,
     heartbeat_horizon: int,
 ) -> None:
+    # Period classes of the baseline form standard_<days>d, one per period.
     declared = tuple(
-        (
-            f'budget_{class_count:02d}_{number:02d}',
-            timedelta(days=number + 1),
-        )
+        (f'standard_{number + 1}d', timedelta(days=number + 1))
         for number in range(class_count)
     )
     database = PartitionMaintenanceDatabase(
@@ -145,7 +144,7 @@ async def test_current_heartbeat_wrong_physical_range_refuses_startup(
         row = (
             await connection.execute(
                 text(
-                    f'SELECT leaf_name, id_index_name, lower_anchor, upper_anchor '
+                    f'SELECT leaf_name, leaf_name || \'_probe_idx\' AS id_index_name, lower_anchor, upper_anchor '
                     f'FROM {LEAF_CATALOG} '
                     'WHERE class_key = :heartbeat_class '
                     'AND lower_anchor <= statement_timestamp() '
@@ -173,17 +172,6 @@ async def test_current_heartbeat_wrong_physical_range_refuses_startup(
                 f'CREATE INDEX {row.id_index_name} ON {row.leaf_name} '
                 '(task_id, role, sent_at DESC)'
             )
-        )
-        wrong_bound = await capture_partition_bound_utc(
-            connection,
-            str(row.leaf_name),
-        )
-        await connection.execute(
-            text(
-                f'UPDATE {LEAF_CATALOG} SET partition_bound = :bound '
-                'WHERE leaf_name = :leaf_name'
-            ),
-            {'bound': wrong_bound, 'leaf_name': row.leaf_name},
         )
 
     startup = await ensure_startup_coverage_in_database(
@@ -239,7 +227,7 @@ async def test_coverage_repairs_noncanonical_index_metadata(
         heartbeat = (
             await connection.execute(
                 text(
-                    f'SELECT leaf_name, id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name, leaf_name || \'_probe_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key = :heartbeat_class '
                     'AND lower_anchor <= statement_timestamp() '
                     'AND upper_anchor > statement_timestamp()'
@@ -250,7 +238,7 @@ async def test_coverage_repairs_noncanonical_index_metadata(
         history = (
             await connection.execute(
                 text(
-                    f'SELECT leaf_name, id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name, leaf_name || \'_task_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key <> :heartbeat_class '
                     'AND detached_at IS NULL AND dropped_at IS NULL '
                     'ORDER BY lower_anchor, leaf_name LIMIT 1'
@@ -337,7 +325,7 @@ async def test_coverage_repairs_an_invalid_index(
         index_name = (
             await connection.execute(
                 text(
-                    f'SELECT id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name || \'_task_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key <> :heartbeat_class '
                     'AND detached_at IS NULL AND dropped_at IS NULL '
                     'ORDER BY lower_anchor, leaf_name LIMIT 1'
@@ -415,7 +403,7 @@ async def test_failed_final_publication_is_retried(
     first = await maintain_partition_coverage(
         database,
         history_horizon_days=1,
-        heartbeat_horizon_hours=1,
+        heartbeat_horizon_hours=2,
     )
     assert isinstance(first, CoverageEnsured), first
     original = StagedLoaderPublisher.republish
@@ -488,7 +476,7 @@ async def test_index_name_reuse_after_ownership_read_does_not_drop_foreign_index
         history = (
             await connection.execute(
                 text(
-                    f'SELECT leaf_name, id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name, leaf_name || \'_task_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key <> :heartbeat_class '
                     'AND detached_at IS NULL AND dropped_at IS NULL '
                     'ORDER BY lower_anchor, leaf_name LIMIT 1'
@@ -662,9 +650,15 @@ async def test_fast_path_rejects_stale_index_schema_version(
     assert 'METADATA_MISMATCH' in outcome.refusal
 
 
-async def test_fast_path_rejects_null_heartbeat_registration(
+async def test_the_database_refuses_a_null_heartbeat_registration(
     partition_schema: HistorySchema,
 ) -> None:
+    """A heartbeat class without its horizon cannot be stored.
+
+    The baseline holds the class shape in CHECK
+    horsies_retention_classes_kind_shape, so the registration the fast path
+    once had to detect is refused by the database.
+    """
     database = PartitionMaintenanceDatabase(
         partition_schema.engine, connection_capacity=2
     )
@@ -675,47 +669,36 @@ async def test_fast_path_rejects_null_heartbeat_registration(
     )
     assert isinstance(first, CoverageEnsured), first
 
-    async with partition_schema.engine.begin() as connection:
-        await connection.execute(
-            text(
-                f'UPDATE {RETENTION_CLASSES} '
-                'SET duration = NULL, partition_interval = NULL, '
-                'finite_parent_name = NULL '
-                'WHERE class_key = :class_key'
-            ),
-            {'class_key': HEARTBEAT_CLASS_KEY},
-        )
+    with pytest.raises(IntegrityError) as refused:
+        async with partition_schema.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f'UPDATE {RETENTION_CLASSES} '
+                    'SET heartbeat_horizon_hours = NULL '
+                    'WHERE class_key = :class_key'
+                ),
+                {'class_key': HEARTBEAT_CLASS_KEY},
+            )
+    orig = refused.value.orig
+    assert isinstance(orig, psycopg.errors.CheckViolation), orig
+    assert orig.diag.constraint_name == 'horsies_retention_classes_kind_shape'
 
-    with pytest.raises(HistoryContractError):
+
+async def test_a_fractional_period_is_refused_before_registration(
+    partition_schema: HistorySchema,
+) -> None:
+    """A retention period is a whole number of days (retention_days)."""
+    database = PartitionMaintenanceDatabase(
+        partition_schema.engine, connection_capacity=2
+    )
+    declared = (('standard_1d', timedelta(days=1, microseconds=1)),)
+    with pytest.raises(ValueError, match='whole number of days'):
         await maintain_partition_coverage(
             database,
             history_horizon_days=3,
             heartbeat_horizon_hours=6,
+            declared_classes=declared,
         )
-
-
-async def test_fast_path_compares_fractional_duration_exactly(
-    partition_schema: HistorySchema,
-) -> None:
-    database = PartitionMaintenanceDatabase(
-        partition_schema.engine, connection_capacity=2
-    )
-    declared = (('fractional_duration', timedelta(seconds=1, microseconds=1)),)
-    first = await maintain_partition_coverage(
-        database,
-        history_horizon_days=3,
-        heartbeat_horizon_hours=6,
-        declared_classes=declared,
-    )
-    assert isinstance(first, CoverageEnsured), first
-
-    healthy = await maintain_partition_coverage(
-        database,
-        history_horizon_days=3,
-        heartbeat_horizon_hours=6,
-        declared_classes=declared,
-    )
-    assert isinstance(healthy, CoverageEnsured), healthy
 
 
 async def test_history_error_does_not_stop_heartbeat_repair(
@@ -736,7 +719,7 @@ async def test_history_error_does_not_stop_heartbeat_repair(
         history_index = (
             await connection.execute(
                 text(
-                    f'SELECT id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name || \'_task_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key <> :heartbeat_class '
                     'AND detached_at IS NULL AND dropped_at IS NULL '
                     'AND lower_anchor <= statement_timestamp() '
@@ -749,7 +732,7 @@ async def test_history_error_does_not_stop_heartbeat_repair(
         heartbeat_index = (
             await connection.execute(
                 text(
-                    f'SELECT id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name || \'_probe_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key = :heartbeat_class '
                     'AND lower_anchor <= statement_timestamp() '
                     'AND upper_anchor > statement_timestamp()'
@@ -859,7 +842,7 @@ async def test_busy_coverage_gate_is_nonfatal_with_current_heartbeat(
         damaged_index = (
             await connection.execute(
                 text(
-                    f'SELECT id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name || \'_task_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key <> :heartbeat_class '
                     'AND detached_at IS NULL AND dropped_at IS NULL '
                     'ORDER BY lower_anchor, leaf_name LIMIT 1'
@@ -911,7 +894,7 @@ async def test_busy_coverage_gate_refuses_startup_without_current_heartbeat(
         current_index = (
             await connection.execute(
                 text(
-                    f'SELECT id_index_name FROM {LEAF_CATALOG} '
+                    f'SELECT leaf_name || \'_probe_idx\' AS id_index_name FROM {LEAF_CATALOG} '
                     'WHERE class_key = :heartbeat_class '
                     'AND lower_anchor <= statement_timestamp() '
                     'AND upper_anchor > statement_timestamp()'
@@ -947,36 +930,23 @@ async def test_busy_coverage_gate_refuses_startup_without_current_heartbeat(
         await holder.close()
 
 
-async def test_pool_coverage_creates_one_open_ended_forever_leaf(
+async def test_pool_coverage_keeps_the_one_static_forever_leaf(
     partition_schema: HistorySchema,
 ) -> None:
-    """The pool path expects one open-ended forever leaf, not daily ones."""
+    """The pool path creates no forever leaf: the static open leaf covers it."""
     from horsies.core.history.commands import OPEN_END_ANCHOR
 
     open_leaves_sql = text(
         f"SELECT leaf_name FROM {LEAF_CATALOG} "
         "WHERE class_key = 'forever' AND upper_anchor = :open_end"
     )
-    async with partition_schema.engine.begin() as connection:
-        for name in (await connection.execute(
-            open_leaves_sql, {'open_end': OPEN_END_ANCHOR},
-        )).scalars().all():
-            await connection.execute(text(f'DROP TABLE {name}'))
-            await connection.execute(
-                text(f'DELETE FROM {LEAF_CATALOG} WHERE leaf_name = :name'),
-                {'name': name},
-            )
-        daily_before = (await connection.execute(text(
-            f"SELECT count(*) FROM {LEAF_CATALOG} WHERE class_key = 'forever'"
-        ))).scalar_one()
-
     database = PartitionMaintenanceDatabase(
         partition_schema.engine, connection_capacity=2,
     )
-    repaired = await maintain_partition_coverage(
+    first = await maintain_partition_coverage(
         database, history_horizon_days=3, heartbeat_horizon_hours=2,
     )
-    assert isinstance(repaired, CoverageEnsured), repaired
+    assert isinstance(first, CoverageEnsured), first
     again = await maintain_partition_coverage(
         database, history_horizon_days=3, heartbeat_horizon_hours=2,
     )
@@ -987,9 +957,9 @@ async def test_pool_coverage_creates_one_open_ended_forever_leaf(
         open_leaves = (await connection.execute(
             open_leaves_sql, {'open_end': OPEN_END_ANCHOR},
         )).scalars().all()
-        daily_after = (await connection.execute(text(
+        daily = (await connection.execute(text(
             f"SELECT count(*) FROM {LEAF_CATALOG} "
             "WHERE class_key = 'forever' AND upper_anchor <> :open_end"
         ), {'open_end': OPEN_END_ANCHOR})).scalar_one()
-    assert len(open_leaves) == 1
-    assert daily_after == daily_before
+    assert list(open_leaves) == [FOREVER_LEAF]
+    assert daily == 0
