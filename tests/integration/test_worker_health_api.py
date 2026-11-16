@@ -121,6 +121,10 @@ async def test_list_worker_states_returns_latest_per_worker(
     assert len(seeded) == 1, 'expected exactly one row per worker'
     assert seeded[0].tasks_running == 3  # newest snapshot
     assert seeded[0].queues == ['default', 'priority']
+    # Maps the worker did not set read as empty dicts, never None.
+    assert seeded[0].queue_priorities == {}
+    assert seeded[0].queue_max_concurrency == {}
+    assert seeded[0].recovery_config == {}
 
 
 @pytest.mark.integration

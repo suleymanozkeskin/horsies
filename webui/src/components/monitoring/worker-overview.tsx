@@ -237,7 +237,7 @@ function WorkerFocus({
             className="rounded bg-muted px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
           >
             {queue}
-            {worker.queue_max_concurrency?.[queue] === undefined
+            {worker.queue_max_concurrency[queue] === undefined
               ? ''
               : `·${worker.queue_max_concurrency[queue]}`}
           </span>
