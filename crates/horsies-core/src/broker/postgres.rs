@@ -1348,8 +1348,9 @@ impl PostgresBroker {
     /// The open core pools, for a lifecycle writer that runs on the main
     /// core pool ([`crate::broker::attempt_writes`]) or a workflow step
     /// (`workflow_engine::steps`), and the token of its write:
-    /// [`PostgresBroker::close`] waits for the write while the token lives. In a worker the main core pool is the worker profile pool. An
-    /// `Idle` handle opens its pools first.
+    /// [`PostgresBroker::close`] waits for the write while the token lives.
+    /// In a worker the main core pool is the worker profile pool. An `Idle`
+    /// handle opens its pools first.
     ///
     /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
     pub(crate) fn core_pools_for_write(
