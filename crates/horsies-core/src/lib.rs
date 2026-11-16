@@ -44,16 +44,16 @@ pub use crate::core::{
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
     RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure,
     SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
-    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions,
-    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendResult, TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule,
-    WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta,
-    WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
-    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
-    WORKFLOW_TERMINAL_STATES,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
+    TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
+    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -68,6 +68,14 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
+// Child mode of a Rust worker binary: the entry checks `child_mode` first
+// and, in child mode, exits with the code of `run_child_host`. Task bodies
+// start work that belongs to their run with `spawn_in_run`.
+pub use crate::worker::executor::child_host::{
+    child_mode, run_child_host, spawn_in_run, ChildApp, ChildArgs, ChildArgsError, ChildHostExit,
+    ChildMode, OrphanSelfHeal, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
+};
+
 // worker re-exports
 pub use crate::worker::{
     cli::LogLevel,
@@ -75,6 +83,18 @@ pub use crate::worker::{
     scheduler::service::{spawn_scheduler, SchedulerStartError},
     worker::Worker,
     WorkerError,
+};
+
+// worker state snapshot values
+pub use crate::broker::{
+    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+
+// fleet check and class report
+pub use crate::broker::{
+    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
+    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
 pub use crate::broker::client_family::ClientFamily;

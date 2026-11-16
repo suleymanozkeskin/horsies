@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::{persist_terminal_state, FinalizeError, FinalizeOutcome};
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::task::error::{OutcomeCode, TaskError};
+use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::worker::recovery::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
@@ -244,7 +244,9 @@ async fn finalize_with(
 }
 
 fn error_result(code: &str) -> TaskResult<Vec<u8>> {
-    TaskResult::Err(TaskError::new(code, format!("{code} happened")))
+    TaskResult::Err(
+        TaskError::new(code, format!("{code} happened")).expect("the test codes are user codes"),
+    )
 }
 
 fn ok_result(text: &str) -> TaskResult<Vec<u8>> {
@@ -528,7 +530,6 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
 /// owes its phase 2 for the committed failure.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
 async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
@@ -585,7 +586,6 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 /// adds no attempt and leaves the committed record as it was.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
 async fn a_workflow_success_replay_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
@@ -724,36 +724,13 @@ async fn a_plain_task_owes_no_phase_two() {
 /// Python `test_worker_persist_terminal_state.py::test_err_workflow_stopped_code_skips`,
 /// changed by decision: `WORKFLOW_STOPPED` is a reserved code and the branch
 /// that left the row RUNNING is removed (decisions, "Task returns: one rule
-/// in the core"). A result with that code fails the task like any error.
-#[tokio::test]
-#[serial]
-async fn a_workflow_stopped_code_in_a_result_fails_the_task() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let queue = test_queue();
-    let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
-
-    let outcome = finalize(
-        &pool,
-        seeded.task_id,
-        TaskResult::Err(TaskError::builtin(
-            OutcomeCode::WorkflowStopped,
-            "workflow was stopped",
-        )),
-    )
-    .await;
-
-    assert!(
-        matches!(outcome, Ok(FinalizeOutcome::Finalized)),
-        "{}",
-        describe(&outcome)
-    );
-    assert_eq!(live_row(&pool, seeded.task_id).await, None);
-    let history = history_row(&pool, seeded.task_id)
-        .await
-        .expect("history row");
-    assert_eq!(history["status"], "FAILED");
-    assert_eq!(history["error_code"], "WORKFLOW_STOPPED");
-    cleanup(&pool, &seeded).await;
+/// in the core"). No task result can carry the code: it is not a built-in
+/// code and `TaskError::new` refuses it, so no result that reaches
+/// `persist_terminal_state` holds it.
+#[test]
+fn a_task_result_cannot_carry_the_workflow_stopped_code() {
+    assert_eq!(BuiltInTaskCode::parse("WORKFLOW_STOPPED"), None);
+    assert!(TaskError::new("WORKFLOW_STOPPED", "workflow was stopped").is_err());
 }
 
 /// Python `test_layer1_tasks.py::test_exponential_backoff_intervals`: two

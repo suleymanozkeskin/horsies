@@ -37,7 +37,9 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
+use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::workflow_engine::phase2_recovery::terminal_status_of_pending_kind;
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -137,7 +139,7 @@ impl std::fmt::Display for FinalizeError {
 // ---------------------------------------------------------------------------
 
 /// Phase 1 finalize gets 3 retries (matches Python `_FINALIZE_PHASE1_MAX_RETRIES`).
-const PHASE1_MAX_RETRIES: u32 = 3;
+pub(crate) const PHASE1_MAX_RETRIES: u32 = 3;
 /// Phase 2 finalize gets 5 retries (matches Python `_FINALIZE_PHASE2_MAX_RETRIES`).
 const PHASE2_MAX_RETRIES: u32 = 5;
 /// Base delay for phase-level retry backoff.
@@ -642,7 +644,18 @@ pub(crate) async fn persist_terminal_state(
             .await
         }
         TaskResult::Err(ref task_error) => {
-            let error_code = task_error.error_code.as_ref().map(ToString::to_string);
+            // The stored error keeps its code when its `data` cannot be stored:
+            // the serializer stores `{"data_refused": <cause>}` in its place
+            // (Python `reportable_error`, `core/codec/typed.py:885-934`).
+            if let Some(refusal) = task_error.storage_refusal() {
+                tracing::error!(
+                    task_id = %task_id,
+                    error_code = %task_error.error_code,
+                    cause = %refusal,
+                    "data of a TaskError cannot be stored; it is stored as data_refused",
+                );
+            }
+            let error_code = Some(task_error.error_code.to_string());
             let retry = retry_request_for(running, stored_options, error_code.as_deref());
             let result_json =
                 serde_json::to_string(&TaskResult::<serde_json::Value>::Err(task_error.clone()))
@@ -699,7 +712,7 @@ fn retry_request_for(
 }
 
 /// Persist a success, or fail a result that is not valid JSON.
-async fn persist_ok_result(
+pub(crate) async fn persist_ok_result(
     broker: &PostgresBroker,
     task_id: Uuid,
     result_bytes: &[u8],
@@ -804,7 +817,7 @@ async fn persist_workflow_success(
 /// A result that is not valid JSON fails the task with
 /// `WORKER_SERIALIZATION_ERROR`, never retried, with the decode diagnosis as
 /// the attempt message (Python `ResultUndecodable`).
-async fn persist_undecodable_result(
+pub(crate) async fn persist_undecodable_result(
     broker: &PostgresBroker,
     task_id: Uuid,
     fence: OwnedClaim,
@@ -839,7 +852,7 @@ async fn persist_undecodable_result(
 /// wake in the statement; a workflow task's failure owes phase 2; a retry
 /// wakes the queue when it is due; a replay owes what the committed write
 /// owed; a refusal owes nothing.
-async fn persist_failed_attempt(
+pub(crate) async fn persist_failed_attempt(
     broker: &PostgresBroker,
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
@@ -912,20 +925,20 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 }
 
 /// A replay of a committed write (`AlreadyApplied`). A workflow task owes
-/// phase 2 while its durable phase-2 record exists; a plain task owes
-/// nothing.
+/// phase 2 while its durable phase-2 record exists, with the outcome of the
+/// status that the record's kind stands for; a plain task owes nothing.
 async fn replay_of_committed_write(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
-        true => match load_pending_terminal_success(pool, task_id).await? {
-            Some(is_success) => Ok(FinalizeOutcome::Terminal {
-                is_success,
+        true => match load_pending_phase_two(pool, task_id).await? {
+            PendingPhaseTwo::Owed(status) => Ok(FinalizeOutcome::Terminal {
+                is_success: status == TaskStatus::Completed,
                 capacity_notified: false,
             }),
-            None => Ok(FinalizeOutcome::Finalized),
+            PendingPhaseTwo::Consumed => Ok(FinalizeOutcome::Finalized),
         },
         false => Ok(FinalizeOutcome::Finalized),
     }
@@ -1023,39 +1036,59 @@ pub(crate) async fn finalize_workflow_phase(
     Ok(())
 }
 
-/// Read the durable phase-2 terminal status after a Phase-1 replay.
+/// The kind of a task's phase-2 record. The record has no status column: the
+/// status follows from the kind (`terminal_status_of_pending_kind`).
+const LOAD_PENDING_KIND_SQL: &str =
+    "SELECT terminalization_kind FROM horsies_workflow_phase2_pending WHERE task_id = $1";
+
+/// What the phase-2 record of a committed workflow write owes, as a replay
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPhaseTwo {
+    /// The record exists: phase 2 is owed for a task that ended with this
+    /// status (COMPLETED, FAILED or EXPIRED).
+    Owed(TaskStatus),
+    /// No record: phase 2 consumed it, so the replay owes nothing.
+    Consumed,
+}
+
+/// Read the phase-2 record of a workflow task after a phase-1 replay.
 ///
-/// `None` means the outbox evidence has already been durably consumed. The
-/// moved terminal row is deliberately not queried: v35 live rows are live-only.
-async fn load_pending_terminal_success(
+/// One statement; writes nothing. The moved history row is not read: the
+/// record is the evidence that phase 2 is still owed.
+///
+/// Errors:
+/// - the read fails: retryable;
+/// - the record names a kind that writes no phase-2 record: not retryable.
+async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
-) -> Result<Option<bool>, FinalizeError> {
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT terminal_status FROM horsies_workflow_phase2_pending WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| FinalizeError {
-        stage: FinalizeStage::Phase2Workflow,
-        task_id,
-        message: format!("failed to load phase-2 terminal status: {}", e),
-        retryable: true,
-    })?;
-    status
-        .map(|status| match status.as_str() {
-            "COMPLETED" => Ok(true),
-            "FAILED" | "CANCELLED" | "EXPIRED" => Ok(false),
-            other => Err(FinalizeError {
+) -> Result<PendingPhaseTwo, FinalizeError> {
+    let kind: Option<String> = sqlx::query_scalar(LOAD_PENDING_KIND_SQL)
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase2Workflow,
+            task_id,
+            message: format!("failed to load the phase-2 record: {error}"),
+            retryable: true,
+        })?;
+    match kind {
+        None => Ok(PendingPhaseTwo::Consumed),
+        Some(kind) => terminal_status_of_pending_kind(&kind)
+            .map(PendingPhaseTwo::Owed)
+            .map_err(|refusal| FinalizeError {
                 stage: FinalizeStage::Phase2Workflow,
                 task_id,
-                message: format!("phase-2 outbox has non-terminal status {other:?}"),
+                message: refusal.to_string(),
                 retryable: false,
             }),
-        })
-        .transpose()
+    }
 }
+
+#[cfg(test)]
+mod replay_read_tests;
 
 pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
     // Wake workers of this queue to re-check capacity/backlog. The capacity
@@ -1187,7 +1220,7 @@ WHERE t.id = target.id
 
 /// Stamp the finalization handoff only for the current owner and claim
 /// generation. One statement in autocommit: its row lock ends with it.
-async fn mark_task_finalizing(
+pub(crate) async fn mark_task_finalizing(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     worker_id: &str,
@@ -1535,7 +1568,7 @@ async fn retry_phase2(
 }
 
 /// Compute phase-level retry delay with exponential backoff.
-fn phase_retry_delay(attempt: u32) -> f64 {
+pub(crate) fn phase_retry_delay(attempt: u32) -> f64 {
     (PHASE_RETRY_BASE_DELAY_S * 2.0f64.powi(attempt as i32 - 1)).min(PHASE_RETRY_MAX_DELAY_S)
 }
 
@@ -1632,7 +1665,8 @@ mod result_wrap_tests {
         let wrapped_json = serde_json::to_string(&TaskResult::Ok(raw)).expect("wrap serializes");
 
         assert_eq!(
-            wrapped_json, r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
+            wrapped_json,
+            r#"{"__h_task_result__":true,"ok":{"amount": 1.2300, "id": 7},"err":null}"#,
             "result bytes must be embedded verbatim",
         );
 

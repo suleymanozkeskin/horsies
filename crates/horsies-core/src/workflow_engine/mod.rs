@@ -13,6 +13,9 @@ pub(crate) mod recovery_limit;
 pub mod start;
 pub(crate) mod steps;
 
+#[cfg(test)]
+mod port_tests;
+
 pub use error::WorkflowError;
 
 /// Parse `good_until` from a serialized task_options JSON string.

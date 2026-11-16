@@ -498,13 +498,21 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 uptime_s: Some(0),
                 processes: 1,
                 queues: vec![],
-                queue_max_concurrency: None,
+                queue_max_concurrency: BTreeMap::new(),
                 tasks_running: 0,
                 tasks_claimed: 0,
                 cluster_wide_cap: None,
                 memory_usage_mb: None,
                 memory_percent: None,
                 cpu_percent: None,
+                slot_health: SlotHealthKind::SlotsDown,
+                down_slots: vec![DownSlotInfo {
+                    slot: 1,
+                    cause: "the OS ran short of a resource (EMFILE)".to_owned(),
+                    detail: "d".to_owned(),
+                    down_since: now,
+                    failed_boots: 2,
+                }],
             }),
             vec![
                 "worker_id",
@@ -524,7 +532,19 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "memory_usage_mb",
                 "memory_percent",
                 "cpu_percent",
+                "slot_health",
+                "down_slots",
             ],
+        ),
+        (
+            keys(DownSlotInfo {
+                slot: 1,
+                cause: "c".to_owned(),
+                detail: "d".to_owned(),
+                down_since: now,
+                failed_boots: 1,
+            }),
+            vec!["slot", "cause", "detail", "down_since", "failed_boots"],
         ),
         (
             keys(WorkerPingInfo {
