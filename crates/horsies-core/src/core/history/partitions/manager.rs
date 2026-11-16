@@ -9,9 +9,9 @@ use sqlx::{PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::core::history::commands::{
-    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf,
-    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage,
-    FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
+    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
+    DropDetachedHistoryLeaf, EnsureLeafCoverage, FinalizeInterruptedLeafDetach, InspectHistoryLeaf,
+    LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::{
@@ -46,14 +46,12 @@ const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlannedLeaf {
     Daily(CreateDailyHistoryLeaf),
-    OpenEnded(CreateOpenEndedHistoryLeaf),
 }
 
 impl PlannedLeaf {
     pub(crate) fn leaf(&self) -> &LeafRef {
         match self {
             Self::Daily(command) => command.leaf(),
-            Self::OpenEnded(command) => command.leaf(),
         }
     }
 }
@@ -66,9 +64,6 @@ pub(crate) async fn create_planned_leaf<P: LoaderPublication>(
 ) -> Result<LeafCreation, HistoryError> {
     match planned {
         PlannedLeaf::Daily(create) => create_daily_leaf(connection, create, publisher).await,
-        PlannedLeaf::OpenEnded(create) => {
-            create_open_ended_leaf(connection, create, publisher).await
-        }
     }
 }
 
@@ -501,15 +496,6 @@ pub async fn create_daily_leaf<P: LoaderPublication>(
         }),
         None => create_leaf(connection, leaf, publisher).await,
     }
-}
-
-/// Creates or repairs the open-ended `forever` leaf.
-pub async fn create_open_ended_leaf<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    command: &CreateOpenEndedHistoryLeaf,
-    publisher: &P,
-) -> Result<LeafCreation, HistoryError> {
-    create_leaf(connection, command.leaf(), publisher).await
 }
 
 async fn create_leaf<P: LoaderPublication>(
