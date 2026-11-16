@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod app;
+pub mod boot_failure;
 pub mod codec;
 pub mod config;
 pub mod defaults;
