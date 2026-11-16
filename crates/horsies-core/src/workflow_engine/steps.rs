@@ -87,6 +87,14 @@ pub(crate) static CHILD_FINISH: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid],
 );
 
+/// `horsies_workflow_resume(workflow_id)`: resumes a PAUSED workflow tree, in
+/// the caller's transaction.
+pub(crate) static RESUME: TypedStatement = TypedStatement::new(
+    "horsies_workflow_resume",
+    step_row_select!("horsies_workflow_resume($1)"),
+    &[ParameterType::Uuid],
+);
+
 // ---------------------------------------------------------------------------
 // Outcomes
 // ---------------------------------------------------------------------------
@@ -259,6 +267,29 @@ impl StepDisposition for ChildFinishDisposition {
     }
 }
 
+/// The disposition of `horsies_workflow_resume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeDisposition {
+    /// The workflow and its PAUSED descendants are RUNNING.
+    Resumed,
+    /// The workflow exists and is not PAUSED (`detail`: its status); nothing
+    /// written.
+    NotPaused,
+    /// No workflow has this id; nothing written.
+    NotFound,
+}
+
+impl StepDisposition for ResumeDisposition {
+    fn from_text(text: &str) -> Option<Self> {
+        match text {
+            "RESUMED" => Some(Self::Resumed),
+            "NOT_PAUSED" => Some(Self::NotPaused),
+            "NOT_FOUND" => Some(Self::NotFound),
+            _ => None,
+        }
+    }
+}
+
 /// Whether a step ended a child workflow whose parent node must advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParentAdvance {
@@ -400,6 +431,20 @@ pub(crate) async fn cancel(
     )
     .await?;
     Ok(cancel_outcome(rows)?)
+}
+
+/// Resumes a workflow tree in a transaction, as producer work
+/// ([`CheckoutClass::Batch`]). Errors as [`run_in_transaction`].
+pub(crate) async fn resume(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+) -> Result<TransactionStep<ResumeDisposition>, WorkflowError> {
+    run_in_transaction(
+        broker,
+        CheckoutClass::Batch,
+        &RESUME.bind().value(&workflow_id).finish(),
+    )
+    .await
 }
 
 /// Phase 2 of a finished workflow task in one statement in autocommit, on the

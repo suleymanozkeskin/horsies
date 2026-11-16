@@ -585,3 +585,67 @@ fn a_chain_of_parent_advances_is_bounded_by_the_tree_depth() {
         (crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH + 1) as usize
     );
 }
+
+// ---------------------------------------------------------------------------
+// Resume
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_resume_disposition_text_reads_and_others_do_not() {
+    for (text, disposition) in [
+        ("RESUMED", ResumeDisposition::Resumed),
+        ("NOT_PAUSED", ResumeDisposition::NotPaused),
+        ("NOT_FOUND", ResumeDisposition::NotFound),
+    ] {
+        assert_eq!(ResumeDisposition::from_text(text), Some(disposition));
+    }
+    assert_eq!(ResumeDisposition::from_text("PAUSED"), None);
+}
+
+/// A PAUSED tree is resumed in one step: the root and its PAUSED child are
+/// RUNNING, and the child's READY node is ENQUEUED with a minted task row.
+/// A second resume finds the root RUNNING: `false`, nothing written. An id
+/// with no workflow is `WORKFLOW_NOT_FOUND`.
+#[tokio::test]
+#[serial]
+async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
+    let broker = test_broker().await;
+    let pool = broker.pool().clone();
+    let root = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let claimed_task = Uuid::new_v4();
+    seed_workflow(&pool, root, "RUNNING", None).await;
+    seed_workflow(&pool, child, "RUNNING", Some(root)).await;
+    seed_claimed_node(&pool, child, claimed_task).await;
+    assert!(pause_workflow(&broker, root).await.expect("pause"));
+    let registry = crate::core::WorkflowSpecRegistry::new();
+    let payload = crate::core::config::payload::PayloadPolicy::default();
+    let retention = crate::core::config::retention::RetentionConfig::default();
+
+    assert!(crate::workflow_engine::lifecycle::resume_workflow(
+        &broker, root, &registry, &payload, &retention
+    )
+    .await
+    .expect("resume"));
+    assert_eq!(workflow_status(&pool, root).await, "RUNNING");
+    assert_eq!(workflow_status(&pool, child).await, "RUNNING");
+    let (node_status, new_task) = root_node(&pool, child).await;
+    assert_eq!(node_status, "ENQUEUED");
+    assert_ne!(new_task, Some(claimed_task), "a new task row is minted");
+
+    assert!(!crate::workflow_engine::lifecycle::resume_workflow(
+        &broker, root, &registry, &payload, &retention
+    )
+    .await
+    .expect("resume of RUNNING"));
+    let missing = crate::workflow_engine::lifecycle::resume_workflow(
+        &broker,
+        Uuid::new_v4(),
+        &registry,
+        &payload,
+        &retention,
+    )
+    .await
+    .expect_err("resume of a missing workflow");
+    assert_eq!(missing.code, HandleErrorCode::WorkflowNotFound);
+}
