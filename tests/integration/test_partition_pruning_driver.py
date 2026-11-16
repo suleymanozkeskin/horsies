@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.commands import (
@@ -26,7 +26,9 @@ from horsies.core.history.commands import (
     LeafBounds,
     LeafLifecycle,
     LeafRef,
+    PruneBounds,
 )
+from horsies.core.history.heartbeats import partitioning
 from horsies.core.history.heartbeats.partitioning import (
     CreateHourlyHeartbeatLeaf,
     create_hourly_heartbeat_leaf,
@@ -41,7 +43,10 @@ from horsies.core.history.maintenance.database import PartitionMaintenanceDataba
 from horsies.core.history.outcomes import (
     LeafCreated,
     LeafDetachInterrupted,
+    LeafInspection,
+    LeafMaintenanceBusy,
     LeafPendingBlocked,
+    PruneReach,
 )
 from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
@@ -52,14 +57,15 @@ from horsies.core.history.partitions.manager import (
     detach_expired_leaf,
     inspect_leaf,
 )
-from horsies.core.history.partitions.publication import UnpublishedLoader
+from horsies.core.history.partitions.publication import (
+    LoaderPublication,
+    UnpublishedLoader,
+)
 
 from tests.integration.task_history_harness import (
-    INSERT_HISTORY_ROW_SQL,
     HistorySchema,
     create_workflow,
     day_bounds,
-    frozen_history_row,
     link_workflow_node,
     register_class,
     terminalization_schema_fixture,
@@ -224,6 +230,59 @@ class TestHeartbeatPruning:
         assert await _catalog_dropped(schema, expired.leaf_name)
         assert await _relation_exists(schema, current.leaf_name)
 
+    async def test_a_heartbeat_leaf_error_is_reported_and_the_pass_goes_on(
+        self,
+        terminalization_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            await register_heartbeat_class(connection, horizon=HORIZON)
+            now = await database_now(connection)
+            hour = now.replace(minute=0, second=0, microsecond=0)
+            failing = hourly_leaf_ref(hour - timedelta(hours=7))
+            expired = hourly_leaf_ref(hour - timedelta(hours=6))
+            for leaf in (failing, expired):
+                created = await create_hourly_heartbeat_leaf(
+                    connection, CreateHourlyHeartbeatLeaf(leaf=leaf)
+                )
+                assert isinstance(created, LeafCreated)
+            parent_name = await register_class(
+                connection, CLASS_KEY, duration_days=30
+            )
+        history_leaf = await _make_history_leaf(schema, parent_name, days_ago=40)
+        detach = partitioning.detach_expired_leaf
+
+        async def detach_failing_first(
+            database: PartitionMaintenanceDatabase,
+            command: DetachExpiredHistoryLeaf,
+            publisher: LoaderPublication,
+        ) -> LeafInspection | LeafMaintenanceBusy:
+            if command.leaf.leaf_name == failing.leaf_name:
+                raise OperationalError('ALTER TABLE', {}, Exception('connection lost'))
+            return await detach(database, command, publisher)
+
+        monkeypatch.setattr(partitioning, 'detach_expired_leaf', detach_failing_first)
+
+        pruned = await prune_expired_partitions(
+            PartitionMaintenanceDatabase(
+                schema.engine, connection_capacity=2
+            ),
+            UnpublishedLoader(),
+        )
+
+        assert [error.split(':', 1)[0] for error in pruned.errors] == [
+            f'heartbeat {failing.leaf_name}'
+        ]
+        assert [entry.leaf_name for entry in pruned.heartbeat_swept] == [
+            expired.leaf_name
+        ]
+        assert [entry.leaf_name for entry in pruned.history_swept] == [
+            history_leaf.leaf_name
+        ]
+        assert pruned.dropped_count == 2
+        assert await _relation_exists(schema, failing.leaf_name)
+
 
 class TestDeclaredDurationGovernsTheDrop:
     """A duration other than 30 days actually governs when a leaf drops.
@@ -338,6 +397,7 @@ class TestHistoryPruning:
 
         assert pruned.dropped_count == 1
         assert pruned.errors == ()
+        assert pruned.reach is PruneReach.WITHIN_BOUNDS
         assert [entry.leaf_name for entry in pruned.history_swept] == [
             expired.leaf_name
         ]
@@ -432,3 +492,162 @@ class TestHistoryPruning:
         assert pruned.dropped_count == 1
         assert not await _relation_exists(schema, expired.leaf_name)
         assert await _catalog_dropped(schema, expired.leaf_name)
+
+
+def _database(schema: HistorySchema) -> PartitionMaintenanceDatabase:
+    return PartitionMaintenanceDatabase(schema.engine, connection_capacity=2)
+
+
+class TestPassBounds:
+    """A pass acts on at most `acted_leaves` leaves, heartbeat leaves
+    first, and reads at most `candidates` leaves per candidate read; a
+    leaf left over is the next pass's candidate and the pass says
+    TRUNCATED."""
+
+    async def test_the_leaf_bound_leaves_the_newer_leaves_for_the_next_pass(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY, duration_days=30)
+        oldest = await _make_history_leaf(schema, parent_name, days_ago=42)
+        middle = await _make_history_leaf(schema, parent_name, days_ago=41)
+        newest = await _make_history_leaf(schema, parent_name, days_ago=40)
+        bounds = PruneBounds(candidates=16, acted_leaves=2)
+
+        first = await prune_expired_partitions(
+            _database(schema), UnpublishedLoader(), bounds
+        )
+
+        assert [entry.leaf_name for entry in first.history_swept] == [
+            oldest.leaf_name, middle.leaf_name,
+        ]
+        assert first.reach is PruneReach.TRUNCATED
+        assert await _relation_exists(schema, newest.leaf_name)
+
+        second = await prune_expired_partitions(
+            _database(schema), UnpublishedLoader(), bounds
+        )
+
+        assert [entry.leaf_name for entry in second.history_swept] == [
+            newest.leaf_name
+        ]
+        assert second.reach is PruneReach.WITHIN_BOUNDS
+        assert not await _relation_exists(schema, newest.leaf_name)
+
+    async def test_the_candidate_bound_truncates_the_read(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY, duration_days=30)
+        oldest = await _make_history_leaf(schema, parent_name, days_ago=41)
+        newest = await _make_history_leaf(schema, parent_name, days_ago=40)
+
+        pruned = await prune_expired_partitions(
+            _database(schema),
+            UnpublishedLoader(),
+            PruneBounds(candidates=1, acted_leaves=64),
+        )
+
+        assert [entry.leaf_name for entry in pruned.history_swept] == [
+            oldest.leaf_name
+        ]
+        assert pruned.reach is PruneReach.TRUNCATED
+        assert await _relation_exists(schema, newest.leaf_name)
+
+    async def test_a_refused_leaf_does_not_count_toward_the_bound(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY, duration_days=30)
+        pinned = await _make_history_leaf(schema, parent_name, days_ago=41)
+        expired = await _make_history_leaf(schema, parent_name, days_ago=40)
+        async with schema.engine.begin() as connection:
+            await _seed_pending_locator(connection, pinned, task_id=str(uuid4()))
+
+        pruned = await prune_expired_partitions(
+            _database(schema),
+            UnpublishedLoader(),
+            PruneBounds(candidates=16, acted_leaves=1),
+        )
+
+        assert [
+            (entry.leaf_name, type(entry.detach).__name__)
+            for entry in pruned.history_swept
+        ] == [
+            (pinned.leaf_name, 'LeafPendingBlocked'),
+            (expired.leaf_name, 'LeafDetached'),
+        ]
+        assert pruned.dropped_count == 1
+        assert pruned.reach is PruneReach.WITHIN_BOUNDS
+
+    async def test_heartbeat_leaves_take_the_bound_first(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            await register_heartbeat_class(connection, horizon=HORIZON)
+            now = await database_now(connection)
+            hour = now.replace(minute=0, second=0, microsecond=0)
+            heartbeat_leaf = hourly_leaf_ref(hour - timedelta(hours=6))
+            created = await create_hourly_heartbeat_leaf(
+                connection, CreateHourlyHeartbeatLeaf(leaf=heartbeat_leaf)
+            )
+            assert isinstance(created, LeafCreated)
+            parent_name = await register_class(connection, CLASS_KEY, duration_days=30)
+        history_leaf = await _make_history_leaf(schema, parent_name, days_ago=40)
+
+        pruned = await prune_expired_partitions(
+            _database(schema),
+            UnpublishedLoader(),
+            PruneBounds(candidates=16, acted_leaves=1),
+        )
+
+        assert [entry.leaf_name for entry in pruned.heartbeat_swept] == [
+            heartbeat_leaf.leaf_name
+        ]
+        assert pruned.history_swept == ()
+        assert pruned.reach is PruneReach.TRUNCATED
+        assert await _relation_exists(schema, history_leaf.leaf_name)
+
+    async def test_a_failed_leaf_counts_toward_the_bound(
+        self,
+        terminalization_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            await register_heartbeat_class(connection, horizon=HORIZON)
+            now = await database_now(connection)
+            hour = now.replace(minute=0, second=0, microsecond=0)
+            failing = hourly_leaf_ref(hour - timedelta(hours=7))
+            expired = hourly_leaf_ref(hour - timedelta(hours=6))
+            for leaf in (failing, expired):
+                created = await create_hourly_heartbeat_leaf(
+                    connection, CreateHourlyHeartbeatLeaf(leaf=leaf)
+                )
+                assert isinstance(created, LeafCreated)
+
+        async def detach_failing(
+            database: PartitionMaintenanceDatabase,
+            command: DetachExpiredHistoryLeaf,
+            publisher: LoaderPublication,
+        ) -> LeafInspection | LeafMaintenanceBusy:
+            raise OperationalError('ALTER TABLE', {}, Exception('connection lost'))
+
+        monkeypatch.setattr(partitioning, 'detach_expired_leaf', detach_failing)
+
+        pruned = await prune_expired_partitions(
+            _database(schema),
+            UnpublishedLoader(),
+            PruneBounds(candidates=16, acted_leaves=1),
+        )
+
+        assert [error.split(':', 1)[0] for error in pruned.errors] == [
+            f'heartbeat {failing.leaf_name}'
+        ]
+        assert pruned.heartbeat_swept == ()
+        assert pruned.reach is PruneReach.TRUNCATED
+        assert await _relation_exists(schema, expired.leaf_name)
