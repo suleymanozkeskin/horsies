@@ -47,10 +47,13 @@ include_dir = { version = "0.7", optional = true }
 mime_guess = { version = "2", optional = true }
 percent-encoding = { version = "2", optional = true }
 tower = { version = "0.5", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value`: stored results are read as raw text first. `unbounded_depth`: a
+# text that the strict reader bounded at 300 levels is decoded past serde_json's
+# own limit of 128 (`core::codec::from_json_str`).
+serde_json = { version = "1", features = ["raw_value", "unbounded_depth"] }
 serde_path_to_error = "0.1"
 serde_plain = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -75,6 +78,7 @@ gethostname = "0.4"
 owo-colors = "4"
 toml = "0.8"
 sysinfo = "0.32"
+libc = "0.2"
 
 [lints]
 workspace = true

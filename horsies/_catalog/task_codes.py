@@ -126,6 +126,4 @@ class OutcomeCode(str, Enum):
     SKIPPED.
     """
 
-    WORKFLOW_STOPPED = 'WORKFLOW_STOPPED'
-
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
