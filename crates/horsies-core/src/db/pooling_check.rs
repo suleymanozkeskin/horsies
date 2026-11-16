@@ -1,6 +1,7 @@
-//! The statement-pooling check of a pool on the main URL.
+//! The statement-pooling check of every core pool, the session pool
+//! included.
 //!
-//! On the first checkout of such a pool in a process, that connection runs
+//! On the first checkout of a pool in a process, that connection runs
 //! `SELECT 1`, then a two-statement transaction sent as separate statements:
 //! `BEGIN`, `SELECT 1`, `COMMIT` (4 round trips, once per pool per process).
 //!
