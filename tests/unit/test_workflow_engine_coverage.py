@@ -41,6 +41,7 @@ from horsies.core.workflows.engine import (
     on_workflow_task_complete,
     try_make_ready_and_enqueue,
 )
+from horsies.core.workflows.stored_success_policy import StoredSuccessPolicyError
 from horsies.core.workflows.sql import (
     COMPLETE_WORKFLOW_TASK_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
@@ -1633,16 +1634,14 @@ class TestEvaluateWorkflowSuccess:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_corrupt_policy_falls_back(self) -> None:
-        """Policy parses to non-dict → default behavior."""
+    async def test_corrupt_policy_fails_the_step(self) -> None:
+        """A policy that parses to a non-object fails the completion step; it
+        no longer falls back to the default rule (which gave True here)."""
         session = AsyncMock()
         session.execute = AsyncMock(return_value=_empty_result())
-        # String that parses to a list, not dict
-        result = await evaluate_workflow_success(
-            session, 'wf-1', '[1,2,3]', False, 0,
-        )
-        # Default: not has_error and failed == 0 → True
-        assert result is True
+        with pytest.raises(StoredSuccessPolicyError, match='not an object'):
+            await evaluate_workflow_success(session, 'wf-1', '[1,2,3]', False, 0)
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_required_indices_skipped(self) -> None:
@@ -1721,12 +1720,14 @@ class TestGetWorkflowFailureError:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_corrupt_policy_returns_none(self) -> None:
+    async def test_corrupt_policy_fails_the_step(self) -> None:
+        """A policy that parses to a non-object fails the step; it no longer
+        returns None (which kept the stored error)."""
         session = AsyncMock()
         session.execute = AsyncMock(return_value=_empty_result())
-        # Parses to list, not dict
-        result = await get_workflow_failure_error(session, 'wf-1', '[1,2]')
-        assert result is None
+        with pytest.raises(StoredSuccessPolicyError, match='not an object'):
+            await get_workflow_failure_error(session, 'wf-1', '[1,2]')
+        session.execute.assert_not_awaited()
 
 
 # ── 11. get_workflow_final_result ────────────────────────────────────
