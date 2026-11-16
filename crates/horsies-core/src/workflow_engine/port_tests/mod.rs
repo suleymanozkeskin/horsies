@@ -15,4 +15,5 @@ mod pause_resume_cancel;
 mod recovery_cases;
 mod recovery_limit_pass;
 mod start_rows;
+mod subworkflow_matrix;
 mod subworkflow_rows;
