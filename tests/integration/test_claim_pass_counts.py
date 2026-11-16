@@ -29,7 +29,7 @@ from horsies.core.worker.sql import (
     COUNT_RUNNING_FOR_WORKER_SQL,
 )
 from horsies.core.utils.db import PooledStatements
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
@@ -47,7 +47,7 @@ async def _seed(
     lease: str | None,
 ) -> None:
     """lease: 'live' (now()+1h), 'expired' (now()-1h), or None (NULL)."""
-    sent_at, sha = compute_test_enqueue_sha(task_name='counts_seed')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='counts_seed')
     lease_sql = {
         'live': "NOW() + INTERVAL '1 hour'",
         'expired': "NOW() - INTERVAL '1 hour'",
@@ -56,27 +56,28 @@ async def _seed(
     await session.execute(
         text(f"""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs, status,
-                 sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, enqueue_sha, claimed_by_worker_id,
-                 claim_expires_at,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'counts_seed', :queue, 100, '[]', '{{}}', :status,
-                 :sent_at, NOW(), NOW(), FALSE, 0, 0, :sha, :worker,
-                 {lease_sql},
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries,
+                    claimed_by_worker_id, claim_expires_at, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'counts_seed', :queue, 100, '{{}}', :status, :sent_at, NOW(),
+                    NOW(), 0, 0, :worker, {lease_sql}, 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': str(uuid.uuid4()),
             'queue': queue,
             'status': status,
             'sent_at': sent_at,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
             'worker': worker,
         },
     )
@@ -93,13 +94,14 @@ class TestClaimPassCounts:
         """Every column of the merged statement equals its original:
         my CLAIMED (live lease only), my RUNNING, my in-flight, global
         in-flight, and per-queue hard/soft counts — across owned/foreign
-        rows, live/expired/NULL leases, and multiple queues."""
+        rows, live/expired leases, and multiple queues. A CLAIMED row always
+        holds a lease (CHECK horsies_tasks_status_live)."""
         rows: list[dict[str, Any]] = [
-            # mine: claimed live, claimed expired (excluded), claimed NULL
-            # lease (included), running
+            # mine: claimed live (two queues), claimed expired (excluded),
+            # running
             dict(status='CLAIMED', queue='q_a', worker=WID, lease='live'),
             dict(status='CLAIMED', queue='q_a', worker=WID, lease='expired'),
-            dict(status='CLAIMED', queue='q_b', worker=WID, lease=None),
+            dict(status='CLAIMED', queue='q_b', worker=WID, lease='live'),
             dict(status='RUNNING', queue='q_b', worker=WID, lease=None),
             # others: claimed live, claimed expired, running, plus an
             # unclaimed PENDING row that must count nowhere
@@ -145,7 +147,7 @@ class TestClaimPassCounts:
             ), queue
 
         # Concrete expected values, so a shared bug in old+new cannot hide:
-        # mine claimed = live + NULL lease = 2; mine running = 1.
+        # mine claimed = two live leases = 2; mine running = 1.
         assert merged.my_claimed == 2
         assert merged.my_running == 1
         assert merged.my_in_flight == 3

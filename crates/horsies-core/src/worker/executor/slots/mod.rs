@@ -7,6 +7,9 @@
 //! - [`budgets`]: the capacity in service of each budget.
 //! - [`pool`] and [`isolated`]: the isolated children and their slots.
 //! - [`outcome`]: the hand-off of each end to the existing outcome writers.
+//! - [`shared_stop`] and [`seat_runs`]: the rules of shared children: the
+//!   stop report of each run, the verdict of each run at a kill, the
+//!   backstops, placement and recycle.
 
 pub mod budgets;
 pub mod dispatch;
@@ -14,7 +17,11 @@ pub mod isolated;
 pub mod outcome;
 pub mod pool;
 pub mod route;
+pub mod seat_runs;
+pub mod shared_stop;
 
+#[cfg(test)]
+mod shared_rules_tests;
 #[cfg(test)]
 mod tests;
 

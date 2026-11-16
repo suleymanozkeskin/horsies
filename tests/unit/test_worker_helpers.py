@@ -45,7 +45,6 @@ from horsies.core.worker.claiming import (
     claim_time_of,
     read_claim_rows,
 )
-from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
 from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import (
     Worker,
@@ -190,8 +189,7 @@ _CLAIM_COLUMNS = [
     'row_kind',
     'id',
     'task_name',
-    'args',
-    'kwargs',
+    'input',
     'queue_name',
     'is_workflow_task',
     'task_options',
@@ -207,7 +205,6 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
         'CLAIMED',
         task_id,
         'task',
-        '[]',
         '{}',
         'default',
         True,
@@ -220,7 +217,7 @@ def _claimed_row(task_id: str) -> tuple[object, ...]:
 
 def _short_row(short_by: int) -> tuple[object, ...]:
     """The 'SHORT' row of HORSIES_CLAIM_SQL."""
-    return ('SHORT', None, None, None, None, None, None, None, None, None, short_by)
+    return ('SHORT', None, None, None, None, None, None, None, None, short_by)
 
 
 
@@ -917,8 +914,11 @@ class TestReaperRetentionPass:
         assert any(
             stmt is DELETE_EXPIRED_WORKFLOWS_SQL for stmt in executed
         )
-        assert any(
-            stmt is DELETE_ORPHANED_RECOVERY_FAILURES_SQL for stmt in executed
+        # The foreign key removes a recovery failure count with its
+        # workflow, so the pass sends no delete of its own for the counts.
+        assert not any(
+            'DELETE FROM horsies_workflow_recovery_failures' in str(stmt)
+            for stmt in executed
         )
         assert recover_mock.await_args is not None
         assert recover_mock.await_args.kwargs['failure_limit'] == 7
@@ -1040,12 +1040,12 @@ class TestClaimBatchLockedReturnsPayload:
         worker = _make_worker()
 
         fake_rows = [
-            ('task-1', 'my_app.add', '[]', '{}'),
-            ('task-2', 'my_app.mul', '[1, 2]', '{"x": 3}'),
+            ('task-1', 'my_app.add', '{}'),
+            ('task-2', 'my_app.mul', '{"x": 3}'),
         ]
 
         fake_result = MagicMock()
-        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.keys.return_value = ['id', 'task_name', 'input']
         fake_result.fetchall.return_value = fake_rows
 
         session = AsyncMock()
@@ -1057,14 +1057,12 @@ class TestClaimBatchLockedReturnsPayload:
         assert rows[0] == {
             'id': 'task-1',
             'task_name': 'my_app.add',
-            'args': '[]',
-            'kwargs': '{}',
+            'input': '{}',
         }
         assert rows[1] == {
             'id': 'task-2',
             'task_name': 'my_app.mul',
-            'args': '[1, 2]',
-            'kwargs': '{"x": 3}',
+            'input': '{"x": 3}',
         }
 
     @pytest.mark.asyncio
@@ -1072,7 +1070,7 @@ class TestClaimBatchLockedReturnsPayload:
         worker = _make_worker()
 
         fake_result = MagicMock()
-        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.keys.return_value = ['id', 'task_name', 'input']
         fake_result.fetchall.return_value = []
 
         session = AsyncMock()
@@ -1087,7 +1085,7 @@ class TestClaimBatchLockedReturnsPayload:
         worker = _make_worker(claim_lease_ms=None)
 
         fake_result = MagicMock()
-        fake_result.keys.return_value = ['id', 'task_name', 'args', 'kwargs']
+        fake_result.keys.return_value = ['id', 'task_name', 'input']
         fake_result.fetchall.return_value = []
 
         session = AsyncMock()

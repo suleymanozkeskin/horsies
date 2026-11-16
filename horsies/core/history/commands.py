@@ -210,33 +210,23 @@ class DetachExpiredHistoryLeaf:
 
     Runs on a dedicated autocommit connection because
     `DETACH PARTITION ... CONCURRENTLY` cannot run inside a transaction
-    block. The statement timeout bounds the wait on long readers.
-
-    `quarantine_horizon` is stated at every call site: None means a
-    pending locator on the leaf always refuses the detach; a duration
-    means locators older than it (by the pending row's `created_at`) are
-    first moved through the quarantine protocol — copy, verify,
-    repoint — and only a leaf whose blockers all resolved proceeds to
-    detach. A quarantine refusal keeps the leaf pinned.
+    block. The statement timeout bounds the wait on long readers. A pending
+    locator on the leaf refuses the detach.
 
     `statement_timeout_ms` carries no default. It once defaulted to
     None, and a call site that simply omitted it waited on a lock with
     no bound while holding the cluster-wide maintenance gate — the
     omission read as "nothing to say here" rather than as a choice.
-    Stating it is now mandatory, exactly as `quarantine_horizon` is;
-    None remains available and means unbounded, but only where someone
-    wrote it.
+    Stating it is mandatory; None remains available and means unbounded,
+    but only where someone wrote it.
     """
 
     leaf: LeafRef
-    quarantine_horizon: timedelta | None
     statement_timeout_ms: int | None
 
     def __post_init__(self) -> None:
         if self.statement_timeout_ms is not None and self.statement_timeout_ms <= 0:
             raise ValueError('statement timeout must be positive')
-        if self.quarantine_horizon is not None and self.quarantine_horizon <= timedelta(0):
-            raise ValueError('quarantine horizon must be positive')
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,9 +240,8 @@ class FinalizeInterruptedLeafDetach:
     the parent, and the pass holding it holds the cluster-wide
     maintenance gate.
 
-    `statement_timeout_ms` carries no default for the same reason
-    `quarantine_horizon` does not: unbounded is a decision, and a
-    default lets a call site take it without making it. None still
+    `statement_timeout_ms` carries no default: unbounded is a decision,
+    and a default lets a call site take it without making it. None still
     means unbounded, but only where someone wrote None.
     """
 

@@ -629,8 +629,8 @@ class TestWorkflowPaths:
     def _promotion_arguments(task_options: str | None) -> dict[str, Any]:
         return {
             'task_name': 'node.task',
-            'task_args': None,
-            'task_kwargs': None,
+            'node_input': '{}',
+            'workflow_sent_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
             'queue_name': 'default',
             'priority': 50,
             'args_from': None,
@@ -748,14 +748,13 @@ class TestMigrationText:
             in ADD_TASK_EXECUTION_COLUMN_SQL.text
         )
 
-    def test_the_model_column_matches_the_migration(self) -> None:
+    def test_the_model_column_matches_the_baseline(self) -> None:
+        """The baseline table has no database defaults: every insert names
+        the class."""
         column = TaskModel.__table__.columns['execution']
         assert column.nullable is False
         assert str(column.type) == 'TEXT'
-        assert column.server_default is not None
-        assert "'ISOLATED'" in str(
-            column.server_default.arg,
-        )
+        assert column.server_default is None
 
     def test_the_claim_indexes_have_the_class_as_their_second_key(self) -> None:
         from horsies.core.schemas.recovery import CLAIM_INDEXES

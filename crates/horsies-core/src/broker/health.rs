@@ -1,11 +1,20 @@
 //! Typed result models for the worker/database health API.
 //!
 //! Mirrors Python's `horsies/core/models/health.py`. These carry no behaviour,
-//! only observed data returned to callers from the broker's health methods.
+//! only observed data returned to callers from the broker's health methods,
+//! and the reading of a stored worker state row into a snapshot.
+
+use std::collections::BTreeMap;
+use std::ops::Range;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sqlx::FromRow;
+
+use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
+use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
+use crate::broker::slot_health::{parse_slot_health, SlotHealth};
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
 /// [`WorkerPingRequest`]; each worker replies on the request's `reply_channel`.
@@ -56,10 +65,11 @@ pub struct WorkerPong {
 
 /// One `horsies_worker_states` row — a worker's state at a point in time.
 ///
-/// Mirrors the timeseries `WorkerStateRow` minus its internal `id`. Returned as
-/// the latest snapshot per worker (cluster-wide listing) or as a timeseries
-/// (single-worker history).
-#[derive(Debug, Clone, FromRow)]
+/// Mirrors Python's `WorkerStateSnapshot` (`horsies/core/models/health.py:399-433`).
+/// Returned as the latest snapshot per worker (cluster-wide listing) or as a
+/// timeseries (single-worker history). The worker state reads build it from
+/// the stored row; a stored value of another shape fails the read.
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkerStateSnapshot {
     pub worker_id: String,
     pub snapshot_at: DateTime<Utc>,
@@ -70,15 +80,243 @@ pub struct WorkerStateSnapshot {
     pub max_claim_per_worker: i32,
     pub cluster_wide_cap: Option<i32>,
     pub queues: Vec<String>,
-    pub queue_priorities: Option<serde_json::Value>,
-    pub queue_max_concurrency: Option<serde_json::Value>,
-    pub recovery_config: Option<serde_json::Value>,
+    /// Queue name to priority. Empty when the worker had none set.
+    pub queue_priorities: BTreeMap<String, i64>,
+    /// Queue name to the most rows of that queue in flight. Empty when the
+    /// worker had none set.
+    pub queue_max_concurrency: BTreeMap<String, i64>,
+    /// The recovery settings and the health of the worker's maintenance
+    /// passes, as the worker wrote them. Empty when the worker had none.
+    pub recovery_config: Map<String, Value>,
     pub tasks_running: i32,
     pub tasks_claimed: i32,
+    /// Resident memory of the worker process only, in MB.
     pub memory_usage_mb: Option<f64>,
     pub memory_percent: Option<f64>,
     pub cpu_percent: Option<f64>,
+    /// Summed resident memory of the worker's executor children, in MB.
+    pub children_memory_mb: Option<f64>,
     pub worker_started_at: DateTime<Utc>,
+    /// Whether any slot was down, and why.
+    pub slot_health: SlotHealth,
+    /// The claim budget of each execution class that the worker runs
+    /// children for: its capacity in service and the classes it claims.
+    pub class_capacity: ClassBudgets,
+}
+
+/// A `horsies_worker_states` row as stored, before its JSON columns are read.
+/// [`StoredWorkerState::into_snapshot`] reads it.
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct StoredWorkerState {
+    pub(crate) worker_id: String,
+    pub(crate) snapshot_at: DateTime<Utc>,
+    pub(crate) hostname: String,
+    pub(crate) pid: i32,
+    pub(crate) processes: i32,
+    pub(crate) max_claim_batch: i32,
+    pub(crate) max_claim_per_worker: i32,
+    pub(crate) cluster_wide_cap: Option<i32>,
+    pub(crate) queues: Vec<String>,
+    pub(crate) queue_priorities: Value,
+    pub(crate) queue_max_concurrency: Value,
+    pub(crate) recovery_config: Value,
+    pub(crate) tasks_running: i32,
+    pub(crate) tasks_claimed: i32,
+    pub(crate) memory_usage_mb: Option<f64>,
+    pub(crate) memory_percent: Option<f64>,
+    pub(crate) cpu_percent: Option<f64>,
+    pub(crate) children_memory_mb: Option<f64>,
+    pub(crate) worker_started_at: DateTime<Utc>,
+    pub(crate) slots_down: Value,
+    pub(crate) class_capacity: Value,
+}
+
+/// A JSON column of a worker state row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerStateColumn {
+    SlotsDown,
+    ClassCapacity,
+    QueuePriorities,
+    QueueMaxConcurrency,
+    RecoveryConfig,
+}
+
+impl WorkerStateColumn {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SlotsDown => "slots_down",
+            Self::ClassCapacity => "class_capacity",
+            Self::QueuePriorities => "queue_priorities",
+            Self::QueueMaxConcurrency => "queue_max_concurrency",
+            Self::RecoveryConfig => "recovery_config",
+        }
+    }
+}
+
+/// A stored worker state row whose JSON column does not have the shape that
+/// the worker writes. The message names the worker, the snapshot, the column
+/// and the cause, as Python's (`horsies/core/brokers/postgres.py:2971-2986`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "worker {worker_id} snapshot at {snapshot_at}: {} is unreadable: {reason}",
+    column.as_str()
+)]
+pub(crate) struct WorkerStateUnreadable {
+    pub(crate) worker_id: String,
+    pub(crate) snapshot_at: DateTime<Utc>,
+    pub(crate) column: WorkerStateColumn,
+    pub(crate) reason: String,
+}
+
+impl StoredWorkerState {
+    /// The snapshot of this row (Python `_row_to_worker_snapshot`,
+    /// `horsies/core/brokers/postgres.py:2961-3009`).
+    ///
+    /// `slots_down` and `class_capacity` are read first, in Python's order.
+    /// The three map columns must be JSON objects; the queue maps hold whole
+    /// numbers. Any other value is [`WorkerStateUnreadable`]. Reads only.
+    pub(crate) fn into_snapshot(self) -> Result<WorkerStateSnapshot, WorkerStateUnreadable> {
+        let slot_health = parse_slot_health(&self.slots_down, self.processes)
+            .map_err(|cause| self.unreadable(WorkerStateColumn::SlotsDown, cause.reason))?;
+        let class_capacity = parse_class_capacity(&self.class_capacity)
+            .map_err(|cause| self.unreadable(WorkerStateColumn::ClassCapacity, cause.reason))?;
+        let queue_priorities = queue_numbers(&self.queue_priorities)
+            .map_err(|reason| self.unreadable(WorkerStateColumn::QueuePriorities, reason))?;
+        let queue_max_concurrency = queue_numbers(&self.queue_max_concurrency)
+            .map_err(|reason| self.unreadable(WorkerStateColumn::QueueMaxConcurrency, reason))?;
+        let recovery_config = json_object(&self.recovery_config)
+            .map_err(|reason| self.unreadable(WorkerStateColumn::RecoveryConfig, reason))?;
+        Ok(WorkerStateSnapshot {
+            worker_id: self.worker_id,
+            snapshot_at: self.snapshot_at,
+            hostname: self.hostname,
+            pid: self.pid,
+            processes: self.processes,
+            max_claim_batch: self.max_claim_batch,
+            max_claim_per_worker: self.max_claim_per_worker,
+            cluster_wide_cap: self.cluster_wide_cap,
+            queues: self.queues,
+            queue_priorities,
+            queue_max_concurrency,
+            recovery_config,
+            tasks_running: self.tasks_running,
+            tasks_claimed: self.tasks_claimed,
+            memory_usage_mb: self.memory_usage_mb,
+            memory_percent: self.memory_percent,
+            cpu_percent: self.cpu_percent,
+            children_memory_mb: self.children_memory_mb,
+            worker_started_at: self.worker_started_at,
+            slot_health,
+            class_capacity,
+        })
+    }
+
+    fn unreadable(&self, column: WorkerStateColumn, reason: String) -> WorkerStateUnreadable {
+        WorkerStateUnreadable {
+            worker_id: self.worker_id.clone(),
+            snapshot_at: self.snapshot_at,
+            column,
+            reason,
+        }
+    }
+}
+
+fn queue_numbers(value: &Value) -> Result<BTreeMap<String, i64>, String> {
+    let entries = json_object(value)?;
+    entries
+        .iter()
+        .map(|(queue, number)| match number.as_i64() {
+            Some(whole) => Ok((queue.clone(), whole)),
+            None => Err(format!(
+                "queue '{queue}' holds {}, not a whole number",
+                stored_value_text(Some(number))
+            )),
+        })
+        .collect()
+}
+
+fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
+    match value {
+        Value::Object(entries) => Ok(entries.clone()),
+        other => Err(format!(
+            "{} is not a JSON object",
+            stored_value_text(Some(other))
+        )),
+    }
+}
+
+/// The snapshots of stored rows, for the read `operation`. The first row that
+/// does not read fails the read: `MONITORING_QUERY_FAILED`, not retryable,
+/// since the same rows give the same answer (Python: the `ValueError` of
+/// `_row_to_worker_snapshot` in the read's `try`,
+/// `horsies/core/brokers/postgres.py:3011-3100`). Nothing changed.
+pub(crate) fn read_worker_snapshots(
+    operation: &str,
+    rows: Vec<StoredWorkerState>,
+) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+    rows.into_iter()
+        .map(|row| read_worker_snapshot(operation, row))
+        .collect()
+}
+
+/// The snapshot of one stored row, for the read `operation`; as
+/// [`read_worker_snapshots`].
+pub(crate) fn read_worker_snapshot(
+    operation: &str,
+    row: StoredWorkerState,
+) -> BrokerResult<WorkerStateSnapshot> {
+    row.into_snapshot()
+        .map_err(|unreadable| BrokerOperationError {
+            code: BrokerErrorCode::MonitoringQueryFailed,
+            message: format!("{operation} failed: {unreadable}"),
+            retryable: false,
+        })
+}
+
+/// The exclusive bound of a stored count: it stays in the range of a
+/// PostgreSQL bigint (Python `_COUNT_LIMIT = 2**63`,
+/// `horsies/core/models/health.py:134`).
+pub(crate) const STORED_COUNT_LIMIT: u64 = 1 << 63;
+
+/// A stored JSON whole number inside `valid` (Python `_whole_in`,
+/// `horsies/core/models/health.py:214-226`). A bool is not a whole number;
+/// any other value outside `valid` is out of range. The error is the reason,
+/// naming `name` and the stored value.
+pub(crate) fn stored_whole_number(
+    value: Option<&Value>,
+    name: &str,
+    valid: Range<u64>,
+) -> Result<u64, String> {
+    match value {
+        Some(Value::Bool(_)) => Err(format!(
+            "{name} {} is not a whole number",
+            stored_value_text(value)
+        )),
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(whole) if valid.contains(&whole) => Ok(whole),
+            _ => Err(format!(
+                "{name} {} is out of range",
+                stored_value_text(value)
+            )),
+        },
+        _ => Err(format!(
+            "{name} {} is out of range",
+            stored_value_text(value)
+        )),
+    }
+}
+
+/// A stored JSON value as text for a refusal reason, in the form of Python's
+/// `repr` of the decoded value: `None` for a missing key or `null`, `True` or
+/// `False`, a string in single quotes, any other value as JSON text.
+pub(crate) fn stored_value_text(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => "None".to_owned(),
+        Some(Value::Bool(true)) => "True".to_owned(),
+        Some(Value::Bool(false)) => "False".to_owned(),
+        Some(Value::String(text)) => format!("'{text}'"),
+        Some(other) => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -118,5 +356,118 @@ mod tests {
             r#"{"correlation_id":"c","worker_id":"w","hostname":"h","pid":1,"extra":true}"#,
         );
         assert!(result.is_err(), "unknown fields must be rejected");
+    }
+
+    fn stored_row() -> StoredWorkerState {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 16, 12, 0, 0).unwrap();
+        StoredWorkerState {
+            worker_id: "w1".to_owned(),
+            snapshot_at: at,
+            hostname: "host".to_owned(),
+            pid: 4242,
+            processes: 2,
+            max_claim_batch: 2,
+            max_claim_per_worker: 2,
+            cluster_wide_cap: None,
+            queues: vec!["default".to_owned()],
+            queue_priorities: serde_json::json!({"default": 1}),
+            queue_max_concurrency: serde_json::json!({}),
+            recovery_config: serde_json::json!({"phase2_recovery": {"state": "ok"}}),
+            tasks_running: 0,
+            tasks_claimed: 0,
+            memory_usage_mb: Some(10.5),
+            memory_percent: None,
+            cpu_percent: None,
+            children_memory_mb: Some(64.0),
+            worker_started_at: at,
+            slots_down: serde_json::json!([]),
+            class_capacity: serde_json::json!({
+                "ISOLATED": {"capacity": 2, "serves": ["ISOLATED"]},
+            }),
+        }
+    }
+
+    /// Python `test_worker_health_api.py::test_worker_state_reads_the_slot_health`
+    /// and `::test_worker_state_reads_the_class_capacity`, without the database.
+    #[test]
+    fn a_stored_row_reads_into_a_snapshot() {
+        let snapshot = stored_row().into_snapshot().expect("readable row");
+
+        assert_eq!(snapshot.slot_health, SlotHealth::AllSlotsServing);
+        let budgets = snapshot.class_capacity.as_slice();
+        assert_eq!(budgets.len(), 1);
+        assert_eq!(budgets[0].capacity, 2);
+        assert_eq!(snapshot.children_memory_mb, Some(64.0));
+        assert_eq!(snapshot.queue_priorities.get("default"), Some(&1));
+        assert!(snapshot.queue_max_concurrency.is_empty());
+        assert!(snapshot.recovery_config.contains_key("phase2_recovery"));
+    }
+
+    /// Python `test_worker_health_api.py::test_an_unreadable_slot_health_fails_the_read`:
+    /// the failure names the worker and the column.
+    #[test]
+    fn an_unreadable_slots_down_names_the_worker_and_the_column() {
+        let mut row = stored_row();
+        row.slots_down = serde_json::json!({"slot": 1});
+
+        let unreadable = row.into_snapshot().expect_err("unreadable slots_down");
+
+        assert_eq!(unreadable.column, WorkerStateColumn::SlotsDown);
+        let message = unreadable.to_string();
+        assert!(message.starts_with("worker w1 snapshot at "), "{message}");
+        assert!(
+            message.ends_with("slots_down is unreadable: slots_down is not a JSON array"),
+            "{message}"
+        );
+    }
+
+    /// Python `test_worker_health_api.py::test_an_unreadable_class_capacity_fails_the_read`.
+    #[test]
+    fn an_unreadable_class_capacity_names_the_budget() {
+        let mut row = stored_row();
+        row.class_capacity =
+            serde_json::json!({"EXCLUSIVE": {"capacity": 1, "serves": ["EXCLUSIVE"]}});
+
+        let unreadable = row.into_snapshot().expect_err("unreadable class_capacity");
+
+        assert_eq!(unreadable.column, WorkerStateColumn::ClassCapacity);
+        assert!(unreadable.to_string().contains("'EXCLUSIVE'"));
+    }
+
+    /// The maps are NOT NULL objects; a stored value of another shape fails
+    /// the read instead of reading as empty.
+    #[test]
+    fn a_map_column_of_another_shape_is_unreadable() {
+        let mut null_map = stored_row();
+        null_map.queue_priorities = serde_json::Value::Null;
+        let mut text_number = stored_row();
+        text_number.queue_max_concurrency = serde_json::json!({"default": "5"});
+        let mut list_config = stored_row();
+        list_config.recovery_config = serde_json::json!([]);
+
+        for (row, column) in [
+            (null_map, WorkerStateColumn::QueuePriorities),
+            (text_number, WorkerStateColumn::QueueMaxConcurrency),
+            (list_config, WorkerStateColumn::RecoveryConfig),
+        ] {
+            assert_eq!(row.into_snapshot().expect_err("unreadable").column, column);
+        }
+    }
+
+    /// An unreadable row fails the read with `MONITORING_QUERY_FAILED`, not
+    /// retryable (Python: a `ValueError` is not a connection error).
+    #[test]
+    fn an_unreadable_row_fails_the_read_and_is_not_retryable() {
+        let mut row = stored_row();
+        row.slots_down = serde_json::json!("down");
+
+        let failed = read_worker_snapshots("list_worker_states", vec![stored_row(), row])
+            .expect_err("the second row is unreadable");
+
+        assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!failed.retryable);
+        assert!(failed
+            .message
+            .starts_with("list_worker_states failed: worker w1 snapshot at "));
     }
 }

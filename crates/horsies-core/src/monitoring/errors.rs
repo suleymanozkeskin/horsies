@@ -5,12 +5,19 @@ use serde::{Deserialize, Serialize};
 use crate::broker::is_retryable_sqlx_error;
 use crate::core::history::errors::HistoryError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "monitoring", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MonitoringQueryErrorCode {
     /// The read failed with a database or driver error. `retryable` is the
     /// driver classification of the cause.
     DbOperationFailed,
+    /// The broker already holds resource sets for its limit of open event
+    /// loops, and this call ran on a new one. Nothing ran. Python client
+    /// only; removed before 0.8.0.
+    EventLoopLimit,
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
     /// Not retryable: a repeat gives the same result until the stored row
