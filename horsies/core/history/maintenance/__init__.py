@@ -1,8 +1,6 @@
-"""Archive maintenance: the gate now, the transcode executor later.
+"""History maintenance: leaf coverage, staged-reader publication, and pruning.
 
-Normal archive access and offline maintenance are mutually exclusive by
-contract: every terminal transition asserts availability inside its own
-transaction, and a maintenance session blocks new transitions rather than
-racing them. This package owns that gate; the replacement-partition
-transcode executor that takes the gate arrives with its own module.
+``coverage`` creates the leaves that writes need and publishes the staged
+readers; ``pruning`` detaches and drops expired leaves; ``database`` is the
+typed handle to the session-capable database that both use.
 """

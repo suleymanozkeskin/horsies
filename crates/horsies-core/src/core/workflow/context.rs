@@ -259,15 +259,12 @@ mod tests {
             "sub-node".to_owned(),
             SubWorkflowSummary {
                 status: "COMPLETED".to_owned(),
-                is_success: true,
-                success_case: None,
                 output: Some(serde_json::json!(42)),
                 total_tasks: 3,
                 completed_tasks: 3,
                 failed_tasks: 0,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: Uuid::nil(),
             },
         );
         let ctx = WorkflowContext::new(
@@ -285,10 +282,8 @@ mod tests {
         let key: NodeKey<i32> = NodeKey::new("sub-node".to_owned());
         let restored = back.summary_for(&key).unwrap();
         assert_eq!(restored.status, "COMPLETED");
-        assert!(restored.is_success);
         assert_eq!(restored.output, Some(serde_json::json!(42)));
         assert_eq!(restored.total_tasks, 3);
-        assert_eq!(restored.child_workflow_id, Uuid::nil());
     }
 
     #[test]
@@ -311,15 +306,12 @@ mod tests {
             "sub_wf:0".to_owned(),
             SubWorkflowSummary {
                 status: "COMPLETED".to_owned(),
-                is_success: true,
-                success_case: None,
                 output: None,
                 total_tasks: 2,
                 completed_tasks: 2,
                 failed_tasks: 0,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: Uuid::nil(),
             },
         );
         WorkflowContext::new(
@@ -336,7 +328,6 @@ mod tests {
         let ctx = make_ctx_with_summary();
         let key: NodeKey<()> = NodeKey::new("sub_wf:0".to_owned());
         let summary = ctx.summary_for(&key).unwrap();
-        assert_eq!(summary.child_workflow_id, Uuid::nil());
         assert_eq!(summary.status, "COMPLETED");
     }
 
@@ -381,15 +372,12 @@ mod tests {
             "sub_wf:0".to_owned(),
             SubWorkflowSummary {
                 status: "COMPLETED".to_owned(),
-                is_success: true,
-                success_case: None,
                 output: Some(serde_json::json!({"total": 7, "label": "done"})),
                 total_tasks: 2,
                 completed_tasks: 2,
                 failed_tasks: 0,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: Uuid::nil(),
             },
         );
         let ctx = WorkflowContext::new(

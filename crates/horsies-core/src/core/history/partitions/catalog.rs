@@ -4,57 +4,202 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 
 use crate::core::history::commands::{is_safe_identifier, LeafBounds, OPEN_END_ANCHOR_SQL};
-use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
+use crate::core::history::ddl::classes::{finite_class_parent_name, FOREVER_CLASS_KEY};
+use crate::core::history::ddl::runtime_names::leaf_id_index_name;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
+use crate::core::history::heartbeats::partitioning::probe_index_name;
+use crate::core::history::names::{
+    HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES, TASK_HISTORY_FOREVER,
+    TASK_HISTORY_PARENT,
+};
+use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 
 pub const INDEX_SCHEMA_VERSION: i16 = 1;
 pub const ORDERING_INDEX_COLUMN: &str = "enqueued_at";
 
+/// What one `horsies_retention_classes` row is, by `class_kind`. Each kind
+/// carries only its own fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionClassKind {
+    /// `forever`: one static leaf, never dropped.
+    Forever,
+    /// `standard_<days>d`: daily leaves, dropped `days` after their upper bound.
+    Period(RetentionDays),
+    /// `heartbeats`: hourly heartbeat leaves, dropped `horizon` after their
+    /// upper bound.
+    Heartbeat(HeartbeatHorizonHours),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionClassRow {
     pub class_key: String,
-    pub duration: Option<Duration>,
-    pub partition_interval: Option<Duration>,
-    pub finite_parent_name: Option<String>,
+    pub kind: RetentionClassKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+impl RetentionClassRow {
+    /// The relation that holds the leaves of this class. Derived from the
+    /// kind and the key; the table stores no parent name.
+    pub fn parent_name(&self) -> Result<String, HistoryError> {
+        match self.kind {
+            RetentionClassKind::Forever => Ok(TASK_HISTORY_FOREVER.to_owned()),
+            RetentionClassKind::Period(_) => finite_class_parent_name(&self.class_key),
+            RetentionClassKind::Heartbeat(_) => Ok(HEARTBEATS_TABLE.to_owned()),
+        }
+    }
+
+    /// How long a leaf stays after its upper bound; `None` for `forever`.
+    pub fn retention(&self) -> Option<Duration> {
+        match self.kind {
+            RetentionClassKind::Forever => None,
+            RetentionClassKind::Period(days) => Some(days.as_duration()),
+            RetentionClassKind::Heartbeat(horizon) => Some(horizon.as_duration()),
+        }
+    }
+}
+
+/// `lower_bound_kind` of a leaf whose partition starts at `MINVALUE`.
+pub const OPEN_LOWER_BOUND_KIND: &str = "OPEN";
+/// `lower_bound_kind` of a leaf whose partition starts at `lower_anchor`.
+pub const AT_LOWER_BOUND_KIND: &str = "AT";
+
+/// The lower bound of a cataloged leaf: the pair `(lower_bound_kind,
+/// lower_anchor)` of the leaf catalog and the lookup manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LeafLowerBound {
+    /// `OPEN` with no anchor: the partition starts at `MINVALUE`. Only the
+    /// static `forever` leaf of the first migration has it. Sorts before every
+    /// time, as `ORDER BY lower_anchor NULLS FIRST`.
+    Open,
+    /// `AT` with an anchor: every leaf that maintenance creates.
+    At(DateTime<Utc>),
+}
+
+impl LeafLowerBound {
+    /// The bound of a stored pair. The pair CHECKs of the catalog and the
+    /// manifest allow only `OPEN` with no anchor and `AT` with one.
+    pub fn decode(kind: &str, anchor: Option<DateTime<Utc>>) -> Result<Self, HistoryError> {
+        match (kind, anchor) {
+            (OPEN_LOWER_BOUND_KIND, None) => Ok(Self::Open),
+            (AT_LOWER_BOUND_KIND, Some(anchor)) => Ok(Self::At(anchor)),
+            (kind, anchor) => Err(HistoryError::contract(format!(
+                "leaf lower bound kind {kind:?} with anchor {anchor:?} is not a stored pair"
+            ))),
+        }
+    }
+
+    /// The stored `lower_bound_kind`.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Open => OPEN_LOWER_BOUND_KIND,
+            Self::At(_) => AT_LOWER_BOUND_KIND,
+        }
+    }
+
+    /// The stored `lower_anchor`: `None` for the open bound.
+    pub fn at(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Open => None,
+            Self::At(value) => Some(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeafCatalogRow {
     pub leaf_name: String,
-    pub parent_name: String,
     pub class_key: String,
-    pub lower_anchor: DateTime<Utc>,
+    pub lower_anchor: LeafLowerBound,
     pub upper_anchor: DateTime<Utc>,
     pub index_schema_version: i16,
-    pub id_index_name: String,
-    pub partition_bound: String,
-    pub min_birth_at: Option<DateTime<Utc>>,
-    pub min_birth_verified: bool,
     pub created_at: DateTime<Utc>,
     pub detached_at: Option<DateTime<Utc>>,
     pub dropped_at: Option<DateTime<Utc>>,
 }
 
+/// The parent relation of a leaf of `class_key`: `horsies_heartbeats` for the
+/// heartbeat class, else `horsies_task_history_<class_key>`.
+pub fn leaf_parent_name(class_key: &str) -> Result<String, HistoryError> {
+    match class_key {
+        HEARTBEAT_CLASS_KEY => Ok(HEARTBEATS_TABLE.to_owned()),
+        _ => finite_class_parent_name(class_key),
+    }
+}
+
+/// The name of a leaf's identity index: `<leaf>_probe_idx` for a heartbeat
+/// leaf, else `<leaf>_task_idx`.
+pub fn leaf_identity_index_name(class_key: &str, leaf_name: &str) -> Result<String, HistoryError> {
+    match class_key {
+        HEARTBEAT_CLASS_KEY => probe_index_name(leaf_name),
+        _ => Ok(leaf_id_index_name(leaf_name)),
+    }
+}
+
 impl LeafCatalogRow {
+    /// The parent relation, derived from the class key.
+    pub fn parent_name(&self) -> Result<String, HistoryError> {
+        leaf_parent_name(&self.class_key)
+    }
+
+    /// The identity index name, derived from the class key and leaf name.
+    pub fn id_index_name(&self) -> Result<String, HistoryError> {
+        leaf_identity_index_name(&self.class_key, &self.leaf_name)
+    }
+
+    /// Whether the row describes the requested class and bounds.
+    pub fn describes(&self, class_key: &str, bounds: &LeafBounds) -> bool {
+        self.class_key == class_key
+            && self.lower_anchor == LeafLowerBound::At(bounds.lower())
+            && self.upper_anchor == bounds.upper()
+    }
+
     fn validate(self) -> Result<Self, HistoryError> {
-        for (label, value) in [
-            ("leaf", self.leaf_name.as_str()),
-            ("parent", self.parent_name.as_str()),
-            ("id index", self.id_index_name.as_str()),
-        ] {
-            if !is_safe_identifier(value) {
-                return Err(HistoryError::contract(format!(
-                    "cataloged {label} name is not a safe identifier: {value:?}"
-                )));
-            }
+        if !is_safe_identifier(&self.leaf_name) {
+            return Err(HistoryError::contract(format!(
+                "cataloged leaf name is not a safe identifier: {:?}",
+                self.leaf_name
+            )));
         }
-        if self.class_key.is_empty() || self.lower_anchor >= self.upper_anchor {
+        let ordered = match self.lower_anchor {
+            LeafLowerBound::Open => true,
+            LeafLowerBound::At(lower) => lower < self.upper_anchor,
+        };
+        if self.class_key.is_empty() || !ordered {
             return Err(HistoryError::contract(
                 "leaf catalog row carries an invalid class or bounds",
             ));
         }
+        self.parent_name()?;
+        self.id_index_name()?;
         Ok(self)
+    }
+}
+
+#[derive(FromRow)]
+struct LeafCatalogRaw {
+    leaf_name: String,
+    class_key: String,
+    lower_bound_kind: String,
+    lower_anchor: Option<DateTime<Utc>>,
+    upper_anchor: DateTime<Utc>,
+    index_schema_version: i16,
+    created_at: DateTime<Utc>,
+    detached_at: Option<DateTime<Utc>>,
+    dropped_at: Option<DateTime<Utc>>,
+}
+
+impl LeafCatalogRaw {
+    fn into_row(self) -> Result<LeafCatalogRow, HistoryError> {
+        LeafCatalogRow {
+            lower_anchor: LeafLowerBound::decode(&self.lower_bound_kind, self.lower_anchor)?,
+            leaf_name: self.leaf_name,
+            class_key: self.class_key,
+            upper_anchor: self.upper_anchor,
+            index_schema_version: self.index_schema_version,
+            created_at: self.created_at,
+            detached_at: self.detached_at,
+            dropped_at: self.dropped_at,
+        }
+        .validate()
     }
 }
 
@@ -89,9 +234,49 @@ pub struct ManifestLeafSelection {
 #[derive(FromRow)]
 struct RetentionClassRaw {
     class_key: String,
-    duration_us: Option<i64>,
-    partition_interval_us: Option<i64>,
-    finite_parent_name: Option<String>,
+    class_kind: String,
+    retention_days: Option<i16>,
+    heartbeat_horizon_hours: Option<i16>,
+}
+
+fn decode_retention_class(row: RetentionClassRaw) -> Result<RetentionClassRow, HistoryError> {
+    let kind = match (
+        row.class_kind.as_str(),
+        row.retention_days,
+        row.heartbeat_horizon_hours,
+    ) {
+        ("FOREVER", None, None) if row.class_key == FOREVER_CLASS_KEY => {
+            RetentionClassKind::Forever
+        }
+        ("PERIOD", Some(days), None) => RetentionDays::from_stored(days)
+            .filter(|days| days.class_key() == row.class_key)
+            .map(RetentionClassKind::Period)
+            .ok_or_else(|| {
+                HistoryError::contract(format!(
+                    "period class {:?} stores {days} days, which do not form its key",
+                    row.class_key
+                ))
+            })?,
+        ("HEARTBEAT", None, Some(hours)) if row.class_key == HEARTBEAT_CLASS_KEY => {
+            HeartbeatHorizonHours::from_stored(hours)
+                .map(RetentionClassKind::Heartbeat)
+                .ok_or_else(|| {
+                    HistoryError::contract(format!(
+                        "heartbeat class stores a horizon of {hours} hours"
+                    ))
+                })?
+        }
+        (kind, _, _) => {
+            return Err(HistoryError::contract(format!(
+                "retention class {:?} has kind {kind:?} with the wrong shape",
+                row.class_key
+            )));
+        }
+    };
+    Ok(RetentionClassRow {
+        class_key: row.class_key,
+        kind,
+    })
 }
 
 pub async fn read_retention_class(
@@ -99,11 +284,7 @@ pub async fn read_retention_class(
     class_key: &str,
 ) -> Result<Option<RetentionClassRow>, HistoryError> {
     let sql = format!(
-        "SELECT class_key,
-                (EXTRACT(epoch FROM duration) * 1000000)::bigint AS duration_us,
-                (EXTRACT(epoch FROM partition_interval) * 1000000)::bigint
-                    AS partition_interval_us,
-                finite_parent_name
+        "SELECT class_key, class_kind, retention_days, heartbeat_horizon_hours
          FROM {RETENTION_CLASSES}
          WHERE class_key = $1"
     );
@@ -111,36 +292,17 @@ pub async fn read_retention_class(
         .bind(class_key)
         .fetch_optional(connection)
         .await?;
-    row.map(|row| {
-        if row.class_key.is_empty() {
-            return Err(HistoryError::contract("retention class key decoded empty"));
-        }
-        if let Some(parent) = row.finite_parent_name.as_deref() {
-            if !is_safe_identifier(parent) {
-                return Err(HistoryError::contract(
-                    "retention class names an unsafe parent relation",
-                ));
-            }
-        }
-        if row.duration_us.is_some() && row.finite_parent_name.is_none() {
-            return Err(HistoryError::contract(
-                "finite retention class has no finite parent relation",
-            ));
-        }
-        Ok(RetentionClassRow {
-            class_key: row.class_key,
-            duration: row.duration_us.map(Duration::microseconds),
-            partition_interval: row.partition_interval_us.map(Duration::microseconds),
-            finite_parent_name: row.finite_parent_name,
-        })
-    })
-    .transpose()
+    row.map(decode_retention_class).transpose()
 }
 
-const LEAF_COLUMNS: &str = "leaf_name, parent_name, class_key,
-    lower_anchor, upper_anchor, index_schema_version, id_index_name,
-    partition_bound, min_birth_at, min_birth_verified, created_at,
-    detached_at, dropped_at";
+/// The catalog columns that `LeafCatalogRaw` reads.
+fn leaf_columns(alias: &str) -> String {
+    format!(
+        "{alias}.leaf_name, {alias}.class_key, {alias}.lower_bound_kind, {alias}.lower_anchor, \
+         {alias}.upper_anchor, {alias}.index_schema_version, {alias}.created_at, \
+         {alias}.detached_at, {alias}.dropped_at"
+    )
+}
 
 /// Catalog predicate of the open-ended `forever` leaf: attached, open end.
 pub(crate) fn open_ended_forever_leaf_predicate(alias: &str) -> String {
@@ -150,33 +312,20 @@ pub(crate) fn open_ended_forever_leaf_predicate(alias: &str) -> String {
     )
 }
 
-/// Start of a new open-ended `forever` leaf: the later of `today_expression`
-/// and the largest upper anchor of the attached `forever` leaves, so the new
-/// leaf never overlaps a daily `forever` leaf, a future one included. The
-/// probe, the connection planner, and their tests use this one rendering.
-pub(crate) fn open_ended_forever_start_sql(today_expression: &str) -> String {
-    format!(
-        "GREATEST({today_expression}, COALESCE((SELECT max(forever_leaf.upper_anchor) \
-         FROM {LEAF_CATALOG} AS forever_leaf \
-         WHERE forever_leaf.class_key = '{FOREVER_CLASS_KEY}' \
-           AND forever_leaf.detached_at IS NULL AND forever_leaf.dropped_at IS NULL), \
-         {today_expression}))"
-    )
-}
-
 /// The catalog row of the attached open-ended `forever` leaf, when one exists.
 pub async fn read_open_ended_forever_leaf(
     connection: &mut PgConnection,
 ) -> Result<Option<LeafCatalogRow>, HistoryError> {
     let sql = format!(
-        "SELECT {LEAF_COLUMNS} FROM {LEAF_CATALOG} AS catalog WHERE {} \
-         ORDER BY catalog.lower_anchor LIMIT 1",
+        "SELECT {} FROM {LEAF_CATALOG} AS catalog WHERE {} \
+         ORDER BY catalog.lower_anchor NULLS FIRST LIMIT 1",
+        leaf_columns("catalog"),
         open_ended_forever_leaf_predicate("catalog")
     );
-    sqlx::query_as::<_, LeafCatalogRow>(&sql)
+    sqlx::query_as::<_, LeafCatalogRaw>(&sql)
         .fetch_optional(connection)
         .await?
-        .map(LeafCatalogRow::validate)
+        .map(LeafCatalogRaw::into_row)
         .transpose()
 }
 
@@ -184,12 +333,15 @@ pub async fn read_leaf_catalog_row(
     connection: &mut PgConnection,
     leaf_name: &str,
 ) -> Result<Option<LeafCatalogRow>, HistoryError> {
-    let sql = format!("SELECT {LEAF_COLUMNS} FROM {LEAF_CATALOG} WHERE leaf_name = $1");
-    sqlx::query_as::<_, LeafCatalogRow>(&sql)
+    let sql = format!(
+        "SELECT {} FROM {LEAF_CATALOG} AS catalog WHERE catalog.leaf_name = $1",
+        leaf_columns("catalog")
+    );
+    sqlx::query_as::<_, LeafCatalogRaw>(&sql)
         .bind(leaf_name)
         .fetch_optional(connection)
         .await?
-        .map(LeafCatalogRow::validate)
+        .map(LeafCatalogRaw::into_row)
         .transpose()
 }
 
@@ -210,63 +362,65 @@ async fn read_attached(
     connection: &mut PgConnection,
     class_key: Option<&str>,
 ) -> Result<Vec<LeafCatalogRow>, HistoryError> {
-    let class_filter = if class_key.is_some() {
-        "AND class_key = $1"
-    } else {
-        ""
+    let class_filter = match class_key {
+        Some(_) => "AND catalog.class_key = $1",
+        None => "",
     };
     let sql = format!(
-        "SELECT {LEAF_COLUMNS} FROM {LEAF_CATALOG}
-         WHERE detached_at IS NULL AND dropped_at IS NULL {class_filter}
-         ORDER BY lower_anchor, leaf_name"
+        "SELECT {} FROM {LEAF_CATALOG} AS catalog
+         WHERE catalog.detached_at IS NULL AND catalog.dropped_at IS NULL {class_filter}
+         ORDER BY catalog.lower_anchor NULLS FIRST, catalog.leaf_name",
+        leaf_columns("catalog")
     );
     let rows = match class_key {
         Some(class_key) => {
-            sqlx::query_as::<_, LeafCatalogRow>(&sql)
+            sqlx::query_as::<_, LeafCatalogRaw>(&sql)
                 .bind(class_key)
                 .fetch_all(connection)
                 .await?
         }
         None => {
-            sqlx::query_as::<_, LeafCatalogRow>(&sql)
+            sqlx::query_as::<_, LeafCatalogRaw>(&sql)
                 .fetch_all(connection)
                 .await?
         }
     };
-    rows.into_iter().map(LeafCatalogRow::validate).collect()
+    rows.into_iter().map(LeafCatalogRaw::into_row).collect()
 }
 
 #[derive(FromRow)]
 struct ManifestRaw {
-    leaf_name: String,
-    parent_name: String,
-    class_key: String,
-    lower_anchor: DateTime<Utc>,
-    upper_anchor: DateTime<Utc>,
-    index_schema_version: i16,
-    id_index_name: String,
-    partition_bound: String,
-    min_birth_at: Option<DateTime<Utc>>,
-    min_birth_verified: bool,
-    created_at: DateTime<Utc>,
-    detached_at: Option<DateTime<Utc>>,
-    dropped_at: Option<DateTime<Utc>>,
+    #[sqlx(flatten)]
+    catalog: LeafCatalogRaw,
     relation_exists: bool,
     parent_exists: bool,
 }
 
+/// Every attached catalog row, with whether its relation and its derived
+/// parent exist. `to_regclass` of a derived name: the parent is
+/// `horsies_heartbeats` for the heartbeat class, else
+/// `horsies_task_history_<class_key>`.
 pub async fn read_manifest_leaf_rows(
     connection: &mut PgConnection,
 ) -> Result<ManifestLeafSelection, HistoryError> {
     let sql = format!(
-        "SELECT {LEAF_COLUMNS},
-                to_regclass(leaf_name) IS NOT NULL AS relation_exists,
-                to_regclass(parent_name) IS NOT NULL AS parent_exists
-         FROM {LEAF_CATALOG}
-         WHERE detached_at IS NULL AND dropped_at IS NULL
-         ORDER BY lower_anchor, leaf_name"
+        "SELECT {},
+                to_regclass(catalog.leaf_name) IS NOT NULL AS relation_exists,
+                to_regclass(
+                    CASE WHEN catalog.class_key = $1 THEN $2
+                         ELSE '{TASK_HISTORY_PARENT}_' || catalog.class_key
+                    END
+                ) IS NOT NULL AS parent_exists
+         FROM {LEAF_CATALOG} AS catalog
+         WHERE catalog.detached_at IS NULL AND catalog.dropped_at IS NULL
+         ORDER BY catalog.lower_anchor NULLS FIRST, catalog.leaf_name",
+        leaf_columns("catalog")
     );
-    let rows: Vec<ManifestRaw> = sqlx::query_as(&sql).fetch_all(connection).await?;
+    let rows: Vec<ManifestRaw> = sqlx::query_as(&sql)
+        .bind(HEARTBEAT_CLASS_KEY)
+        .bind(HEARTBEATS_TABLE)
+        .fetch_all(connection)
+        .await?;
     let mut attached = Vec::with_capacity(rows.len());
     let mut absent = Vec::new();
     let mut history_rows = 0_usize;
@@ -274,22 +428,7 @@ pub async fn read_manifest_leaf_rows(
     for row in rows {
         let relation_exists = row.relation_exists;
         let parent_exists = row.parent_exists;
-        let catalog = LeafCatalogRow {
-            leaf_name: row.leaf_name,
-            parent_name: row.parent_name,
-            class_key: row.class_key,
-            lower_anchor: row.lower_anchor,
-            upper_anchor: row.upper_anchor,
-            index_schema_version: row.index_schema_version,
-            id_index_name: row.id_index_name,
-            partition_bound: row.partition_bound,
-            min_birth_at: row.min_birth_at,
-            min_birth_verified: row.min_birth_verified,
-            created_at: row.created_at,
-            detached_at: row.detached_at,
-            dropped_at: row.dropped_at,
-        }
-        .validate()?;
+        let catalog = row.catalog.into_row()?;
         if catalog.class_key != HEARTBEAT_CLASS_KEY {
             history_rows += 1;
             any_history_parent |= parent_exists;
@@ -308,19 +447,6 @@ pub async fn read_manifest_leaf_rows(
         attached,
         absent_relations: absent,
     })
-}
-
-pub async fn read_attached_birth_floor(
-    connection: &mut PgConnection,
-) -> Result<Option<DateTime<Utc>>, HistoryError> {
-    let sql = format!(
-        "SELECT min(min_birth_at) FROM {LEAF_CATALOG}
-         WHERE detached_at IS NULL AND dropped_at IS NULL AND class_key <> $1"
-    );
-    Ok(sqlx::query_scalar(&sql)
-        .bind(HEARTBEAT_CLASS_KEY)
-        .fetch_one(connection)
-        .await?)
 }
 
 pub(crate) async fn pin_utc_timezone(
@@ -599,15 +725,29 @@ mod open_ended_leaf_sql_tests {
     use super::*;
 
     #[test]
-    fn open_ended_start_and_predicate_render_one_pinned_text() {
+    fn lower_bound_pairs_decode_closed() {
+        let anchor = DateTime::from_timestamp(86_400, 0).unwrap();
         assert_eq!(
-            open_ended_forever_start_sql("t.today"),
-            "GREATEST(t.today, COALESCE((SELECT max(forever_leaf.upper_anchor) \
-             FROM horsies_task_history_leaf_catalog AS forever_leaf \
-             WHERE forever_leaf.class_key = 'forever' \
-               AND forever_leaf.detached_at IS NULL AND forever_leaf.dropped_at IS NULL), \
-             t.today))"
+            LeafLowerBound::decode("OPEN", None).unwrap(),
+            LeafLowerBound::Open
         );
+        assert_eq!(
+            LeafLowerBound::decode("AT", Some(anchor)).unwrap(),
+            LeafLowerBound::At(anchor)
+        );
+        for (kind, stored) in [("OPEN", Some(anchor)), ("AT", None), ("MIN", None)] {
+            assert!(
+                LeafLowerBound::decode(kind, stored).is_err(),
+                "{kind} {stored:?}"
+            );
+        }
+        assert!(LeafLowerBound::Open < LeafLowerBound::At(anchor));
+        assert_eq!(LeafLowerBound::Open.kind(), "OPEN");
+        assert_eq!(LeafLowerBound::At(anchor).at(), Some(anchor));
+    }
+
+    #[test]
+    fn open_ended_predicate_renders_one_pinned_text() {
         assert_eq!(
             open_ended_forever_leaf_predicate("c"),
             "c.class_key = 'forever' AND c.upper_anchor = TIMESTAMPTZ '9999-01-01 00:00:00+00' \

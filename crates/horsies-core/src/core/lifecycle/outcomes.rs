@@ -132,13 +132,12 @@ pub struct ObservedWorkflowLink {
 /// The row is terminal, but another operation put it there.
 ///
 /// Claim-shaped evidence would be all-NULL on a terminal row — precisely
-/// where the log has to name who won. A committed kind of `None` is a row
-/// written before the kind column existed: unknown provenance, never
-/// inferred.
+/// where the log has to name who won. Every history row carries the kind of
+/// the function that moved it, so the committed kind is required.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedForeignTerminalization {
     pub observed_status: TaskStatus,
-    pub committed_kind: Option<TerminalizationKind>,
+    pub committed_kind: TerminalizationKind,
     pub terminal_at: Option<DateTime<Utc>>,
 }
 
@@ -452,7 +451,7 @@ fn decode_evidence(
             Ok(GuardEvidence::ForeignTerminalization(
                 ObservedForeignTerminalization {
                     observed_status,
-                    committed_kind: optional_kind(raw)?,
+                    committed_kind: require_kind(raw)?,
                     terminal_at: raw.terminal_at,
                 },
             ))
@@ -767,7 +766,7 @@ mod tests {
             evidence,
             GuardEvidence::ForeignTerminalization(ObservedForeignTerminalization {
                 observed_status: TaskStatus::Completed,
-                committed_kind: Some(TerminalizationKind::CompleteFused),
+                committed_kind: TerminalizationKind::CompleteFused,
                 ..
             })
         ));

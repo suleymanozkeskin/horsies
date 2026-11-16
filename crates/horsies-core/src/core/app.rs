@@ -987,7 +987,7 @@ impl Horsies {
             for child_key in &registered.declared_children {
                 if self
                     .workflow_registry
-                    .resolve_child_registration("", Some(child_key.as_str()))
+                    .resolve_child_registration(child_key.as_str())
                     .is_none()
                 {
                     report.add(
