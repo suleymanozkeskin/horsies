@@ -72,11 +72,16 @@ impl SequenceReader {
 
 #[async_trait]
 impl SchemaReader for SequenceReader {
-    async fn read(&self, _expected_version: i64) -> Result<SchemaStatus, sqlx::Error> {
+    async fn read(
+        &self,
+        _expected_version: i64,
+    ) -> Result<SchemaStatus, crate::broker::BrokerError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         match self.answers.lock().await.pop_front() {
             Some(ReaderAnswer::Status(status)) => Ok(status),
-            Some(ReaderAnswer::Failure) | None => Err(sqlx::Error::PoolClosed),
+            Some(ReaderAnswer::Failure) | None => Err(
+                crate::broker::BrokerError::ConnectionFailed("the test reader fails".to_owned()),
+            ),
         }
     }
 }
