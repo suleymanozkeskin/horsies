@@ -122,6 +122,13 @@ pub enum ConnectFailure {
     /// The socket, the TLS handshake or the protocol failed.
     #[error("the connection could not be made: {0}")]
     TransportFailed(tokio_postgres::Error),
+    /// The connection opened, and its session setting statement failed. The
+    /// connection is closed.
+    #[error("the session setup `{statement}` failed: {error}")]
+    SessionSetupFailed {
+        statement: &'static str,
+        error: tokio_postgres::Error,
+    },
 }
 
 impl ConnectError {
@@ -137,7 +144,8 @@ impl ConnectError {
 
     /// Whether the failure may clear. A refused server certificate is
     /// permanent; other transport failures are transient; a server refusal
-    /// follows its SQLSTATE class.
+    /// and a failed session setup follow the SQLSTATE class (a setup failure
+    /// with no server error is transient).
     pub fn transience(&self) -> Transience {
         match &self.cause {
             ConnectFailure::TimedOut { .. } => Transience::Transient,
@@ -145,6 +153,10 @@ impl ConnectError {
             ConnectFailure::TransportFailed(error) => match tls_failure(error) {
                 TlsFailure::CertificateRefused => Transience::Permanent,
                 TlsFailure::OtherTls | TlsFailure::NotTls => Transience::Transient,
+            },
+            ConnectFailure::SessionSetupFailed { error, .. } => match error.as_db_error() {
+                Some(server_error) => sqlstate_transience(server_error.code()),
+                None => Transience::Transient,
             },
         }
     }
@@ -159,7 +171,9 @@ impl ConnectError {
                 TlsFailure::CertificateRefused | TlsFailure::OtherTls => PlainRetry::Allowed,
                 TlsFailure::NotTls => PlainRetry::NotAllowed,
             },
-            ConnectFailure::TimedOut { .. } => PlainRetry::NotAllowed,
+            ConnectFailure::TimedOut { .. } | ConnectFailure::SessionSetupFailed { .. } => {
+                PlainRetry::NotAllowed
+            }
         }
     }
 }
