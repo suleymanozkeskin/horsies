@@ -4476,7 +4476,7 @@ WHERE wt.workflow_id = $1
         .await
         .expect("insert node");
 
-        let err = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+        let err = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
         let result_json =
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
         sqlx::query(
