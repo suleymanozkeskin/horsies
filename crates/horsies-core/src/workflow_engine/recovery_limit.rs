@@ -203,7 +203,8 @@ impl CandidateFailure {
                 | WorkflowError::WorkflowTimeout { .. }
                 | WorkflowError::WorkflowError(_)
                 | WorkflowError::InvalidStatus(_)
-                | WorkflowError::Validation(_),
+                | WorkflowError::Validation(_)
+                | WorkflowError::StepContract(_),
             )
             | Self::Panic(_) => FailureClass::Persistent,
         }
@@ -220,6 +221,7 @@ impl CandidateFailure {
             Self::Error(WorkflowError::WorkflowError(_)) => "WorkflowError",
             Self::Error(WorkflowError::InvalidStatus(_)) => "InvalidStatus",
             Self::Error(WorkflowError::Validation(_)) => "Validation",
+            Self::Error(WorkflowError::StepContract(_)) => "StepContract",
             Self::Panic(_) => PANIC_ERROR_TYPE,
         }
     }

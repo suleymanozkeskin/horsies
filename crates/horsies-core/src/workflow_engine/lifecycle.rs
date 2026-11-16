@@ -17,6 +17,7 @@ use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
 };
+use crate::workflow_engine::steps::{self, CancelOutcome, PauseOutcome};
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -26,12 +27,6 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-const CANCEL_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')
-RETURNING id";
 
 /// Lock the workflow row first, before any workflow_task rows, so the cancel
 /// transaction acquires `{horsies_workflows, horsies_workflow_tasks}` in the same
@@ -102,21 +97,11 @@ WHERE id = $1 AND status = 'PAUSED'
   AND updated_at < NOW() - ($3::double precision * INTERVAL '1 second')
 RETURNING id";
 
-const PAUSE_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'PAUSED', updated_at = NOW()
-WHERE id = $1 AND status = 'RUNNING'
-RETURNING id";
-
 const RESUME_WORKFLOW_SQL: &str = "\
 UPDATE horsies_workflows
 SET status = 'RUNNING', updated_at = NOW()
 WHERE id = $1 AND status = 'PAUSED'
 RETURNING id";
-
-/// Check if a workflow exists (regardless of status).
-const CHECK_WORKFLOW_EXISTS_SQL: &str = "\
-SELECT id FROM horsies_workflows WHERE id = $1";
 
 /// Current status of a workflow (for the idempotent resume path).
 const GET_WORKFLOW_STATUS_SQL: &str = "\
@@ -172,23 +157,6 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
 const FIND_RUNNING_CHILDREN_SQL: &str = "\
 SELECT id FROM horsies_workflows
 WHERE parent_workflow_id = $1 AND status = 'RUNNING'";
-
-/// The cancellable descendants of a workflow, at any depth, in the core's workflow lock order
-/// (`depth`, `id`). The walk passes terminal workflows too, so a cancellable grandchild under a terminal child
-/// is found (Python `SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL`). The depth CHECK (0..32) bounds the walk.
-const SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL: &str = "\
-WITH RECURSIVE descendants AS (
-    SELECT id, status, depth
-    FROM horsies_workflows
-    WHERE parent_workflow_id = $1
-    UNION ALL
-    SELECT child.id, child.status, child.depth
-    FROM horsies_workflows child
-    JOIN descendants parent ON child.parent_workflow_id = parent.id
-)
-SELECT id FROM descendants
-WHERE status IN ('PENDING', 'RUNNING', 'PAUSED')
-ORDER BY depth, id";
 
 /// Pause a single child workflow (RUNNING -> PAUSED).
 const PAUSE_CHILD_WORKFLOW_SQL: &str = "\
@@ -316,6 +284,10 @@ fn to_handle_error(e: WorkflowError, workflow_id: Uuid) -> HandleOperationError 
 ///   so, as Python's `is_retryable_connection_error` (`core/models/workflow/handle.py:928`).
 /// - A stored value that does not parse (an unknown status, a stored JSON value) is `STORED_DATA_INVALID`,
 ///   not retryable: the same call gets the same answer (`core/models/workflow/handle_types.py:33-57`).
+/// - A failure of a step on the statement layer (`WorkflowError::Broker` with `BrokerError::Statement`) is
+///   `DB_OPERATION_FAILED`, retryable by the statement layer's transience.
+/// - A step row outside its function's contract (`StepContract`) is `INTERNAL_FAILED`, not retryable: the
+///   core and the installed baseline disagree.
 /// - The remaining variants keep `INTERNAL_FAILED` until resume runs through its SQL function; Python
 ///   raises them.
 pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> HandleOperationError {
@@ -331,7 +303,8 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         }
         WorkflowError::WorkflowTimeout { .. }
         | WorkflowError::WorkflowError(_)
-        | WorkflowError::Validation(_) => (HandleErrorCode::InternalFailed, false),
+        | WorkflowError::Validation(_)
+        | WorkflowError::StepContract(_) => (HandleErrorCode::InternalFailed, false),
     };
     HandleOperationError {
         code,
@@ -354,115 +327,50 @@ async fn admit_workflow_write(broker: &PostgresBroker, workflow_id: Uuid) -> Han
         .map_err(|error| to_handle_error(WorkflowError::Broker(error), workflow_id))
 }
 
-/// Check if a workflow exists. Returns `Err(WorkflowNotFound)` if not.
-async fn ensure_workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<(), WorkflowError> {
-    let exists: Option<IdRow> = sqlx::query_as(CHECK_WORKFLOW_EXISTS_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
-    if exists.is_none() {
-        return Err(WorkflowError::WorkflowNotFound { workflow_id });
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Cancel a workflow.
+/// Cancels a workflow tree: `horsies_workflow_cancel`, one statement in autocommit (Python
+/// `WorkflowHandle.cancel_async`, `core/models/workflow/handle.py:1588-1765`).
 ///
-/// Transitions RUNNING/PAUSED -> CANCELLED. Skips all non-terminal
-/// workflow_tasks and cancels any enqueued horsies_tasks.
+/// The function locks the root row, then its PENDING, RUNNING and PAUSED descendants in `(depth, id)`
+/// order, then the live tasks behind their nodes in id order, then their live nodes; it sets every locked
+/// workflow CANCELLED with `completed_at`, moves the tasks behind ENQUEUED nodes to history as cancelled,
+/// and skips the waiting nodes. A node whose task already started stays RUNNING until the task ends. The
+/// CANCELLED status change fires the `workflow_done` trigger per row.
 ///
-/// Returns `true` if the workflow was actually cancelled. The handle's client family is checked before
-/// the first write (`admit_workflow_write`).
+/// Outcomes:
+/// - `Ok(true)`: the tree is cancelled.
+/// - `Ok(false)`: the workflow is COMPLETED, FAILED, CANCELLED or EXPIRED; nothing was written.
+/// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+/// - `DB_OPERATION_FAILED`: the client family check refused the handle, or the statement failed
+///   (retryable by the statement layer's transience; an `OutcomeUnknown` may have committed).
+/// - `INTERNAL_FAILED`: a row outside the function's contract.
+///
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    cancel_workflow_inner(broker.pool(), workflow_id)
-        .await
-        .map_err(|e| to_handle_error(e, workflow_id))
-}
-
-/// Lock the workflow row + backing tasks + workflow_tasks, flip the workflow
-/// status to CANCELLED, and run the backing-task cleanup, in the caller's
-/// transaction, so the locks are held from before the status flip through commit.
-/// Worker claiming uses `FOR UPDATE SKIP LOCKED`, so these locks close the window
-/// where a worker could claim a queued task during the uncommitted cancellation
-/// (horsies #65).
-///
-/// Lock order (N6): the workflow row is locked first, before any
-/// workflow_task rows, matching `COMPLETE_WORKFLOW_TASK_SQL` (workflows before
-/// workflow_tasks). Opposite orders across the two paths deadlock under
-/// contention.
-///
-/// Returns `true` if the workflow was non-terminal and got cancelled; `false` writes nothing.
-async fn cancel_one_workflow_steps(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workflow_id: Uuid,
-) -> Result<bool, WorkflowError> {
-    // Workflow row first — see the lock-order invariant above and on
-    // COMPLETE_WORKFLOW_TASK_SQL.
-    sqlx::query(LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    // Re-lock backing tasks: an in-flight enqueue may have linked a new task
-    // row while we waited on the workflow_task locks above.
-    sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-
-    let cancelled: Option<IdRow> = sqlx::query_as(CANCEL_WORKFLOW_SQL)
-        .bind(workflow_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-
-    if cancelled.is_none() {
-        return Ok(false);
+    match steps::cancel(broker, workflow_id).await {
+        Ok(CancelOutcome::Cancelled {
+            cancelled_workflow_ids,
+            cancelled_task_ids,
+        }) => {
+            tracing::info!(
+                workflow_id = %workflow_id,
+                cancelled_workflows = cancelled_workflow_ids.len(),
+                cancelled_tasks = cancelled_task_ids.len(),
+                "workflow cancelled",
+            );
+            Ok(true)
+        }
+        Ok(CancelOutcome::NotCancellable) => Ok(false),
+        Ok(CancelOutcome::NotFound) => Err(to_handle_error(
+            WorkflowError::WorkflowNotFound { workflow_id },
+            workflow_id,
+        )),
+        Err(error) => Err(to_handle_error(error, workflow_id)),
     }
-
-    // Cancel not-yet-started horsies_tasks (PENDING/CLAIMED/RUNNING) for
-    // ENQUEUED wf_tasks, so workers cannot pick them up after we commit. The
-    // function verifies the workflow's CANCELLED status in-statement, so it
-    // must follow the flip above; the #176 lock order (workflow row first,
-    // then task rows) is preserved because this transaction already holds
-    // both.
-    let outcomes = crate::broker::terminalization::terminalize_in_tx(
-        tx,
-        &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
-            workflow_ids: vec![workflow_id],
-        },
-    )
-    .await
-    .map_err(WorkflowError::Broker)?;
-    // Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
-    sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    // Skip ENQUEUED wf_tasks whose horsies_tasks were just cancelled.
-    sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
-        .bind(workflow_id)
-        .bind(
-            outcomes
-                .iter()
-                .map(|outcome| outcome.task_id())
-                .collect::<Vec<_>>(),
-        )
-        .execute(&mut **tx)
-        .await?;
-
-    Ok(true)
 }
 
 /// Expire PAUSED workflows older than the configured policy age.
@@ -578,76 +486,44 @@ fn format_python_timedelta(duration: chrono::Duration) -> Result<String, Workflo
     })
 }
 
-/// Cancel a workflow and its cancellable descendants in one transaction (Python
-/// `WorkflowHandle.cancel_async`, `core/models/workflow/handle.py:1588-1765`).
+/// Pauses a workflow tree: `horsies_workflow_pause`, one statement in autocommit (Python
+/// `pause_workflow`, `core/workflows/lifecycle.py:886-994`, with `cascade_pause_to_children`).
 ///
-/// A failure at any step rolls back the whole tree: no part of a tree is cancelled alone. Descendant
-/// workflow rows are locked after the root, in `(depth, id)` order. The CANCELLED status flip fires the
-/// `workflow_done` trigger per row, so no manual notify is sent.
-async fn cancel_workflow_inner(pool: &PgPool, workflow_id: Uuid) -> Result<bool, WorkflowError> {
-    let mut tx = pool.begin().await?;
-    if !cancel_one_workflow_steps(&mut tx, workflow_id).await? {
-        tx.rollback().await?;
-        ensure_workflow_exists(pool, workflow_id).await?;
-        return Ok(false);
-    }
-
-    // Cascade cancellation to non-terminal descendant workflows so RUNNING
-    // children stop executing (parity with horsies PR #66).
-    let descendants: Vec<Uuid> = sqlx::query_scalar(SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL)
-        .bind(workflow_id)
-        .fetch_all(&mut *tx)
-        .await?;
-    for child_id in descendants {
-        let child_cancelled = cancel_one_workflow_steps(&mut tx, child_id).await?;
-        tracing::debug!(
-            parent_workflow_id = %workflow_id,
-            child_workflow_id = %child_id,
-            child_cancelled,
-            "cascade: descendant workflow cancel",
-        );
-    }
-    tx.commit().await?;
-
-    tracing::info!(workflow_id = %workflow_id, "workflow cancelled");
-    Ok(true)
-}
-
-/// Pause a workflow.
+/// The function moves the workflow RUNNING -> PAUSED, then its RUNNING descendants level by level in
+/// `(depth, id)` order; it abandons every CLAIMED task behind an ENQUEUED or RUNNING node of the paused tree
+/// (`PAUSE_ABANDON_WORKFLOW`) and puts the nodes of the abandoned tasks back to READY with no task, so a
+/// resume enqueues new task rows for them. Tasks that already run go on; their results do not enqueue
+/// new work until a resume. The status trigger sends one `workflow_done` per paused workflow at commit.
 ///
-/// Transitions RUNNING -> PAUSED. No new tasks will be enqueued.
-/// Already-running tasks will complete but their results won't
-/// trigger new enqueues until resume.
+/// Outcomes:
+/// - `Ok(true)`: the workflow was RUNNING and is PAUSED with its RUNNING descendants.
+/// - `Ok(false)`: the workflow exists and is not RUNNING; nothing was written.
+/// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+/// - `DB_OPERATION_FAILED` and `INTERNAL_FAILED`: as [`cancel_workflow`].
 ///
-/// Cascades pause to all running child workflows (iterative BFS),
-/// matching Python's `_cascade_pause_to_children()` behavior.
-///
-/// Returns `true` if the workflow was actually paused. The handle's client family is checked before
-/// the first write (`admit_workflow_write`).
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    pause_workflow_inner(broker.pool(), workflow_id)
-        .await
-        .map_err(|e| to_handle_error(e, workflow_id))
-}
-
-async fn pause_workflow_inner(pool: &PgPool, workflow_id: Uuid) -> Result<bool, WorkflowError> {
-    let mut tx = pool.begin().await?;
-    let paused: Option<IdRow> = sqlx::query_as(PAUSE_WORKFLOW_SQL)
-        .bind(workflow_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-    if paused.is_none() {
-        tx.rollback().await?;
-        ensure_workflow_exists(pool, workflow_id).await?;
-        return Ok(false);
+    match steps::pause(broker, workflow_id).await {
+        Ok(PauseOutcome::Paused {
+            paused_workflow_ids,
+            abandoned_task_ids,
+        }) => {
+            tracing::info!(
+                workflow_id = %workflow_id,
+                paused_workflows = paused_workflow_ids.len(),
+                abandoned_tasks = abandoned_task_ids.len(),
+                "workflow paused",
+            );
+            Ok(true)
+        }
+        Ok(PauseOutcome::NotRunning) => Ok(false),
+        Ok(PauseOutcome::NotFound) => Err(to_handle_error(
+            WorkflowError::WorkflowNotFound { workflow_id },
+            workflow_id,
+        )),
+        Err(error) => Err(to_handle_error(error, workflow_id)),
     }
-
-    tracing::info!(workflow_id = %workflow_id, "workflow paused");
-    pause_tree_and_relocate_in_tx(&mut tx, workflow_id).await?;
-    tx.commit().await?;
-    Ok(true)
 }
 
 /// Pause all RUNNING descendants and relocate claimed-but-not-started backing
@@ -1709,7 +1585,11 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_claimed_backing(&pool, workflow_id, old_task_id).await;
 
-        assert!(pause_workflow_inner(&pool, workflow_id).await.unwrap());
+        assert!(
+            pause_workflow(&PostgresBroker::from_pool(pool.clone()), workflow_id)
+                .await
+                .unwrap()
+        );
         let paused: (String, String, Option<Uuid>) = sqlx::query_as(
             "SELECT w.status, wt.status, wt.task_id
              FROM horsies_workflows w
@@ -2176,12 +2056,13 @@ mod cancel_lock_order_tests {
             .await
             .expect("conn A locks the workflow row");
 
-        // Run the real cancel transaction concurrently.
+        // Run the real cancel statement concurrently, on a broker of its own.
         let cancel_pool = pool.clone();
         let cancel_wf = wf.clone();
         let cancel_task = tokio::spawn(async move {
-            cancel_workflow_inner(
-                &cancel_pool,
+            let cancel_broker = PostgresBroker::from_pool(cancel_pool);
+            cancel_workflow(
+                &cancel_broker,
                 Uuid::parse_str(&cancel_wf).expect("test identity must be UUID"),
             )
             .await

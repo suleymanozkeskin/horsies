@@ -502,7 +502,7 @@ fn classify_workflow_error(
         WorkflowError::Serialization(_) | WorkflowError::Validation(_) => {
             WorkflowStartErrorCode::ValidationFailed
         }
-        WorkflowError::Database(_) | WorkflowError::Broker(_) => {
+        WorkflowError::Database(_) | WorkflowError::Broker(_) | WorkflowError::StepContract(_) => {
             WorkflowStartErrorCode::EnqueueFailed
         }
         WorkflowError::WorkflowNotFound { .. }

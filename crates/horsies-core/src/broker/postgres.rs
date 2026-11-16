@@ -52,7 +52,9 @@ use crate::broker::task_lists::{
 };
 use crate::broker::wait_limit::WaitLimit;
 
-use crate::broker::pools::{CloseOutcome, CoreHandle, PoolProfile, SessionPool};
+use crate::broker::pools::{
+    CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
+};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
     Transaction as CoreTransaction, TypedStatement, WORKER_RESERVED_CONNECTIONS,
@@ -1305,6 +1307,24 @@ impl PostgresBroker {
 
     fn log_statement(&self, statement: &TypedStatement) {
         self.statement_log.log(statement);
+    }
+
+    /// The open core pools for a write, and the token that keeps the write in
+    /// the wait of [`PostgresBroker::close`]. The workflow steps
+    /// (`workflow_engine::steps`) run on them.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
+    /// its pools again.
+    pub(crate) fn core_pools_for_write(
+        &self,
+    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
+        Ok(self.core.pools_for_write()?)
+    }
+
+    /// Whether the broker logs each core statement it runs
+    /// (`PostgresConfig::echo`).
+    pub(crate) fn statement_log(&self) -> StatementLog {
+        self.statement_log
     }
 
     /// Whether this broker's runtime pool is configured for PgBouncer
