@@ -96,10 +96,15 @@ fn query_vocabulary_and_bounds_are_exhaustive() {
         .with_limit(501)
         .is_err());
     assert!(WorkflowRunsQuery::new().with_limit(201).is_err());
-    for payload_column in ["args", "kwargs", "result", "task_options"] {
-        assert!(!super::queries::LIVE_SUMMARY_COLUMNS
-            .split(", ")
-            .any(|column| column.trim() == payload_column));
+    let list_columns = super::function_rows::MONITORING_TASK_LIST
+        .sql()
+        .split("FROM")
+        .next()
+        .expect("the list statement has a select list");
+    for payload_column in ["input", "result", "task_options"] {
+        assert!(!list_columns
+            .split(|character: char| character == ',' || character.is_whitespace())
+            .any(|column| column == payload_column));
     }
 }
 
