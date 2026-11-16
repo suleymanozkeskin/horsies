@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from importlib import resources
+from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -19,11 +23,27 @@ from horsies.core.baseline.migration import (
 from horsies.core.types.result import Err, Ok
 
 PINNED_CHECKSUM_HEX = (
-    '0c33476bd7e392b9ebcdcd28034ecf356536cb75852a1d0e'
-    '8f331cdad59a3c9c2bae1a38501296237237af44619c38d4'
+    '8315f57889e675bcf1a8eb3948abc624e44c5e80e3c243b9'
+    '441f079941bf9db79094e27b8156eeef3d04afbc30c75b3a'
 )
 """SHA-384 of the migration text. An edit of a baseline SQL file changes it;
 the edit then shows in this file's diff as well."""
+
+_REPOSITORY: Final = Path(__file__).resolve().parents[2]
+_CORE_MIGRATIONS: Final = (
+    _REPOSITORY / 'crates' / 'horsies-core' / 'src' / 'broker' / 'migrations.rs'
+)
+"""The core's migration runner: its ``baseline_sql_files!`` list includes the same files."""
+_SCHEMA_PAGE: Final = (
+    _REPOSITORY
+    / 'website'
+    / 'src'
+    / 'content'
+    / 'docs'
+    / 'internals'
+    / 'database-schema.md'
+)
+"""The docs page whose table lists each file of the migration."""
 
 
 def _loaded() -> BaselineMigration:
@@ -59,7 +79,52 @@ def test_text_is_the_files_in_name_order() -> None:
     functions = loaded.sql.index('-- horsies baseline schema, part 3:')
     lifecycle_functions = loaded.sql.index('-- horsies baseline schema, part 4:')
     workflow_functions = loaded.sql.index('-- horsies baseline schema, part 5:')
-    assert tables == 0 < indexes < functions < lifecycle_functions < workflow_functions
+    scheduler_monitoring_functions = loaded.sql.index(
+        '-- horsies baseline schema, part 7:'
+    )
+    assert (
+        tables
+        == 0
+        < indexes
+        < functions
+        < lifecycle_functions
+        < workflow_functions
+        < scheduler_monitoring_functions
+    )
+
+
+def _package_sql_files() -> tuple[str, ...]:
+    folder = resources.files('horsies.core.baseline').joinpath('sql')
+    return tuple(
+        sorted(entry.name for entry in folder.iterdir() if entry.name.endswith('.sql'))
+    )
+
+
+def _core_sql_files() -> tuple[str, ...]:
+    """The quoted names of the ``baseline_sql_files!`` invocation in the core."""
+    source = _CORE_MIGRATIONS.read_text(encoding='utf-8')
+    start = source.index('\nbaseline_sql_files!(\n')
+    end = source.index('\n);\n', start)
+    return tuple(re.findall(r'"([^"]+)"', source[start:end]))
+
+
+def test_the_list_holds_every_sql_file_of_the_package_folder() -> None:
+    assert BASELINE_SQL_FILES == _package_sql_files()
+
+
+def test_the_core_includes_the_same_files_in_the_same_order() -> None:
+    # Both clients install the same migration 1000 text and checksum. The
+    # core's test `baseline_file_list_is_python_s_list_and_the_whole_folder`
+    # checks the same pair from its side.
+    assert _core_sql_files() == BASELINE_SQL_FILES
+
+
+def test_the_schema_page_lists_every_file() -> None:
+    page = _SCHEMA_PAGE.read_text(encoding='utf-8')
+    listed = tuple(
+        re.findall(r'^\| `(\d{4}_[a-z_]+\.sql)` \|', page, flags=re.MULTILINE)
+    )
+    assert listed == BASELINE_SQL_FILES
 
 
 def test_text_names_no_schema() -> None:

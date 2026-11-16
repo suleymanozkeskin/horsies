@@ -2,7 +2,6 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
-use crate::core::workflow::node::NO_NODE_INPUT;
 use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
 use std::time::Instant;
@@ -17,6 +16,7 @@ use crate::workflow_engine::recovery_limit::{
 };
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 // ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ LIMIT CAST($2 AS bigint)";
 const GLOBAL_CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
        wt.input, wt.args_from, wt.dependencies,
-       wt.sub_workflow_name, wt.sub_definition_key
+       wt.sub_workflow_name, wt.sub_definition_key, wt.sub_workflow_params
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -198,7 +198,7 @@ LIMIT CAST($1 AS bigint)";
 const TREE_CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
        wt.input, wt.args_from, wt.dependencies,
-       wt.sub_workflow_name, wt.sub_definition_key
+       wt.sub_workflow_name, wt.sub_definition_key, wt.sub_workflow_params
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -493,7 +493,7 @@ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
 /// Link workflow_task to a newly created horsies_task.
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -550,6 +550,8 @@ struct ReadySubworkflowRow {
     dependencies: Vec<i32>,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice (`NOT_GIVEN` or `GIVEN`).
+    sub_workflow_params: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1673,8 +1675,8 @@ async fn start_stuck_subworkflow(
         &row.dependencies,
     )
     .await?;
-    let has_child_inputs = row.input != NO_NODE_INPUT || row.args_from.is_some();
-    let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
+    let params = stored_sub_workflow_params(row.sub_workflow_params.as_deref())?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);
 
@@ -3113,6 +3115,18 @@ mod cap_tests {
         assert!(enqueue_ready_task(&pool, &row, &retention)
             .await
             .expect("recovery enqueue path"));
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the recovery node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input

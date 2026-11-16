@@ -70,7 +70,11 @@ from horsies.core.models.workflow_pg import (
     WorkflowTaskModel as _WorkflowTaskModel,
 )
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
+from horsies.core.types.status import (
+    TASK_TERMINAL_STATES,
+    TaskAttemptOutcome,
+    TaskStatus,
+)
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
@@ -113,6 +117,10 @@ from horsies.core.models.health import (
     parse_slot_health,
 )
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.identity.fingerprint import (
+    COMMAND_FINGERPRINT_VERSION,
+    EnqueueCommandV1,
+)
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
@@ -217,11 +225,87 @@ _ENQUEUE_WRITE_ERRORS: Final = (*_DRIVER_ERRORS, HistoryContractError)
 
 @dataclass(frozen=True, slots=True)
 class _PreparedEnqueue:
-    """The checked input of one enqueue. Only the database can refuse it now."""
+    """The checked input of one enqueue. Only the database can refuse it now.
+
+    ``sent_at`` is the caller's call-site instant, which the row stores.
+    """
 
     insert_params: dict[str, Any]
     command_fingerprint: bytes
+    sent_at: datetime
     scoped_key_digest: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredSend:
+    """The facts of an existing task row that the exact-id resend check reads."""
+
+    fingerprint_version: int | None
+    fingerprint: bytes | None
+    sent_at: datetime
+
+
+def _repeats_stored_send(
+    stored: _StoredSend,
+    *,
+    command_fingerprint: bytes,
+    sent_at: datetime,
+) -> bool:
+    """Whether a send with this fingerprint and ``sent_at`` repeats the send
+    that wrote ``stored``. Pure.
+
+    The version-1 command fingerprint and ``sent_at`` together cover every
+    field of ``enqueue_sha``. A row with no fingerprint is a task that the
+    workflow engine wrote, and no send repeats it.
+    """
+    return (
+        stored.fingerprint_version == COMMAND_FINGERPRINT_VERSION
+        and stored.fingerprint is not None
+        and bytes(stored.fingerprint) == command_fingerprint
+        and stored.sent_at == sent_at
+    )
+
+
+def _command_fingerprint(
+    *,
+    task_name: str,
+    queue_name: str,
+    priority: int,
+    stored_input: str,
+    good_until: datetime | None,
+    enqueue_delay_seconds: int | None,
+    task_options: str | None,
+    retention_class_key: str,
+    retain_rerun_input: bool,
+) -> Result[bytes, BrokerInvalidInput]:
+    """The version-1 command fingerprint of a send. Pure.
+
+    The input travels in the fingerprint's kwargs element as the stored
+    ``input`` text, and the args element is always null: a Python send has
+    no positional arguments. The fingerprint is therefore a function of the
+    stored row. A value that the fingerprint refuses is ``INVALID_INPUT``.
+    """
+    try:
+        command = EnqueueCommandV1(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=None,
+            kwargs_json=stored_input,
+            good_until=good_until,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            task_options_json=task_options,
+            retention_class_key=retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+            rerun_of_task_id=None,
+            rerun_root_task_id=None,
+        )
+    except ValueError as exc:
+        return Err(BrokerInvalidInput(
+            message=f'enqueue input refused for {task_name}: {exc}',
+            exception=exc,
+        ))
+    return Ok(command.fingerprint)
 
 
 _SENT_AT_FUTURE_TOLERANCE: Final = timedelta(seconds=5)
@@ -230,7 +314,7 @@ _SENT_AT_FUTURE_TOLERANCE: Final = timedelta(seconds=5)
 
 def _check_enqueue_timing(
     *,
-    sent_at: datetime | None,
+    sent_at: datetime,
     enqueued_at: datetime | None,
     enqueue_delay_seconds: int | None,
 ) -> Result[None, BrokerInvalidInput]:
@@ -254,8 +338,7 @@ def _check_enqueue_timing(
                 exception=NoCause(),
             ))
     if (
-        sent_at is not None
-        and sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
+        sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
         and enqueued_at is None
         and enqueue_delay_seconds is None
     ):
@@ -272,9 +355,8 @@ def _check_enqueue_timing(
 
 @dataclass(frozen=True, slots=True)
 class _EnqueueOptions:
-    """The task options of one enqueue, and the columns read from them."""
+    """The columns read from the task options of one enqueue."""
 
-    value: Json
     max_retries: int
     execution: Execution
 
@@ -282,16 +364,14 @@ class _EnqueueOptions:
 def _parse_enqueue_task_options(
     task_name: str, task_options: str | None,
 ) -> Result[_EnqueueOptions, BrokerInvalidTaskOptions]:
-    """Parse task options to their value, retry limit and execution class.
+    """Parse task options to their retry limit and execution class.
 
     ``serialize_task_options()`` always produces this text, so malformed JSON
     is a bug, not a runtime condition, and it must not be silently swallowed.
     No options store no retries and ``ISOLATED``.
     """
     if not task_options:
-        return Ok(_EnqueueOptions(
-            value=None, max_retries=0, execution=Execution.ISOLATED,
-        ))
+        return Ok(_EnqueueOptions(max_retries=0, execution=Execution.ISOLATED))
     opts_r = loads_json(task_options)
     if is_err(opts_r):
         return Err(BrokerInvalidTaskOptions(
@@ -313,7 +393,6 @@ def _parse_enqueue_task_options(
             exception=NoCause(),
         ))
     return Ok(_EnqueueOptions(
-        value=opts_r.ok_value,
         max_retries=retry_limit_r.ok_value,
         execution=execution_r.ok_value,
     ))
@@ -366,23 +445,30 @@ def _check_enqueue_args(
             ))
 
 
-def _parse_enqueue_kwargs(
-    task_name: str, kwargs_json: str | None,
-) -> Result[dict[str, Any], BrokerInvalidInput]:
-    """Parse kwargs text to its object. Null and absent are an empty object.
+EMPTY_TASK_INPUT: Final = '{}'
+"""The ``input`` of a send with no keyword arguments."""
 
-    The refusal text names the JSON type, not the input value.
+
+def _parse_enqueue_input(
+    task_name: str, kwargs_json: str | None,
+) -> Result[str, BrokerInvalidInput]:
+    """Check the kwargs text and give the ``input`` text that the row stores.
+
+    An object is stored exactly as sent, because the command fingerprint
+    covers its bytes. Absent kwargs and JSON null store ``EMPTY_TASK_INPUT``:
+    a Python send stores its keyword arguments as one JSON object. Anything
+    else is refused; the refusal text names the JSON type, not the value.
     """
     if kwargs_json is None:
-        return Ok({})
+        return Ok(EMPTY_TASK_INPUT)
     parsed = _parse_enqueue_json('kwargs', task_name, kwargs_json)
     if is_err(parsed):
         return parsed
     match parsed.ok_value:
         case None:
-            return Ok({})
-        case dict() as kwargs:
-            return Ok(kwargs)
+            return Ok(EMPTY_TASK_INPUT)
+        case dict():
+            return Ok(kwargs_json)
         case other:
             return Err(BrokerInvalidInput(
                 message=(
@@ -706,17 +792,11 @@ SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
 """)
 
 # Slim status probe for result-wait polling: the full row drags the
-# (potentially TOASTed) args/kwargs/result payload columns along on every
-# poll iteration; status+name is all the loop needs until terminal.
+# (potentially TOASTed) input column along on every poll iteration;
+# status+name is all the loop needs. A live row holds no result: the result
+# is stored with the terminal record in history.
 GET_TASK_STATUS_NAME_SQL = text("""
     SELECT status, task_name FROM horsies_tasks WHERE id = :id
-""")
-
-# Terminal fetch for the result-wait loop: exactly the columns
-# RawResultRecord consumes. The full entity would also ship args/kwargs —
-# multi-MB for payload-heavy tasks — to read a result envelope.
-GET_TASK_RESULT_RECORD_SQL = text("""
-    SELECT task_name, status, result FROM horsies_tasks WHERE id = :id
 """)
 
 # Sentinel returned by _probe_result_row while the row is non-terminal.
@@ -725,7 +805,6 @@ _STILL_WAITING = object()
 REQUEUE_STALE_CLAIMED_SQL = text("""
     UPDATE horsies_tasks AS t
     SET status = 'PENDING',
-        claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
@@ -779,29 +858,23 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
 ENQUEUE_INSERT_SQL = text("""
     INSERT INTO horsies_tasks (
         idempotency_key_digest, id, task_name, queue_name, priority,
-        args, kwargs, status, sent_at, enqueued_at, good_until,
-        claimed, retry_count, max_retries, task_options, execution,
-        enqueue_sha, is_workflow_task, created_at, updated_at,
+        input, status, sent_at, enqueued_at, good_until,
+        retry_count, max_retries, task_options, execution,
+        is_workflow_task, created_at, updated_at,
         command_fingerprint_version, command_fingerprint,
-        retention_class_key, retain_rerun_input, input_digest,
-        prepared_rerun_input_disposition, prepared_rerun_input_version,
-        prepared_rerun_input_codec, prepared_rerun_input_content_type,
-        prepared_rerun_input_digest, prepared_rerun_input_inline
+        retention_class_key, retain_rerun_input
     ) VALUES (
         :idempotency_key_digest, :id, :task_name, :queue_name, :priority,
-        :args, :kwargs, 'PENDING', :sent_at,
+        :input, 'PENDING', :sent_at,
         COALESCE(
             :enqueued_at,
             NOW() + COALESCE(:enqueue_delay, INTERVAL '0 seconds')
         ),
         :good_until,
-        FALSE, 0, :max_retries, :task_options, :execution,
-        :enqueue_sha, FALSE, NOW(), NOW(),
+        0, :max_retries, :task_options, :execution,
+        FALSE, NOW(), NOW(),
         :command_fingerprint_version, :command_fingerprint,
-        :retention_class_key, :retain_rerun_input, :input_digest,
-        :prepared_rerun_input_disposition, :prepared_rerun_input_version,
-        :prepared_rerun_input_codec, :prepared_rerun_input_content_type,
-        :prepared_rerun_input_digest, :prepared_rerun_input_inline
+        :retention_class_key, :retain_rerun_input
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id
@@ -1561,114 +1634,15 @@ class PostgresBroker:
     # ----------------- Async API -----------------
 
     @staticmethod
-    def _cutover_enqueue_values(
-        *,
-        task_name: str,
-        queue_name: str,
-        priority: int,
-        args_json: str | None,
-        kwargs_json: str | None,
-        kwargs: dict[str, Any],
-        good_until: Optional[datetime],
-        enqueue_delay_seconds: Optional[int],
-        task_options: Optional[str],
-        task_options_value: Any,
-        retention_class_key: str,
-        retain_rerun_input: bool,
-    ) -> Result[dict[str, Any], BrokerInvalidInput]:
-        """The cutover column values for one fresh enqueue.
-
-        The command fingerprint covers the carried JSON strings as-is;
-        the prepared envelope re-serializes the parsed VALUES through the
-        canonical content-v1 serializer, because envelope identity is
-        content identity, not string identity. `enqueue_sha` is separate
-        and unchanged: it remains the exact-ID resend comparator and
-        never becomes the key contract.
-        """
-        from hashlib import sha256
-
-        from horsies.core.history.identity.fingerprint import EnqueueCommandV1
-        from horsies.core.history.rerun.input_envelope import (
-            INPUT_ENVELOPE_CODEC,
-            INPUT_ENVELOPE_CONTENT_TYPE,
-            INPUT_ENVELOPE_INLINE_MAX_BYTES,
-            INPUT_ENVELOPE_VERSION,
-            encode_input_envelope_v1,
-        )
-
-        # task_options arrives both as the stored string (fingerprint
-        # input) and as the value the caller already parsed once for
-        # retry-policy extraction; parsing it again here would be the
-        # second parse of the same string on every enqueue.
-        payload = encode_input_envelope_v1(
-            args=[],
-            kwargs=kwargs,
-            options=task_options_value,
-        )
-        digest = sha256(payload).digest()
-        try:
-            command = EnqueueCommandV1(
-                task_name=task_name,
-                queue_name=queue_name,
-                priority=priority,
-                args_json=args_json,
-                kwargs_json=kwargs_json,
-                good_until=good_until,
-                enqueue_delay_seconds=enqueue_delay_seconds,
-                task_options_json=task_options,
-                retention_class_key=retention_class_key,
-                retain_rerun_input=retain_rerun_input,
-                rerun_of_task_id=None,
-                rerun_root_task_id=None,
-            )
-        except ValueError as exc:
-            return Err(BrokerInvalidInput(
-                message=f'enqueue input refused for {task_name}: {exc}',
-                exception=exc,
-            ))
-        fingerprint = command.fingerprint
-
-        if not retain_rerun_input:
-            disposition: dict[str, Any] = {
-                'prepared_rerun_input_disposition': 'DECLINED_BY_POLICY',
-            }
-        elif len(payload) > INPUT_ENVELOPE_INLINE_MAX_BYTES:
-            disposition = {
-                'prepared_rerun_input_disposition': 'OVER_BOUND',
-            }
-        else:
-            disposition = {
-                'prepared_rerun_input_disposition': 'INLINE',
-                'prepared_rerun_input_version': INPUT_ENVELOPE_VERSION,
-                'prepared_rerun_input_codec': INPUT_ENVELOPE_CODEC,
-                'prepared_rerun_input_content_type': (
-                    INPUT_ENVELOPE_CONTENT_TYPE
-                ),
-                'prepared_rerun_input_digest': digest,
-                'prepared_rerun_input_inline': payload,
-            }
-        return Ok(
-            {
-                'command_fingerprint_version': 1,
-                'command_fingerprint': fingerprint,
-                'retention_class_key': retention_class_key,
-                'retain_rerun_input': retain_rerun_input,
-                'input_digest': digest,
-                **disposition,
-            }
-        )
-
-    @staticmethod
     def _prepare_enqueue(
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
         queue_name: str,
         priority: int,
         args_json: str | None,
         kwargs_json: str | None,
-        sent_at: Optional[datetime],
+        sent_at: datetime,
         enqueued_at: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         good_until: Optional[datetime],
@@ -1694,37 +1668,29 @@ class PostgresBroker:
         args_r = _check_enqueue_args(task_name, args_json)
         if is_err(args_r):
             return args_r
-        kwargs_r = _parse_enqueue_kwargs(task_name, kwargs_json)
-        if is_err(kwargs_r):
-            return kwargs_r
+        input_r = _parse_enqueue_input(task_name, kwargs_json)
+        if is_err(input_r):
+            return input_r
+        stored_input = input_r.ok_value
         options_r = _parse_enqueue_task_options(task_name, task_options)
         if is_err(options_r):
             return options_r
         parsed_options = options_r.ok_value
-        task_options_value = parsed_options.value
 
-        # The cutover payload: command fingerprint, retention
-        # snapshot, and the prepared rerun-input envelope, computed
-        # here so every producer path carries them without call-site
-        # changes. Values are real for every new row; the columns
-        # are transitionally nullable (v27) only for rows written by
-        # older code, which the cutover migration's backfill owns.
-        cutover = PostgresBroker._cutover_enqueue_values(
+        fingerprint_r = _command_fingerprint(
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            kwargs=kwargs_r.ok_value,
+            stored_input=stored_input,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options=task_options,
-            task_options_value=task_options_value,
             retention_class_key=retention_class_key,
             retain_rerun_input=retain_rerun_input,
         )
-        if is_err(cutover):
-            return cutover
+        if is_err(fingerprint_r):
+            return fingerprint_r
+        command_fingerprint = fingerprint_r.ok_value
 
         scoped_key_digest: bytes | None = None
         if idempotency_key is not None:
@@ -1745,20 +1711,21 @@ class PostgresBroker:
                 task_name=task_name,
                 queue_name=queue_name,
                 priority=priority,
-                args_json=args_json,
-                kwargs_json=kwargs_json,
-                call_site_sent_at=sent_at or datetime.now(timezone.utc),
+                stored_input=stored_input,
+                call_site_sent_at=sent_at,
                 enqueued_at=enqueued_at,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
                 max_retries=parsed_options.max_retries,
                 task_options=task_options,
                 execution=parsed_options.execution,
-                enqueue_sha=enqueue_sha,
                 scoped_key_digest=scoped_key_digest,
-                cutover_values=cutover.ok_value,
+                command_fingerprint=command_fingerprint,
+                retention_class_key=retention_class_key,
+                retain_rerun_input=retain_rerun_input,
             ),
-            command_fingerprint=cutover.ok_value['command_fingerprint'],
+            command_fingerprint=command_fingerprint,
+            sent_at=sent_at,
             scoped_key_digest=scoped_key_digest,
         ))
 
@@ -1769,26 +1736,24 @@ class PostgresBroker:
         task_name: str,
         queue_name: str,
         priority: int,
-        args_json: str | None,
-        kwargs_json: str | None,
+        stored_input: str,
         call_site_sent_at: datetime,
         enqueued_at: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         good_until: Optional[datetime],
-        max_retries: Json,
+        max_retries: int,
         task_options: Optional[str],
         execution: Execution,
-        enqueue_sha: str,
         scoped_key_digest: Optional[bytes],
-        cutover_values: dict[str, Any],
+        command_fingerprint: bytes,
+        retention_class_key: str,
+        retain_rerun_input: bool,
     ) -> dict[str, Any]:
         """Bind parameters for ``ENQUEUE_INSERT_SQL``, one entry per bind.
 
-        The prepared-rerun-input columns are always bound: absent
-        disposition fields bind NULL, which is identical to omitting the
-        nullable, default-free columns. ``enqueued_at`` and
-        ``enqueue_delay`` drive the statement's COALESCE — explicit
-        timestamp wins, else NOW() plus the delay, else NOW().
+        ``enqueued_at`` and ``enqueue_delay`` drive the statement's
+        COALESCE — explicit timestamp wins, else NOW() plus the delay, else
+        NOW().
         """
         return {
             'idempotency_key_digest': scoped_key_digest,
@@ -1796,8 +1761,7 @@ class PostgresBroker:
             'task_name': task_name,
             'queue_name': queue_name,
             'priority': priority,
-            'args': args_json,
-            'kwargs': kwargs_json,
+            'input': stored_input,
             'sent_at': call_site_sent_at,
             'enqueued_at': enqueued_at,
             'enqueue_delay': (
@@ -1809,32 +1773,10 @@ class PostgresBroker:
             'max_retries': max_retries,
             'task_options': task_options,
             'execution': execution.value,
-            'enqueue_sha': enqueue_sha,
-            'command_fingerprint_version': (
-                cutover_values['command_fingerprint_version']
-            ),
-            'command_fingerprint': cutover_values['command_fingerprint'],
-            'retention_class_key': cutover_values['retention_class_key'],
-            'retain_rerun_input': cutover_values['retain_rerun_input'],
-            'input_digest': cutover_values['input_digest'],
-            'prepared_rerun_input_disposition': (
-                cutover_values['prepared_rerun_input_disposition']
-            ),
-            'prepared_rerun_input_version': (
-                cutover_values.get('prepared_rerun_input_version')
-            ),
-            'prepared_rerun_input_codec': (
-                cutover_values.get('prepared_rerun_input_codec')
-            ),
-            'prepared_rerun_input_content_type': (
-                cutover_values.get('prepared_rerun_input_content_type')
-            ),
-            'prepared_rerun_input_digest': (
-                cutover_values.get('prepared_rerun_input_digest')
-            ),
-            'prepared_rerun_input_inline': (
-                cutover_values.get('prepared_rerun_input_inline')
-            ),
+            'command_fingerprint_version': COMMAND_FINGERPRINT_VERSION,
+            'command_fingerprint': command_fingerprint,
+            'retention_class_key': retention_class_key,
+            'retain_rerun_input': retain_rerun_input,
         }
 
     async def enqueue_async(
@@ -1847,7 +1789,7 @@ class PostgresBroker:
         args_json: str | None = None,
         kwargs_json: str | None = None,
         priority: int = 100,
-        sent_at: Optional[datetime] = None,
+        sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
@@ -1856,6 +1798,15 @@ class PostgresBroker:
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> Result[str, BrokerEnqueueError]:
+        """Write one PENDING task row, or answer the send that wrote it.
+
+        The row stores ``kwargs_json`` as its ``input`` (``{}`` when there
+        are none), the version-1 command fingerprint of the send and
+        ``sent_at``, the call time of the send. A send that repeats a task id
+        is the same send only when the stored fingerprint and ``sent_at``
+        are equal; a resend passes the ``sent_at`` of the first send.
+        ``enqueue_sha`` is not stored and not compared.
+        """
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('enqueue', loop_limit)
@@ -1873,7 +1824,6 @@ class PostgresBroker:
             retain_rerun_input = self.config.retain_rerun_input_default
         prepared_r = self._prepare_enqueue(
             task_id=task_id,
-            enqueue_sha=enqueue_sha,
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
@@ -1908,17 +1858,18 @@ class PostgresBroker:
                 return await self._insert_keyed_enqueue(
                     resources,
                     task_id=task_id,
-                    enqueue_sha=enqueue_sha,
                     task_name=task_name,
                     key_digest=prepared.scoped_key_digest,
                     command_fingerprint=prepared.command_fingerprint,
+                    sent_at=prepared.sent_at,
                     insert_params=prepared.insert_params,
                 )
             return await self._insert_unkeyed_enqueue(
                 resources,
                 task_id=task_id,
-                enqueue_sha=enqueue_sha,
                 task_name=task_name,
+                command_fingerprint=prepared.command_fingerprint,
+                sent_at=prepared.sent_at,
                 insert_params=prepared.insert_params,
             )
         except _ENQUEUE_WRITE_ERRORS as exc:
@@ -1932,8 +1883,9 @@ class PostgresBroker:
         resources: BrokerResources,
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
+        command_fingerprint: bytes,
+        sent_at: datetime,
         insert_params: dict[str, Any],
     ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Insert one row, then verify the payload on a task id conflict.
@@ -1956,9 +1908,13 @@ class PostgresBroker:
             # Row inserted — fresh enqueue succeeded.
             return Ok(task_id)
 
-        # Conflict: task_id already exists. Verify payload identity via stored SHA.
+        # Conflict: task_id already exists. Compare the stored send.
         return await self._verify_enqueue_conflict(
-            resources, task_id, enqueue_sha, task_name,
+            resources,
+            task_id=task_id,
+            task_name=task_name,
+            command_fingerprint=command_fingerprint,
+            sent_at=sent_at,
         )
 
     async def _insert_keyed_enqueue(
@@ -1966,17 +1922,17 @@ class PostgresBroker:
         resources: BrokerResources,
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
+        sent_at: datetime,
         insert_params: dict[str, Any],
     ) -> Result[str, BrokerEnqueueError]:
         """Claim the key and insert in ONE transaction.
 
-        The claim reuses the command fingerprint computed for the cutover
-        columns, and a replayed key returns the committed request's id: the
-        same result shape as a fresh enqueue, no distinguishability flag.
+        The claim uses the command fingerprint that the row stores, and a
+        replayed key returns the committed request's id: the same result
+        shape as a fresh enqueue, no distinguishability flag.
         """
         from horsies.core.history.identity.keys import IDEMPOTENCY_SCOPE_VERSION
         from horsies.core.history.identity.reservations import (
@@ -2022,10 +1978,10 @@ class PostgresBroker:
                 return await self._bind_key_after_task_id_conflict(
                     session,
                     task_id=task_id,
-                    enqueue_sha=enqueue_sha,
                     task_name=task_name,
                     key_digest=key_digest,
                     command_fingerprint=command_fingerprint,
+                    sent_at=sent_at,
                 )
             await session.commit()
         return Ok(task_id)
@@ -2035,10 +1991,10 @@ class PostgresBroker:
         session: AsyncSession,
         *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
+        sent_at: datetime,
     ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Bind a claimed key to an exact existing live task atomically.
 
@@ -2050,10 +2006,10 @@ class PostgresBroker:
         existing = (
             await session.execute(
                 select(
-                    TaskModel.enqueue_sha,
                     TaskModel.idempotency_key_digest,
                     TaskModel.command_fingerprint_version,
                     TaskModel.command_fingerprint,
+                    TaskModel.sent_at,
                 )
                 .where(TaskModel.id == task_id)
                 .with_for_update()
@@ -2071,12 +2027,13 @@ class PostgresBroker:
                     exception=NoCause(),
                 )
             )
-        existing_fingerprint = existing.command_fingerprint
-        if (
-            existing.enqueue_sha != enqueue_sha
-            or existing.command_fingerprint_version != 1
-            or existing_fingerprint is None
-            or bytes(existing_fingerprint) != command_fingerprint
+        stored = _StoredSend(
+            fingerprint_version=existing.command_fingerprint_version,
+            fingerprint=existing.command_fingerprint,
+            sent_at=existing.sent_at,
+        )
+        if not _repeats_stored_send(
+            stored, command_fingerprint=command_fingerprint, sent_at=sent_at,
         ):
             await session.rollback()
             return Err(
@@ -2114,19 +2071,27 @@ class PostgresBroker:
     async def _verify_enqueue_conflict(
         self,
         resources: BrokerResources,
+        *,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
+        command_fingerprint: bytes,
+        sent_at: datetime,
     ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
-        """Verify a conflicting task_id has the same payload.
+        """Verify that the row with a conflicting task_id holds this send.
 
-        Called when INSERT ... ON CONFLICT DO NOTHING returns no row.
+        Called when INSERT ... ON CONFLICT DO NOTHING returns no row. The
+        exact-id resend check compares the stored command fingerprint and
+        ``sent_at`` (``_repeats_stored_send``).
         """
         try:
             async with resources.session_factory() as session:
                 row = (
                     await session.execute(
-                        select(TaskModel.enqueue_sha).where(TaskModel.id == task_id),
+                        select(
+                            TaskModel.command_fingerprint_version,
+                            TaskModel.command_fingerprint,
+                            TaskModel.sent_at,
+                        ).where(TaskModel.id == task_id),
                     )
                 ).fetchone()
         except _DRIVER_ERRORS as exc:
@@ -2142,9 +2107,9 @@ class PostgresBroker:
             )
 
         if row is None:
-            # The insert observed a conflict, but the row disappeared before we
-            # could compare enqueue_sha. Without the stored fingerprint, this
-            # cannot be proven idempotent.
+            # The insert observed a conflict, but the row disappeared before
+            # the compare. Without the stored send, this cannot be proven
+            # idempotent.
             return Err(
                 BrokerEnqueueFailed(
                     message=(
@@ -2156,22 +2121,23 @@ class PostgresBroker:
                 )
             )
 
-        existing_sha: str = row.enqueue_sha
-        # enqueue_sha is NOT NULL — defensive assertion against data corruption.
-        assert (
-            existing_sha is not None
-        ), f'enqueue_sha is NULL for task_id={task_id} — column is NOT NULL'
-
-        if existing_sha == enqueue_sha:
-            # Idempotent success — same payload already enqueued.
+        stored = _StoredSend(
+            fingerprint_version=row.command_fingerprint_version,
+            fingerprint=row.command_fingerprint,
+            sent_at=row.sent_at,
+        )
+        if _repeats_stored_send(
+            stored, command_fingerprint=command_fingerprint, sent_at=sent_at,
+        ):
+            # Idempotent success — the same send is already enqueued.
             return Ok(task_id)
 
-        # Different payload with same task_id — always a bug.
+        # Another command or another sent_at with the same task_id.
         return Err(
             BrokerPayloadMismatch(
                 message=(
                     f'task_id {task_id} already exists with different payload '
-                    f'for {task_name} (sha mismatch)'
+                    f'for {task_name} (command fingerprint or sent_at differs)'
                 ),
             )
         )
@@ -2405,12 +2371,12 @@ class PostgresBroker:
     ) -> 'BrokerResult[RawResultRecord | None] | object':
         """Slim status probe for the result-wait loop.
 
-        Polls status+name only; the full row (with potentially TOASTed
-        payload columns) is fetched once, when a terminal status is
-        observed. A live row that is absent — or that vanishes between
-        the status probe and the record fetch — falls through to the
-        history side, because terminalization DELETES the live row as
-        it records the terminal fact.
+        Polls status+name only. A live row holds no result: the result is
+        stored with the terminal record in history, so a live row that is
+        absent falls through to the history side, because terminalization
+        DELETES the live row as it records the terminal fact. A live row
+        with a terminal status has no result to read and gives a
+        payload-less record.
 
         Returns the loop's final ``BrokerResult`` when the wait is over,
         or the ``_STILL_WAITING`` sentinel to keep polling. With
@@ -2424,27 +2390,7 @@ class PostgresBroker:
         if probe_row is None:
             return await self._history_result_record(session, task_id)
         status = TaskStatus(str(probe_row.status))
-        if status in (
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.EXPIRED,
-        ):
-            record_row = (await session.execute(
-                GET_TASK_RESULT_RECORD_SQL, {'id': task_id},
-            )).fetchone()
-            if record_row is None:
-                # The ruled boundary: the row moved between the live
-                # poll and this fetch.
-                return await self._history_result_record(
-                    session, task_id
-                )
-            return self._build_raw_result_record(
-                task_id,
-                str(record_row.task_name),
-                TaskStatus(str(record_row.status)),
-                cast('str | None', record_row.result),
-            )
-        if status == TaskStatus.CANCELLED or non_terminal_snapshot:
+        if status in TASK_TERMINAL_STATES or non_terminal_snapshot:
             return Ok(RawResultRecord(
                 task_id=task_id,
                 task_name=str(probe_row.task_name),
@@ -3715,11 +3661,10 @@ class PostgresBroker:
         queue_name: str,
         *,
         task_id: str,
-        enqueue_sha: str,
         args_json: str | None,
         kwargs_json: str | None,
         priority: int,
-        sent_at: Optional[datetime],
+        sent_at: datetime,
         enqueued_at: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         good_until: Optional[datetime],
@@ -3738,7 +3683,6 @@ class PostgresBroker:
             retain_rerun_input = self.config.retain_rerun_input_default
         prepared_r = self._prepare_enqueue(
             task_id=task_id,
-            enqueue_sha=enqueue_sha,
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
@@ -3771,7 +3715,11 @@ class PostgresBroker:
                 pass
         try:
             return self.run_sync(
-                self._verify_taken_task_id, task_id, enqueue_sha, task_name,
+                self._verify_taken_task_id,
+                task_id,
+                task_name,
+                prepared.command_fingerprint,
+                prepared.sent_at,
             )
         except LoopRunnerError as exc:
             return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
@@ -3779,8 +3727,9 @@ class PostgresBroker:
     async def _verify_taken_task_id(
         self,
         task_id: str,
-        enqueue_sha: str,
         task_name: str,
+        command_fingerprint: bytes,
+        sent_at: datetime,
     ) -> Result[str, BrokerEnqueueError]:
         """``_verify_enqueue_conflict`` on this loop's resource set, for a
         sync send whose INSERT found the task id taken."""
@@ -3791,7 +3740,11 @@ class PostgresBroker:
                 pass
         try:
             return await self._verify_enqueue_conflict(
-                resources, task_id, enqueue_sha, task_name,
+                resources,
+                task_id=task_id,
+                task_name=task_name,
+                command_fingerprint=command_fingerprint,
+                sent_at=sent_at,
             )
         except _ENQUEUE_WRITE_ERRORS as exc:
             return _enqueue_failed(
@@ -3809,7 +3762,7 @@ class PostgresBroker:
         args_json: str | None = None,
         kwargs_json: str | None = None,
         priority: int = 100,
-        sent_at: Optional[datetime] = None,
+        sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
@@ -3835,7 +3788,6 @@ class PostgresBroker:
                     task_name,
                     queue_name,
                     task_id=task_id,
-                    enqueue_sha=enqueue_sha,
                     args_json=args_json,
                     kwargs_json=kwargs_json,
                     priority=priority,

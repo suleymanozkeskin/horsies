@@ -142,44 +142,66 @@ impl ConnectError {
         match &self.cause {
             ConnectFailure::TimedOut { .. } => Transience::Transient,
             ConnectFailure::ServerRefused(error) => sqlstate_transience(error.code()),
-            ConnectFailure::TransportFailed(error) => match certificate_check(error) {
-                CertificateCheck::Refused => Transience::Permanent,
-                CertificateCheck::NotInvolved => Transience::Transient,
+            ConnectFailure::TransportFailed(error) => match tls_failure(error) {
+                TlsFailure::CertificateRefused => Transience::Permanent,
+                TlsFailure::OtherTls | TlsFailure::NotTls => Transience::Transient,
             },
         }
     }
+
+    /// Whether `sslmode=prefer` tries again without TLS after this failure,
+    /// as libpq does: after a failed TLS handshake, or after a server refusal
+    /// of the session. A timeout and a socket failure are not tried again.
+    pub(crate) fn plain_retry(&self) -> PlainRetry {
+        match &self.cause {
+            ConnectFailure::ServerRefused(_) => PlainRetry::Allowed,
+            ConnectFailure::TransportFailed(error) => match tls_failure(error) {
+                TlsFailure::CertificateRefused | TlsFailure::OtherTls => PlainRetry::Allowed,
+                TlsFailure::NotTls => PlainRetry::NotAllowed,
+            },
+            ConnectFailure::TimedOut { .. } => PlainRetry::NotAllowed,
+        }
+    }
 }
 
-/// Whether a transport failure came from a refused server certificate.
-enum CertificateCheck {
-    Refused,
-    NotInvolved,
+/// Whether a failed `sslmode=prefer` attempt is followed by a plain attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlainRetry {
+    Allowed,
+    NotAllowed,
+}
+
+/// The TLS part of a transport failure.
+enum TlsFailure {
+    /// rustls refused the server certificate.
+    CertificateRefused,
+    /// Another rustls error: the handshake failed.
+    OtherTls,
+    /// No rustls error in the chain.
+    NotTls,
 }
 
 /// Walks the error's source chain (at most [`MAX_ERROR_CHAIN_DEPTH`] links)
-/// for a rustls certificate error. tokio-rustls wraps rustls errors in an
-/// `io::Error`, whose `source()` skips the wrapped error, so each `io::Error`
-/// is opened with `get_ref`.
-fn certificate_check(error: &tokio_postgres::Error) -> CertificateCheck {
+/// for a rustls error. tokio-rustls wraps rustls errors in an `io::Error`,
+/// whose `source()` skips the wrapped error, so each `io::Error` is opened
+/// with `get_ref`.
+fn tls_failure(error: &tokio_postgres::Error) -> TlsFailure {
     let mut current = error.source();
     for _ in 0..MAX_ERROR_CHAIN_DEPTH {
         let Some(link) = current else {
-            return CertificateCheck::NotInvolved;
+            return TlsFailure::NotTls;
         };
-        if let Some(rustls::Error::InvalidCertificate(_)) = link.downcast_ref::<rustls::Error>() {
-            return CertificateCheck::Refused;
+        let wrapped = link
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io_error| io_error.get_ref())
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>());
+        match link.downcast_ref::<rustls::Error>().or(wrapped) {
+            Some(rustls::Error::InvalidCertificate(_)) => return TlsFailure::CertificateRefused,
+            Some(_) => return TlsFailure::OtherTls,
+            None => current = link.source(),
         }
-        if let Some(io_error) = link.downcast_ref::<std::io::Error>() {
-            if let Some(rustls::Error::InvalidCertificate(_)) = io_error
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<rustls::Error>())
-            {
-                return CertificateCheck::Refused;
-            }
-        }
-        current = link.source();
     }
-    CertificateCheck::NotInvolved
+    TlsFailure::NotTls
 }
 
 /// A checkout from a core pool failed. Nothing was sent.
@@ -295,6 +317,14 @@ pub enum NotSentCause {
     /// The prepare round trip failed. The statement itself did not run.
     #[error("preparing the statement failed before it ran: {0}")]
     PrepareFailed(tokio_postgres::Error),
+    /// An earlier failure discarded this connection (or dropped its open
+    /// transaction); nothing more runs on it. Check out another connection.
+    #[error("the connection was discarded after an earlier failure; check out another one")]
+    ConnectionDiscarded,
+    /// A statement of the transaction failed, so the transaction can only roll
+    /// back. Nothing of it committed.
+    #[error("the transaction is aborted: statement `{failed_statement}` failed in it")]
+    TransactionAborted { failed_statement: &'static str },
 }
 
 impl NotSentCause {
@@ -307,6 +337,8 @@ impl NotSentCause {
                 Some(server_error) => sqlstate_transience(server_error.code()),
                 None => Transience::Transient,
             },
+            NotSentCause::ConnectionDiscarded => Transience::Transient,
+            NotSentCause::TransactionAborted { .. } => Transience::Permanent,
         }
     }
 }

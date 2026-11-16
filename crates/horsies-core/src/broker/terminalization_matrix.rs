@@ -19,7 +19,6 @@ use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
@@ -264,9 +263,12 @@ impl IsolatedTerminalizationTestDatabase {
     async fn create() -> Self {
         let database = Self::create_empty().await;
         let pool = &database.pool;
-        run_horsies_migrations(pool)
-            .await
-            .expect("migrate isolated terminalization database");
+        crate::broker::migrations::install_schema(
+            pool,
+            crate::broker::client_family::ClientFamily::Rust,
+        )
+        .await
+        .expect("migrate isolated terminalization database");
         let mut transaction = pool.begin().await.expect("coverage transaction");
         let coverage =
             ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -356,9 +358,12 @@ pub(crate) async fn migrated_pool() -> PgPool {
                     .await
                     .expect("unlock P5 database setup");
             assert!(unlocked, "P5 database setup lock was held");
-            run_horsies_migrations(&anchor)
-                .await
-                .expect("migrate P5 database");
+            crate::broker::migrations::install_schema(
+                &anchor,
+                crate::broker::client_family::ClientFamily::Rust,
+            )
+            .await
+            .expect("migrate P5 database");
             let mut transaction = anchor.begin().await.expect("coverage transaction");
             let coverage =
                 ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -494,7 +499,7 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'matrix_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            $1, 'matrix_task', 'default', 100, 'null', NULL, 'ISOLATED',
             'forever', NOW(), NOW(),
             CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END, $9,
             $2, NOW(), $5, $4, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -1947,7 +1952,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
              updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          )
-         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, '{}', NULL,
+         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, 'null', NULL,
                 'ISOLATED', 'forever', NOW(), NOW(),
                 NULL, NULL, NULL,
                 'PENDING', NOW(), NULL, NULL, NULL,
@@ -3210,6 +3215,10 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
     }
 }
 
+/// The baseline result rule (`horsies_task_history_result_domain`): an
+/// administrative cancel stores no result and no digest; every other kind
+/// stores the payload it was given and its sha256 digest, and the deferred
+/// record of a workflow task carries the same digest.
 #[tokio::test]
 #[serial]
 async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
@@ -3236,12 +3245,6 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
             if deferred {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
             }
-            sqlx::query("UPDATE horsies_tasks SET result = $2 WHERE id = $1")
-                .bind(id)
-                .bind(&payload)
-                .execute(pool)
-                .await
-                .unwrap();
             let mut tx = pool.begin().await.unwrap();
             sqlx::query("SELECT horsies_move_task_to_history($1,$2,$3,NOW(),$4,NULL,NULL)")
                 .bind(id)
@@ -3257,19 +3260,18 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 .execute(tx.as_mut())
                 .await
                 .unwrap();
-            let (result, prior, digest): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as("SELECT result_payload, prior_result_payload, result_digest FROM horsies_task_history WHERE task_id=$1")
-                .bind(id).fetch_one(tx.as_mut()).await.unwrap();
-            let expected_payload = payload.as_ref().map(|v| v.as_bytes().to_vec());
-            match admin {
-                true => {
-                    assert_eq!(prior, expected_payload);
-                    assert!(result.is_none());
-                }
-                false => {
-                    assert_eq!(result, expected_payload);
-                    assert!(prior.is_none());
-                }
-            }
+            let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT result_payload, result_digest FROM horsies_task_history WHERE task_id=$1",
+            )
+            .bind(id)
+            .fetch_one(tx.as_mut())
+            .await
+            .unwrap();
+            let expected_payload = match admin {
+                true => None,
+                false => payload.as_ref().map(|v| v.as_bytes().to_vec()),
+            };
+            assert_eq!(result, expected_payload);
             let expected_digest: Option<Vec<u8>> = sqlx::query_scalar("SELECT sha256($1::bytea)")
                 .bind(&expected_payload)
                 .fetch_one(tx.as_mut())

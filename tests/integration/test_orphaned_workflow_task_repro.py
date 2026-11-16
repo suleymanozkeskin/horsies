@@ -18,7 +18,7 @@ from horsies.core.types.result import is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.sql import COUNT_IN_FLIGHT_FOR_WORKER_SQL
 from horsies.core.worker.worker import Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import current_resources
 
 # The claim generation of every row seeded here, which the fences of the
@@ -32,28 +32,23 @@ async def _seed_orphaned_claimed_workflow_task(
     worker_id: str,
 ) -> str:
     task_id = str(uuid4())
-    sent_at, enqueue_sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='workflow_join_barrier',
         queue_name='default',
     )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, created_at, updated_at,
-                claimed, claimed_at, claimed_by_worker_id, claim_expires_at,
-                retry_count, max_retries, enqueue_sha, is_workflow_task,
-                retention_class_key, command_fingerprint_version,
-                command_fingerprint, retain_rerun_input,
-                prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, status, sent_at,
+                enqueued_at, created_at, updated_at, claimed_at, claimed_by_worker_id,
+                claim_expires_at, retry_count, max_retries, is_workflow_task,
+                retention_class_key, command_fingerprint_version, command_fingerprint,
+                retain_rerun_input, execution
             ) VALUES (
-                :id, 'workflow_join_barrier', 'default', 100, '[]', '{}',
-                'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
-                TRUE, :claimed_at, :worker_id, NOW() + INTERVAL '5 minutes',
-                0, 0, :enqueue_sha, TRUE,
-                'standard_30d', 1,
-                sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                FALSE, 'NEVER_ELIGIBLE'
+                :id, 'workflow_join_barrier', 'default', 100, '{}', 'CLAIMED',
+                :sent_at, NOW(), NOW(), NOW(), :claimed_at, :worker_id,
+                NOW() + INTERVAL '5 minutes', 0, 0, TRUE, 'standard_30d', NULL, NULL,
+                FALSE, 'ISOLATED'
             )
         """),
         {
@@ -61,7 +56,7 @@ async def _seed_orphaned_claimed_workflow_task(
             'sent_at': sent_at,
             'claimed_at': CLAIMED_AT,
             'worker_id': worker_id,
-            'enqueue_sha': enqueue_sha,
+            'command_fingerprint': fingerprint,
         },
     )
     await session.commit()
