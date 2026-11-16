@@ -22,6 +22,11 @@ same rows.
 Sort and group columns are resolved through allowlist mappings keyed by
 ``Literal`` types, so no caller-supplied string reaches SQL.
 
+The live table holds no end time, error code, failed reason or result: a
+task moves to history when it ends. The live side reads these facts as NULL,
+a sort on them sorts every live row as NULL, and an error-code or category
+filter selects no live row.
+
 Load characteristics: ``task_stats``, ``task_facets`` and ``task_breakdown``
 aggregate the live table plus the bounded history window. Each facet dimension
 groups both lifecycle sides and applies its cap only after their counts are
@@ -39,12 +44,15 @@ from typing import Any, Literal, NamedTuple, assert_never
 
 from sqlalchemy import (
     ColumnElement,
+    DateTime,
+    Interval,
     Select,
     SQLColumnExpression,
-    and_,
+    cast,
+    false,
     func,
+    null,
     nulls_last,
-    or_,
     select,
     text,
 )
@@ -166,11 +174,16 @@ class _SortKey(NamedTuple):
     nullable: bool
 
 
+# A live row has no end time, so the sort keys built on one are NULL for every
+# live row: the live side sorts them as NULL, after every history row.
+_LIVE_END_TIME: SQLColumnExpression[Any] = cast(null(), DateTime(timezone=True))
+_LIVE_EXECUTION_SPAN: SQLColumnExpression[Any] = cast(null(), Interval())
+
 _SORT_COLUMNS: dict[str, _SortKey] = {
     'enqueued_at': _SortKey(TaskModel.enqueued_at, nullable=False),
     'started_at': _SortKey(TaskModel.started_at, nullable=True),
-    'completed_at': _SortKey(TaskModel.completed_at, nullable=True),
-    'failed_at': _SortKey(TaskModel.failed_at, nullable=True),
+    'completed_at': _SortKey(_LIVE_END_TIME, nullable=True),
+    'failed_at': _SortKey(_LIVE_END_TIME, nullable=True),
     'status': _SortKey(TaskModel.status, nullable=False),
     'task_name': _SortKey(TaskModel.task_name, nullable=False),
     'queue_name': _SortKey(TaskModel.queue_name, nullable=False),
@@ -179,11 +192,7 @@ _SORT_COLUMNS: dict[str, _SortKey] = {
     'queue_s': _SortKey(
         TaskModel.started_at - TaskModel.enqueued_at, nullable=True
     ),
-    'exec_s': _SortKey(
-        func.coalesce(TaskModel.completed_at, TaskModel.failed_at)
-        - TaskModel.started_at,
-        nullable=True,
-    ),
+    'exec_s': _SortKey(_LIVE_EXECUTION_SPAN, nullable=True),
 }
 
 # group_by value -> the model column it groups on.
@@ -360,27 +369,26 @@ def _contract_err(
 # Row -> model mappers
 # --------------------------------------------------------------------------- #
 def _task_spans(task: TaskModel) -> tuple[int | None, int | None]:
-    """``(queue_s, exec_s)`` for a task row.
+    """``(queue_s, exec_s)`` for a live task row.
 
-    The queue span counts up only while the task is still waiting to start,
-    and the execution span only while it is running. A terminal row missing
-    its end timestamp yields None rather than a duration that grows forever.
+    A live row has no end time. The queue span counts up only while the
+    task is still waiting to start, and the execution span only while it is
+    running.
     """
-    end = task.completed_at or task.failed_at
     queue_s = span_s(
         task.enqueued_at,
-        task.started_at or end,
+        task.started_at,
         live=task.status in _QUEUEING_STATUSES,
     )
-    exec_s = span_s(task.started_at, end, live=task.status is TaskStatus.RUNNING)
+    exec_s = span_s(task.started_at, None, live=task.status is TaskStatus.RUNNING)
     return queue_s, exec_s
 
 
 # The exact column set ``_task_summary`` reads. ``list_tasks`` loads only
-# these; the payload columns (args, kwargs, result, task_options) stay
-# unfetched, so a list page never ships or detoasts task payloads.
-# ``raiseload=True`` turns any future access to an unlisted column into an
-# immediate error instead of a silent lazy load.
+# these; the payload columns (input, task_options) stay unfetched, so a list
+# page never ships or detoasts task payloads. ``raiseload=True`` turns any
+# future access to an unlisted column into an immediate error instead of a
+# silent lazy load.
 _SUMMARY_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     TaskModel.id,
     TaskModel.task_name,
@@ -390,18 +398,44 @@ _SUMMARY_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     TaskModel.retry_count,
     TaskModel.max_retries,
     TaskModel.is_workflow_task,
-    TaskModel.error_code,
     TaskModel.worker_hostname,
     TaskModel.claimed_by_worker_id,
     TaskModel.enqueued_at,
     TaskModel.started_at,
-    TaskModel.completed_at,
-    TaskModel.failed_at,
+)
+
+# The exact column set ``_leaf_task`` reads, loaded as ``_SUMMARY_COLUMNS``.
+_LEAF_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
+    TaskModel.id,
+    TaskModel.task_name,
+    TaskModel.queue_name,
+    TaskModel.priority,
+    TaskModel.status,
+    TaskModel.retry_count,
+    TaskModel.max_retries,
+    TaskModel.is_workflow_task,
+    TaskModel.worker_hostname,
+    TaskModel.enqueued_at,
+    TaskModel.started_at,
+    TaskModel.good_until,
+    TaskModel.execution,
 )
 
 
+def _live_task_statement(task_id: str) -> Select[tuple[TaskModel]]:
+    """The live row of one task, with the leaf columns only."""
+    return (
+        select(TaskModel)
+        .options(load_only(*_LEAF_COLUMNS, raiseload=True))
+        .where(TaskModel.id == task_id)
+    )
+
+
 def _task_summary(task: TaskModel) -> TaskSummary:
-    """Map a task row to its list-view shape."""
+    """Map a live task row to its list-view shape.
+
+    A live row has no error code and no end time, so these read None.
+    """
     queue_s, exec_s = _task_spans(task)
     return TaskSummary(
         id=task.id,
@@ -412,14 +446,14 @@ def _task_summary(task: TaskModel) -> TaskSummary:
         retry_count=task.retry_count,
         max_retries=task.max_retries,
         is_workflow_task=task.is_workflow_task,
-        error_code=nz(task.error_code),
-        error_category=_category_value(task.error_code),
+        error_code=None,
+        error_category=None,
         worker_hostname=task.worker_hostname,
         worker_id=task.claimed_by_worker_id,
         enqueued_at=task.enqueued_at,
         started_at=task.started_at,
-        completed_at=task.completed_at,
-        failed_at=task.failed_at,
+        completed_at=None,
+        failed_at=None,
         queue_s=queue_s,
         exec_s=exec_s,
     )
@@ -477,19 +511,23 @@ def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
 
 
 def _leaf_task(task: TaskModel) -> LeafTaskInfo:
-    """Map a task row to the detail shape shared by tasks and workflow nodes."""
+    """Map a live task row to the detail shape shared by tasks and workflow nodes.
+
+    A live row has no error code, failed reason or end time, so these read
+    None.
+    """
     queue_s, exec_s = _task_spans(task)
     return LeafTaskInfo(
         task_id=task.id,
         status=task.status.value,
-        error_code=nz(task.error_code),
-        failed_reason=nz(task.failed_reason),
+        error_code=None,
+        failed_reason=None,
         retry_count=task.retry_count,
         max_retries=task.max_retries,
         enqueued_at=task.enqueued_at,
         started_at=task.started_at,
-        completed_at=task.completed_at,
-        failed_at=task.failed_at,
+        completed_at=None,
+        failed_at=None,
         queue_s=queue_s,
         exec_s=exec_s,
         worker_hostname=task.worker_hostname,
@@ -498,18 +536,63 @@ def _leaf_task(task: TaskModel) -> LeafTaskInfo:
     )
 
 
-def _attempt(row: TaskAttemptModel) -> TaskAttemptInfo:
+type _AttemptRow = tuple[
+    int,
+    str,
+    bool,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    datetime,
+    datetime,
+]
+"""``attempt, outcome, will_retry, error_code, error_message, failed_reason,
+worker_hostname, started_at, finished_at`` of one attempt row."""
+
+
+def _attempts_statement(task_id: str) -> Select[_AttemptRow]:
+    """The attempt rows of one task, oldest first, with the read columns only."""
+    return (
+        select(
+            TaskAttemptModel.attempt,
+            TaskAttemptModel.outcome,
+            TaskAttemptModel.will_retry,
+            TaskAttemptModel.error_code,
+            TaskAttemptModel.error_message,
+            TaskAttemptModel.failed_reason,
+            TaskAttemptModel.worker_hostname,
+            TaskAttemptModel.started_at,
+            TaskAttemptModel.finished_at,
+        )
+        .where(TaskAttemptModel.task_id == task_id)
+        .order_by(TaskAttemptModel.attempt)
+    )
+
+
+def _attempt(row: _AttemptRow) -> TaskAttemptInfo:
     """Map an attempt row to its response shape."""
+    (
+        attempt,
+        outcome,
+        will_retry,
+        error_code,
+        error_message,
+        failed_reason,
+        worker_hostname,
+        started_at,
+        finished_at,
+    ) = row
     return TaskAttemptInfo(
-        attempt=row.attempt,
-        outcome=row.outcome,
-        will_retry=row.will_retry,
-        error_code=nz(row.error_code),
-        error_message=nz(row.error_message),
-        failed_reason=nz(row.failed_reason),
-        worker_hostname=row.worker_hostname,
-        started_at=row.started_at,
-        finished_at=row.finished_at,
+        attempt=attempt,
+        outcome=outcome,
+        will_retry=will_retry,
+        error_code=nz(error_code),
+        error_message=nz(error_message),
+        failed_reason=nz(failed_reason),
+        worker_hostname=worker_hostname,
+        started_at=started_at,
+        finished_at=finished_at,
     )
 
 
@@ -607,30 +690,6 @@ def _node_exec_s(
 # --------------------------------------------------------------------------- #
 # Filter assembly
 # --------------------------------------------------------------------------- #
-def _category_predicate(category: ErrorCategory) -> ColumnElement[bool]:
-    """The condition selecting tasks in one taxonomy family.
-
-    A built-in family expands to its member codes. DOMAIN is their complement:
-    any non-empty code the library does not define, which is exactly what
-    ``categorize_error_code`` labels DOMAIN. Expansion happens here rather than
-    in a caller so no client has to carry a copy of the code lists.
-    """
-    match category:
-        case ErrorCategory.DOMAIN:
-            return and_(
-                TaskModel.error_code.is_not(None),
-                TaskModel.error_code != '',
-                TaskModel.error_code.not_in(_BUILTIN_CODES),
-            )
-        case (
-            ErrorCategory.OPERATIONAL
-            | ErrorCategory.CONTRACT
-            | ErrorCategory.RETRIEVAL
-            | ErrorCategory.OUTCOME
-        ):
-            return TaskModel.error_code.in_(_CATEGORY_TO_CODES[category])
-
-
 def _history_scope(
     *,
     statuses: list[TaskStatus],
@@ -677,14 +736,14 @@ def _scope_conditions(
     error_categories: list[ErrorCategory],
     retried_only: bool,
 ) -> list[ColumnElement[bool]]:
-    """Build the WHERE conditions for the given task filters.
+    """Build the live-table WHERE conditions for the given task filters.
 
     Each dimension is multi-select: values within a dimension are OR-combined
     and dimensions are AND-combined. An empty list means no filter on that
-    dimension. ``error_categories`` is the coarse form of ``error_codes`` and
-    is an independent dimension: each family expands to a code predicate and
-    the families are OR-combined. ``retried_only`` keeps only tasks retried at
-    least once.
+    dimension. ``error_codes`` and ``error_categories`` select by error code,
+    and a live row has none, so either filter selects no live row; the
+    history side applies them (``_history_scope``). ``retried_only`` keeps
+    only tasks retried at least once.
     """
     conditions: list[ColumnElement[bool]] = []
     if statuses:
@@ -695,31 +754,67 @@ def _scope_conditions(
         conditions.append(TaskModel.queue_name.in_(queues))
     if workers:
         conditions.append(TaskModel.claimed_by_worker_id.in_(workers))
-    if error_codes:
-        conditions.append(TaskModel.error_code.in_(error_codes))
-    if error_categories:
-        conditions.append(
-            or_(*(_category_predicate(category) for category in error_categories))
-        )
+    if error_codes or error_categories:
+        conditions.append(false())
     if retried_only:
         conditions.append(TaskModel.retry_count > 0)
     return conditions
 
 
-def facet_statement(
-    column: InstrumentedAttribute[Any],
-    scope: list[ColumnElement[bool]],
-    *extra: ColumnElement[bool],
-) -> Select[tuple[str | None, int]]:
-    """Distinct values of one column with counts, capped for the dropdown."""
-    counted = func.count().label('n')
-    return (
-        select(column, counted)
-        .where(*scope, *extra)
-        .group_by(column)
-        .order_by(counted.desc())
-        .limit(_FACET_VALUE_CAP)
+# ``(facet, column)`` of each side. The live table has no error code, so the
+# live side has no ``error_code`` facet.
+_LIVE_FACET_COLUMNS: tuple[tuple[str, str], ...] = (
+    ('worker', 'claimed_by_worker_id'),
+    ('task_name', 'task_name'),
+    ('queue_name', 'queue_name'),
+)
+_HISTORY_FACET_COLUMNS: tuple[tuple[str, str], ...] = (
+    ('worker', 'last_claimed_worker_id'),
+    ('task_name', 'task_name'),
+    ('queue_name', 'queue_name'),
+    ('error_code', 'error_code'),
+)
+
+
+def _facet_side_sql(
+    facet_columns: tuple[tuple[str, str], ...],
+    conditions: list[str],
+    table: str,
+) -> str:
+    """One side of ``facets_statement``: a count per value of each facet column.
+
+    The inner group can run in parallel, and GROUPING SETS cannot, so the
+    sets read its small result, not the rows. ``GROUPING()`` sets a bit for
+    each column that is not in the row's set; the set of column ``i`` of
+    ``n`` has every bit but bit ``n - 1 - i``.
+    """
+    columns = ', '.join(column for _, column in facet_columns)
+    all_bits = (1 << len(facet_columns)) - 1
+    masks = [
+        all_bits - (1 << (len(facet_columns) - 1 - index))
+        for index in range(len(facet_columns))
+    ]
+    facet_arms = ' '.join(
+        f"WHEN {mask} THEN '{facet}'"
+        for mask, (facet, _) in zip(masks, facet_columns, strict=True)
     )
+    value_arms = ' '.join(
+        f'WHEN {mask} THEN {column}::text'
+        for mask, (_, column) in zip(masks, facet_columns, strict=True)
+    )
+    grouping_sets = ', '.join(f'({column})' for _, column in facet_columns)
+    return f"""
+        SELECT CASE GROUPING({columns}) {facet_arms} END AS facet,
+               CASE GROUPING({columns}) {value_arms} END AS facet_value,
+               sum(group_count) AS facet_count
+        FROM (
+            SELECT {columns}, count(*) AS group_count
+            FROM {table}
+            WHERE {' AND '.join(conditions) or 'TRUE'}
+            GROUP BY {columns}
+        ) AS side_groups
+        GROUP BY GROUPING SETS ({grouping_sets})
+    """
 
 
 def facets_statement(
@@ -730,9 +825,10 @@ def facets_statement(
 ) -> tuple[str, dict[str, object]]:
     """Every facet of ``task_facets`` in one scan of each side.
 
-    One ``GROUPING SETS`` per side counts all four columns in one pass, and
+    One ``GROUPING SETS`` per side counts its facet columns in one pass, and
     the sides sum per facet. The rank runs here, after the sum, so that ties
-    follow the database collation.
+    follow the database collation. Error codes come from the history side
+    only: a live row has none.
 
     An error code is a free string, so a window can hold as many codes as rows.
     The category of each code and the exact total of each category come from
@@ -765,42 +861,12 @@ def facets_statement(
     if retried_only:
         common.append('retry_count > 0')
 
-    def side(worker_column: str, conditions: list[str], table: str) -> str:
-        columns = f'{worker_column}, task_name, queue_name, error_code'
-        # The inner group can run in parallel, and GROUPING SETS cannot, so the
-        # sets read its small result, not the rows. GROUPING() sets a bit for
-        # each column that is not in the row's set.
-        return f"""
-            SELECT CASE GROUPING({columns})
-                       WHEN 7 THEN 'worker'
-                       WHEN 11 THEN 'task_name'
-                       WHEN 13 THEN 'queue_name'
-                       WHEN 14 THEN 'error_code'
-                   END AS facet,
-                   CASE GROUPING({columns})
-                       WHEN 7 THEN {worker_column}::text
-                       WHEN 11 THEN task_name::text
-                       WHEN 13 THEN queue_name::text
-                       WHEN 14 THEN error_code::text
-                   END AS facet_value,
-                   sum(group_count) AS facet_count
-            FROM (
-                SELECT {columns}, count(*) AS group_count
-                FROM {table}
-                WHERE {' AND '.join(conditions) or 'TRUE'}
-                GROUP BY {columns}
-            ) AS side_groups
-            GROUP BY GROUPING SETS (
-                ({worker_column}), (task_name), (queue_name), (error_code)
-            )
-        """
-
-    live = side('claimed_by_worker_id', common, 'horsies_tasks')
-    history = side(
-        'last_claimed_worker_id',
+    live = _facet_side_sql(_LIVE_FACET_COLUMNS, common, 'horsies_tasks')
+    history = _facet_side_sql(
+        _HISTORY_FACET_COLUMNS,
         [
-            'retention_anchor_at >= :window_lower',
-            'retention_anchor_at < :window_upper',
+            'terminal_at >= :window_lower',
+            'terminal_at < :window_upper',
             *common,
         ],
         'horsies_task_history',
@@ -1425,12 +1491,8 @@ async def get_task_detail(
         return Ok(TaskDetailNotFound(
             task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
         ))
-    task_stmt = select(TaskModel).where(TaskModel.id == task_id)
-    attempts_stmt = (
-        select(TaskAttemptModel)
-        .where(TaskAttemptModel.task_id == task_id)
-        .order_by(TaskAttemptModel.attempt)
-    )
+    task_stmt = _live_task_statement(task_id)
+    attempts_stmt = _attempts_statement(task_id)
     # One indexed hop to the node this task backs, if any. Kept as its own
     # statement rather than a join onto the task row: a standalone task is
     # the common case and this returns nothing for it.
@@ -1476,7 +1538,7 @@ async def get_task_detail(
                         workflow_task_index=workflow_task_index,
                     )
                 )
-            attempt_rows = (await session.execute(attempts_stmt)).scalars().all()
+            attempt_rows = (await session.execute(attempts_stmt)).tuples().all()
             node = (await session.execute(node_stmt)).tuples().first()
     except SQLAlchemyError as exc:
         return _db_err('task detail query', exc)
@@ -1491,7 +1553,8 @@ async def get_task_detail(
             queue_name=task.queue_name,
             priority=task.priority,
             is_workflow_task=task.is_workflow_task,
-            error_category=_category_value(task.error_code),
+            # A live row has no error code.
+            error_category=None,
             attempts=[_attempt(row) for row in attempt_rows],
             workflow_id=workflow_id,
             workflow_task_index=workflow_task_index,
@@ -1550,6 +1613,34 @@ async def _history_detail(
 # --------------------------------------------------------------------------- #
 # Workflow queries
 # --------------------------------------------------------------------------- #
+# The node columns each read maps. The payload columns (input, result) stay
+# unfetched; ``raiseload=True`` turns an access to any other column into an
+# immediate error.
+_RUN_NODE_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
+    WorkflowTaskModel.id,
+    WorkflowTaskModel.task_index,
+    WorkflowTaskModel.node_id,
+    WorkflowTaskModel.task_name,
+    WorkflowTaskModel.status,
+    WorkflowTaskModel.dependencies,
+    WorkflowTaskModel.allow_failed_deps,
+    WorkflowTaskModel.is_subworkflow,
+    WorkflowTaskModel.sub_workflow_id,
+    WorkflowTaskModel.started_at,
+    WorkflowTaskModel.completed_at,
+)
+_NODE_DETAIL_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
+    WorkflowTaskModel.id,
+    WorkflowTaskModel.task_index,
+    WorkflowTaskModel.node_id,
+    WorkflowTaskModel.task_name,
+    WorkflowTaskModel.status,
+    WorkflowTaskModel.is_subworkflow,
+    WorkflowTaskModel.task_id,
+    WorkflowTaskModel.error,
+)
+
+
 async def list_workflow_names(
     broker: PostgresBroker,
 ) -> MonitoringResult[list[str]]:
@@ -1630,6 +1721,7 @@ async def get_workflow_run(
     run_stmt = select(WorkflowModel).where(WorkflowModel.id == workflow_id)
     nodes_stmt = (
         select(WorkflowTaskModel)
+        .options(load_only(*_RUN_NODE_COLUMNS, raiseload=True))
         .where(WorkflowTaskModel.workflow_id == workflow_id)
         .order_by(WorkflowTaskModel.task_index)
     )
@@ -1735,9 +1827,13 @@ async def get_workflow_node(
     """
     if not _is_uuid_text(workflow_id):
         return Ok(None)
-    node_stmt = select(WorkflowTaskModel).where(
-        WorkflowTaskModel.workflow_id == workflow_id,
-        WorkflowTaskModel.task_index == task_index,
+    node_stmt = (
+        select(WorkflowTaskModel)
+        .options(load_only(*_NODE_DETAIL_COLUMNS, raiseload=True))
+        .where(
+            WorkflowTaskModel.workflow_id == workflow_id,
+            WorkflowTaskModel.task_index == task_index,
+        )
     )
 
     match await broker.select_resources():
@@ -1755,12 +1851,10 @@ async def get_workflow_node(
 
             task: TaskModel | None = None
             history: HistoryTaskDetail | None = None
-            attempt_rows: list[TaskAttemptModel] = []
+            attempt_rows: list[_AttemptRow] = []
             if node.task_id is not None:
                 task = (
-                    await session.execute(
-                        select(TaskModel).where(TaskModel.id == node.task_id)
-                    )
+                    await session.execute(_live_task_statement(node.task_id))
                 ).scalar_one_or_none()
                 if task is None:
                     match await _history_detail(session, str(node.task_id)):
@@ -1770,13 +1864,9 @@ async def get_workflow_node(
                             history = None
                 attempt_rows = list(
                     (
-                        await session.execute(
-                            select(TaskAttemptModel)
-                            .where(TaskAttemptModel.task_id == node.task_id)
-                            .order_by(TaskAttemptModel.attempt)
-                        )
+                        await session.execute(_attempts_statement(node.task_id))
                     )
-                    .scalars()
+                    .tuples()
                     .all()
                 )
     except SQLAlchemyError as exc:

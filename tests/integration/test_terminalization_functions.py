@@ -189,7 +189,7 @@ async def _requeued_after_failed_attempt(
                 :id, 1, 'FAILED', TRUE,
                 NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 minute',
                 'TASK_EXCEPTION', 'attempt one raised', :reason, :worker,
-                'terminalization-host', 4242, 'terminalization-proc'
+                'terminalization-test-host', 4242, 'terminalization-test-proc'
             )
         """),
         {'id': task_id, 'reason': failed_reason, 'worker': WORKER},
@@ -627,8 +627,8 @@ async def _heartbeat(
                 task_id, sender_id, role, sent_at, hostname, pid
             )
             VALUES (
-                :id, 'staleness-test', :role,
-                NOW() - make_interval(secs => :ago), 'staleness-host', 4242
+                :id, 'staleness-test', :role, NOW() - make_interval(secs => :ago),
+                'terminalization-test-host', 4242
             )
         """),
         {'id': task_id, 'role': role, 'ago': seconds_ago},
@@ -860,7 +860,8 @@ class TestFailStale:
                     task_id, sender_id, role, sent_at, hostname, pid
                 ) VALUES (
                     :id, 'fractional-threshold-test', 'runner',
-                    NOW() - INTERVAL '1.25 seconds', 'fractional-host', 4242
+                    NOW() - INTERVAL '1.25 seconds',
+                    'terminalization-test-host', 4242
                 )
             """),
             {'id': task_id},

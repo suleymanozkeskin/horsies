@@ -76,15 +76,12 @@ async def insert_attempts(
             text("""
                 INSERT INTO horsies_task_attempts (
                     task_id, attempt, outcome, will_retry,
-                    started_at, finished_at, error_code, error_message,
-                    failed_reason, worker_id, worker_hostname, worker_pid,
-                    worker_process_name
+                    started_at, finished_at, worker_id, worker_hostname,
+                    worker_pid, worker_process_name
                 ) VALUES (
                     CAST(:task_id AS uuid), :attempt, 'FAILED', TRUE,
                     NOW() - interval '2 minutes', NOW() - interval '1 minute',
-                    NULL, NULL,
-                    NULL, :worker, 'it-host', 4242,
-                    'it-proc'
+                    :worker, 'it-host', 4242, 'it-proc'
                 )
             """),
             {'task_id': task_id, 'attempt': attempt, 'worker': WORKER},

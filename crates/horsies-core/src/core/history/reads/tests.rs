@@ -306,6 +306,15 @@ fn test_window() -> HistoryWindow {
 }
 
 #[test]
+fn history_window_is_increasing_and_at_most_thirty_days() {
+    let lower = timestamp("2026-08-01T00:00:00Z");
+    assert!(HistoryWindow::new(lower, lower + Duration::days(30)).is_ok());
+    assert!(HistoryWindow::new(lower, lower + Duration::days(30) + Duration::seconds(1)).is_err());
+    assert!(HistoryWindow::new(lower, lower).is_err());
+    assert!(HistoryWindow::new(lower + Duration::days(1), lower).is_err());
+}
+
+#[test]
 fn page_facet_and_aggregate_builders_pin_bounds_filters_columns_and_sorts() {
     assert_eq!(HISTORY_SUMMARY_COLUMNS.len(), 18);
     for envelope in ["result_payload", "attempt_snapshot", "rerun_input_inline"] {
@@ -1288,7 +1297,115 @@ fn duplicate_guard_renders_pruned_and_legacy_probes_without_fallback_or_live() {
         assert_eq!(guard.matches(&probe).count(), 2, "{}", leaf.relation_name());
     }
     assert!(guard.trim_end().ends_with("$function$"));
-    assert!(guard.contains("RETURN FALSE;"));
+    assert!(guard.contains(
+        "RETURN EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions WHERE task_id = p_task_id);"
+    ));
+}
+
+#[tokio::test]
+#[serial]
+async fn duplicate_guard_finds_a_recorded_clock_exception() {
+    let database = TestDatabase::create().await;
+    let mut transaction = database.pool.begin().await.expect("begin exception setup");
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .expect("publish the readers");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let now = database_now(&mut transaction).await.expect("database now");
+    // Born an hour after its terminal time: a client clock ahead of the
+    // database. The move records such an id; the guard finds it there.
+    let recorded = v7_with_birth(now + Duration::hours(1));
+    let unrecorded = v7_with_birth(now + Duration::hours(2));
+    sqlx::query(
+        "INSERT INTO horsies_task_history_clock_exceptions (
+             task_id, retention_class_key, terminal_at
+         ) VALUES ($1, 'standard_30d', $2)",
+    )
+    .bind(recorded)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .expect("record a clock exception");
+    assert!(duplicate_guard(&mut transaction, recorded).await);
+    assert!(!duplicate_guard(&mut transaction, unrecorded).await);
+    transaction
+        .rollback()
+        .await
+        .expect("rollback exception setup");
+    database.drop().await;
+}
+
+/// The stamp comment of every rendered reader, in signature order.
+async fn reader_stamps(connection: &mut PgConnection) -> Vec<Option<String>> {
+    let mut stamps = Vec::new();
+    for signature in super::publisher::rendered_reader_signatures() {
+        let stamp: Option<String> =
+            sqlx::query_scalar("SELECT obj_description(to_regprocedure($1), 'pg_proc')")
+                .bind(&signature)
+                .fetch_one(&mut *connection)
+                .await
+                .expect("read reader stamp");
+        stamps.push(stamp);
+    }
+    stamps
+}
+
+#[tokio::test]
+#[serial]
+async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone() {
+    let database = TestDatabase::create().await;
+    let mut transaction = database.pool.begin().await.expect("begin stamp setup");
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .expect("publish the readers");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let stamps = reader_stamps(&mut transaction).await;
+    let expected: String = sqlx::query_scalar(&format!(
+        "SELECT {}",
+        super::publisher::manifest_stamp_sql()
+    ))
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("compute manifest stamp");
+    assert!(expected.starts_with("horsies:manifest:"));
+    assert_eq!(stamps, vec![Some(expected.clone()); 5]);
+    for timezone in ["Etc/GMT+12", "Etc/GMT-12"] {
+        sqlx::query("SELECT set_config('timezone', $1, true)")
+            .bind(timezone)
+            .execute(&mut *transaction)
+            .await
+            .expect("set session time zone");
+        let stamp: String = sqlx::query_scalar(&format!(
+            "SELECT {}",
+            super::publisher::manifest_stamp_sql()
+        ))
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("compute manifest stamp");
+        assert_eq!(stamp, expected, "{timezone}");
+    }
+    assert!(!StagedLoaderPublisher
+        .needs_republication(&mut transaction)
+        .await
+        .expect("stamped readers are current"));
+    // A reader without the stamp of the published manifest needs a
+    // republication, whichever reader it is.
+    sqlx::query("COMMENT ON FUNCTION horsies_task_detail_staged(uuid) IS 'stale'")
+        .execute(&mut *transaction)
+        .await
+        .expect("stale detail stamp");
+    assert!(StagedLoaderPublisher
+        .needs_republication(&mut transaction)
+        .await
+        .expect("stale stamp probe"));
+    transaction.rollback().await.expect("rollback stamp setup");
+    database.drop().await;
 }
 
 async fn duplicate_guard(connection: &mut PgConnection, task_id: Uuid) -> bool {
@@ -1353,10 +1470,9 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
     transaction.commit().await.expect("commit guard setup");
 
     let mut connection = database.pool.acquire().await.expect("acquire guard reads");
-    assert_eq!(
-        guard_marker(&mut connection).await.as_deref(),
-        Some("horsies:rendered")
-    );
+    assert!(guard_marker(&mut connection)
+        .await
+        .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
     assert!(duplicate_guard(&mut connection, normal_id).await);
     assert!(duplicate_guard(&mut connection, legacy_id).await);
     assert!(!duplicate_guard(&mut connection, absent_id).await);
@@ -1401,10 +1517,9 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
         .republish(&mut connection)
         .await
         .expect("replace the first version");
-    assert_eq!(
-        guard_marker(&mut connection).await.as_deref(),
-        Some("horsies:rendered")
-    );
+    assert!(guard_marker(&mut connection)
+        .await
+        .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
     assert!(!duplicate_guard(&mut connection, clock_violation_id).await);
     drop(connection);
     database.drop().await;
@@ -1447,6 +1562,7 @@ fn result_wire_row(location: &str) -> ResultWireRow {
         result_envelope_version: Some(1),
         result_payload: Some(b"1".to_vec()),
         result_digest: Some(vec![3; 32]),
+        task_name: Some("p4.history".to_owned()),
     }
 }
 
@@ -1464,6 +1580,7 @@ fn result_wire_decode_is_typed_and_fail_closed() {
         )
         .unwrap(),
         TaskResultRead::Live(LiveTaskResult {
+            task_name: "p4.history".to_owned(),
             status: "RUNNING".to_owned(),
             result: Some("{}".to_owned()),
             failed_reason: None,
@@ -1474,6 +1591,7 @@ fn result_wire_decode_is_typed_and_fail_closed() {
     else {
         panic!("history row did not decode as history");
     };
+    assert_eq!(stored.task_name, "p4.history");
     assert_eq!(
         stored.payload,
         HistoryResultPayload::Stored {
@@ -1506,12 +1624,80 @@ fn result_wire_decode_is_typed_and_fail_closed() {
             result_digest: None,
             ..result_wire_row("HISTORY")
         },
+        ResultWireRow {
+            task_name: None,
+            ..result_wire_row("HISTORY")
+        },
+        ResultWireRow {
+            task_name: None,
+            ..result_wire_row("LIVE")
+        },
     ] {
         assert!(matches!(
             decode_result_row(task_id, broken),
             Err(HistoryError::Contract(_))
         ));
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
+    use crate::broker::postgres::PostgresBroker;
+    use crate::core::TaskResult;
+
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let mut transaction = database
+        .pool
+        .begin()
+        .await
+        .expect("begin stale reader setup");
+    let now = database_now(&mut transaction).await.expect("database now");
+    let today = utc_day(now);
+    let parent = register_test_class(&mut transaction, class_key, 30).await;
+    let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let completed_id = v7_with_birth(today + Duration::hours(2));
+    let completed_json =
+        serde_json::to_string(&TaskResult::<i32>::Ok(7)).expect("encode completed result");
+    seed_history_row_with_payload(
+        &mut transaction,
+        completed_id,
+        class_key,
+        today + Duration::hours(3),
+        "COMPLETED",
+        "COMPLETE_FUSED",
+        completed_json.as_bytes(),
+    )
+    .await;
+    // A result reader rendered before the leaf existed: it probes no leaf.
+    let stale_reader = super::lookup_generation::render_staged_result_function(
+        &LookupManifest::new(Vec::new()).expect("empty manifest"),
+    );
+    sqlx::query(&stale_reader)
+        .execute(&mut *transaction)
+        .await
+        .expect("install a stale result reader");
+    transaction
+        .commit()
+        .await
+        .expect("commit stale reader setup");
+
+    let mut connection = database.pool.acquire().await.expect("acquire result read");
+    assert_eq!(
+        read_task_result(&mut connection, completed_id)
+            .await
+            .expect("stale result read"),
+        TaskResultRead::Absent
+    );
+    drop(connection);
+    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let confirmed = broker
+        .get_result::<i32>(completed_id, None)
+        .await
+        .expect("the detail reader confirms the history row");
+    assert!(matches!(confirmed, TaskResult::Ok(7)));
+    database.drop().await;
 }
 
 #[tokio::test]
@@ -1564,6 +1750,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
             .await
             .expect("read live result"),
         TaskResultRead::Live(LiveTaskResult {
+            task_name: "p4.live".to_owned(),
             status: "PENDING".to_owned(),
             result: None,
             failed_reason: None,
@@ -1575,6 +1762,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     else {
         panic!("retained task did not read as history");
     };
+    assert_eq!(failed.task_name, "p4.history");
     assert_eq!(failed.status, "FAILED");
     assert_eq!(failed.failed_reason.as_deref(), Some("failed"));
     assert_eq!(failed.envelope_version, 1);
@@ -1635,7 +1823,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
          RETURNS TABLE (location text, status text, live_result text, failed_reason text,
                         result_envelope_version smallint, result_payload bytea,
-                        result_digest bytea)
+                        result_digest bytea, task_name text)
          LANGUAGE plpgsql STABLE AS
          $$ BEGIN PERFORM core_p4_function_that_does_not_exist(); END $$",
     )

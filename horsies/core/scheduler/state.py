@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.logging import get_logger
@@ -111,12 +111,7 @@ class ScheduleStateManager:
             stmt = (
                 select(ScheduleStateModel)
                 .where(ScheduleStateModel.schedule_name.in_(schedule_names))
-                .where(
-                    or_(
-                        ScheduleStateModel.next_run_at.is_(None),
-                        ScheduleStateModel.next_run_at <= now,
-                    )
-                )
+                .where(ScheduleStateModel.next_run_at <= now)
                 .order_by(ScheduleStateModel.next_run_at.asc())
             )
             result = await session.execute(stmt)
@@ -158,7 +153,7 @@ class ScheduleStateManager:
         self,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str] = None,
+        config_hash: bytes,
         session: Optional[AsyncSession] = None,
     ) -> ScheduleStateModel:
         """
@@ -167,7 +162,8 @@ class ScheduleStateManager:
         Args:
             schedule_name: Unique schedule identifier
             next_run_at: Calculated next run time
-            config_hash: Hash of the schedule config for change detection
+            config_hash: SHA-256 digest (32 bytes) of the schedule config,
+                for change detection. The column is NOT NULL.
             session: Reuse this session (caller commits); None opens an
                 owned session that commits here
 
@@ -208,7 +204,7 @@ class ScheduleStateManager:
         session: AsyncSession,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str],
+        config_hash: bytes,
         commit: bool,
     ) -> ScheduleStateModel:
         """Create the state row unless it exists; commit when owning the
@@ -333,7 +329,7 @@ class ScheduleStateManager:
         self,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str] = None,
+        config_hash: Optional[bytes] = None,
         session: Optional[AsyncSession] = None,
     ) -> None:
         """
@@ -342,7 +338,8 @@ class ScheduleStateManager:
         Args:
             schedule_name: Unique schedule identifier
             next_run_at: New next run time (UTC)
-            config_hash: Optional new config hash
+            config_hash: New SHA-256 digest (32 bytes) of the schedule
+                config; None keeps the stored digest
             session: Reuse this session (caller commits); None opens an
                 owned session that commits here
 
@@ -380,7 +377,7 @@ class ScheduleStateManager:
         session: AsyncSession,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str],
+        config_hash: Optional[bytes],
         commit: bool,
     ) -> None:
         """Run the next-run UPDATE; commit when this call owns the session.

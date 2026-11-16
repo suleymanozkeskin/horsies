@@ -397,7 +397,7 @@ INSERT_WORKER_STATE_SQL = text("""
 """)
 
 # Retention deletes run in bounded batches: each statement deletes at most
-# :batch_size rows selected by an id-subselect, and the reaper commits per
+# :batch_size rows selected by a key subselect, and the reaper commits per
 # batch. An unbounded DELETE turns the first pass over a large eligible
 # backlog (retention newly enabled, or the window lowered) into one
 # multi-minute transaction — WAL burst, task_attempts cascades, and a
@@ -411,8 +411,8 @@ INSERT_WORKER_STATE_SQL = text("""
 
 DELETE_EXPIRED_WORKER_STATES_SQL = text("""
     DELETE FROM horsies_worker_states
-    WHERE id IN (
-        SELECT id FROM horsies_worker_states
+    WHERE (worker_id, snapshot_at) IN (
+        SELECT worker_id, snapshot_at FROM horsies_worker_states
         WHERE snapshot_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
         LIMIT :batch_size
         FOR UPDATE SKIP LOCKED

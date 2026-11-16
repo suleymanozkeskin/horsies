@@ -417,6 +417,8 @@ class WorkerStateSnapshot:
 
     Mirrors ``WorkerStateModel``. Returned as the latest snapshot per worker
     (cluster-wide listing) or as a timeseries (single-worker history).
+    ``queue_priorities``, ``queue_max_concurrency`` and ``recovery_config``
+    are empty when the worker had none set.
     ``slot_health`` says whether any slot was down, and why.
     ``class_capacity`` holds the claim budget of each execution class that
     the worker runs children for: its capacity in service and the classes
@@ -432,9 +434,9 @@ class WorkerStateSnapshot:
     max_claim_per_worker: int
     cluster_wide_cap: int | None
     queues: list[str]
-    queue_priorities: dict[str, int] | None
-    queue_max_concurrency: dict[str, int] | None
-    recovery_config: dict[str, Any] | None
+    queue_priorities: dict[str, int]
+    queue_max_concurrency: dict[str, int]
+    recovery_config: dict[str, Any]
     tasks_running: int
     tasks_claimed: int
     memory_usage_mb: float | None
