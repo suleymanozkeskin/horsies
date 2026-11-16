@@ -49,8 +49,7 @@ RERUN_FIELD_PROVENANCE: Final[dict[str, FieldProvenance]] = {
     # Request-specified but not row-borne: these travel in the
     # versioned input envelope whose content contract this package
     # owns; options ride input availability with them.
-    'args': FieldProvenance.REPLAYED_VIA_ENVELOPE,
-    'kwargs': FieldProvenance.REPLAYED_VIA_ENVELOPE,
+    'input': FieldProvenance.REPLAYED_VIA_ENVELOPE,
     'task_options': FieldProvenance.REPLAYED_VIA_ENVELOPE,
     # Read from the replayed task options, as every enqueue reads it.
     'execution': FieldProvenance.REPLAYED_VIA_ENVELOPE,
@@ -72,22 +71,14 @@ RERUN_FIELD_PROVENANCE: Final[dict[str, FieldProvenance]] = {
     'idempotency_key_digest': FieldProvenance.RESOLVED_AT_ENQUEUE,
     'command_fingerprint_version': FieldProvenance.RESOLVED_AT_ENQUEUE,
     'command_fingerprint': FieldProvenance.RESOLVED_AT_ENQUEUE,
-    'enqueue_sha': FieldProvenance.RESOLVED_AT_ENQUEUE,
     # Lifecycle zero-state; attempt numbering and budget anew.
     'status': FieldProvenance.FRESH_RUNTIME_STATE,
     'retry_count': FieldProvenance.FRESH_RUNTIME_STATE,
     'next_retry_at': FieldProvenance.FRESH_RUNTIME_STATE,
-    'claimed': FieldProvenance.FRESH_RUNTIME_STATE,
     'claimed_at': FieldProvenance.FRESH_RUNTIME_STATE,
     'claimed_by_worker_id': FieldProvenance.FRESH_RUNTIME_STATE,
     'claim_expires_at': FieldProvenance.FRESH_RUNTIME_STATE,
     'started_at': FieldProvenance.FRESH_RUNTIME_STATE,
-    'completed_at': FieldProvenance.FRESH_RUNTIME_STATE,
-    'failed_at': FieldProvenance.FRESH_RUNTIME_STATE,
-    'terminal_at': FieldProvenance.FRESH_RUNTIME_STATE,
-    'result': FieldProvenance.FRESH_RUNTIME_STATE,
-    'failed_reason': FieldProvenance.FRESH_RUNTIME_STATE,
-    'error_code': FieldProvenance.FRESH_RUNTIME_STATE,
     'finalizing_at': FieldProvenance.FRESH_RUNTIME_STATE,
     'finalizing_by_worker_id': FieldProvenance.FRESH_RUNTIME_STATE,
     'worker_pid': FieldProvenance.FRESH_RUNTIME_STATE,

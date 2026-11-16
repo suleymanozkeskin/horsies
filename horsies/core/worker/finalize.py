@@ -1268,8 +1268,8 @@ class FinalizeMixin:
                 retry_error = error
             case ApplyTerminalization(command=unsupported):
                 raise RuntimeError(
-                    f'{type(unsupported).__name__} is not part of this '
-                    f"cutover's authorized scope"
+                    f'{type(unsupported).__name__} is not a terminal '
+                    f'command of the finalize path'
                 )
             case _ as unreachable:
                 assert_never(unreachable)
