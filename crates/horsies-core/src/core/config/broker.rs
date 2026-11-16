@@ -74,9 +74,10 @@ pub struct PostgresConfig {
     #[serde(default = "default_pool_timeout")]
     pub pool_timeout: u32,
 
-    /// Seconds before a connection is recycled.
+    /// When a connection is replaced by its age (SQLAlchemy's
+    /// `pool_recycle`): never, or after a number of seconds.
     #[serde(default = "default_pool_recycle")]
-    pub pool_recycle: u32,
+    pub pool_recycle: crate::manifest::PoolRecycle,
 
     /// Whether to log SQL statements.
     #[serde(default)]
@@ -150,8 +151,8 @@ fn default_max_overflow() -> u32 {
 fn default_pool_timeout() -> u32 {
     30
 }
-fn default_pool_recycle() -> u32 {
-    1800
+fn default_pool_recycle() -> crate::manifest::PoolRecycle {
+    crate::manifest::PoolRecycle::after_seconds(1800)
 }
 
 /// Every field of `PostgresConfig`. An unknown key is refused, as Python's
@@ -177,7 +178,7 @@ struct PostgresConfigWire {
     #[serde(default = "default_pool_timeout")]
     pool_timeout: u32,
     #[serde(default = "default_pool_recycle")]
-    pool_recycle: u32,
+    pool_recycle: crate::manifest::PoolRecycle,
     #[serde(default)]
     echo: bool,
     #[serde(default)]
@@ -520,7 +521,7 @@ mod tests {
             max_overflow: 10,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
             tcp_user_timeout: Default::default(),
@@ -542,7 +543,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
             tcp_user_timeout: Default::default(),
@@ -562,7 +563,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
             tcp_user_timeout: Default::default(),
@@ -582,7 +583,7 @@ mod tests {
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
-            pool_recycle: 1800,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
             tcp_user_timeout: Default::default(),
