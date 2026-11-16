@@ -122,7 +122,7 @@ async fn fail_task(pool: &PgPool, task_id: Uuid) {
                 worker_id: "w3-worker".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("W3 failure".to_owned()),
         },
     )
@@ -266,6 +266,11 @@ fn action_models_and_task_mapping_serialize_exactly() {
             error(TaskActionErrorCode::DbOperationFailed, None, "database"),
             503,
             r#"{"detail":"database"}"#,
+        ),
+        (
+            error(TaskActionErrorCode::EventLoopLimit, None, "loop limit"),
+            503,
+            r#"{"detail":"loop limit"}"#,
         ),
         (
             error(TaskActionErrorCode::StoredDataInvalid, None, "stored"),
@@ -482,7 +487,7 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
         .expect_err("task database failure");
     assert_eq!(task.code, TaskActionErrorCode::DbOperationFailed);
     assert!(task.retryable);
-    let workflow = pause_workflow_action(&pool, Uuid::new_v4()).await;
+    let workflow = pause_workflow_action(&broker, Uuid::new_v4()).await;
     assert_eq!(workflow.status_code(), 503);
     assert!(matches!(workflow.body(), ActionBody::Detail { .. }));
 }
@@ -492,12 +497,13 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
 async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
+    let broker = PostgresBroker::from_pool(pool.clone());
     let registry = WorkflowSpecRegistry::new();
     let payload = PayloadPolicy::default();
     let retention = RetentionConfig::default();
 
     let running_to_pause = seed_workflow(&pool, WorkflowStatus::Running).await;
-    let paused = pause_workflow_action(&pool, running_to_pause).await;
+    let paused = pause_workflow_action(&broker, running_to_pause).await;
     assert_eq!(paused.status_code(), 200);
     assert_eq!(
         body_json(&paused),
@@ -507,7 +513,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
 
     let paused_to_resume = seed_workflow(&pool, WorkflowStatus::Paused).await;
     let resumed =
-        resume_workflow_action(&pool, paused_to_resume, &registry, &payload, &retention).await;
+        resume_workflow_action(&broker, paused_to_resume, &registry, &payload, &retention).await;
     assert_eq!(resumed.status_code(), 200);
     assert_eq!(
         body_json(&resumed),
@@ -515,7 +521,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     );
 
     let running_to_cancel = seed_workflow(&pool, WorkflowStatus::Running).await;
-    let cancelled = cancel_workflow_action(&pool, running_to_cancel).await;
+    let cancelled = cancel_workflow_action(&broker, running_to_cancel).await;
     assert_eq!(cancelled.status_code(), 200);
     assert_eq!(
         body_json(&cancelled),
@@ -526,11 +532,11 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     for action in ["pause", "resume", "cancel"] {
         let completed = seed_workflow(&pool, WorkflowStatus::Completed).await;
         let outcome = match action {
-            "pause" => pause_workflow_action(&pool, completed).await,
+            "pause" => pause_workflow_action(&broker, completed).await,
             "resume" => {
-                resume_workflow_action(&pool, completed, &registry, &payload, &retention).await
+                resume_workflow_action(&broker, completed, &registry, &payload, &retention).await
             }
-            "cancel" => cancel_workflow_action(&pool, completed).await,
+            "cancel" => cancel_workflow_action(&broker, completed).await,
             _ => unreachable!(),
         };
         assert_eq!(outcome.status_code(), 409);
@@ -543,11 +549,11 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     for action in ["pause", "resume", "cancel"] {
         let missing = Uuid::new_v4();
         let outcome = match action {
-            "pause" => pause_workflow_action(&pool, missing).await,
+            "pause" => pause_workflow_action(&broker, missing).await,
             "resume" => {
-                resume_workflow_action(&pool, missing, &registry, &payload, &retention).await
+                resume_workflow_action(&broker, missing, &registry, &payload, &retention).await
             }
-            "cancel" => cancel_workflow_action(&pool, missing).await,
+            "cancel" => cancel_workflow_action(&broker, missing).await,
             _ => unreachable!(),
         };
         assert_eq!(outcome.status_code(), 404);

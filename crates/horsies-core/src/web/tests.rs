@@ -1139,8 +1139,13 @@ async fn clean_w4(pool: &PgPool, prefix: &str) {
 
 async fn migrated_state() -> WebState {
     let pool = migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
-    let app = Horsies::new(AppConfig::for_database_url(migrated_database_url().await)).unwrap();
+    let database_url = migrated_database_url().await;
+    // The worker ping route needs the broker's listener.
+    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+        pool,
+        &database_url,
+    ));
+    let app = Horsies::new(AppConfig::for_database_url(database_url)).unwrap();
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
