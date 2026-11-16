@@ -10,6 +10,7 @@
 //! A refusal never holds an input value: a database URL can carry a password,
 //! so the cause names the error class and the position in the text only.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{mask_database_url, PostgresConfig};
@@ -391,8 +392,14 @@ pub struct ManifestRefused {
 /// Pure: no I/O. Refuses unknown fields, missing fields, values outside
 /// their bounds and every manifest version but [`PRODUCER_MANIFEST_VERSION`].
 pub fn parse_producer_manifest(text: &str) -> Result<ProducerManifest, ManifestRefused> {
+    parse_manifest(text)
+}
+
+/// Parse a manifest of type `T` from its JSON text, with the field path of
+/// a refusal and never a value. Pure: no I/O.
+pub(crate) fn parse_manifest<T: DeserializeOwned>(text: &str) -> Result<T, ManifestRefused> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    let parsed: Result<ProducerManifest, _> = serde_path_to_error::deserialize(&mut deserializer);
+    let parsed: Result<T, _> = serde_path_to_error::deserialize(&mut deserializer);
     let manifest = parsed.map_err(|error| {
         let field_path = error.path().to_string();
         let inner = error.into_inner();
