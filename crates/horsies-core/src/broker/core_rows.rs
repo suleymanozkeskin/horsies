@@ -1,10 +1,44 @@
-//! Reading the rows of core statements (`crate::db`): the row helpers and
-//! the readers of the broker's row types. Each reader takes the columns by
-//! name, with the Rust type the sqlx `FromRow` of the same type reads.
+//! Running core statements (`crate::db`) and reading their rows: the
+//! statement log, the row helpers and the readers of the broker's row types.
+//! Each reader takes the columns by name, with the Rust type the sqlx
+//! `FromRow` of the same type reads.
 
-use crate::broker::health::WorkerStateSnapshot;
-use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow};
+use crate::broker::health::StoredWorkerState;
+use crate::broker::row::task::{
+    ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
+};
 use crate::db::{FromSql, Row, TypedStatement};
+
+/// Whether the broker logs each core statement it runs
+/// (`PostgresConfig::echo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatementLog {
+    Off,
+    /// Statement name and SQL text at debug level, target `horsies.sql`.
+    Debug,
+}
+
+impl StatementLog {
+    pub(crate) fn from_echo(echo: bool) -> Self {
+        match echo {
+            true => Self::Debug,
+            false => Self::Off,
+        }
+    }
+
+    /// Logs one statement before it runs.
+    pub(crate) fn log(self, statement: &TypedStatement) {
+        match self {
+            Self::Off => {}
+            Self::Debug => tracing::debug!(
+                target: "horsies.sql",
+                statement = statement.name(),
+                sql = statement.sql(),
+                "statement",
+            ),
+        }
+    }
+}
 
 /// A row of a core statement that does not have the shape its reader
 /// requires. The same statement meets it again, so it is not retryable.
@@ -34,6 +68,25 @@ pub(crate) fn column<'row, T: FromSql<'row>>(
         column,
         cause,
     })
+}
+
+/// The name a [`RowDecodeError::Column`] gives the first column of a
+/// statement that returns one unnamed value.
+const FIRST_COLUMN: &str = "(first column)";
+
+/// Decodes the first column of a row of `statement`: the one value of a
+/// statement such as `SELECT to_regprocedure($1) IS NOT NULL`, as sqlx's
+/// `query_scalar`.
+pub(crate) fn scalar<'row, T: FromSql<'row>>(
+    row: &'row Row,
+    statement: &TypedStatement,
+) -> Result<T, RowDecodeError> {
+    row.try_get(0_usize)
+        .map_err(|cause| RowDecodeError::Column {
+            statement: statement.name(),
+            column: FIRST_COLUMN,
+            cause,
+        })
 }
 
 /// The first row, when the reader takes zero or one row (the rest is not
@@ -84,12 +137,78 @@ pub(crate) fn expired_task_row(
     })
 }
 
-/// Reads a [`WorkerStateSnapshot`].
-pub(crate) fn worker_state_snapshot(
+/// Reads a [`TaskResultRow`].
+pub(crate) fn task_result_row(
     row: &Row,
     statement: &TypedStatement,
-) -> Result<WorkerStateSnapshot, RowDecodeError> {
-    Ok(WorkerStateSnapshot {
+) -> Result<TaskResultRow, RowDecodeError> {
+    Ok(TaskResultRow {
+        id: column(row, statement, "id")?,
+        status: column(row, statement, "status")?,
+        result: column(row, statement, "result")?,
+        failed_reason: column(row, statement, "failed_reason")?,
+    })
+}
+
+/// Reads a [`TaskInfoRow`].
+pub(crate) fn task_info_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<TaskInfoRow, RowDecodeError> {
+    Ok(TaskInfoRow {
+        id: column(row, statement, "id")?,
+        task_name: column(row, statement, "task_name")?,
+        status: column(row, statement, "status")?,
+        queue_name: column(row, statement, "queue_name")?,
+        priority: column(row, statement, "priority")?,
+        retry_count: column(row, statement, "retry_count")?,
+        max_retries: column(row, statement, "max_retries")?,
+        next_retry_at: column(row, statement, "next_retry_at")?,
+        sent_at: column(row, statement, "sent_at")?,
+        enqueued_at: column(row, statement, "enqueued_at")?,
+        claimed_at: column(row, statement, "claimed_at")?,
+        started_at: column(row, statement, "started_at")?,
+        completed_at: column(row, statement, "completed_at")?,
+        failed_at: column(row, statement, "failed_at")?,
+        worker_hostname: column(row, statement, "worker_hostname")?,
+        worker_pid: column(row, statement, "worker_pid")?,
+        worker_process_name: column(row, statement, "worker_process_name")?,
+        error_code: column(row, statement, "error_code")?,
+        failed_reason: column(row, statement, "failed_reason")?,
+        result: column(row, statement, "result")?,
+        execution: column(row, statement, "execution")?,
+    })
+}
+
+/// Reads a [`TaskAttemptRow`].
+pub(crate) fn task_attempt_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<TaskAttemptRow, RowDecodeError> {
+    Ok(TaskAttemptRow {
+        task_id: column(row, statement, "task_id")?,
+        attempt: column(row, statement, "attempt")?,
+        outcome: column(row, statement, "outcome")?,
+        will_retry: column(row, statement, "will_retry")?,
+        started_at: column(row, statement, "started_at")?,
+        finished_at: column(row, statement, "finished_at")?,
+        error_code: column(row, statement, "error_code")?,
+        error_message: column(row, statement, "error_message")?,
+        failed_reason: column(row, statement, "failed_reason")?,
+        worker_id: column(row, statement, "worker_id")?,
+        worker_hostname: column(row, statement, "worker_hostname")?,
+        worker_pid: column(row, statement, "worker_pid")?,
+        worker_process_name: column(row, statement, "worker_process_name")?,
+    })
+}
+
+/// Reads a [`StoredWorkerState`]: the stored row, before
+/// [`StoredWorkerState::into_snapshot`] reads its JSON columns.
+pub(crate) fn stored_worker_state(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<StoredWorkerState, RowDecodeError> {
+    Ok(StoredWorkerState {
         worker_id: column(row, statement, "worker_id")?,
         snapshot_at: column(row, statement, "snapshot_at")?,
         hostname: column(row, statement, "hostname")?,
@@ -107,7 +226,10 @@ pub(crate) fn worker_state_snapshot(
         memory_usage_mb: column(row, statement, "memory_usage_mb")?,
         memory_percent: column(row, statement, "memory_percent")?,
         cpu_percent: column(row, statement, "cpu_percent")?,
+        children_memory_mb: column(row, statement, "children_memory_mb")?,
         worker_started_at: column(row, statement, "worker_started_at")?,
+        slots_down: column(row, statement, "slots_down")?,
+        class_capacity: column(row, statement, "class_capacity")?,
     })
 }
 

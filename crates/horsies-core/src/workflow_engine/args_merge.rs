@@ -47,26 +47,101 @@ pub(crate) fn input_object(
     }
 }
 
+/// The node input after the `args_from` merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArgsFromMerge {
+    /// The input with one member per `args_from` key; the input unchanged when the node has no
+    /// `args_from`.
+    Merged(String),
+    /// An `args_from` key is also a member of the node's static input. Nothing is merged: the node
+    /// fails with [`ArgsFromConflict::node_error`] (Python `core/workflows/engine.py:834-839`,
+    /// `:1151-1163`).
+    StaticMemberConflict(ArgsFromConflict),
+}
+
+/// An `args_from` key that the node's static input also sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArgsFromConflict {
+    /// The conflicting key.
+    pub(crate) key: String,
+}
+
+/// The kind of the node whose input takes the `args_from` members. It names the node in the
+/// conflict message, as Python does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergedNodeKind {
+    Task,
+    SubWorkflow,
+}
+
+impl ArgsFromConflict {
+    /// The error that the failed node stores: `WORKFLOW_ENQUEUE_FAILED` with Python's message and
+    /// `data` (`core/workflows/engine.py:472-555`, `:620-631`, `:834-839`, `:1151-1163`).
+    pub(crate) fn node_error(
+        &self,
+        workflow_id: Uuid,
+        task_index: i32,
+        kind: MergedNodeKind,
+    ) -> TaskError {
+        let node = match kind {
+            MergedNodeKind::Task => format!("task {task_index}"),
+            MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
+        };
+        TaskError {
+            data: Some(serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": task_index,
+            })),
+            ..TaskError::builtin(
+                OperationalErrorCode::WorkflowEnqueueFailed,
+                format!(
+                    "args_from key '{}' conflicts with static kwarg ({node})",
+                    self.key
+                ),
+            )
+        }
+    }
+}
+
+/// The `args_from` key that the static input also sets, if any.
+///
+/// With several, the first in the order in which Python reads the stored `args_from` (`jsonb` key
+/// order: shorter keys first, then by bytes), so the core names the key that Python names.
+fn static_member_conflict(
+    object: &serde_json::Map<String, serde_json::Value>,
+    args_from: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ArgsFromConflict> {
+    args_from
+        .keys()
+        .filter(|key| object.contains_key(key.as_str()))
+        .min_by(|left, right| (left.len(), left.as_bytes()).cmp(&(right.len(), right.as_bytes())))
+        .map(|key| ArgsFromConflict { key: key.clone() })
+}
+
 /// Merge args_from dependency results into the node's input (synchronous variant).
 ///
-/// With no args_from the input is returned unchanged. Otherwise, for each
+/// With no args_from the input is returned unchanged. An `args_from` key that the static input
+/// also sets gives [`ArgsFromMerge::StaticMemberConflict`] and merges nothing. Otherwise, for each
 /// (field_name, dep_index) in args_from:
 ///   - If dep COMPLETED: injects `TaskResult::Ok(result_value)`
 ///   - Otherwise (SKIPPED/FAILED/missing): injects `TaskResult::Err(UPSTREAM_SKIPPED)`
-pub fn merge_args_from_sync(
+pub(crate) fn merge_args_from_sync(
     input: &str,
     args_from: &Option<serde_json::Value>,
     dep_results: &HashMap<i32, DepResult>,
-) -> Result<String, WorkflowError> {
+) -> Result<ArgsFromMerge, WorkflowError> {
     let args_from_map = match args_from {
         Some(v) => match v.as_object() {
             Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(input.to_owned()),
+            _ => return Ok(ArgsFromMerge::Merged(input.to_owned())),
         },
-        None => return Ok(input.to_owned()),
+        None => return Ok(ArgsFromMerge::Merged(input.to_owned())),
     };
 
     let mut object = input_object(input)?;
+    if let Some(conflict) = static_member_conflict(&object, args_from_map) {
+        return Ok(ArgsFromMerge::StaticMemberConflict(conflict));
+    }
 
     for (field_name, dep_idx_value) in args_from_map {
         let dep_idx = dep_idx_value.as_i64().unwrap_or(-1) as i32;
@@ -74,7 +149,7 @@ pub fn merge_args_from_sync(
         object.insert(field_name.clone(), wrapped);
     }
 
-    Ok(serde_json::to_string(&object)?)
+    Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -87,20 +162,20 @@ struct DepRow {
 /// Merge args_from dependency results into the node's input (async variant).
 ///
 /// Fetches dependency results from the database, then applies the same
-/// wrapping logic as the synchronous variant.
-pub async fn merge_args_from_async(
+/// conflict check and wrapping logic as the synchronous variant.
+pub(crate) async fn merge_args_from_async(
     pool: &PgPool,
     workflow_id: Uuid,
     input: &str,
     args_from: &Option<serde_json::Value>,
     dep_indices: &[i32],
-) -> Result<String, WorkflowError> {
+) -> Result<ArgsFromMerge, WorkflowError> {
     let args_from_map = match args_from {
         Some(v) => match v.as_object() {
             Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(input.to_owned()),
+            _ => return Ok(ArgsFromMerge::Merged(input.to_owned())),
         },
-        None => return Ok(input.to_owned()),
+        None => return Ok(ArgsFromMerge::Merged(input.to_owned())),
     };
 
     let rows: Vec<DepRow> = sqlx::query_as(
@@ -126,6 +201,9 @@ pub async fn merge_args_from_async(
         .collect();
 
     let mut object = input_object(input)?;
+    if let Some(conflict) = static_member_conflict(&object, args_from_map) {
+        return Ok(ArgsFromMerge::StaticMemberConflict(conflict));
+    }
 
     for (field_name, dep_idx_value) in args_from_map {
         let dep_idx = dep_idx_value.as_i64().unwrap_or(-1) as i32;
@@ -133,7 +211,7 @@ pub async fn merge_args_from_async(
         object.insert(field_name.clone(), wrapped);
     }
 
-    Ok(serde_json::to_string(&object)?)
+    Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
 }
 
 /// Wrap a single dependency result into a serialized `TaskResult` value. Python:
@@ -241,16 +319,93 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The merged input; a test that reaches a conflict fails.
+    fn merged(
+        input: &str,
+        args_from: &Option<serde_json::Value>,
+        dep_results: &HashMap<i32, DepResult>,
+    ) -> String {
+        match merge_args_from_sync(input, args_from, dep_results).unwrap() {
+            ArgsFromMerge::Merged(merged) => merged,
+            ArgsFromMerge::StaticMemberConflict(conflict) => {
+                panic!("unexpected args_from conflict on '{}'", conflict.key)
+            }
+        }
+    }
+
+    #[test]
+    fn an_args_from_key_that_names_a_static_member_is_a_conflict() {
+        let mut deps = HashMap::new();
+        deps.insert(
+            0,
+            DepResult {
+                status: "COMPLETED".to_owned(),
+                result: Some(serde_json::to_string(&TaskResult::Ok(json!(1))).unwrap()),
+            },
+        );
+        let outcome =
+            merge_args_from_sync(r#"{"x": 5, "y": 6}"#, &Some(json!({"x": 0})), &deps).unwrap();
+        assert_eq!(
+            outcome,
+            ArgsFromMerge::StaticMemberConflict(ArgsFromConflict {
+                key: "x".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn with_several_conflicts_the_first_key_in_stored_order_is_named() {
+        // jsonb key order: shorter keys first, then by bytes. Python iterates in that order.
+        let outcome = merge_args_from_sync(
+            r#"{"aa": 1, "b": 2, "c": 3}"#,
+            &Some(json!({"aa": 0, "c": 0, "b": 0})),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ArgsFromMerge::StaticMemberConflict(ArgsFromConflict {
+                key: "b".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn the_conflict_error_follows_python() {
+        let workflow_id = Uuid::nil();
+        let conflict = ArgsFromConflict {
+            key: "x".to_owned(),
+        };
+        let task = conflict.node_error(workflow_id, 3, MergedNodeKind::Task);
+        assert_eq!(
+            task.error_code.as_ref().map(ToString::to_string).as_deref(),
+            Some("WORKFLOW_ENQUEUE_FAILED")
+        );
+        assert_eq!(
+            task.message.as_deref(),
+            Some("args_from key 'x' conflicts with static kwarg (task 3)")
+        );
+        assert_eq!(
+            task.data,
+            Some(json!({"workflow_id": workflow_id.to_string(), "task_index": 3}))
+        );
+        let child = conflict.node_error(workflow_id, 4, MergedNodeKind::SubWorkflow);
+        assert_eq!(
+            child.message.as_deref(),
+            Some("args_from key 'x' conflicts with static kwarg (subworkflow task 4)")
+        );
+    }
+
     #[test]
     fn merge_no_args_from_returns_existing() {
-        let result = merge_args_from_sync(r#"{"x": 1}"#, &None, &HashMap::new()).unwrap();
+        let result = merged(r#"{"x": 1}"#, &None, &HashMap::new());
         assert_eq!(result, r#"{"x": 1}"#);
     }
 
     #[test]
     fn merge_empty_args_from_returns_existing() {
         let args_from = Some(json!({}));
-        let result = merge_args_from_sync(r#"{"x": 1}"#, &args_from, &HashMap::new()).unwrap();
+        let result = merged(r#"{"x": 1}"#, &args_from, &HashMap::new());
         assert_eq!(result, r#"{"x": 1}"#);
     }
 
@@ -268,7 +423,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
+        let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert_eq!(answer["__h_task_result__"], true);
@@ -287,7 +442,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
+        let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert!(answer["err"].is_object());
@@ -301,7 +456,7 @@ mod tests {
     fn merge_missing_dep_wraps_in_task_result_err() {
         let deps = HashMap::new(); // no deps
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
+        let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert!(answer["err"].is_object());
@@ -321,7 +476,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"dep_val": 0}));
-        let result = merge_args_from_sync(r#"{"existing": true}"#, &args_from, &deps).unwrap();
+        let result = merged(r#"{"existing": true}"#, &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["existing"], true);
         assert_eq!(parsed["dep_val"]["__h_task_result__"], true);
@@ -338,7 +493,7 @@ mod tests {
                 result: Some(serde_json::to_string(&TaskResult::Ok(json!(1))).unwrap()),
             },
         );
-        let result = merge_args_from_sync("{}", &Some(json!({"answer": 3})), &deps).unwrap();
+        let result = merged("{}", &Some(json!({"answer": 3})), &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer: TaskResult<serde_json::Value> =
             serde_json::from_value(parsed["answer"].clone()).unwrap();
@@ -364,7 +519,7 @@ mod tests {
                     result: None,
                 },
             );
-            let result = merge_args_from_sync("{}", &Some(json!({"answer": 2})), &deps).unwrap();
+            let result = merged("{}", &Some(json!({"answer": 2})), &deps);
             let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
             let answer: TaskResult<serde_json::Value> =
                 serde_json::from_value(parsed["answer"].clone()).unwrap();
@@ -410,7 +565,7 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
+        let result = merged("{}", &args_from, &deps);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
         assert!(answer["err"].is_object());
