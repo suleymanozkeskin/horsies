@@ -367,12 +367,11 @@ async fn the_pending_locator_pins_its_node_to_its_workflow() {
 /// points at it.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #861"]
 async fn a_locator_is_copied_verified_and_repointed() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
-    let outcome = quarantine_one(&mut transaction, evidence.task_id, "port repoint")
+    let outcome = quarantine_one(&mut transaction, evidence.task_id)
         .await
         .expect("quarantine");
     assert_eq!(outcome.verdict, QuarantineVerdict::Repointed);
@@ -404,7 +403,6 @@ async fn a_locator_is_copied_verified_and_repointed() {
 /// keeps its history source.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #861"]
 async fn a_broken_locator_refuses_and_keeps_its_history_source() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -418,7 +416,7 @@ async fn a_broken_locator_refuses_and_keeps_its_history_source() {
     .execute(transaction.as_mut())
     .await
     .expect("break the locator");
-    let outcome = quarantine_one(&mut transaction, evidence.task_id, "port broken locator")
+    let outcome = quarantine_one(&mut transaction, evidence.task_id)
         .await
         .expect("quarantine");
     assert_eq!(outcome.verdict, QuarantineVerdict::SourceAbsent);
@@ -434,11 +432,10 @@ async fn a_broken_locator_refuses_and_keeps_its_history_source() {
 /// `TestRefusal.test_unknown_task_is_pending_gone`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #861"]
 async fn an_unknown_task_is_pending_gone() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
-    let outcome = quarantine_one(&mut transaction, Uuid::new_v4(), "port unknown task")
+    let outcome = quarantine_one(&mut transaction, Uuid::new_v4())
         .await
         .expect("quarantine");
     assert_eq!(outcome.verdict, QuarantineVerdict::PendingGone);
