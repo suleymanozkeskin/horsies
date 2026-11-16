@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sha2 = "0.10"
 log = "0.4"
 rand = "0.8"
-gethostname = "0.4"
+gethostname = "1.1"
 clap = { version = "4", features = ["derive"] }
 owo-colors = "4"
 toml = "0.8"
