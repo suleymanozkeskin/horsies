@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, FromRow, Postgres, Transaction};
 use std::str::FromStr;
@@ -10,11 +9,8 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope;
-use crate::core::history::enqueue::{
-    prepare_enqueue_facts, EnqueueInputEligibility, PreparedEnqueueFacts,
-};
+use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::identity::fingerprint::COMMAND_FINGERPRINT_VERSION;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
@@ -28,7 +24,9 @@ use crate::core::history::reads::result::{
 use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
-use crate::core::{OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult};
+use crate::core::{
+    EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
+};
 
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
@@ -58,28 +56,35 @@ fn test_uuid(value: &str) -> Uuid {
 // SQL constants
 // ---------------------------------------------------------------------------
 
+// Every NOT NULL column is named: the baseline schema has no column defaults.
+// A first-run send has no rerun lineage and is not a workflow task.
 const ENQUEUE_SQL: &str = "\
 INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, args, kwargs,
-    status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at,
-    command_fingerprint_version, command_fingerprint, retention_class_key,
-    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
-    retain_rerun_input, prepared_rerun_input_disposition,
-    prepared_rerun_input_version, prepared_rerun_input_codec,
-    prepared_rerun_input_content_type, prepared_rerun_input_digest,
-    prepared_rerun_input_inline, prepared_rerun_input_reference
+    id, task_name, queue_name, priority, input, task_options, execution,
+    retention_class_key, sent_at, created_at,
+    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+    status, enqueued_at, retry_count, max_retries, good_until,
+    is_workflow_task, updated_at,
+    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7,
-        CASE WHEN $8::timestamptz IS NOT NULL THEN $8
-             WHEN $26::bigint IS NOT NULL
-             THEN NOW() + make_interval(secs => $26::double precision)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, 'PENDING',
+        CASE WHEN $13::timestamptz IS NOT NULL THEN $13
+             WHEN $14::bigint IS NOT NULL
+             THEN NOW() + make_interval(secs => $14::double precision)
              ELSE NOW() END,
-        $9,
-        $10, $11, $12, FALSE, NOW(), NOW(), $13, $14, $15, $16, NULL, NULL,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25)
+        0, $15, $16, FALSE, NOW(), $17, NULL, NULL)
 ON CONFLICT (id) DO NOTHING
 RETURNING id";
+
+// The exact-id resend check reads what the send compares: the command
+// fingerprint and the stored send call time.
+const READ_SEND_IDENTITY_SQL: &str = "\
+SELECT command_fingerprint_version, command_fingerprint, sent_at
+FROM horsies_tasks WHERE id = $1";
+
+const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
+SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
+FROM horsies_tasks WHERE id = $1 FOR UPDATE";
 
 // Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
 // its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
@@ -135,7 +140,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at";
+RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at";
 
 // One server-side call performs advisory-lock acquisition + cap counts + the
 // windowed claim (see horsies_claim, migrations/0027_claim_function_v12.sql;
@@ -151,7 +156,7 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 // good_until) are gone from the function; the dispatch path reads them from
 // SET_RUNNING_SQL's RETURNING instead.
 const HORSIES_CLAIM_SQL: &str = "\
-SELECT id::uuid AS id, task_name, args, kwargs, queue_name, is_workflow_task, \
+SELECT id::uuid AS id, task_name, input, queue_name, is_workflow_task, \
        task_options, claimed_at \
 FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
@@ -311,7 +316,7 @@ GROUP BY queue_name";
 /// more than that can be dispatched this pass (P7). `claimed_at` rides along so
 /// the buffered dispatch fences on the claim generation it acts for.
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
-SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options, claimed_at \
+SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at \
 FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
 ORDER BY priority ASC, enqueued_at ASC, id ASC \
@@ -905,6 +910,22 @@ impl PostgresBroker {
         Ok(broker)
     }
 
+    /// Connect with the schema behaviour and the keyed-enqueue reservation
+    /// window of a client manifest. The window is checked before any
+    /// database connection is attempted.
+    pub async fn connect_with_policies(
+        config: &PostgresConfig,
+        schema_initialization_mode: SchemaInitializationMode,
+        window: chrono::Duration,
+    ) -> Result<Self, BrokerError> {
+        let seconds = idempotency_reservation_window_seconds(Some(window))?;
+        let mut broker =
+            Self::connect_with_schema_initialization_mode(config, schema_initialization_mode)
+                .await?;
+        broker.idempotency_reservation_window_seconds = seconds;
+        Ok(broker)
+    }
+
     /// Run embedded SQL migrations.
     ///
     /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
@@ -1012,25 +1033,25 @@ impl PostgresBroker {
 
     /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
     ///
-    /// Uses ON CONFLICT DO NOTHING with `enqueue_sha` verification for
-    /// idempotent enqueue — matching Python's `enqueue_async()` behaviour.
+    /// `input` is the encoded task input as one JSON value; it is stored as
+    /// written. Uses ON CONFLICT DO NOTHING; a taken task id is compared by the
+    /// version-1 command fingerprint and the stored `sent_at` (the exact-id
+    /// resend check).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
         task_name: &str,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
         queue_name: &str,
         priority: i32,
         sent_at: Option<DateTime<Utc>>,
         enqueued_at: Option<DateTime<Utc>>,
         good_until: Option<DateTime<Utc>>,
         task_options: Option<&str>,
-        enqueue_sha: &str,
         predetermined_task_id: Option<Uuid>,
         enqueue_delay_seconds: Option<i64>,
         idempotency_key: Option<&str>,
-        retention_class_key: Option<&str>,
+        retention: EnqueueRetention,
         retain_rerun_input: Option<bool>,
     ) -> Result<Uuid, BrokerError> {
         if enqueued_at.is_some() && enqueue_delay_seconds.is_some() {
@@ -1053,23 +1074,27 @@ impl PostgresBroker {
             })?,
         };
         let max_retries = parse_max_retries(task_options);
-        let effective_sent_at = sent_at.unwrap_or_else(Utc::now);
+        let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
+        let retention_class_key = retention.class_key();
         let facts = prepare_enqueue_facts(
             task_name,
             queue_name,
             priority,
-            args,
-            kwargs,
+            input,
             good_until,
             enqueue_delay_seconds,
             task_options,
-            retention_class_key,
+            Some(&retention_class_key),
             retain_rerun_input,
             idempotency_key,
-            EnqueueInputEligibility::Ordinary,
         )
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        let sent = SendIdentity {
+            fingerprint_version: Some(facts.command_fingerprint_version),
+            fingerprint: Some(facts.command_fingerprint.to_vec()),
+            sent_at: effective_sent_at,
+        };
         let mut transaction = self.pool.begin().await.map_err(BrokerError::Database)?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
@@ -1110,38 +1135,24 @@ impl PostgresBroker {
             .bind(task_name)
             .bind(queue_name)
             .bind(priority)
-            .bind(args)
-            .bind(kwargs)
-            .bind(effective_sent_at)
-            .bind(enqueued_at)
-            .bind(good_until)
-            .bind(max_retries)
+            .bind(input)
             .bind(task_options)
-            .bind(enqueue_sha)
+            .bind(facts.execution.as_str())
+            .bind(&facts.retention_class_key)
+            .bind(effective_sent_at)
             .bind(facts.command_fingerprint_version)
             .bind(facts.command_fingerprint.as_slice())
-            .bind(&facts.retention_class_key)
-            .bind(facts.input_digest.as_slice())
             .bind(
                 facts
                     .idempotency_key_digest
                     .as_ref()
                     .map(<[u8; 32]>::as_slice),
             )
-            .bind(facts.retain_rerun_input)
-            .bind(facts.prepared_rerun_input_disposition.as_str())
-            .bind(facts.prepared_rerun_input_version)
-            .bind(facts.prepared_rerun_input_codec)
-            .bind(facts.prepared_rerun_input_content_type)
-            .bind(
-                facts
-                    .prepared_rerun_input_digest
-                    .as_ref()
-                    .map(<[u8; 32]>::as_slice),
-            )
-            .bind(facts.prepared_rerun_input_inline.as_deref())
-            .bind(facts.prepared_rerun_input_reference.as_deref())
+            .bind(enqueued_at)
             .bind(enqueue_delay_seconds)
+            .bind(max_retries)
+            .bind(good_until)
+            .bind(facts.retain_rerun_input)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(BrokerError::Database)?;
@@ -1158,9 +1169,8 @@ impl PostgresBroker {
                     transaction,
                     task_id,
                     task_name,
-                    enqueue_sha,
+                    &sent,
                     &key_digest,
-                    &facts,
                 )
                 .await;
         }
@@ -1170,19 +1180,23 @@ impl PostgresBroker {
             .await
             .map_err(BrokerError::Database)?;
 
-        // Conflict: task_id already exists. Verify payload identity via stored SHA.
-        tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — verifying enqueue_sha");
+        // Conflict: task_id already exists. Compare the fingerprint and sent_at.
+        tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
 
-        let stored_sha: Option<(String,)> =
-            sqlx::query_as("SELECT enqueue_sha FROM horsies_tasks WHERE id = $1")
+        let stored: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>)> =
+            sqlx::query_as(READ_SEND_IDENTITY_SQL)
                 .bind(task_id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(BrokerError::Database)?;
 
         let outcome = classify_enqueue_conflict(
-            stored_sha.as_ref().map(|(s,)| s.as_str()),
-            enqueue_sha,
+            stored.map(|(fingerprint_version, fingerprint, sent_at)| SendIdentity {
+                fingerprint_version,
+                fingerprint,
+                sent_at,
+            }),
+            &sent,
             task_id,
             task_name,
         );
@@ -1199,27 +1213,21 @@ impl PostgresBroker {
         outcome
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn bind_key_after_task_id_conflict(
         &self,
         mut transaction: Transaction<'_, Postgres>,
         task_id: Uuid,
         task_name: &str,
-        enqueue_sha: &str,
+        sent: &SendIdentity,
         key_digest: &[u8; 32],
-        facts: &PreparedEnqueueFacts,
     ) -> Result<Uuid, BrokerError> {
-        let existing: Option<(String, Option<Vec<u8>>, Option<i16>, Option<Vec<u8>>)> =
-            sqlx::query_as(
-                "SELECT enqueue_sha, idempotency_key_digest,
-                        command_fingerprint_version, command_fingerprint
-                 FROM horsies_tasks WHERE id = $1 FOR UPDATE",
-            )
-            .bind(task_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(BrokerError::Database)?;
-        let Some((stored_sha, bound_digest, fingerprint_version, fingerprint)) = existing else {
+        let existing: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>, Option<Vec<u8>>)> =
+            sqlx::query_as(READ_SEND_IDENTITY_FOR_KEY_SQL)
+                .bind(task_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(BrokerError::Database)?;
+        let Some((fingerprint_version, fingerprint, sent_at, bound_digest)) = existing else {
             transaction
                 .rollback()
                 .await
@@ -1229,10 +1237,12 @@ impl PostgresBroker {
                 task_name: task_name.to_owned(),
             });
         };
-        if stored_sha != enqueue_sha
-            || fingerprint_version != Some(COMMAND_FINGERPRINT_VERSION)
-            || fingerprint.as_deref() != Some(facts.command_fingerprint.as_slice())
-        {
+        let stored = SendIdentity {
+            fingerprint_version,
+            fingerprint,
+            sent_at,
+        };
+        if &stored != sent {
             transaction
                 .rollback()
                 .await
@@ -1816,8 +1826,7 @@ impl PostgresBroker {
                         include_failed_reason,
                         include_attempts,
                     )
-                    .map(Some)
-                    .map_err(task_info_history_error),
+                    .map(Some),
                     Some(TaskDetailResult::Live { .. }) | None => Ok(None),
                     Some(TaskDetailResult::Absent { .. }) => Ok(None),
                 }
@@ -2702,11 +2711,16 @@ fn map_history_read_error(error: HistoryError) -> BrokerError {
     }
 }
 
+/// The task info code of a read error, by Python's rule
+/// (`horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`): only a
+/// stored result that fails its check is `INVALID_JSON_PAYLOAD`; a status or
+/// an attempt snapshot that does not decode, and a database failure, are
+/// `TASK_INFO_QUERY_FAILED`, retryable by the driver classification. A
+/// history result is checked in [`history_task_info`]; on the live path the
+/// only `Serialization` error is the stored result's.
 fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
     let code = match &error {
-        BrokerError::Serialization(_)
-        | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidStatus(_) => BrokerErrorCode::InvalidJsonPayload,
+        BrokerError::Serialization(_) => BrokerErrorCode::InvalidJsonPayload,
         _ => BrokerErrorCode::TaskInfoQueryFailed,
     };
     BrokerOperationError {
@@ -2896,19 +2910,33 @@ fn history_task_result_row(
     })
 }
 
+/// The task info of a history row. A stored result that fails its digest or
+/// does not decode is `INVALID_JSON_PAYLOAD`; a status or an attempt snapshot
+/// that does not decode is `TASK_INFO_QUERY_FAILED`, not retryable (Python
+/// `horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`).
 fn history_task_info(
     detail: HistoryTaskDetail,
     include_result: bool,
     include_failed_reason: bool,
     include_attempts: bool,
-) -> Result<TaskInfo, BrokerError> {
-    let status = crate::broker::row::task::parse_task_status(&detail.status)?;
-    let result = if include_result {
-        decode_history_result_value(&detail)?
-            .map(serde_json::from_value)
-            .transpose()?
-    } else {
-        None
+) -> BrokerResult<TaskInfo> {
+    let status = crate::broker::row::task::parse_task_status(&detail.status)
+        .map_err(task_info_history_error)?;
+    let result = match include_result {
+        false => None,
+        true => decode_history_result_value(&detail)
+            .and_then(|value| {
+                value
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(BrokerError::Serialization)
+            })
+            .map_err(|error| {
+                invalid_raw_result(format!(
+                    "stored result of task {} does not decode: {error}",
+                    detail.task_id
+                ))
+            })?,
     };
     let terminal_at = detail.terminal_at;
     let attempts = include_attempts
@@ -2919,7 +2947,8 @@ fn history_task_info(
                 .map(|record| task_attempt_info_from_record(detail.task_id, record))
                 .collect::<Result<Vec<_>, _>>()
         })
-        .transpose()?;
+        .transpose()
+        .map_err(task_info_history_error)?;
     Ok(TaskInfo {
         task_id: detail.task_id,
         task_name: detail.task_name,
@@ -3601,17 +3630,70 @@ mod tests {
 
     // Enqueue-conflict classification (parity with horsies PR #48).
 
+    fn send_identity(fingerprint: u8, sent_at: DateTime<Utc>) -> SendIdentity {
+        SendIdentity {
+            fingerprint_version: Some(1),
+            fingerprint: Some(vec![fingerprint; 32]),
+            sent_at,
+        }
+    }
+
     #[test]
-    fn enqueue_conflict_matching_sha_is_idempotent_ok() {
+    fn enqueue_conflict_matching_identity_is_idempotent_ok() {
         let task_id = Uuid::new_v4();
-        let out = classify_enqueue_conflict(Some("sha-1"), "sha-1", task_id, "my_task");
+        let sent_at = Utc::now();
+        let out = classify_enqueue_conflict(
+            Some(send_identity(1, sent_at)),
+            &send_identity(1, sent_at),
+            task_id,
+            "my_task",
+        );
         assert_eq!(out.unwrap(), task_id);
     }
 
     #[test]
-    fn enqueue_conflict_differing_sha_is_payload_mismatch() {
+    fn enqueue_conflict_differing_fingerprint_is_payload_mismatch() {
         let task_id = Uuid::new_v4();
-        let out = classify_enqueue_conflict(Some("other"), "sha-1", task_id, "my_task");
+        let sent_at = Utc::now();
+        let out = classify_enqueue_conflict(
+            Some(send_identity(2, sent_at)),
+            &send_identity(1, sent_at),
+            task_id,
+            "my_task",
+        );
+        assert!(matches!(
+            out,
+            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
+        ));
+    }
+
+    #[test]
+    fn enqueue_conflict_differing_sent_at_is_payload_mismatch() {
+        let task_id = Uuid::new_v4();
+        let sent_at = Utc::now();
+        let out = classify_enqueue_conflict(
+            Some(send_identity(1, sent_at - chrono::Duration::seconds(1))),
+            &send_identity(1, sent_at),
+            task_id,
+            "my_task",
+        );
+        assert!(matches!(
+            out,
+            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
+        ));
+    }
+
+    #[test]
+    fn enqueue_conflict_with_an_engine_minted_row_is_payload_mismatch() {
+        let task_id = Uuid::new_v4();
+        let sent_at = Utc::now();
+        let minted = SendIdentity {
+            fingerprint_version: None,
+            fingerprint: None,
+            sent_at,
+        };
+        let out =
+            classify_enqueue_conflict(Some(minted), &send_identity(1, sent_at), task_id, "my_task");
         assert!(matches!(
             out,
             Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
@@ -3621,7 +3703,12 @@ mod tests {
     #[test]
     fn enqueue_conflict_missing_row_is_non_retryable_unverifiable() {
         // Row disappeared before verification: must NOT be treated as idempotent Ok.
-        let out = classify_enqueue_conflict(None, "sha-1", Uuid::new_v4(), "my_task");
+        let out = classify_enqueue_conflict(
+            None,
+            &send_identity(1, Utc::now()),
+            Uuid::new_v4(),
+            "my_task",
+        );
         match out {
             Err(err @ BrokerError::EnqueueConflictUnverifiable { .. }) => {
                 assert!(!err.is_retryable(), "must be non-retryable");
@@ -3633,67 +3720,62 @@ mod tests {
             other => panic!("expected EnqueueConflictUnverifiable, got: {other:?}"),
         }
     }
+
+    #[test]
+    fn sent_at_is_cut_to_whole_microseconds() {
+        let sent_at = DateTime::parse_from_rfc3339("2026-11-16T12:00:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stored = sent_at_at_stored_precision(sent_at).unwrap();
+        assert_eq!(stored.nanosecond(), 123_456_000);
+        assert_eq!(sent_at_at_stored_precision(stored).unwrap(), stored);
+    }
 }
 
-/// Canonical UTC datetime string for fingerprint hashing.
-/// Matches Python's `_canon_dt()`: always UTC, microsecond precision.
-fn canon_dt(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
+/// What the exact-id resend check compares: the version-1 command fingerprint
+/// and the send call time. A resend of one send call carries both unchanged; a
+/// different send with the same task id differs in at least one. A row that
+/// the workflow engine minted has no fingerprint, so a send never matches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SendIdentity {
+    fingerprint_version: Option<i16>,
+    fingerprint: Option<Vec<u8>>,
+    sent_at: DateTime<Utc>,
+}
+
+/// `sent_at` at the precision that PostgreSQL stores (whole microseconds), so
+/// the stored value equals the value that a resend of the same call carries.
+fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, BrokerError> {
+    let nanos = sent_at.nanosecond();
+    sent_at
+        .with_nanosecond(nanos - nanos % 1_000)
+        .ok_or_else(|| {
+            BrokerError::EnqueueContract(format!("sent_at {sent_at} has no whole-microsecond form"))
+        })
 }
 
 /// Classify the outcome of an `INSERT ... ON CONFLICT DO NOTHING` enqueue
-/// conflict by comparing the stored `enqueue_sha` against the expected one.
+/// conflict by comparing the stored send identity against the sent one.
 ///
 /// - `None` (row gone before verification): cannot prove payload identity, so
 ///   fail non-retryably rather than assume the original send succeeded
 ///   (parity with horsies PR #48).
-/// - matching sha: idempotent success.
-/// - differing sha: same task_id, different payload — a programming error.
+/// - equal identity: idempotent success.
+/// - other identity: same task_id, different command or send call.
 fn classify_enqueue_conflict(
-    stored_sha: Option<&str>,
-    enqueue_sha: &str,
+    stored: Option<SendIdentity>,
+    sent: &SendIdentity,
     task_id: Uuid,
     task_name: &str,
 ) -> Result<Uuid, BrokerError> {
-    match stored_sha {
+    match stored {
         None => Err(BrokerError::EnqueueConflictUnverifiable {
             task_id,
             task_name: task_name.to_owned(),
         }),
-        Some(existing) if existing == enqueue_sha => Ok(task_id),
+        Some(existing) if &existing == sent => Ok(task_id),
         Some(_) => Err(BrokerError::PayloadMismatch { task_id }),
     }
-}
-
-/// Compute a SHA-256 hex digest for idempotent enqueue verification.
-///
-/// Covers all enqueue-identity fields, matching Python's `enqueue_fingerprint()`.
-/// Two sends with different priority, sent_at, or good_until produce different hashes.
-pub fn compute_enqueue_sha(
-    task_name: &str,
-    queue_name: &str,
-    priority: i32,
-    args: Option<&str>,
-    kwargs: Option<&str>,
-    sent_at: DateTime<Utc>,
-    good_until: Option<DateTime<Utc>>,
-    enqueue_delay_seconds: Option<i64>,
-    task_options: Option<&str>,
-) -> String {
-    let canonical = serde_json::to_string(&serde_json::json!([
-        task_name,
-        queue_name,
-        priority,
-        args,
-        kwargs,
-        canon_dt(sent_at),
-        good_until.map(canon_dt),
-        enqueue_delay_seconds,
-        task_options,
-    ]))
-    .expect("JSON serialization of fingerprint fields cannot fail");
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("{:x}", digest)
 }
 
 #[cfg(test)]
@@ -3805,7 +3887,7 @@ mod horsies_claim_tests {
         .expect("function must exist with the pinned signature");
         assert_eq!(
             result_shape,
-            "TABLE(id text, task_name character varying, args text, kwargs text, \
+            "TABLE(id text, task_name character varying, input text, \
              queue_name character varying, is_workflow_task boolean, task_options text, \
              claimed_at timestamp with time zone)",
             "OUT columns diverged from the Python v12 shape",
@@ -4989,7 +5071,7 @@ mod filter_non_runnable_tests {
         for status in ["PAUSED", "CANCELLED", "RUNNING"] {
             let workflow_id = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO horsies_workflows(id,name,status) VALUES($1,'lookup_test',$2)",
+                "INSERT INTO horsies_workflows(id,name,status,on_error,depth,root_workflow_id,sent_at,created_at,updated_at) VALUES($1,'lookup_test',$2,'fail',0,$1,NOW(),NOW(),NOW())",
             )
             .bind(workflow_id)
             .bind(status)
@@ -4999,7 +5081,7 @@ mod filter_non_runnable_tests {
             for index in 0..2 {
                 let task_id = Uuid::new_v4();
                 ids.push(task_id);
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,task_args,task_kwargs,dependencies,status,task_id) VALUES($1,$2,$3,$4,'lookup_test','[]','{}','{}','ENQUEUED',$5)")
+                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES($1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
                     .bind(Uuid::new_v4()).bind(workflow_id).bind(index)
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
@@ -5098,12 +5180,14 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', '[]', '{}',
+                status, is_subworkflow, max_retries, execution, retention_class_key,
+                task_id, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', 'null',
                       'default', 100, '{}', FALSE, 'all',
-                      'ENQUEUED', FALSE, $3, NOW())",
+                      'ENQUEUED', FALSE, 3, 'ISOLATED', 'standard_30d',
+                      $3, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(&wf_id)
@@ -6059,5 +6143,43 @@ mod pool_options_tests {
 
         assert!(failed.is_err(), "the dead connection serves the statement");
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod task_info_code_tests {
+    //! Python's task info codes (`horsies/core/brokers/postgres.py:4889-4904`,
+    //! `:4973-4977`): only a stored result that fails its check is
+    //! `INVALID_JSON_PAYLOAD`.
+    use super::*;
+
+    #[test]
+    fn a_result_that_does_not_parse_is_invalid_json_payload() {
+        let parse_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+
+        let error = task_info_history_error(BrokerError::Serialization(parse_error));
+
+        assert_eq!(error.code, BrokerErrorCode::InvalidJsonPayload);
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn a_status_or_attempt_that_does_not_decode_is_task_info_query_failed() {
+        for error in [
+            BrokerError::InvalidStatus("BOGUS".to_owned()),
+            BrokerError::HistoryReadContract("unknown task-attempt outcome".to_owned()),
+        ] {
+            let mapped = task_info_history_error(error);
+            assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
+            assert!(!mapped.retryable);
+        }
+    }
+
+    #[test]
+    fn a_database_failure_is_task_info_query_failed_with_the_driver_flag() {
+        let mapped = task_info_history_error(BrokerError::Database(sqlx::Error::PoolTimedOut));
+
+        assert_eq!(mapped.code, BrokerErrorCode::TaskInfoQueryFailed);
+        assert!(mapped.retryable);
     }
 }

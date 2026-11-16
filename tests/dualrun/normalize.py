@@ -2,14 +2,23 @@
 
 Order of work:
 
-1. Each column is normalized by its rule, except ids, which wait for labels.
+1. Every cell of every table is normalized by its column rule
+   (``cells.stable_rows``). Ids, also ids inside JSON documents, wait for
+   labels.
 2. Tables are labelled in catalog order. Inside a table, rows are sorted by
    the normalized values of ``order_by``; an id without a label yet sorts as
-   ``UnlabelledId``. Labels are then assigned row by row, column by column.
-3. Rows that tie on ``order_by`` and assign new labels are checked: the
-   assignment is arbitrary unless the tied rows are equal apart from their
-   new labels, and those labels occur nowhere else. Otherwise the tie is
-   reported as an ``AmbiguousGroup``; the labels are never guessed.
+   ``UnlabelledId``.
+3. Rows that tie on ``order_by`` are sorted by their references: for each
+   id the row brings in, the rows elsewhere in the snapshot that hold the
+   same id, normalized with that id marked as ``self``. This order uses
+   only normalized facts, so both runs of one state get the same order.
+4. Labels are assigned row by row, column by column, in document order
+   inside a JSON document.
+5. Rows that still tie (same ``order_by`` values, same references) and
+   bring in new labels are checked: the assignment is arbitrary unless the
+   rows are equal apart from their new labels, and each new value occurs
+   only inside the group, in one row or in every row of it. Otherwise the
+   group is reported as an ``AmbiguousGroup``. A label is never guessed.
 """
 
 from __future__ import annotations
@@ -17,104 +26,36 @@ from __future__ import annotations
 import itertools
 from collections import Counter
 from dataclasses import dataclass
-from enum import Enum
+from typing import Final
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.rules import (
-    AnchorReference,
-    ColumnRule,
-    Exact,
-    IdFamily,
-    Ignored,
-    NormalisedId,
-    RunWindowReference,
-    SnapshotCatalog,
-    TableRules,
-    TimeOrderOnly,
-    TimeWithin,
-    catalog_defects,
+from tests.dualrun.cells import (
+    NormalizeError,
+    PendingDocument,
+    PendingId,
+    RawSnapshot,
+    StableCell,
+    StableRow,
+    cell_ids,
+    stable_rows,
 )
+from tests.dualrun.rules import IdFamily, SnapshotCatalog, TableRules, catalog_defects
 from tests.dualrun.values import (
     Cell,
-    DuringRun,
-    ExactValue,
-    FiniteTime,
     IdLabel,
-    IgnoredValue,
-    InfiniteFuture,
-    InfinitePast,
-    LiteralTime,
+    JsonDocument,
     NormalizedValue,
-    NullValue,
     OffsetFromAnchor,
     OrderKeyCell,
     OrderKeyValue,
+    RenderedDocument,
     RunWindow,
-    TimeRank,
-    TimeValue,
     UnlabelledId,
-    parse_time_text,
+    map_json,
+    render_json,
+    render_value,
     sort_token,
-    time_sort_token,
 )
-
-# ---- Raw input (from the capture) ----
-
-RawCell = str | None
-"""The text form of one stored value; ``None`` is SQL NULL."""
-
-RawRow = tuple[RawCell, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class RawTable:
-    """The rows of one table, columns in catalog order."""
-
-    name: str
-    rows: tuple[RawRow, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class RawSnapshot:
-    """The rows of every catalog table, tables in catalog order."""
-
-    tables: tuple[RawTable, ...]
-
-
-# ---- Errors ----
-
-
-@dataclass(frozen=True, slots=True)
-class UnreadableTime:
-    """A clock column holds a text form the parser rejects."""
-
-    table: str
-    column: str
-    text: str
-    cause: str
-
-
-class UnanchoredReason(Enum):
-    """Why an anchored clock value has no offset."""
-
-    ANCHOR_NULL = 'the anchor column is NULL while the value is set'
-    ANCHOR_INFINITE = 'the anchor column is infinite'
-    VALUE_INFINITE = 'the value is infinite'
-
-
-@dataclass(frozen=True, slots=True)
-class UnanchoredTime:
-    """An anchored clock value whose offset from its anchor is not defined."""
-
-    table: str
-    column: str
-    anchor: str
-    reason: UnanchoredReason
-
-
-NormalizeError = UnreadableTime | UnanchoredTime
-
-# ---- Output ----
 
 NormalizedRow = tuple[NormalizedValue, ...]
 
@@ -143,7 +84,7 @@ class NormalizedTable:
 
 @dataclass(frozen=True, slots=True)
 class AmbiguousGroup:
-    """Rows that tie on ``order_by`` while the order between them decides labels."""
+    """Rows that tie on ``order_by`` and on their references while their order decides labels."""
 
     table: str
     order_key: tuple[OrderKeyCell, ...]
@@ -167,34 +108,35 @@ class NormalizedSnapshot:
 
 # ---- Labels ----
 
+REFERENCE_CONTEXT_LIMIT: Final = 64
+"""Most rows whose content orders a tie through one shared id. A value held
+by more rows orders by its holder count only, which keeps the work per row
+bounded; ties it cannot separate stay ambiguous."""
 
-@dataclass(frozen=True, slots=True)
-class _PendingId:
-    """An id cell before labelling."""
-
-    raw: str
-    family: IdFamily
-
-
-@dataclass(frozen=True, slots=True)
-class _PrivateId:
-    """In a tie check only: a label new in the tied group, numbered by first appearance in its row."""
-
-    family: IdFamily
-    local: int
-
-
-_StableCell = NormalizedValue | _PendingId
-_StableRow = tuple[_StableCell, ...]
+_Token = tuple[int, str]
+_Context = tuple[_Token, ...]
+_Signature = tuple[tuple[_Context, ...], ...]
+_SELF: _Token = (20, 'self')
+_ANY_OFFSET: _Token = (7, 'offset')
+"""Offsets compare within a bound, so a reference order must not depend on their exact value."""
 
 
 class _LabelBook:
     """One label per raw id value, numbered per family by first appearance."""
 
-    def __init__(self, occurrences: Counter[str]) -> None:
+    def __init__(self, stable: list[list[StableRow]]) -> None:
         self._labels: dict[str, IdLabel] = {}
         self._issued: Counter[IdFamily] = Counter()
-        self._occurrences = occurrences
+        self._occurrences: Counter[str] = Counter()
+        self._holders: dict[str, list[tuple[int, int]]] = {}
+        for table_index, rows in enumerate(stable):
+            for row_index, row in enumerate(rows):
+                for cell in row:
+                    for pending in cell_ids(cell):
+                        self._occurrences[pending.raw] += 1
+                        holders = self._holders.setdefault(pending.raw, [])
+                        if not holders or holders[-1] != (table_index, row_index):
+                            holders.append((table_index, row_index))
 
     def lookup(self, raw: str) -> IdLabel | UnlabelledId:
         match self._labels.get(raw):
@@ -209,212 +151,41 @@ class _LabelBook:
         self._labels[raw] = IdLabel(family=family, ordinal=self._issued[family])
 
     def occurrences(self, raw: str) -> int:
-        """How many cells of the whole snapshot hold ``raw`` under an id rule."""
+        """How many id cells of the whole snapshot hold ``raw``."""
         return self._occurrences[raw]
 
-
-def _is_id_rule(rule: ColumnRule) -> bool:
-    match rule:
-        case NormalisedId():
-            return True
-        case Exact() | TimeOrderOnly() | TimeWithin() | Ignored():
-            return False
+    def holders(self, raw: str) -> list[tuple[int, int]]:
+        """Every (table index, row index) whose row holds ``raw`` in an id cell."""
+        return self._holders.get(raw, [])
 
 
-def _id_occurrences(raw: RawSnapshot, catalog: SnapshotCatalog) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for table, raw_table in zip(catalog.tables, raw.tables, strict=True):
-        positions = [
-            index for index, spec in enumerate(table.columns) if _is_id_rule(spec.rule)
-        ]
-        for row in raw_table.rows:
-            counts.update(
-                value
-                for value in (row[index] for index in positions)
-                if value is not None
-            )
-    return counts
+def _known(pending: PendingId, book: _LabelBook) -> OrderKeyValue:
+    return book.lookup(pending.raw)
 
 
-# ---- Column rules ----
-
-
-def _parse_times(
-    table: str, column: str, texts: list[RawCell]
-) -> Result[list[TimeValue | None], UnreadableTime]:
-    parsed: list[TimeValue | None] = []
-    for text in texts:
-        match text:
-            case None:
-                parsed.append(None)
-            case str():
-                match parse_time_text(text):
-                    case Ok(value):
-                        parsed.append(value)
-                    case Err(rejected):
-                        return Err(
-                            UnreadableTime(
-                                table=table,
-                                column=column,
-                                text=text,
-                                cause=rejected.cause,
-                            )
-                        )
-    return Ok(parsed)
-
-
-def _ranked(times: list[TimeValue | None]) -> list[_StableCell]:
-    tokens = sorted({time_sort_token(time) for time in times if time is not None})
-    rank_of = {token: rank for rank, token in enumerate(tokens, start=1)}
-    return [
-        NullValue() if time is None else TimeRank(rank=rank_of[time_sort_token(time)])
-        for time in times
-    ]
-
-
-def _windowed(
-    times: list[TimeValue | None], window: RunWindow, rule: TimeWithin
-) -> list[_StableCell]:
-    low = window.start - rule.bound
-    high = window.end + rule.bound
-    cells: list[_StableCell] = []
-    for time in times:
-        match time:
-            case None:
-                cells.append(NullValue())
-            case FiniteTime(at=at) if low <= at <= high:
-                cells.append(DuringRun())
-            case FiniteTime() | InfinitePast() | InfiniteFuture():
-                cells.append(LiteralTime(time=time))
-    return cells
-
-
-def _offset(
-    value: TimeValue | None, anchor: TimeValue | None
-) -> NormalizedValue | UnanchoredReason:
-    match value, anchor:
-        case None, _:
-            return NullValue()
-        case InfinitePast() | InfiniteFuture(), _:
-            return UnanchoredReason.VALUE_INFINITE
-        case FiniteTime(), None:
-            return UnanchoredReason.ANCHOR_NULL
-        case FiniteTime(), InfinitePast() | InfiniteFuture():
-            return UnanchoredReason.ANCHOR_INFINITE
-        case FiniteTime(at=at), FiniteTime(at=anchor_at):
-            return OffsetFromAnchor(offset=at - anchor_at)
-
-
-def _anchored(
-    table: TableRules,
-    index: int,
-    anchor: str,
-    rows: tuple[RawRow, ...],
-) -> Result[list[_StableCell], NormalizeError]:
-    column = table.columns[index].name
-    anchor_index = table.position(anchor)
-    match _parse_times(table.name, column, [row[index] for row in rows]):
-        case Err(error):
-            return Err(error)
-        case Ok(values):
-            pass
-    match _parse_times(table.name, anchor, [row[anchor_index] for row in rows]):
-        case Err(error):
-            return Err(error)
-        case Ok(anchors):
-            pass
-    cells: list[_StableCell] = []
-    for value, anchor_value in zip(values, anchors, strict=True):
-        match _offset(value, anchor_value):
-            case UnanchoredReason() as reason:
-                return Err(
-                    UnanchoredTime(
-                        table=table.name, column=column, anchor=anchor, reason=reason
-                    )
-                )
-            case normalized:
-                cells.append(normalized)
-    return Ok(cells)
-
-
-def _exact_cell(text: RawCell) -> _StableCell:
-    match text:
-        case None:
-            return NullValue()
-        case str():
-            return ExactValue(text=text)
-
-
-def _ignored_cell() -> _StableCell:
-    return IgnoredValue()
-
-
-def _id_cell(text: RawCell, family: IdFamily) -> _StableCell:
-    match text:
-        case None:
-            return NullValue()
-        case str():
-            return _PendingId(raw=text, family=family)
-
-
-def _column_cells(
-    table: TableRules,
-    index: int,
-    rows: tuple[RawRow, ...],
-    window: RunWindow,
-) -> Result[list[_StableCell], NormalizeError]:
-    spec = table.columns[index]
-    texts = [row[index] for row in rows]
-    match spec.rule:
-        case Exact():
-            return Ok([_exact_cell(text) for text in texts])
-        case NormalisedId(family=family):
-            return Ok([_id_cell(text, family) for text in texts])
-        case Ignored():
-            return Ok([_ignored_cell() for _ in texts])
-        case TimeOrderOnly():
-            return _parse_times(table.name, spec.name, texts).map(_ranked)
-        case TimeWithin(reference=reference) as rule:
-            match reference:
-                case AnchorReference(column=anchor):
-                    return _anchored(table, index, anchor, rows)
-                case RunWindowReference():
-                    match _parse_times(table.name, spec.name, texts):
-                        case Err(error):
-                            return Err(error)
-                        case Ok(times):
-                            return Ok(_windowed(times, window, rule))
-
-
-def _stable_rows(
-    table: TableRules,
-    rows: tuple[RawRow, ...],
-    window: RunWindow,
-) -> Result[list[_StableRow], NormalizeError]:
-    columns: list[list[_StableCell]] = []
-    for index in range(len(table.columns)):
-        match _column_cells(table, index, rows, window):
-            case Err(error):
-                return Err(error)
-            case Ok(cells):
-                columns.append(cells)
-    return Ok([tuple(column[row] for column in columns) for row in range(len(rows))])
-
-
-# ---- Labelling and ties ----
-
-
-def _order_value(cell: _StableCell, book: _LabelBook) -> OrderKeyValue:
+def _order_value(cell: StableCell, book: _LabelBook) -> OrderKeyValue:
     match cell:
-        case _PendingId(raw=raw):
-            return book.lookup(raw)
+        case PendingId():
+            return _known(cell, book)
+        case PendingDocument(root=root):
+            return RenderedDocument(
+                text=render_json(root, lambda leaf: _leaf_text(leaf, book))
+            )
         case _:
             return cell
 
 
-def _final_value(cell: _StableCell, book: _LabelBook) -> NormalizedValue:
-    match cell:
-        case _PendingId(raw=raw):
+def _leaf_text(leaf: NormalizedValue | PendingId, book: _LabelBook) -> str:
+    match leaf:
+        case PendingId():
+            return render_value(_known(leaf, book))
+        case _:
+            return render_value(leaf)
+
+
+def _final_leaf(leaf: NormalizedValue | PendingId, book: _LabelBook) -> NormalizedValue:
+    match leaf:
+        case PendingId(raw=raw):
             match book.lookup(raw):
                 case IdLabel() as label:
                     return label
@@ -423,62 +194,143 @@ def _final_value(cell: _StableCell, book: _LabelBook) -> NormalizedValue:
                         f'id {raw!r} has no label after its table was labelled'
                     )
         case _:
+            return leaf
+
+
+def _final_value(cell: StableCell, book: _LabelBook) -> NormalizedValue:
+    match cell:
+        case PendingId():
+            return _final_leaf(cell, book)
+        case PendingDocument(root=root):
+            return JsonDocument(
+                root=map_json(root, lambda leaf: _final_leaf(leaf, book))
+            )
+        case _:
             return cell
 
 
+# ---- Masked tokens (reference order and tie check) ----
+
+
+def _leaf_token(
+    leaf: NormalizedValue | PendingId, marks: dict[str, str], book: _LabelBook
+) -> str:
+    match leaf:
+        case PendingId(raw=raw) if raw in marks:
+            return marks[raw]
+        case PendingId():
+            return render_value(_known(leaf, book))
+        case _:
+            return render_value(leaf)
+
+
+def _masked_token(cell: StableCell, marks: dict[str, str], book: _LabelBook) -> _Token:
+    """A cell as a token: ids in ``marks`` as their mark, other ids as their label or ``<new id>``."""
+    match cell:
+        case PendingId(raw=raw) if raw in marks:
+            return (21, marks[raw])
+        case PendingId():
+            return sort_token(_known(cell, book))
+        case PendingDocument(root=root):
+            return (12, render_json(root, lambda leaf: _leaf_token(leaf, marks, book)))
+        case OffsetFromAnchor():
+            return _ANY_OFFSET
+        case _:
+            return sort_token(cell)
+
+
+def _signature(
+    table_index: int, row_index: int, stable: list[list[StableRow]], book: _LabelBook
+) -> _Signature:
+    """For each id that the row brings in, the sorted rows elsewhere that hold it."""
+    row = stable[table_index][row_index]
+    new_values = [
+        pending.raw
+        for cell in row
+        for pending in cell_ids(cell)
+        if isinstance(book.lookup(pending.raw), UnlabelledId)
+    ]
+    signature: list[tuple[_Context, ...]] = []
+    for raw in dict.fromkeys(new_values):
+        others = [
+            holder for holder in book.holders(raw) if holder != (table_index, row_index)
+        ]
+        if len(others) > REFERENCE_CONTEXT_LIMIT:
+            signature.append((((-2, f'{len(others):09d} holders'),),))
+            continue
+        marks = {raw: _SELF[1]}
+        contexts = [
+            (
+                (-1, f'{holder_table:06d}'),
+                *(
+                    _masked_token(cell, marks, book)
+                    for cell in stable[holder_table][holder_row]
+                ),
+            )
+            for holder_table, holder_row in others
+        ]
+        signature.append(tuple(sorted(contexts)))
+    return tuple(signature)
+
+
+def _refined_groups(
+    table_index: int,
+    order: list[int],
+    tokens: list[tuple[_Token, ...]],
+    stable: list[list[StableRow]],
+    book: _LabelBook,
+) -> list[list[int]]:
+    """Rows in label order, grouped by equal order key and equal references."""
+    groups: list[list[int]] = []
+    for _, tied in itertools.groupby(order, key=lambda row: tokens[row]):
+        members = list(tied)
+        if len(members) == 1:
+            groups.append(members)
+            continue
+        signatures = {
+            row: _signature(table_index, row, stable, book) for row in members
+        }
+        members.sort(key=lambda row: signatures[row])
+        groups.extend(
+            list(group)
+            for _, group in itertools.groupby(members, key=lambda row: signatures[row])
+        )
+    return groups
+
+
 def _assign_labels(
-    stable: list[_StableRow], order: list[int], book: _LabelBook
+    rows: list[StableRow], order: list[int], book: _LabelBook
 ) -> dict[int, tuple[str, ...]]:
     introduced: dict[int, tuple[str, ...]] = {}
     for row in order:
         new: list[str] = []
-        for cell in stable[row]:
-            match cell:
-                case _PendingId(raw=raw, family=family) if isinstance(
-                    book.lookup(raw), UnlabelledId
-                ):
-                    book.introduce(raw, family)
-                    new.append(raw)
-                case _:
-                    pass
+        for cell in rows[row]:
+            for pending in cell_ids(cell):
+                if isinstance(book.lookup(pending.raw), UnlabelledId):
+                    book.introduce(pending.raw, pending.family)
+                    new.append(pending.raw)
         introduced[row] = tuple(new)
     return introduced
 
 
-def _masked_row(
-    cells: _StableRow, group_new: set[str], book: _LabelBook
-) -> tuple[NormalizedValue | _PrivateId, ...]:
-    local: dict[str, int] = {}
-    masked: list[NormalizedValue | _PrivateId] = []
-    for cell in cells:
-        match cell:
-            case _PendingId(raw=raw, family=family) if raw in group_new:
-                masked.append(
-                    _PrivateId(family=family, local=local.setdefault(raw, len(local)))
-                )
-            case _:
-                masked.append(_final_value(cell, book))
-    return tuple(masked)
-
-
 def _interchangeable(
     members: list[int],
-    stable: list[_StableRow],
+    rows: list[StableRow],
     introduced: dict[int, tuple[str, ...]],
     book: _LabelBook,
 ) -> bool:
     """Whether every order of the tied rows gives the same normalized table.
 
-    True when the rows assign no new label. Otherwise each new value must
-    occur only inside the group, in one row or in every row, and the rows
-    must be equal once each new value is replaced by its first position
-    in its row.
+    True when the rows bring in no new label. Otherwise each new value must
+    occur only inside the group, in one row or in every row of it, and the
+    rows must be equal once each new value is replaced by its first
+    position in its row.
     """
     group_new = {raw for row in members for raw in introduced[row]}
     if not group_new:
         return True
     in_row = {
-        row: Counter(cell.raw for cell in stable[row] if isinstance(cell, _PendingId))
+        row: Counter(pending.raw for cell in rows[row] for pending in cell_ids(cell))
         for row in members
     }
     for raw in group_new:
@@ -486,46 +338,56 @@ def _interchangeable(
         inside = sum(in_row[row][raw] for row in holders)
         if book.occurrences(raw) != inside or len(holders) not in (1, len(members)):
             return False
-    masked = [_masked_row(stable[row], group_new, book) for row in members]
+    masked: list[tuple[_Token, ...]] = []
+    for row in members:
+        local = [
+            pending.raw
+            for cell in rows[row]
+            for pending in cell_ids(cell)
+            if pending.raw in group_new
+        ]
+        marks = {
+            raw: f'new-{position}' for position, raw in enumerate(dict.fromkeys(local))
+        }
+        masked.append(tuple(_masked_token(cell, marks, book) for cell in rows[row]))
     return all(row == masked[0] for row in masked)
 
 
-def _normalize_table(
+def _label_table(
+    table_index: int,
     table: TableRules,
-    raw: RawTable,
-    window: RunWindow,
+    stable: list[list[StableRow]],
     book: _LabelBook,
-) -> Result[tuple[NormalizedTable, tuple[AmbiguousGroup, ...]], NormalizeError]:
-    match _stable_rows(table, raw.rows, window):
-        case Err(error):
-            return Err(error)
-        case Ok(stable):
-            pass
+) -> tuple[NormalizedTable, tuple[AmbiguousGroup, ...]]:
+    rows = stable[table_index]
     positions = tuple(table.position(column) for column in table.order_by)
     order_keys = [
         tuple(_order_value(row[position], book) for position in positions)
-        for row in stable
+        for row in rows
     ]
     tokens = [tuple(sort_token(value) for value in key) for key in order_keys]
-    order = sorted(range(len(stable)), key=lambda row: tokens[row])
-    introduced = _assign_labels(stable, order, book)
-    ambiguities: list[AmbiguousGroup] = []
-    for _, group in itertools.groupby(order, key=lambda row: tokens[row]):
-        members = list(group)
-        if len(members) > 1 and not _interchangeable(members, stable, introduced, book):
-            key = tuple(
+    initial = sorted(range(len(rows)), key=lambda row: tokens[row])
+    groups = _refined_groups(table_index, initial, tokens, stable, book)
+    order = [row for group in groups for row in group]
+    introduced = _assign_labels(rows, order, book)
+    ambiguities = [
+        AmbiguousGroup(
+            table=table.name,
+            order_key=tuple(
                 OrderKeyCell(column=column, value=value)
                 for column, value in zip(
-                    table.order_by, order_keys[members[0]], strict=True
+                    table.order_by, order_keys[group[0]], strict=True
                 )
-            )
-            ambiguities.append(
-                AmbiguousGroup(table=table.name, order_key=key, row_count=len(members))
-            )
-    rows = tuple(
-        tuple(_final_value(cell, book) for cell in stable[row]) for row in order
+            ),
+            row_count=len(group),
+        )
+        for group in groups
+        if len(group) > 1 and not _interchangeable(group, rows, introduced, book)
+    ]
+    normalized = tuple(
+        tuple(_final_value(cell, book) for cell in rows[row]) for row in order
     )
-    return Ok((NormalizedTable(rules=table, rows=rows), tuple(ambiguities)))
+    return NormalizedTable(rules=table, rows=normalized), tuple(ambiguities)
 
 
 def _assert_shape(raw: RawSnapshot, catalog: SnapshotCatalog) -> None:
@@ -551,20 +413,25 @@ def normalize_snapshot(
 ) -> Result[NormalizedSnapshot, NormalizeError]:
     """Normalize a raw snapshot by ``catalog``.
 
-    ``window`` is the run window that ``RunWindowReference`` rules compare
-    against. Ties that decide labels are reported in ``ambiguities``, not
-    as an error, so that a compare can report them with the rest.
-    The raw snapshot must follow the catalog's tables and columns (asserted).
+    ``window`` is the run window that run-window clock rules and generated
+    names refer to. Ties that decide labels are reported in
+    ``ambiguities``, not as an error, so that a compare can report them
+    with the rest. The raw snapshot must follow the catalog's tables and
+    columns (asserted).
     """
     _assert_shape(raw, catalog)
-    book = _LabelBook(_id_occurrences(raw, catalog))
-    tables: list[NormalizedTable] = []
-    ambiguities: list[AmbiguousGroup] = []
+    stable: list[list[StableRow]] = []
     for table, raw_table in zip(catalog.tables, raw.tables, strict=True):
-        match _normalize_table(table, raw_table, window, book):
+        match stable_rows(table, raw_table.rows, window):
             case Err(error):
                 return Err(error)
-            case Ok((normalized, groups)):
-                tables.append(normalized)
-                ambiguities.extend(groups)
+            case Ok(rows):
+                stable.append(rows)
+    book = _LabelBook(stable)
+    tables: list[NormalizedTable] = []
+    ambiguities: list[AmbiguousGroup] = []
+    for table_index, table in enumerate(catalog.tables):
+        normalized, groups = _label_table(table_index, table, stable, book)
+        tables.append(normalized)
+        ambiguities.extend(groups)
     return Ok(NormalizedSnapshot(tables=tuple(tables), ambiguities=tuple(ambiguities)))

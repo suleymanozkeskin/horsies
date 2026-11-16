@@ -33,7 +33,7 @@ from .versions import (
     ArchiveDomain,
     CorruptArchiveValue,
     DecodedArchiveValue,
-    validate_envelope_contract,
+    validate_archive_version,
     verify_payload_digest,
 )
 
@@ -77,20 +77,16 @@ class AttemptRecord:
 def decode_attempt_snapshot(
     *,
     version: int,
-    codec: str,
-    content_type: str,
     payload: bytes,
     digest: bytes,
 ) -> ArchiveDecodeResult[tuple[AttemptRecord, ...]]:
     """Decode a stored snapshot, failing closed on every malformation."""
-    contract_failure = validate_envelope_contract(
+    version_failure = validate_archive_version(
         domain=ArchiveDomain.ATTEMPTS,
         version=version,
-        codec=codec,
-        content_type=content_type,
     )
-    if contract_failure is not None:
-        return contract_failure
+    if version_failure is not None:
+        return version_failure
     digest_failure = verify_payload_digest(
         domain=ArchiveDomain.ATTEMPTS, payload=payload, digest=digest
     )

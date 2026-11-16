@@ -325,9 +325,8 @@ class WorkerStateInfo(BaseModel):
     True once that age exceeds the snapshot threshold, signalling a worker
     that stopped reporting. Liveness is proven separately by an active ping.
 
-    ``slot_health`` is ``all_serving``, ``slots_down`` (``down_slots`` lists
-    them, in slot order) or ``not_recorded`` (a worker version that did not
-    record it). ``down_slots`` is empty unless ``slot_health`` is
+    ``slot_health`` is ``all_serving`` or ``slots_down`` (``down_slots`` lists
+    them, in slot order). ``down_slots`` is empty unless ``slot_health`` is
     ``slots_down``.
     """
 
@@ -341,14 +340,14 @@ class WorkerStateInfo(BaseModel):
     uptime_s: int | None
     processes: int
     queues: list[str]
-    queue_max_concurrency: dict[str, int] | None
+    queue_max_concurrency: dict[str, int]
     tasks_running: int
     tasks_claimed: int
     cluster_wide_cap: int | None
     memory_usage_mb: float | None
     memory_percent: float | None
     cpu_percent: float | None
-    slot_health: Literal['all_serving', 'slots_down', 'not_recorded']
+    slot_health: Literal['all_serving', 'slots_down']
     down_slots: list[DownSlotInfo]
 
 
@@ -374,17 +373,6 @@ class WorkerClassLoadInfo(BaseModel):
     worker_id: str
     snapshot_at: datetime
     budgets: list[BudgetLoadInfo]
-
-
-class ClassesNotRecordedInfo(BaseModel):
-    """A live worker whose snapshot does not record its claim budgets.
-
-    A worker version that does not record them wrote the snapshot; the report
-    leaves the worker out of every stream.
-    """
-
-    worker_id: str
-    snapshot_at: datetime
 
 
 class StreamServedInfo(BaseModel):
@@ -447,16 +435,14 @@ class ClassReportInfo(BaseModel):
 
     ``checked_at`` is database time. A worker is live while its latest
     snapshot is at most ``live_window_s`` old. ``streams`` is ordered by
-    queue name, then by execution class. ``workers`` holds the live workers
-    that recorded their claim budgets, ``not_recorded`` the live workers
-    that did not, by worker id.
+    queue name, then by execution class. ``workers`` holds the live workers,
+    by worker id.
     """
 
     checked_at: datetime
     live_window_s: int
     streams: list[PendingStreamInfo]
     workers: list[WorkerClassLoadInfo]
-    not_recorded: list[ClassesNotRecordedInfo]
 
 
 class WorkerPingInfo(BaseModel):

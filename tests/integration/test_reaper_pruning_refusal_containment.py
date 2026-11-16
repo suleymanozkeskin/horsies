@@ -44,6 +44,10 @@ from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
 from tests.broker_resources_support import current_resources
+from tests.integration.task_history_harness import (
+    create_workflow,
+    link_workflow_node,
+)
 
 # Comfortably past the default class's 30-day horizon.
 BLOCKED_AGE = timedelta(days=45)
@@ -122,56 +126,32 @@ async def _block_leaf(broker: PostgresBroker, leaf: LeafRef) -> uuid.UUID:
     on (workflow_node_row_id, workflow_id); neither participates in the
     blocker survey itself.
     """
-    workflow_id = uuid.uuid4()
-    node_id = uuid.uuid4()
     task_id = uuid.uuid4()
     anchor = leaf.bounds.lower + timedelta(hours=12)
     async with current_resources(broker).engine.begin() as connection:
-        await connection.execute(
-            text(
-                'INSERT INTO horsies_workflows '
-                '(id, name, status, on_error, depth, root_workflow_id, '
-                ' sent_at, created_at, updated_at) '
-                "VALUES (:id, :name, :status, 'fail', 0, :id, "
-                ' now(), now(), now())'
-            ),
-            {
-                'id': workflow_id,
-                'name': 'refusal-containment',
-                'status': 'COMPLETED',
-            },
-        )
-        await connection.execute(
-            text(
-                'INSERT INTO horsies_workflow_tasks '
-                '(id, workflow_id, task_index, task_name, input, queue_name, '
-                ' priority, dependencies, allow_failed_deps, join_type, '
-                ' status, is_subworkflow, created_at, '
-                ' max_retries, execution, retention_class_key) '
-                "VALUES (:id, :workflow_id, 0, :task_name, '{}', 'default', "
-                " 100, ARRAY[]::int[], FALSE, 'all', :status, FALSE, now(), "
-                " 0, 'ISOLATED', 'standard_30d')"
-            ),
-            {
-                'id': node_id,
-                'workflow_id': workflow_id,
-                'task_name': 'refusal.blocker',
-                'status': 'COMPLETED',
-            },
+        workflow_id = await create_workflow(connection, status='COMPLETED')
+        node_id = await link_workflow_node(
+            connection,
+            str(task_id),
+            workflow_id=workflow_id,
+            node_status='COMPLETED',
         )
         await connection.execute(
             text(
                 'INSERT INTO horsies_workflow_phase2_pending ('
                 '  task_id, workflow_id, workflow_node_row_id,'
-                '  terminal_status, terminal_at, terminalization_kind,'
+                '  terminalization_kind,'
                 '  recovery_source, history_class, history_anchor,'
                 '  history_schema_version, result_digest,'
-                '  phase2_generation, created_at, attempt_count'
+                '  quarantine_task_id, created_at, attempt_count,'
+                '  last_attempt_at, last_failure_class'
                 ') VALUES ('
                 '  :task_id, :workflow_id, :node_id,'
-                "  'COMPLETED', :anchor, 'COMPLETE_LOCKED',"
+                "  'COMPLETE_LOCKED',"
                 "  'HISTORY', :history_class, :anchor,"
-                '  1, :digest, :generation, now(), 0)'
+                '  1, :digest,'
+                '  NULL, now(), 0,'
+                '  NULL, NULL)'
             ),
             {
                 'task_id': task_id,
@@ -179,11 +159,10 @@ async def _block_leaf(broker: PostgresBroker, leaf: LeafRef) -> uuid.UUID:
                 'node_id': node_id,
                 'anchor': anchor,
                 'history_class': leaf.class_key,
-                'generation': uuid.uuid4(),
                 'digest': b'\x00' * 32,
             },
         )
-    return workflow_id
+    return uuid.UUID(workflow_id)
 
 
 async def _leaf_exists(broker: PostgresBroker, leaf: LeafRef) -> bool:

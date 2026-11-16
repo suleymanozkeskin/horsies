@@ -36,9 +36,7 @@ from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
-    ClassCapacityNotRecorded,
     DownSlot,
-    SlotHealthNotRecorded,
     SlotsDown,
 )
 from horsies.core.models.payload import PayloadPolicy
@@ -1610,9 +1608,9 @@ def _worker_state_row(**overrides: Any) -> Any:
         'max_claim_per_worker': 4,
         'cluster_wide_cap': None,
         'queues': ['default'],
-        'queue_priorities': None,
-        'queue_max_concurrency': None,
-        'recovery_config': None,
+        'queue_priorities': {},
+        'queue_max_concurrency': {},
+        'recovery_config': {},
         'tasks_running': 2,
         'tasks_claimed': 1,
         'memory_usage_mb': 12.5,
@@ -1751,7 +1749,6 @@ class TestWorkerStateReads:
     @pytest.mark.parametrize(
         ('stored', 'expected'),
         [
-            (None, SlotHealthNotRecorded()),
             ([], AllSlotsServing()),
             (
                 [
@@ -1776,7 +1773,7 @@ class TestWorkerStateReads:
                 ),
             ),
         ],
-        ids=['not-recorded', 'all-serving', 'one-down'],
+        ids=['all-serving', 'one-down'],
     )
     async def test_the_snapshot_carries_the_slot_health(
         self,
@@ -1810,7 +1807,6 @@ class TestWorkerStateReads:
     @pytest.mark.parametrize(
         ('stored', 'expected'),
         [
-            (None, ClassCapacityNotRecorded()),
             ({}, ClassBudgets(())),
             (
                 {'ISOLATED': {'capacity': 2, 'serves': ['ISOLATED']}},
@@ -1819,7 +1815,7 @@ class TestWorkerStateReads:
                 ),
             ),
         ],
-        ids=['not-recorded', 'serves-no-class', 'one-budget'],
+        ids=['serves-no-class', 'one-budget'],
     )
     async def test_the_snapshot_carries_the_class_capacity(
         self,
@@ -3832,8 +3828,6 @@ class TestHistoryTaskInfoResultDecode:
         detail.result_payload = payload
         detail.result_digest = archive_digest(payload)
         detail.result_envelope_version = 1
-        detail.result_codec = 'json-utf8'
-        detail.result_content_type = 'application/json'
 
         with (
             patch(

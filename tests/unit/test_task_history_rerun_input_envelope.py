@@ -1,10 +1,14 @@
-"""Input-envelope content v1: canonical bytes, fail-closed decode.
+"""The rerun input envelope: exact-text framing, fail-closed decode.
 
-The digest covers bytes, so the serializer is pinned canonical — equal
-content in any construction order produces identical bytes — and the
-decoder verifies the digest before parsing, refuses foreign shapes, and
-never reads an absent options key as defaults. Stored bytes are strict
-JSON: a non-finite number never enters them and never leaves them.
+The move frames the stored input and options texts byte for byte, and the
+decoder hands the same texts back, so a rerun that stores them gets the
+same envelope and digest. The decoder verifies the digest before parsing,
+refuses any other framing, and never reads an absent options member as
+defaults. Stored bytes are strict JSON: a non-finite number never enters
+them and never leaves them.
+
+The prepared enqueue envelope writer, ``encode_input_envelope_v1``, keeps
+its canonical-serialization pins.
 """
 
 from __future__ import annotations
@@ -17,9 +21,11 @@ from horsies.core.history.rerun.input_envelope import (
     InputEnvelopeCorrupt,
     InputEnvelopeVersionUnknown,
     ReconstructedInput,
+    StoredTaskOptions,
     decode_input_envelope,
     encode_input_envelope_v1,
 )
+from tests.rerun_envelope_support import frame_rerun_envelope
 
 pytestmark = [pytest.mark.unit]
 
@@ -57,25 +63,56 @@ class TestCanonicalSerialization:
         assert 'ü'.encode('utf-8') in payload
 
 
-class TestDecode:
-    def test_roundtrip(self) -> None:
-        payload = encode_input_envelope_v1(
-            args=[1], kwargs={'k': 'v'}, options={'o': 1}
-        )
-        decoded = roundtrip(payload)
-        assert decoded == ReconstructedInput(
-            args=(1,), kwargs={'k': 'v'}, options={'o': 1}
+class TestFraming:
+    def test_the_mirror_frames_input_and_options_byte_for_byte(self) -> None:
+        assert frame_rerun_envelope('{"k":"v"}', '{"o":1}') == (
+            b'{"input":{"k":"v"},"options":{"o":1}}'
         )
 
-    def test_null_options_means_defaults(self) -> None:
-        payload = encode_input_envelope_v1(args=[], kwargs={}, options=None)
+    def test_absent_options_frame_as_null(self) -> None:
+        assert frame_rerun_envelope('{}', None) == (
+            b'{"input":{},"options":null}'
+        )
+
+
+class TestDecode:
+    def test_roundtrip_returns_the_stored_texts(self) -> None:
+        payload = frame_rerun_envelope('{"k":"v"}', '{"o":1}')
         decoded = roundtrip(payload)
+        assert decoded == ReconstructedInput(
+            input_json='{"k":"v"}',
+            options=StoredTaskOptions(text='{"o":1}', value={'o': 1}),
+        )
+
+    def test_texts_come_back_exactly_as_stored(self) -> None:
+        """Spacing and key order are part of the bytes the digest covers."""
+        input_json = ' {"b": 2, "a": [1, 2]} '
+        options_json = '{"timeout_ms": 5, "execution": "ISOLATED"}'
+        decoded = roundtrip(frame_rerun_envelope(input_json, options_json))
+        assert isinstance(decoded, ReconstructedInput)
+        assert decoded.input_json == input_json
+        assert decoded.options is not None
+        assert decoded.options.text == options_json
+        assert frame_rerun_envelope(
+            decoded.input_json, decoded.options.text
+        ) == frame_rerun_envelope(input_json, options_json)
+
+    def test_a_member_name_inside_the_input_is_not_a_boundary(self) -> None:
+        input_json = '{"s":",\\"options\\":","options":{}}'
+        decoded = roundtrip(frame_rerun_envelope(input_json, None))
+        assert decoded == ReconstructedInput(input_json=input_json, options=None)
+
+    def test_non_ascii_stays_utf8(self) -> None:
+        decoded = roundtrip(frame_rerun_envelope('{"k":"ü"}', None))
+        assert decoded == ReconstructedInput(input_json='{"k":"ü"}', options=None)
+
+    def test_null_options_means_defaults(self) -> None:
+        decoded = roundtrip(frame_rerun_envelope('{}', None))
         assert isinstance(decoded, ReconstructedInput)
         assert decoded.options is None
 
-    def test_absent_options_key_fails_closed(self) -> None:
-        payload = b'{"args":[],"kwargs":{}}'
-        decoded = roundtrip(payload)
+    def test_absent_options_member_fails_closed(self) -> None:
+        decoded = roundtrip(b'{"input":{}}')
         assert isinstance(decoded, InputEnvelopeCorrupt)
         assert 'options' in decoded.detail
 
@@ -89,34 +126,42 @@ class TestDecode:
         assert 'digest' in decoded.detail
 
     def test_unknown_version_is_typed(self) -> None:
-        payload = encode_input_envelope_v1(args=[], kwargs={}, options=None)
+        payload = frame_rerun_envelope('{}', None)
         decoded = decode_input_envelope(
             version=2, payload=payload, digest=sha256(payload).digest()
         )
         assert decoded == InputEnvelopeVersionUnknown(version=2)
 
     @pytest.mark.parametrize(
-        'payload',
+        ('payload', 'detail'),
         [
-            b'[]',
-            b'{"args":{},"kwargs":{},"options":null}',
-            b'{"args":[],"kwargs":[],"options":null}',
-            b'{"args":[],"kwargs":{},"options":7}',
-            b'{"args":[],"kwargs":{},"options":null,"extra":1}',
+            (b'[]', 'not framed'),
+            (b'{"options":null,"input":{}}', 'not framed'),
+            (b'{"input":{},"options":null,"extra":1}', 'not framed'),
+            (b'{"args":[],"kwargs":{},"options":null}', 'not framed'),
+            (b'{ "input":{},"options":null}', 'not framed'),
+            (b'{"input":[],"options":null}', 'input is not an object'),
+            (b'{"input":"text","options":null}', 'input is not an object'),
+            (b'{"input":{},"options":7}', 'neither an object nor null'),
+            (b'{"input":{},"options":[]}', 'neither an object nor null'),
         ],
     )
-    def test_foreign_shapes_fail_closed(self, payload: bytes) -> None:
-        assert isinstance(roundtrip(payload), InputEnvelopeCorrupt)
+    def test_foreign_shapes_fail_closed(
+        self, payload: bytes, detail: str
+    ) -> None:
+        decoded = roundtrip(payload)
+        assert isinstance(decoded, InputEnvelopeCorrupt)
+        assert detail in decoded.detail
 
     @pytest.mark.parametrize(
         'payload',
         [
-            b'{"args":[Infinity],"kwargs":{},"options":null}',
-            b'{"args":[],"kwargs":{"x":-Infinity},"options":null}',
-            b'{"args":[],"kwargs":{},"options":{"x":NaN}}',
-            b'{"args":[1e9999],"kwargs":{},"options":null}',
-            b'{"args":[],"kwargs":{"x":-1e9999},"options":null}',
-            b'{"args":[],"kwargs":{},"options":{"x":[{"y":1e9999}]}}',
+            b'{"input":{"x":Infinity},"options":null}',
+            b'{"input":{"x":-Infinity},"options":null}',
+            b'{"input":{},"options":{"x":NaN}}',
+            b'{"input":{"x":1e9999},"options":null}',
+            b'{"input":{"x":-1e9999},"options":null}',
+            b'{"input":{},"options":{"x":[{"y":1e9999}]}}',
         ],
     )
     def test_non_finite_number_fails_closed(self, payload: bytes) -> None:
@@ -125,19 +170,22 @@ class TestDecode:
         assert 'payload is not JSON' in decoded.detail
 
     def test_lone_surrogate_fails_closed(self) -> None:
-        payload = rb'{"args":[],"kwargs":{"x":"\ud800"},"options":null}'
+        payload = rb'{"input":{"x":"\ud800"},"options":null}'
         decoded = roundtrip(payload)
         assert isinstance(decoded, InputEnvelopeCorrupt)
         assert 'lone surrogate' in decoded.detail
 
     def test_nesting_past_the_depth_bound_fails_closed(self) -> None:
-        payload = b'{"args":' + b'[' * 1_100 + b']' * 1_100 + b',"kwargs":{},"options":null}'
+        payload = (
+            b'{"input":{"x":' + b'[' * 1_100 + b']' * 1_100
+            + b'},"options":null}'
+        )
         decoded = roundtrip(payload)
         assert isinstance(decoded, InputEnvelopeCorrupt)
         assert 'nested deeper than' in decoded.detail
 
     def test_integer_over_the_parse_limit_fails_closed(self) -> None:
-        payload = b'{"args":[' + b'1' * 5000 + b'],"kwargs":{},"options":null}'
+        payload = b'{"input":{"x":' + b'1' * 5000 + b'},"options":null}'
         decoded = roundtrip(payload)
         assert isinstance(decoded, InputEnvelopeCorrupt)
         assert 'payload is not JSON' in decoded.detail
@@ -155,20 +203,10 @@ class TestDecode:
         assert isinstance(decoded, InputEnvelopeCorrupt)
         assert 'payload is not JSON' in decoded.detail
 
-    def test_largest_finite_float_roundtrips_byte_identical(self) -> None:
-        payload = encode_input_envelope_v1(
-            args=[1.7976931348623157e308], kwargs={}, options=None
-        )
-        decoded = roundtrip(payload)
-        assert isinstance(decoded, ReconstructedInput)
-        assert (
-            encode_input_envelope_v1(
-                args=decoded.args,
-                kwargs=decoded.kwargs,
-                options=decoded.options,
-            )
-            == payload
-        )
+    def test_largest_finite_float_comes_back_byte_identical(self) -> None:
+        input_json = '{"x":1.7976931348623157e308}'
+        decoded = roundtrip(frame_rerun_envelope(input_json, None))
+        assert decoded == ReconstructedInput(input_json=input_json, options=None)
 
 
 class TestNonFiniteValueIsADefect:
