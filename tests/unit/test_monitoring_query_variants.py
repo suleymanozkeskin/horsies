@@ -3,15 +3,15 @@
 ``MonitoringQueryError`` is a union with one frozen variant per
 ``MonitoringQueryErrorCode`` member. A variant's repr hides the message and
 the cause. History data that does not decode is
-``MonitoringQueryHistoryContractViolation`` in ``list_tasks`` and in both
-detail reads. The query tests run on a mocked session.
+``MonitoringQueryHistoryContractViolation`` in ``list_tasks`` (the EXPLAIN
+text of the history estimate) and in both detail reads. The query tests run
+on a double of the one function statement.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, get_args
-from unittest.mock import AsyncMock, MagicMock
+from typing import get_args
 
 import pytest
 from fastapi import HTTPException
@@ -36,7 +36,12 @@ from horsies.monitoring.queries import (
     list_tasks,
 )
 from horsies.web.routes._common import query_failed
-from tests.broker_resources_support import attach_resources, fake_resources
+from tests.monitoring_function_support import (
+    function_broker,
+    history_row,
+    list_totals_row,
+    node_row,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -105,39 +110,6 @@ class TestVariantCatalog:
                 assert error.retryable is False
 
 
-def _broker_with_session(session: AsyncMock) -> MagicMock:
-    session_ctx = AsyncMock()
-    session_ctx.__aenter__ = AsyncMock(return_value=session)
-    session_ctx.__aexit__ = AsyncMock(return_value=False)
-    broker = MagicMock()
-    attach_resources(
-        broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)),
-    )
-    return broker
-
-
-def _scalar_result(value: Any) -> MagicMock:
-    result = MagicMock()
-    result.scalar_one_or_none.return_value = value
-    return result
-
-
-def _session(*results: MagicMock | BaseException) -> AsyncMock:
-    session = AsyncMock()
-    session.execute = AsyncMock(side_effect=list(results))
-    session.connection = AsyncMock(return_value=MagicMock())
-    return session
-
-
-def _refuse_history_read(monkeypatch: pytest.MonkeyPatch, cause: BaseException) -> None:
-    monkeypatch.setattr(
-        queries_module, 'staged_detail_published', AsyncMock(return_value=True),
-    )
-    monkeypatch.setattr(
-        queries_module, 'read_task_detail', AsyncMock(side_effect=cause),
-    )
-
-
 class TestDatabaseFailure:
     @pytest.mark.parametrize(
         'cause,retryable',
@@ -151,7 +123,7 @@ class TestDatabaseFailure:
     async def test_the_cause_is_kept_and_classified(
         self, cause: BaseException, retryable: bool,
     ) -> None:
-        broker = _broker_with_session(_session(cause))
+        broker, _ = function_broker(cause)
 
         result = await get_task_detail(broker, TASK_ID)
 
@@ -165,31 +137,24 @@ class TestDatabaseFailure:
 
 class TestHistoryContractViolation:
     @pytest.mark.asyncio
-    async def test_task_detail_returns_the_variant_with_the_cause(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cause = HistoryContractError(CAUSE_MARKER)
-        _refuse_history_read(monkeypatch, cause)
-        broker = _broker_with_session(_session(_scalar_result(None)))
+    async def test_task_detail_returns_the_variant_with_the_cause(self) -> None:
+        broker, _ = function_broker([history_row(TASK_ID, status=CAUSE_MARKER)])
 
         result = await get_task_detail(broker, TASK_ID)
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert error.exception is cause
-        assert error.message == f'task detail history read failed: {CAUSE_MARKER}'
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.message == (
+            f'task detail history read failed: history row {TASK_ID} has status '
+            f"'{CAUSE_MARKER}', which is not a task status"
+        )
 
     @pytest.mark.asyncio
-    async def test_workflow_node_returns_the_variant_with_the_cause(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cause = HistoryContractError(CAUSE_MARKER)
-        _refuse_history_read(monkeypatch, cause)
-        node = MagicMock()
-        node.task_id = TASK_ID
-        broker = _broker_with_session(
-            _session(_scalar_result(node), _scalar_result(None)),
+    async def test_workflow_node_returns_the_variant_with_the_cause(self) -> None:
+        broker, _ = function_broker(
+            [node_row(0, history_row(TASK_ID, status=CAUSE_MARKER))],
         )
 
         result = await get_workflow_node(broker, WORKFLOW_ID, 0)
@@ -197,21 +162,29 @@ class TestHistoryContractViolation:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert error.exception is cause
-        assert error.message == f'workflow node history read failed: {CAUSE_MARKER}'
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.message == (
+            f'workflow node history read failed: history row {TASK_ID} has status '
+            f"'{CAUSE_MARKER}', which is not a task status"
+        )
 
     @pytest.mark.asyncio
     async def test_the_task_list_estimate_returns_the_variant_with_the_cause(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         cause = HistoryContractError(CAUSE_MARKER)
-        monkeypatch.setattr(
-            queries_module, '_estimated_task_total', AsyncMock(return_value=0),
+
+        def refuse(payload: object) -> int:
+            raise cause
+
+        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', refuse)
+        broker, _ = function_broker(
+            [
+                list_totals_row(
+                    'ESTIMATE_HISTORY_PLAN', live_total=0, history_total=None, plan='[]',
+                ),
+            ],
         )
-        monkeypatch.setattr(
-            queries_module, '_estimated_history_total', AsyncMock(side_effect=cause),
-        )
-        broker = _broker_with_session(_session())
         upper = datetime(2026, 11, 1, tzinfo=timezone.utc)
 
         result = await list_tasks(

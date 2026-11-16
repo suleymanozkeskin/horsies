@@ -97,7 +97,7 @@ Rules:
 - A send makes at most 4 broker calls: 1 first call and 3 resends.
 - The wait before a resend starts at 200 ms and doubles. The maximum wait is 2000 ms.
 - Only `TaskSendEnqueueFailed` with `retryable=True` is resent. Every other error returns at once.
-- All resends of one send use the same task id. A resend of an enqueue that did commit returns the same task.
+- All resends of one send use the same task id. A resend of an enqueue that did commit returns the same task, also after that task finished: the resend reads the task history and does not run the task a second time.
 - The setting applies to `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`.
 
 A resend lives inside one send call. It does not survive a process stop. If the process stops after the commit and before the send, no task exists.

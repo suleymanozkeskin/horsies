@@ -20,6 +20,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::core::registry::BuilderHookName;
 use crate::worker::executor::protocol::{RunEnd, StopReason};
 use crate::worker::retry::read_stored_options;
 
@@ -74,13 +75,20 @@ fn dispatched(task_id: Uuid, generation: DateTime<Utc>) -> ClaimedTask {
     }
 }
 
+/// The writer of `WORKER`, with the orphan self-heal off: a stop for a node
+/// that is not linked then writes nothing (`settle_tests` covers the
+/// self-heal).
 fn writer(pool: &PgPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let successes = super::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
-        Arc::new(PostgresBroker::from_pool(pool.clone())),
-        Arc::new(WorkflowSpecRegistry::new()),
+        broker,
+        Arc::new(WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER)),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
+        successes,
+        OrphanSelfHeal::Off,
     )
 }
 
@@ -173,7 +181,8 @@ async fn an_unconfirmed_start_does_not_touch_a_later_claim() {
 }
 
 /// Every other stop of a plain task owes nothing: the child's start wrote
-/// what its case needs, and the parent leaves the row alone.
+/// what its case needs, and the parent leaves the row alone. With the
+/// orphan self-heal off, `NODE_NOT_LINKED` writes nothing either.
 #[tokio::test]
 #[serial]
 async fn other_stops_of_a_plain_task_write_nothing() {

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,6 +35,7 @@ from horsies.core.types.result import is_ok
 from horsies.core.worker.claiming import ClaimPass
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.current import set_current_app
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.stored_timeout import (
     NoTimeout,
     OptionsUnreadable,
@@ -101,9 +101,8 @@ def _run_in_process(
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
         *,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         execution: Execution,
-        task_options: str | None,
     ) -> None:
         seen.append(timeout)
         wire = wire_of(
@@ -115,7 +114,7 @@ def _run_in_process(
                 master_worker_id=worker.worker_instance_id,
                 is_workflow_task=is_workflow_task,
                 timeout=timeout,
-                claimed_at=claimed_at,
+                claimed_at=claim.claimed_at,
                 task_loop=TaskLoop(),
             )
         )
@@ -126,7 +125,7 @@ def _run_in_process(
             is_workflow_task,
             timeout=timeout,
             task_name=task_name,
-            claimed_at=claimed_at,
+            claim=claim,
         )
         assert is_ok(result), result
 

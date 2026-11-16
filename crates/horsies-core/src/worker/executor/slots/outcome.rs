@@ -4,41 +4,53 @@
 //!
 //! | End | Statement |
 //! |---|---|
-//! | `NotDispatched` | release of the claim; the row goes back to the queue |
-//! | `Reported(result)`, a value | the fused success of a plain task, or the workflow success |
+//! | `NotDispatched` | `horsies_release_claims` with placement `SAME_CLASS`; the row goes back to the queue |
+//! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
-//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim |
+//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); a task whose node is not linked is cancelled as an owned orphan (`horsies_cancel_owned_orphan`) when the app's `auto_terminate_orphaned_workflow_tasks` is on |
 //! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
-//! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end; a row that is still CLAIMED is released |
+//! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
 //!
 //! A database error never decides between a retry and a failure: the write
 //! is sent again, at most the retries of its [`WriteStage`]. After the last
 //! retry of a `TASK_TIMEOUT` write, crash recovery writes `TASK_TIMEOUT` at
 //! the same placement, with its own retries (Python
-//! `_recover_timed_out_row`).
+//! `_recover_timed_out_row`). A plain success sent again joins a later
+//! batch; a row whose batch committed before its reply was lost answers
+//! `AlreadyApplied`.
 
 use std::sync::Arc;
 use std::time::Duration;
+
+use serde_json::value::RawValue;
+use uuid::Uuid;
 
 use super::dispatch::{AttemptEnd, ClaimedTask, Settlement};
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
-use crate::broker::PostgresBroker;
+use crate::broker::claims::{
+    release_claims, ReleaseBatch, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
+};
+use crate::broker::terminalization::terminalize;
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
-use crate::core::lifecycle::OwnedClaim;
+use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
+use crate::db::Transience;
 use crate::worker::execution::{
-    persist_failed_attempt, persist_ok_result, persist_undecodable_result, phase_retry_delay,
-    run_phase2, unclaim_task_with_retry, FinalizeError, FinalizeOutcome, Phase2Work,
-    PHASE1_MAX_RETRIES,
+    persist_failed_attempt, persist_ok_result, persist_undecodable_result,
+    persist_unreported_attempt, phase_retry_delay, run_phase2, FinalizeError, FinalizeOutcome,
+    FinalizeStage, Phase2Work, PhaseTwoForm, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
 };
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
+use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
+use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
 use crate::worker::retry::{admit_retry, RetryAdmission};
 
 /// The text of a worker failure with no detail (Python
@@ -49,6 +61,28 @@ const WORKER_FAILURE_FALLBACK: &str = "Worker failure";
 pub const TIMEOUT_WRITE_MAX_RETRIES: u32 = 3;
 /// Retries of a crash-recovery write (Python `_FINALIZE_FUTURE_MAX_RETRIES`).
 pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
+/// Sends of the release of a claim that no child took, the first included.
+pub const RELEASE_SENDS: u32 = 3;
+
+/// Whether the worker cancels a claimed workflow task whose node is not
+/// linked to it (the app's `auto_terminate_orphaned_workflow_tasks`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanSelfHeal {
+    /// Cancel the task with `horsies_cancel_owned_orphan`.
+    On,
+    /// Leave the row CLAIMED for inspection.
+    Off,
+}
+
+impl OrphanSelfHeal {
+    /// The setting of `auto_terminate_orphaned_workflow_tasks`.
+    pub fn of_recovery_flag(auto_terminate_orphaned_workflow_tasks: bool) -> Self {
+        match auto_terminate_orphaned_workflow_tasks {
+            true => Self::On,
+            false => Self::Off,
+        }
+    }
+}
 
 /// The stage of an outcome write. Each stage has its own retry bound
 /// (Python `_max_retries_of`).
@@ -75,20 +109,38 @@ impl WriteStage {
     }
 }
 
-/// One write of phase 1, sent again on a retryable database error.
-enum PhaseOneWrite {
-    Success { value: Vec<u8> },
-    Undecodable { diagnosis: String },
-    Failure(FinishFailedAttempt),
+/// What one write of phase 1 did.
+enum PhaseOneOutcome {
+    /// The write applied or was refused; what it owes follows.
+    Finalize(FinalizeOutcome),
+    /// The row was still CLAIMED by this claim generation: the statement put
+    /// it back in the queue with no attempt row.
+    ClaimReleased,
 }
 
-/// Whether a write that found the row CLAIMED releases the claim: the
-/// child was killed before it set the row RUNNING.
+/// One write of phase 1, sent again on a retryable database error.
+enum PhaseOneWrite {
+    Success {
+        value: Vec<u8>,
+    },
+    Undecodable {
+        diagnosis: String,
+    },
+    Failure(FinishFailedAttempt),
+    /// The cancel of a claimed workflow task whose node is not linked.
+    CancelOrphan,
+}
+
+/// What the failed-attempt statement does with a row that is still CLAIMED
+/// by this claim generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimedRowRule {
-    /// The child reported a result, so the row must be RUNNING.
+    /// The child reported a result, so the row must be RUNNING; a CLAIMED
+    /// row is not held (`horsies_finish_failed_attempt` with `REFUSE`).
     Refuse,
-    /// A killed child: a CLAIMED row goes back to the queue with no attempt.
+    /// A killed child, which may have died before it set the row RUNNING: a
+    /// CLAIMED row goes back to the queue with no attempt, in the same
+    /// statement (`RELEASE`).
     Release,
 }
 
@@ -245,13 +297,95 @@ pub fn timeout_recovery_write(
     )
 }
 
+/// The stored form of a success value (`TaskResult::Ok`), with the value
+/// text kept byte for byte. Pure.
+///
+/// Errors: the diagnosis of a value that is not JSON; the caller fails the
+/// task with `WORKER_SERIALIZATION_ERROR`.
+fn ok_envelope(value: &[u8]) -> Result<String, String> {
+    let raw = serde_json::from_slice::<&RawValue>(value).map_err(|error| error.to_string())?;
+    serde_json::to_string(&TaskResult::Ok(raw)).map_err(|error| error.to_string())
+}
+
+/// A finalize batcher for an outcome writer under test: a worker pool of 5
+/// connections (2 flushers) and a queue of 64 rows.
+#[cfg(test)]
+pub(super) fn test_successes(
+    broker: &Arc<PostgresBroker>,
+    worker_id: &str,
+) -> FinalizeBatcher<WorkerPoolSuccessWrite> {
+    use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
+    use crate::worker::finalize_batch::FlusherBound;
+    let sizing = PoolSizing::new(5, Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS))
+        .expect("a worker pool of 5 keeps batch connections");
+    FinalizeBatcher::new(
+        WorkerPoolSuccessWrite::new(Arc::clone(broker), worker_id.to_owned()),
+        std::num::NonZeroUsize::new(64).expect("64 is not zero"),
+        FlusherBound::of_worker_pool(&sizing).expect("a pool of 5 leaves 2 flushers"),
+    )
+}
+
+/// The settlement of one release, from its one outcome. The release answers
+/// each input row once, so another count is a defect.
+fn released(task: &ClaimedTask, reason: &str, outcomes: &[(Uuid, ReleaseOutcome)]) -> Settlement {
+    match outcomes {
+        [(_, ReleaseOutcome::Released)] => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                "Requeued worker-owned in-flight task {}: {reason}",
+                task.task_id,
+            );
+            Settlement::Written
+        }
+        [(_, ReleaseOutcome::NotHeld)] => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                "Failed to requeue task {} (not owned or not requeueable): {reason}",
+                task.task_id,
+            );
+            Settlement::NotHeld
+        }
+        other => unreachable!(
+            "the release of one claim answered {} rows for task {}",
+            other.len(),
+            task.task_id
+        ),
+    }
+}
+
+/// The settlement of a release that failed: the claim lease returns the
+/// row.
+fn release_failed(
+    task: &ClaimedTask,
+    reason: &str,
+    error: &BrokerError,
+    retryable: bool,
+) -> Settlement {
+    tracing::error!(
+        task_id = %task.task_id,
+        error = %error,
+        "DB error while requeueing task {} ({reason}); its claim lease returns the row",
+        task.task_id,
+    );
+    match retryable {
+        true => Settlement::RetriesExhausted,
+        false => Settlement::WriteFailed,
+    }
+}
+
 /// Writes the end of each attempt with the existing statements.
+///
+/// The plain successes go to the finalize batcher of the worker, which
+/// writes them in batches; the worker stop closes it after the drain of the
+/// outcome writes (`finalize_batch::stop::drain_then_close`).
 pub struct OutcomeWriter {
     broker: Arc<PostgresBroker>,
     workflows: Arc<WorkflowSpecRegistry>,
     worker_id: String,
     payload_policy: PayloadPolicy,
     retention: RetentionConfig,
+    successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
+    orphan_self_heal: OrphanSelfHeal,
 }
 
 impl OutcomeWriter {
@@ -261,6 +395,8 @@ impl OutcomeWriter {
         worker_id: String,
         payload_policy: PayloadPolicy,
         retention: RetentionConfig,
+        successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
+        orphan_self_heal: OrphanSelfHeal,
     ) -> Self {
         Self {
             broker,
@@ -268,6 +404,8 @@ impl OutcomeWriter {
             worker_id,
             payload_policy,
             retention,
+            successes,
+            orphan_self_heal,
         }
     }
 
@@ -408,21 +546,25 @@ impl OutcomeWriter {
         &self,
         task: &ClaimedTask,
         write: &PhaseOneWrite,
-    ) -> Result<FinalizeOutcome, FinalizeError> {
+        claimed_row: ClaimedRowRule,
+    ) -> Result<PhaseOneOutcome, FinalizeError> {
         let workflow = task.kind.is_workflow_task();
-        match write {
-            PhaseOneWrite::Success { value } => {
-                persist_ok_result(
-                    &self.broker,
-                    task.task_id,
-                    value,
-                    fence(task, &self.worker_id),
-                    workflow,
-                    &task.queue_name,
-                )
-                .await
-            }
-            PhaseOneWrite::Undecodable { diagnosis } => {
+        let written = match (write, claimed_row) {
+            (PhaseOneWrite::Success { value }, _) => match task.kind.is_workflow_task() {
+                true => {
+                    persist_ok_result(
+                        &self.broker,
+                        task.task_id,
+                        value,
+                        fence(task, &self.worker_id),
+                        workflow,
+                        &task.queue_name,
+                    )
+                    .await
+                }
+                false => self.complete_plain_success(task, value).await,
+            },
+            (PhaseOneWrite::Undecodable { diagnosis }, _) => {
                 persist_undecodable_result(
                     &self.broker,
                     task.task_id,
@@ -432,9 +574,130 @@ impl OutcomeWriter {
                 )
                 .await
             }
-            PhaseOneWrite::Failure(command) => {
+            (PhaseOneWrite::Failure(command), ClaimedRowRule::Refuse) => {
                 persist_failed_attempt(&self.broker, command, workflow).await
             }
+            (PhaseOneWrite::Failure(command), ClaimedRowRule::Release) => {
+                return persist_unreported_attempt(&self.broker, command, workflow)
+                    .await
+                    .map(|written| match written {
+                        UnreportedAttemptWrite::ClaimReleased => PhaseOneOutcome::ClaimReleased,
+                        UnreportedAttemptWrite::Written(outcome) => {
+                            PhaseOneOutcome::Finalize(outcome)
+                        }
+                    });
+            }
+            (PhaseOneWrite::CancelOrphan, _) => self.cancel_orphan(task).await,
+        };
+        written.map(PhaseOneOutcome::Finalize)
+    }
+
+    /// Cancel a claimed workflow task whose node is not linked to it, fenced
+    /// to this claim (Python `horsies/core/worker/finalize.py:1216-1260`,
+    /// the `CancelOwnedOrphan` decision of `_persist_task_terminal_state`).
+    /// The function judges the link again under its own lock: a task that
+    /// is no longer a terminable owned orphan is left as it is. Nothing is
+    /// owed to phase 2 in either case.
+    ///
+    /// Errors: a [`FinalizeError`] of phase 1, retryable when the database
+    /// error may clear.
+    async fn cancel_orphan(&self, task: &ClaimedTask) -> Result<FinalizeOutcome, FinalizeError> {
+        let command = TerminalizationCommand::CancelOwnedOrphan {
+            task_id: task.task_id,
+            fence: fence(task, &self.worker_id),
+        };
+        let cancelled = match self.broker.core_pools_for_write() {
+            Ok((open, _write)) => {
+                terminalize(open.main(), self.broker.statement_log(), &command).await
+            }
+            Err(error) => Err(error),
+        };
+        let outcomes = cancelled.map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase1Persist,
+            task_id: task.task_id,
+            message: format!("Failed to terminate orphaned workflow task: {error}"),
+            retryable: error.is_retryable(),
+        })?;
+        match outcomes.first() {
+            Some(TerminalizationOutcome::Applied { .. }) => tracing::info!(
+                task_id = %task.task_id,
+                "Task {} cancelled: orphaned workflow task (no live workflow_task linkage)",
+                task.task_id,
+            ),
+            Some(
+                TerminalizationOutcome::AlreadyApplied { .. }
+                | TerminalizationOutcome::LostClaim { .. }
+                | TerminalizationOutcome::SourceStateConflict { .. }
+                | TerminalizationOutcome::TaskAbsent { .. },
+            )
+            | None => tracing::debug!(
+                task_id = %task.task_id,
+                "Task {} was no longer a terminable owned orphan",
+                task.task_id,
+            ),
+        }
+        Ok(FinalizeOutcome::Finalized)
+    }
+
+    /// The success of a plain task: its row joins the next batch of the
+    /// finalize batcher (Python `_complete_plain_success`,
+    /// `horsies/core/worker/finalize.py:1386-1436`). Returns after the
+    /// statement of the row's batch returned. A plain success owes no phase
+    /// 2: its capacity wake commits with the row.
+    ///
+    /// Errors: a [`FinalizeError`] of phase 1, retryable when the cause of
+    /// the batch write may clear (an unknown outcome is retryable: the
+    /// replay finds the row `AlreadyApplied` when it committed).
+    async fn complete_plain_success(
+        &self,
+        task: &ClaimedTask,
+        value: &[u8],
+    ) -> Result<FinalizeOutcome, FinalizeError> {
+        let result_json = match ok_envelope(value) {
+            Ok(result_json) => result_json,
+            Err(diagnosis) => {
+                return persist_undecodable_result(
+                    &self.broker,
+                    task.task_id,
+                    fence(task, &self.worker_id),
+                    false,
+                    &diagnosis,
+                )
+                .await
+            }
+        };
+        let answer = self
+            .successes
+            .complete(PlainSuccess {
+                task_id: task.task_id,
+                claimed_at: task.claimed_at,
+                result_json,
+            })
+            .await;
+        match answer {
+            Ok(
+                TerminalizationOutcome::Applied { .. }
+                | TerminalizationOutcome::AlreadyApplied { .. },
+            ) => Ok(FinalizeOutcome::Finalized),
+            Ok(
+                TerminalizationOutcome::LostClaim { .. }
+                | TerminalizationOutcome::SourceStateConflict { .. }
+                | TerminalizationOutcome::TaskAbsent { .. },
+            ) => Ok(FinalizeOutcome::Refused),
+            Err(RowNotWritten::WriteFailed(error)) => Err(FinalizeError {
+                stage: FinalizeStage::Phase1Persist,
+                task_id: task.task_id,
+                message: format!("the batched success write failed: {error}"),
+                retryable: matches!(error.transience(), Transience::Transient),
+            }),
+            Err(
+                stopped @ (RowNotWritten::StatementCancelledAtStop | RowNotWritten::NotSentAtStop),
+            ) => Err(FinalizeError {
+                stage: FinalizeStage::Phase1Persist,
+                task_id: task.task_id,
+                message: stopped.to_string(),
+                retryable: false,
+            }),
         }
     }
 
@@ -450,7 +713,7 @@ impl OutcomeWriter {
         let max_retries = stage.max_retries();
         let mut retries_done: u32 = 0;
         let outcome = loop {
-            let error = match self.write_once(task, &write).await {
+            let error = match self.write_once(task, &write, claimed_row).await {
                 Ok(outcome) => break outcome,
                 Err(error) => error,
             };
@@ -490,70 +753,97 @@ impl OutcomeWriter {
                 }
             }
         };
-        match (outcome, claimed_row) {
-            (
-                FinalizeOutcome::Terminal {
-                    is_success,
-                    capacity_notified,
-                },
-                _,
-            ) => {
-                self.phase_two(task, is_success, capacity_notified).await;
+        match outcome {
+            PhaseOneOutcome::Finalize(FinalizeOutcome::Terminal {
+                capacity_notified,
+                phase_two,
+            }) => {
+                self.phase_two(task, capacity_notified, phase_two).await;
                 Settlement::Written
             }
-            (FinalizeOutcome::Retried | FinalizeOutcome::Finalized, _) => Settlement::Written,
-            (FinalizeOutcome::Refused, ClaimedRowRule::Refuse) => Settlement::NotHeld,
-            (FinalizeOutcome::Refused, ClaimedRowRule::Release) => {
-                self.release(task, "the child was killed before the task ran")
-                    .await
+            PhaseOneOutcome::Finalize(FinalizeOutcome::Retried | FinalizeOutcome::Finalized) => {
+                Settlement::Written
+            }
+            PhaseOneOutcome::Finalize(FinalizeOutcome::Refused) => Settlement::NotHeld,
+            PhaseOneOutcome::ClaimReleased => {
+                tracing::warn!(
+                    task_id = %task.task_id,
+                    "the child was killed before the task ran; the claim went back to the queue",
+                );
+                Settlement::Written
             }
         }
     }
 
-    async fn phase_two(&self, task: &ClaimedTask, is_success: bool, capacity_notified: bool) {
+    async fn phase_two(
+        &self,
+        task: &ClaimedTask,
+        capacity_notified: bool,
+        phase_two: PhaseTwoForm,
+    ) {
         run_phase2(
-            self.broker.pool(),
+            &self.broker,
             &self.workflows,
             Phase2Work {
                 task_id: task.task_id,
-                is_success,
                 queue_name: task.queue_name.clone(),
                 is_workflow_task: task.kind.is_workflow_task(),
                 capacity_notified,
+                phase_two,
             },
-            &self.payload_policy,
             &self.retention,
         )
         .await;
     }
 
-    /// Release a claim that is still this worker's, at this generation: the
-    /// row goes back to the queue. A row in any other state is left alone.
+    /// Release a claim that no child took (Python `_requeue_claimed_task`,
+    /// `horsies/core/worker/dispatch.py:254-295`): `horsies_release_claims`
+    /// with placement `SAME_CLASS`, fenced to this worker and this claim
+    /// generation. The row goes back to the queue in its class; a row in any
+    /// other state is left alone. A database error that may clear sends the
+    /// release again, at most [`RELEASE_SENDS`] sends in all. After an
+    /// unknown outcome a released row answers `NotHeld` to the next send.
     async fn release(&self, task: &ClaimedTask, reason: &str) -> Settlement {
-        match unclaim_task_with_retry(
-            &self.broker,
-            task.task_id,
-            &self.worker_id,
-            task.claimed_at,
-            reason,
-        )
-        .await
-        {
-            Ok(true) => Settlement::Written,
-            Ok(false) => Settlement::NotHeld,
-            Err(error) => {
-                tracing::error!(
-                    task_id = %task.task_id,
-                    error = %error,
-                    "the claim could not be released; its lease returns the row",
-                );
-                Settlement::RetriesExhausted
+        let batch = match ReleaseBatch::new(&[(task.task_id, task.claimed_at)]) {
+            Ok(batch) => batch,
+            Err(refused) => unreachable!("one claim is a valid release batch: {refused}"),
+        };
+        let command = ReleaseClaims {
+            worker_id: self.worker_id.clone(),
+            batch,
+            placement: ReleasePlacement::SameClass,
+        };
+        let mut sends: u32 = 1;
+        loop {
+            let sent = match self.broker.core_pools_for_write() {
+                Ok((open, _write)) => {
+                    release_claims(open.main(), self.broker.statement_log(), &command).await
+                }
+                Err(error) => Err(error),
+            };
+            let error = match sent {
+                Ok(outcomes) => return released(task, reason, &outcomes),
+                Err(error) => error,
+            };
+            match (error.is_retryable(), sends < RELEASE_SENDS) {
+                (true, true) => {
+                    tracing::warn!(
+                        task_id = %task.task_id,
+                        send = sends,
+                        max = RELEASE_SENDS,
+                        error = %error,
+                        "the release of the claim failed; sending it again",
+                    );
+                    tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(sends))).await;
+                    sends += 1;
+                }
+                (retryable, _) => return release_failed(task, reason, &error, retryable),
             }
         }
     }
 
     /// The child stopped before RUNNING; no task code ran (Python
-    /// `classify.py`).
+    /// `horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`).
     ///
     /// - An expired workflow task replays phase 2.
     /// - An unconfirmed start releases the claim at once with the fenced
@@ -562,22 +852,40 @@ impl OutcomeWriter {
     ///   claim generation. A row outside the fence, such as a start that
     ///   committed before its reply was lost, is left to recovery. A release
     ///   that fails is logged, and the claim lease returns the row.
+    /// - A task whose node is not linked is cancelled as an owned orphan when
+    ///   the app turns the self-heal on; with it off the row stays CLAIMED
+    ///   for inspection.
     /// - Every other stop wrote what its case needs in the child.
     async fn after_stop(&self, task: &ClaimedTask, reason: StopReason) -> Settlement {
-        match (reason, task.kind.is_workflow_task()) {
-            (StopReason::TaskExpired, true) => {
-                self.phase_two(task, false, false).await;
+        match (reason, task.kind.is_workflow_task(), self.orphan_self_heal) {
+            (StopReason::TaskExpired, true, _) => {
+                self.phase_two(task, false, PhaseTwoForm::NotKnown).await;
                 Settlement::NothingOwed
             }
-            (StopReason::OwnershipUnconfirmed, _) => {
+            (StopReason::OwnershipUnconfirmed, _, _) => {
                 self.release(task, "the start of the attempt was not confirmed")
                     .await
             }
+            (StopReason::NodeNotLinked, _, OrphanSelfHeal::On) => {
+                self.phase_one(
+                    task,
+                    PhaseOneWrite::CancelOrphan,
+                    ClaimedRowRule::Refuse,
+                    WriteStage::PhaseOne,
+                )
+                .await
+            }
+            (StopReason::NodeNotLinked, _, OrphanSelfHeal::Off) => {
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    "Task {} terminalization classified as no-op: ORPHAN_SELF_HEAL_DISABLED",
+                    task.task_id,
+                );
+                Settlement::NothingOwed
+            }
             (
-                StopReason::TaskExpired
-                | StopReason::ClaimLost
-                | StopReason::WorkflowStopped
-                | StopReason::NodeNotLinked,
+                StopReason::TaskExpired | StopReason::ClaimLost | StopReason::WorkflowStopped,
+                _,
                 _,
             ) => Settlement::NothingOwed,
         }

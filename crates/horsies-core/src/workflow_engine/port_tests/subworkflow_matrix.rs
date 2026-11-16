@@ -170,7 +170,8 @@ fn slow_definition() -> RegisteredWorkflowDefinition {
 /// A registry with every child of the matrix. The dynamic definitions come
 /// first, so the static middles that name them resolve.
 pub(super) fn registry() -> WorkflowSpecRegistry {
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     for definition in [failed_input_definition(), slow_definition()] {
         registry
             .register_definition(definition)

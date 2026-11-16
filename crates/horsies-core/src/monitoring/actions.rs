@@ -150,7 +150,8 @@ fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
         | WorkflowError::WorkflowTimeout { .. }
         | WorkflowError::WorkflowError(_)
         | WorkflowError::InvalidStatus(_)
-        | WorkflowError::Validation(_) => detail(503, error.to_string()),
+        | WorkflowError::Validation(_)
+        | WorkflowError::StepContract(_) => detail(503, error.to_string()),
     }
 }
 
