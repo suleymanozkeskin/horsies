@@ -157,9 +157,9 @@ class TestWorkflowRecovery:
             text("""
                 INSERT INTO horsies_workflows
                     (id, name, status, on_error, depth, root_workflow_id,
-                     created_at, updated_at)
-                VALUES (:id, 'savepoint_probe', 'RUNNING', 'FAIL', 0, :id,
-                        NOW(), NOW())
+                     sent_at, created_at, updated_at)
+                VALUES (:id, 'savepoint_probe', 'RUNNING', 'fail', 0, :id,
+                        NOW(), NOW(), NOW())
             """),
             {'id': wf_id},
         )
