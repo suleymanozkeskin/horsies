@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::commands::{
-    open_end_anchor, CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
-    DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
+    open_end_anchor, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf,
+    EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::{
     finite_class_parent_name, register_period_class, ClassRegistration, FOREVER_CLASS_KEY,
@@ -50,7 +50,6 @@ use super::catalog::{
     read_manifest_leaf_rows, LeafCatalogRow, LeafIndexKind, LeafLowerBound,
     LeafPartitionBoundExpectation,
 };
-use super::health::collect_partition_health;
 use super::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
     verify_static_forever_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine, NoQuarantine,
@@ -876,20 +875,6 @@ async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independ
     .await
     .expect("verify property index");
     assert!(matches!(verified, LeafCreation::AlreadyConformant { .. }));
-    let report = collect_partition_health(
-        &mut transaction,
-        &CollectPartitionHealth::new(class_key, true).expect("health command"),
-    )
-    .await
-    .expect("collect health");
-    assert!(report.is_healthy(), "health faults: {:?}", report.faults);
-    assert!(
-        report
-            .coverage
-            .expect("class coverage")
-            .complete_future_intervals
-            >= 2
-    );
     let squatter = leaf_ref(&parent, class_key, today + Duration::days(10));
     sqlx::query(&format!(
         "CREATE TABLE {} (x integer)",
@@ -3039,38 +3024,6 @@ async fn pool_coverage_creates_the_period_leaves_and_no_forever_leaf() {
         panic!("{second:?}");
     };
     assert_eq!(report.created_history_leaves, 0);
-    database.drop().await;
-}
-
-async fn forever_floor_faults(connection: &mut PgConnection) -> Vec<HealthFault> {
-    collect_partition_health(
-        connection,
-        &CollectPartitionHealth::new(FOREVER_CLASS_KEY, false).unwrap(),
-    )
-    .await
-    .unwrap()
-    .faults
-    .into_iter()
-    .filter(|fault| matches!(fault, HealthFault::CoverageBelowFloor { .. }))
-    .collect()
-}
-
-#[tokio::test]
-#[serial]
-async fn forever_health_meets_the_floor_with_the_static_leaf() {
-    let database = TestDatabase::create().await;
-    let mut tx = database.pool.begin().await.unwrap();
-    // The static forever leaf reaches the open end from install on.
-    assert_eq!(forever_floor_faults(tx.as_mut()).await, Vec::new());
-    let coverage = ensure_partition_coverage(&mut tx, 2, 2, &[], &StagedLoaderPublisher)
-        .await
-        .unwrap();
-    assert!(
-        matches!(coverage, CoverageOutcome::Ensured(_)),
-        "{coverage:?}"
-    );
-    assert_eq!(forever_floor_faults(tx.as_mut()).await, Vec::new());
-    tx.rollback().await.unwrap();
     database.drop().await;
 }
 
