@@ -2,10 +2,13 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod client_family;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
 pub mod error;
 pub mod health;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod listener;
 pub mod migrations;
 #[cfg(test)]

@@ -18,7 +18,10 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 /// Rust has no exceptions — tasks return `Result<T, TaskError>`. "Exception"
 /// is a Python-specific concept. Since the Rust port uses its own database
 /// (not shared with Python), wire-format compatibility is not required.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OperationalErrorCode {
     /// Task panicked or produced an unexpected error the worker couldn't handle.
@@ -71,7 +74,10 @@ impl OperationalErrorCode {
 /// A code/typing/usage contract was violated.
 ///
 /// Typical caller behavior: fix code or type assumptions, do not blindly retry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ContractCode {
     ArgumentTypeMismatch,
@@ -90,7 +96,10 @@ impl ContractCode {
 /// The caller cannot get the value right now or cannot locate it.
 ///
 /// Typical caller behavior: wait, poll again, handle missing value as normal flow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RetrievalCode {
     WaitTimeout,
@@ -118,7 +127,10 @@ impl RetrievalCode {
 /// A non-bug execution outcome or control-flow result.
 ///
 /// Typical caller behavior: branch on outcome, continue control flow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OutcomeCode {
     TaskCancelled,

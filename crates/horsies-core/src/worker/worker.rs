@@ -2947,6 +2947,7 @@ mod tests {
             session_database_url: Some(session_url),
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
@@ -3054,6 +3055,7 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
@@ -3163,6 +3165,7 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
@@ -3257,3 +3260,6 @@ mod tests {
         clean(&pool).await;
     }
 }
+
+#[cfg(test)]
+mod live_worker_tests;
