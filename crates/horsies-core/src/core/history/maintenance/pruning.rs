@@ -29,8 +29,37 @@ pub struct HistoryLeafSwept {
 
 /// Expired leaves one candidate query of a pass reads at most.
 pub const MAX_PRUNE_CANDIDATES_PER_PASS: usize = 512;
-/// Leaves one pass detaches and drops at most, heartbeat leaves first.
+/// Leaves one pass acts on at most, heartbeat leaves first. A refused leaf
+/// does not count; see `sweep_counts_toward_bound`.
 pub const MAX_PRUNE_LEAVES_PER_PASS: usize = 64;
+
+/// One sweep over the expired leaves of one kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeafSweep<E> {
+    pub swept: Vec<E>,
+    /// One entry per leaf whose sweep failed.
+    pub errors: Vec<String>,
+    /// Leaves that count toward the per-pass bound.
+    pub acted: usize,
+    pub reach: PruneReach,
+}
+
+/// Whether one swept leaf counts toward `MAX_PRUNE_LEAVES_PER_PASS`: the leaf
+/// ends detached or dropped. A busy, blocked, not-expired or quarantine-refused
+/// leaf does not count. A detached leaf whose drop is refused counts, because
+/// the detach outcome does not tell a detach of this pass from an earlier one.
+pub(crate) fn sweep_counts_toward_bound(
+    detach: &DetachExpiredLeafOutcome,
+    drop: Option<&LeafDrop>,
+) -> bool {
+    match (detach, drop) {
+        (_, Some(LeafDrop::Dropped { .. })) => true,
+        (DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }), _) => true,
+        (DetachExpiredLeafOutcome::Inspection(_), _)
+        | (DetachExpiredLeafOutcome::Busy { .. }, _)
+        | (DetachExpiredLeafOutcome::QuarantineRefused(_), _) => false,
+    }
+}
 
 /// Whether a per-pass bound stopped a pass. Errors and refusals are reported
 /// apart from it.
@@ -254,40 +283,57 @@ async fn sweep_history_leaf<P: LoaderPublication>(
     })
 }
 
-/// Detach and drop at most `max_leaves` expired period-class leaves, oldest
-/// first. One leaf's error goes to the error list and the sweep goes on with
-/// the next leaf; a failed discovery sweeps nothing. `Truncated` when more
-/// expired leaves remain for the next pass.
+/// Detach and drop expired period-class leaves, oldest first, until
+/// `max_acted_leaves` leaves count toward the bound. A leaf whose sweep fails
+/// counts, since its effects are unknown; its error goes to the error list and
+/// the sweep goes on with the next leaf. A failed discovery sweeps nothing.
+/// `Truncated` when expired leaves remain for the next pass.
 pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
-    max_leaves: usize,
-) -> (Vec<HistoryLeafSwept>, Vec<String>, PruneReach) {
-    let (mut candidates, candidate_reach) =
+    max_acted_leaves: usize,
+) -> LeafSweep<HistoryLeafSwept> {
+    let (candidates, candidate_reach) =
         match expired_candidates(pool, EXPIRED_HISTORY_FILTER, true).await {
             Ok(candidates) => candidates,
             Err(error) => {
-                return (
-                    Vec::new(),
-                    vec![format!("discover history: {error}")],
-                    PruneReach::WithinBounds,
-                )
+                return LeafSweep {
+                    swept: Vec::new(),
+                    errors: vec![format!("discover history: {error}")],
+                    acted: 0,
+                    reach: PruneReach::WithinBounds,
+                }
             }
         };
-    let reach = match (candidate_reach, candidates.len() > max_leaves) {
-        (PruneReach::Truncated, _) | (PruneReach::WithinBounds, true) => PruneReach::Truncated,
-        (PruneReach::WithinBounds, false) => PruneReach::WithinBounds,
-    };
-    candidates.truncate(max_leaves);
     let mut swept = Vec::new();
     let mut errors = Vec::new();
+    let mut acted = 0;
+    let mut reach = candidate_reach;
     for leaf in candidates {
+        if acted >= max_acted_leaves {
+            reach = PruneReach::Truncated;
+            break;
+        }
         match sweep_history_leaf(pool, &leaf, publisher).await {
-            Ok(entry) => swept.push(entry),
-            Err(error) => errors.push(format!("{}: {error}", leaf.leaf_name())),
+            Ok(entry) => {
+                acted += usize::from(sweep_counts_toward_bound(
+                    &entry.detach,
+                    entry.drop.as_ref(),
+                ));
+                swept.push(entry);
+            }
+            Err(error) => {
+                acted += 1;
+                errors.push(format!("{}: {error}", leaf.leaf_name()));
+            }
         }
     }
-    (swept, errors, reach)
+    LeafSweep {
+        swept,
+        errors,
+        acted,
+        reach,
+    }
 }
 
 /// Prune expired partitions through a direct or session-capable pool.
@@ -297,26 +343,32 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
 ) -> PrunePass {
     let (finalized_leaves, mut refusals, mut errors, finalize_reach) =
         finalize_interrupted_detaches(pool, publisher).await;
-    let (heartbeat_swept, heartbeat_attempts, heartbeat_reach) =
+    let heartbeat =
         match sweep_expired_heartbeat_leaves(pool, publisher, MAX_PRUNE_LEAVES_PER_PASS).await {
-            Ok((swept, leaf_errors, reach)) => {
-                let attempts = swept.len() + leaf_errors.len();
-                errors.extend(
-                    leaf_errors
-                        .into_iter()
-                        .map(|error| format!("heartbeat {error}")),
-                );
-                (swept, attempts, reach)
-            }
+            Ok(sweep) => sweep,
             Err(error) => {
                 errors.push(format!("discover heartbeat: {error}"));
-                (Vec::new(), 0, PruneReach::WithinBounds)
+                LeafSweep {
+                    swept: Vec::new(),
+                    errors: Vec::new(),
+                    acted: 0,
+                    reach: PruneReach::WithinBounds,
+                }
             }
         };
-    let history_budget = MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat_attempts);
-    let (history_swept, history_errors, history_reach) =
-        sweep_expired_history_leaves(pool, publisher, history_budget).await;
-    errors.extend(history_errors);
+    errors.extend(
+        heartbeat
+            .errors
+            .into_iter()
+            .map(|error| format!("heartbeat {error}")),
+    );
+    let heartbeat_swept = heartbeat.swept;
+    let heartbeat_reach = heartbeat.reach;
+    let history_budget = MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat.acted);
+    let history = sweep_expired_history_leaves(pool, publisher, history_budget).await;
+    errors.extend(history.errors);
+    let history_swept = history.swept;
+    let history_reach = history.reach;
     let reach = match (finalize_reach, heartbeat_reach, history_reach) {
         (PruneReach::WithinBounds, PruneReach::WithinBounds, PruneReach::WithinBounds) => {
             PruneReach::WithinBounds

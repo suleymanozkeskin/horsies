@@ -9,7 +9,9 @@ use crate::core::history::commands::{
 };
 use crate::core::history::ddl::runtime_names::render_daily_leaf_ddl;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::maintenance::pruning::PruneReach;
+use crate::core::history::maintenance::pruning::{
+    sweep_counts_toward_bound, LeafSweep, PruneReach, MAX_PRUNE_CANDIDATES_PER_PASS,
+};
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES,
 };
@@ -462,11 +464,10 @@ pub struct HeartbeatLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
-/// The oldest expired heartbeat leaves, at most `max_leaves`, and whether
-/// more remain.
+/// The oldest expired heartbeat leaves, at most
+/// `MAX_PRUNE_CANDIDATES_PER_PASS`, and whether more remain.
 async fn expired_heartbeat_leaves(
     pool: &PgPool,
-    max_leaves: usize,
 ) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
     let sql = format!(
         "SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
@@ -479,19 +480,19 @@ async fn expired_heartbeat_leaves(
          ORDER BY c.lower_anchor
          LIMIT $2"
     );
-    let fetch_limit = i64::try_from(max_leaves.saturating_add(1)).unwrap_or(i64::MAX);
+    let fetch_limit = i64::try_from(MAX_PRUNE_CANDIDATES_PER_PASS + 1).unwrap_or(i64::MAX);
     let rows: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&sql)
         .bind(HEARTBEAT_CLASS_KEY)
         .bind(fetch_limit)
         .fetch_all(pool)
         .await?;
-    let reach = match rows.len() > max_leaves {
+    let reach = match rows.len() > MAX_PRUNE_CANDIDATES_PER_PASS {
         true => PruneReach::Truncated,
         false => PruneReach::WithinBounds,
     };
     let leaves = rows
         .into_iter()
-        .take(max_leaves)
+        .take(MAX_PRUNE_CANDIDATES_PER_PASS)
         .map(|(leaf_name, lower, upper)| {
             let bounds = LeafBounds::new(lower, upper)
                 .map_err(|error| HistoryError::contract(error.to_string()))?;
@@ -544,25 +545,45 @@ async fn sweep_heartbeat_leaf<P: LoaderPublication>(
     })
 }
 
-/// Sweep at most `max_leaves` expired heartbeat leaves, oldest first, through
-/// a direct or session-capable pool. The `Err` side is a failed discovery,
-/// which sweeps nothing. One leaf's error goes to the error list of the `Ok`
-/// side and the sweep goes on with the next leaf; every leaf in either list
-/// counts toward `max_leaves`. `Truncated` when more expired leaves remain
-/// for the next pass.
+/// Sweep expired heartbeat leaves, oldest first, through a direct or
+/// session-capable pool, until `max_acted_leaves` leaves count toward the
+/// bound (`sweep_counts_toward_bound`). The `Err` side is a failed discovery,
+/// which sweeps nothing. A leaf whose sweep fails counts, since its effects
+/// are unknown; its error goes to the error list and the sweep goes on with
+/// the next leaf. `Truncated` when expired leaves remain for the next pass.
 pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
-    max_leaves: usize,
-) -> Result<(Vec<HeartbeatLeafSwept>, Vec<String>, PruneReach), HistoryError> {
-    let (leaves, reach) = expired_heartbeat_leaves(pool, max_leaves).await?;
-    let mut swept = Vec::with_capacity(leaves.len());
+    max_acted_leaves: usize,
+) -> Result<LeafSweep<HeartbeatLeafSwept>, HistoryError> {
+    let (leaves, candidate_reach) = expired_heartbeat_leaves(pool).await?;
+    let mut swept = Vec::new();
     let mut errors = Vec::new();
+    let mut acted = 0;
+    let mut reach = candidate_reach;
     for leaf in leaves {
+        if acted >= max_acted_leaves {
+            reach = PruneReach::Truncated;
+            break;
+        }
         match sweep_heartbeat_leaf(pool, &leaf, publisher).await {
-            Ok(entry) => swept.push(entry),
-            Err(error) => errors.push(format!("{}: {error}", leaf.leaf_name())),
+            Ok(entry) => {
+                acted += usize::from(sweep_counts_toward_bound(
+                    &entry.detach,
+                    entry.drop.as_ref(),
+                ));
+                swept.push(entry);
+            }
+            Err(error) => {
+                acted += 1;
+                errors.push(format!("{}: {error}", leaf.leaf_name()));
+            }
         }
     }
-    Ok((swept, errors, reach))
+    Ok(LeafSweep {
+        swept,
+        errors,
+        acted,
+        reach,
+    })
 }
