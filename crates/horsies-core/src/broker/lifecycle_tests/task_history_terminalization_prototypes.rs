@@ -43,8 +43,6 @@ fn fused(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: RESULT.to_owned(),
-        notify_channel: "task_queue_default".to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -516,37 +514,50 @@ async fn terminalization_boundary_failure_rolls_back_every_relation() {
     }
 }
 
-/// Python `test_capacity_notification_failure_rolls_back_fused_completion`:
-/// a capacity wake that the server refuses (a payload over 8000 bytes)
-/// fails the fused completion, and nothing of the move stays.
+/// Python `test_capacity_notification_failure_rolls_back_fused_completion`.
+/// The baseline function builds the wake from the locked row: channel
+/// `task_queue_<queue>`, payload `capacity`. The queue name CHECK bounds the
+/// name to 52 bytes, so the channel fits PostgreSQL's 63-byte limit and the
+/// wake cannot be refused: the CHECK refuses a 53-byte queue name, and the
+/// completion of a seeded row applies with its wake.
 #[tokio::test]
 #[serial]
 async fn capacity_notification_failure_rolls_back_fused_completion() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = terminalize(
+    let refused = sqlx::query("UPDATE horsies_tasks SET queue_name = $2 WHERE id = $1")
+        .bind(task_id)
+        .bind("q".repeat(53))
+        .execute(&pool)
+        .await
+        .map(|done| done.rows_affected());
+    assert_refused(
+        refused,
+        "23514",
+        Constraint::Named("horsies_tasks_queue_name_length"),
+    );
+    assert_eq!(live_row(&pool, task_id).await, before);
+
+    let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id,
             fence: owned_claim(),
             result_json: RESULT.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: "x".repeat(9_000),
         },
     )
-    .await;
-
-    assert_refused_with_message(
-        Err::<(), _>(database_error(refused)),
-        "22023",
-        "payload string too long",
+    .await
+    .expect("fused completion");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ),
+        "{outcomes:?}"
     );
-    assert_eq!(live_row(&pool, task_id).await, before);
-    assert_eq!(live_attempts(&pool, task_id).await.len(), 1);
-    assert_eq!(history_row(&pool, task_id).await, None);
+    assert_eq!(live_row(&pool, task_id).await, None);
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
