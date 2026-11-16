@@ -40,6 +40,7 @@ from horsies.core.lifecycle.classify import (
     ErrorProduced,
     FinalizeContext,
     NoTerminalAction,
+    ReleaseUnconfirmedClaim,
     ReplayWorkflowPhase2,
     ResultProduced,
     ResultUndecodable,
@@ -638,6 +639,41 @@ class FinalizeMixin:
             claim=claim,
         )
 
+    async def _release_unconfirmed_claim(
+        self,
+        task_id: str,
+        claimed_at: datetime,
+    ) -> None:
+        """Release the claim of a start that the child did not confirm.
+
+        One fenced release (``_requeue_claimed_task``): status CLAIMED, this
+        worker, the generation ``claimed_at``. A row outside the fence is not
+        touched. A database error is logged; the claim lease then returns
+        the row, as before this release existed. Nothing is owed to phase 2:
+        no task code ran.
+        """
+        outcome = await self._requeue_claimed_task(
+            task_id,
+            'the start of the attempt was not confirmed',
+            claimed_at=claimed_at,
+        )
+        match outcome:
+            case _RequeueOutcome.REQUEUED | _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED:
+                return
+            case _RequeueOutcome.DB_ERROR:
+                logger.error(
+                    'Task %s: the release of an unconfirmed start failed; '
+                    'the claim lease returns the row',
+                    task_id,
+                )
+            case _RequeueOutcome.TERMINAL_REPLAYED:
+                raise AssertionError(
+                    f'release of task {task_id} returned {outcome}; a release '
+                    'replays no terminal write',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
     async def _requeue_not_dispatched(
         self,
         task_id: str,
@@ -1201,6 +1237,9 @@ class FinalizeMixin:
                     task_id,
                     reason.value,
                 )
+                return Ok(None)
+            case ReleaseUnconfirmedClaim(claimed_at=release_generation):
+                await self._release_unconfirmed_claim(task_id, release_generation)
                 return Ok(None)
             case ReplayWorkflowPhase2():
                 return _phase2_of_a_replay(
