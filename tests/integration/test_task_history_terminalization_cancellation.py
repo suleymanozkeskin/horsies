@@ -85,7 +85,7 @@ async def link_node(
         if workflow_id is not None
         else await create_workflow(connection, status='RUNNING')
     )
-    await link_workflow_node(
+    _ = await link_workflow_node(
         connection,
         task_id,
         workflow_id=node_workflow,
@@ -276,7 +276,7 @@ class TestOrphanSingle:
             assert outcome.guard_kind is None
 
     @pytest.mark.asyncio
-    async def test_links_to_distinct_workflows_fail_closed(
+    async def test_the_database_refuses_a_second_node_for_one_task(
         self, terminalization_schema: HistorySchema
     ) -> None:
         """A task backs at most one node: the unique index on the node's

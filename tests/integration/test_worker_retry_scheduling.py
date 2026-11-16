@@ -33,7 +33,7 @@ from horsies.core.worker import failed_attempt as failed_attempt_module
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.failed_attempt import FinishFailedAttempt, RetryAfter
 from horsies.core.worker.worker import Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal, read_attempts
 
 pytestmark = [pytest.mark.integration]
@@ -98,7 +98,7 @@ async def _insert_task(
     """
     task_id = str(uuid.uuid4())
     is_terminal = status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name=TASK_NAME,
         good_until=good_until,
         task_options=task_options,
@@ -106,27 +106,30 @@ async def _insert_task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
-                 created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha, claimed_by_worker_id,
-                 claimed_at,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, :task_name, 'default', 100, '[]', '{}', :status, :sent_at,
-                 NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id,
-                 :claimed_at,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    good_until, task_options, claimed_by_worker_id, claimed_at,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    is_workflow_task, claim_expires_at, worker_pid, worker_hostname,
+                    worker_process_name
+                ) VALUES (
+                    :id, :task_name, 'default', 100, '{}', :status, :sent_at, NOW(),
+                    NOW(), :retry_count, :max_retries, NOW(), :good_until,
+                    :task_options, :claimed_by_worker_id, :claimed_at, 'standard_30d',
+                    1, :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE,
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
             'task_name': TASK_NAME,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'status': 'RUNNING' if is_terminal else status,
             'retry_count': retry_count,
             'max_retries': max_retries,

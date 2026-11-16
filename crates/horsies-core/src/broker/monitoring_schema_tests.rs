@@ -44,7 +44,7 @@ async fn seed_task(pool: &PgPool, task_id: Uuid, task_name: &str) {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
+            $1, $2, 'default', 100, 'null', NULL, 'ISOLATED',
             'forever', NOW(), NOW(),
             1, decode(repeat('07', 32), 'hex'), NULL,
             'PENDING', NOW(), NULL, NULL, NULL,
