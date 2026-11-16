@@ -210,7 +210,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
             {'task_name': task_name},
         )
     ).fetchall()
-    assert [(row.id, row.task_options) for row in rows] == [(slot_task_id, None)]
+    assert [(row.id, row.task_options) for row in rows] == [(str(slot_task_id), None)]
 
     state = (
         await session.execute(
@@ -222,6 +222,6 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
             {'schedule_name': schedule_name},
         )
     ).one()
-    assert state.last_task_id == slot_task_id
+    assert state.last_task_id == str(slot_task_id)
     assert state.next_run_at == next_run
     assert state.run_count == 1

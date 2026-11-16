@@ -25,12 +25,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..errors import HistoryContractError
 from ..names import KEY_RESERVATIONS
+from ...utils.db import uuid_column_value
 
 KEY_RESERVATION_OUTCOME_TYPE = 'horsies_key_reservation_outcome'
 KEY_RESERVATION_CLAIM_FUNCTION = 'horsies_key_reservation_claim'
@@ -219,21 +221,21 @@ def reservation_function_fragments() -> tuple[str, ...]:
 class ReservationApplied:
     """The key is now reserved by this request."""
 
-    task_id: str
+    task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
 class ReservationReplay:
     """An active reservation with the same fingerprint owns the key."""
 
-    task_id: str
+    task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
 class ReservationConflict:
     """An active reservation with a different fingerprint owns the key."""
 
-    task_id: str
+    task_id: UUID
     observed_fingerprint_version: int
 
 
@@ -250,7 +252,7 @@ async def claim_key_reservation(
     reservation_window_seconds: int,
     fingerprint_version: int,
     fingerprint: bytes,
-    task_id: str,
+    task_id: UUID,
 ) -> ReservationClaim:
     """Claim, replay, or conflict — one statement in the caller's transaction."""
     row = (
@@ -269,7 +271,7 @@ async def claim_key_reservation(
                 'window_seconds': reservation_window_seconds,
                 'fingerprint_version': fingerprint_version,
                 'fingerprint': fingerprint,
-                'task_id': task_id,
+                'task_id': str(task_id),
             },
         )
     ).one()
@@ -335,7 +337,7 @@ def decode_reservation_row(
     """Decode one claim outcome row, failing closed on contract breaks."""
     if not isinstance(outcome, str) or row_task_id is None:
         raise HistoryContractError('reservation outcome row did not decode')
-    task_id = str(row_task_id)
+    task_id = uuid_column_value(row_task_id, column='task_id')
     match outcome:
         case 'APPLIED':
             if observed_fingerprint_version is not None:

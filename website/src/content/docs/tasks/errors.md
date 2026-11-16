@@ -184,7 +184,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `message` | `str` | Human-readable description |
 | `retryable` | `bool` | Driver classification of the cause where the variant has a cause from the driver: `True` when the condition may clear, for example a lost connection. `False` on every other variant |
 | `exception` | `BaseException` on `BrokerOperationFailed` and `BrokerLoopRunnerFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
-| `owner_task_id` | `str` | The task that holds the idempotency key |
+| `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `loop_limit` | `EventLoopLimit` | The limit and the threads of the held event loops |
 
 The repr of a variant shows its class name and its other fields. `message` and `exception` are not in the repr.
@@ -242,11 +242,11 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
-| `task_id` | `str` | Task id of the prepared send |
+| `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
 | `retryable` | `bool` | Driver classification of the cause: `True` when the condition may clear, for example a lost connection |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception. On `TaskSendLoopRunnerFailed` it is `BaseException`: always the `LoopRunnerError` |
-| `owner_task_id` | `str` | The task that holds the idempotency key |
+| `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Length of the serialized kwargs |
 | `limit_bytes` | `int` | The configured `payload.reject_bytes` |
 

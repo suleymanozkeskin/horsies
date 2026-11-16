@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from pydantic import SecretStr
@@ -191,12 +192,12 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         task_options_json = register(app)
-        broker = _broker_mock(Ok('task-1'))
+        broker = _broker_mock(Ok(UUID(int=1)))
         scheduler = _started_scheduler(app, broker)
 
         result = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
 
-        assert result == Ok('task-1')
+        assert result == Ok(UUID(int=1))
         stored_text = broker.enqueue_async.await_args.kwargs['task_options']
         assert stored_text == task_options_json
         stored = _stored_options(stored_text)
@@ -207,7 +208,7 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         _ = _register_isolated(app)
-        broker = _broker_mock(Ok('task-1'))
+        broker = _broker_mock(Ok(UUID(int=1)))
         scheduler = _started_scheduler(app, broker)
 
         _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
@@ -246,7 +247,7 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         task_options_json = _register_isolated(app)
-        broker = _broker_mock(Ok('task-1'))
+        broker = _broker_mock(Ok(UUID(int=1)))
         scheduler = _started_scheduler(app, broker)
         later_slot = SLOT.replace(second=5)
 
@@ -264,7 +265,7 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         task_options_json = _register_isolated(app)
-        broker = _broker_mock(Ok('task-1'))
+        broker = _broker_mock(Ok(UUID(int=1)))
         scheduler = _started_scheduler(app, broker)
 
         _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
@@ -453,13 +454,13 @@ class TestSlotWithAnotherCommand:
 
     async def test_catch_up_enqueues_the_slots_after_the_fired_slot(self) -> None:
         schedule = _schedule(catch_up_missed=True)
-        harness = _harness(schedule, [_mismatch(), Ok('task-5'), Ok('task-10')])
+        harness = _harness(schedule, [_mismatch(), Ok(UUID(int=5)), Ok(UUID(int=10))])
 
         await harness.scheduler._check_schedule(schedule, SLOT.replace(second=12))
 
         assert harness.broker.enqueue_async.await_count == 3
         update_kwargs = harness.state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == 'task-10'
+        assert update_kwargs['task_id'] == UUID(int=10)
         assert update_kwargs['next_run_at'] == SLOT.replace(second=15)
         harness.session.commit.assert_awaited_once()
         harness.session.rollback.assert_not_awaited()

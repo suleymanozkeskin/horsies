@@ -309,7 +309,7 @@ async def _diagnose_live_miss(
     """
     if not await staged_detail_published(connection):
         return _not_found(task_id)
-    state = await read_task_state(connection, task_id=task_id)
+    state = await read_task_state(connection, task_id=uuid.UUID(task_id))
     match state:
         case HistoryTaskState(is_workflow_task=True, status=status):
             return _workflow_bound(task_id, status)

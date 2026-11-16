@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
@@ -582,7 +583,7 @@ class Scheduler:
                             f'catching up with cap={schedule.max_catch_up_runs}',
                         )
 
-                    last_task_id = ''
+                    last_task_id: UUID | None = None
                     caught_up: list[datetime] = []
                     permanent_skip_slot: datetime | None = None
                     for due_time in due_runs:
@@ -624,20 +625,21 @@ class Scheduler:
                         next_run = calculate_next_run(
                             schedule.pattern, progress_slot, schedule.timezone,
                         )
-                        if caught_up:
-                            await self.state_manager.update_after_run(
-                                schedule_name=schedule.name,
-                                task_id=last_task_id,
-                                executed_at=check_time,
-                                next_run_at=next_run,
-                                session=session,
-                            )
-                        else:
-                            await self.state_manager.update_next_run(
-                                schedule_name=schedule.name,
-                                next_run_at=next_run,
-                                session=session,
-                            )
+                        match last_task_id:
+                            case UUID() as recorded_task_id:
+                                await self.state_manager.update_after_run(
+                                    schedule_name=schedule.name,
+                                    task_id=recorded_task_id,
+                                    executed_at=check_time,
+                                    next_run_at=next_run,
+                                    session=session,
+                                )
+                            case None:
+                                await self.state_manager.update_next_run(
+                                    schedule_name=schedule.name,
+                                    next_run_at=next_run,
+                                    session=session,
+                                )
                         await session.commit()
                         if len(caught_up) < len(due_runs):
                             logger.warning(
@@ -905,9 +907,9 @@ class Scheduler:
         schedule: TaskSchedule,
         *,
         slot_time: datetime,
-        task_id: str,
-        result: Result[str, BrokerEnqueueError],
-    ) -> Result[str, BrokerEnqueueError]:
+        task_id: UUID,
+        result: Result[UUID, BrokerEnqueueError],
+    ) -> Result[UUID, BrokerEnqueueError]:
         """Return Ok(task_id) when the slot's task id already holds another command.
 
         PAYLOAD_MISMATCH on the deterministic slot task id means a task for
@@ -936,7 +938,7 @@ class Scheduler:
         schedule: TaskSchedule,
         *,
         slot_time: datetime,
-    ) -> Result[str, BrokerEnqueueError]:
+    ) -> Result[UUID, BrokerEnqueueError]:
         """Enqueue a scheduled task via the broker.
 
         Uses a deterministic task_id derived from the schedule name and slot_time.

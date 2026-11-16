@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import ClassVar
+from uuid import UUID
 
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.history.periods import RetentionClassKey
@@ -130,7 +131,7 @@ class TaskSendAsyncContext:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ASYNC_CONTEXT
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
@@ -159,7 +160,7 @@ class TaskSendEnqueueFailed:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ENQUEUE_FAILED
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     retryable: bool
@@ -174,7 +175,7 @@ class TaskSendPayloadMismatch:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.PAYLOAD_MISMATCH
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
@@ -203,10 +204,10 @@ class TaskSendIdempotencyKeyConflict:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
-    owner_task_id: str
+    owner_task_id: UUID
 
 
 @dataclass(slots=True, frozen=True)
@@ -233,7 +234,7 @@ class TaskSendLoopRunnerFailed:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.LOOP_RUNNER_FAILED
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     exception: BaseException = field(repr=False)

@@ -168,7 +168,7 @@ async def test_a_recorded_run_stores_the_slot_task_id_and_counts_one_run(
         row.next_run_at,
         row.run_count,
         row.config_hash,
-    ) == (task_id, executed_at, next_run, 1, CONFIG_HASH)
+    ) == (str(task_id), executed_at, next_run, 1, CONFIG_HASH)
 
 
 @pytest.mark.asyncio(loop_scope='function')

@@ -76,13 +76,13 @@ def enqueue_fingerprint(
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def schedule_slot_task_id(schedule_name: str, slot_time: datetime) -> str:
+def schedule_slot_task_id(schedule_name: str, slot_time: datetime) -> uuid.UUID:
     """Deterministic task_id for a schedule name + slot time.
 
     Same schedule + same slot -> same UUID5 -> idempotent on conflict.
     Different schedule or different slot -> different UUID5 -> no collision.
     """
-    return str(uuid.uuid5(
+    return uuid.uuid5(
         _SCHEDULE_NAMESPACE,
         f"{schedule_name}:{_canon_dt(slot_time)}",
-    ))
+    )

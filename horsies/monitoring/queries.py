@@ -633,7 +633,7 @@ def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
     )
     exec_s = span_s(detail.started_at, end, live=False)
     return LeafTaskInfo(
-        task_id=detail.task_id,
+        task_id=str(detail.task_id),
         status=detail.status.value,
         error_code=nz(detail.error_code),
         failed_reason=nz(detail.final_failed_reason),
@@ -1595,7 +1595,7 @@ async def _history_detail(
     connection = await session.connection()
     if not await staged_detail_published(connection):
         return TaskAbsenceReason.NOT_CLASSIFIED
-    detail = await read_task_detail(connection, task_id=task_id)
+    detail = await read_task_detail(connection, task_id=uuid.UUID(task_id))
     match detail:
         case HistoryTaskDetail():
             return detail

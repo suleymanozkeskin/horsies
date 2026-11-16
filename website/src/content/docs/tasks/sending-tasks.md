@@ -32,7 +32,7 @@ from horsies import Ok, Err
 async def my_endpoint():
     match await my_task.send_async(name="alice", count=3):
         case Ok(handle):
-            return {"task_id": handle.task_id}
+            return {"task_id": str(handle.task_id)}
         case Err(send_err):
             return {"error": send_err.message}
 ```
@@ -409,7 +409,7 @@ The codes, and which of them the retry methods accept, are in the [Errors Refere
 
 | Property/Method | Type | Description |
 | --------------- | ---- | ----------- |
-| `.task_id` | `str` | Unique task identifier |
+| `.task_id` | `uuid.UUID` | Unique task identifier |
 | `.get(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (blocking) |
 | `.get_async(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (async) |
 | `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |

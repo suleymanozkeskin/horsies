@@ -24,6 +24,7 @@ finding a working function that was never broken.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
@@ -89,7 +90,7 @@ def v7_with_birth(birth: datetime) -> str:
     """Mint a v7 identifier whose embedded birth is the given instant."""
     milliseconds = int(birth.timestamp() * 1_000)
     generator = MonotonicUuid7Generator(clock_ms=lambda: milliseconds)
-    return generator.mint()
+    return str(generator.mint())
 
 
 async def _create_leaf(
@@ -261,7 +262,7 @@ class TestMissingLeafBreaksAndHeals:
             await StagedLoaderPublisher().republish(connection)
 
         async with history_schema.engine.connect() as connection:
-            detail = await read_task_detail(connection, task_id=task_id)
+            detail = await read_task_detail(connection, task_id=UUID(task_id))
         assert isinstance(detail, TaskDetailAbsent), detail
         assert detail.reason is TaskAbsenceReason.WITHIN_RETAINED_HISTORY, (
             'a task whose leaf was destroyed out of band does not predate '

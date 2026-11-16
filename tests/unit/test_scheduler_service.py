@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 from typing import Annotated
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from pydantic import AfterValidator
@@ -760,7 +761,7 @@ class TestCheckScheduleSkipsMissedRuns:
         state_manager.update_next_run = AsyncMock()
         scheduler.state_manager = state_manager
 
-        enqueue_mock = AsyncMock(return_value=Ok('task-1'))
+        enqueue_mock = AsyncMock(return_value=Ok(UUID(int=1)))
         scheduler._enqueue_scheduled_task = enqueue_mock  # type: ignore[method-assign]
         return scheduler, config.schedules[0], enqueue_mock, state_manager
 
@@ -1102,7 +1103,7 @@ class TestCheckScheduleSessionUsage:
         state_manager.update_after_run = AsyncMock()
         scheduler.state_manager = state_manager
 
-        scheduler._enqueue_scheduled_task = AsyncMock(return_value=Ok('task-1'))  # type: ignore[method-assign]
+        scheduler._enqueue_scheduled_task = AsyncMock(return_value=Ok(UUID(int=1)))  # type: ignore[method-assign]
 
         await scheduler._check_schedule(config.schedules[0], now)
 
@@ -2036,10 +2037,10 @@ class TestCheckScheduleAdditionalPaths:
         state_manager.update_after_run = AsyncMock()
         scheduler.state_manager = state_manager
 
-        enqueue_ids: list[str] = []
+        enqueue_ids: list[UUID] = []
 
-        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[str]:
-            task_id = f'task-{len(enqueue_ids)}'
+        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[UUID]:
+            task_id = UUID(int=len(enqueue_ids))
             enqueue_ids.append(task_id)
             return Ok(task_id)
 
@@ -2087,11 +2088,11 @@ class TestCheckScheduleAdditionalPaths:
 
         call_idx = 0
 
-        async def _fail_second(sched: object, *, slot_time: datetime) -> Ok[str] | Err[BrokerOperationError]:
+        async def _fail_second(sched: object, *, slot_time: datetime) -> Ok[UUID] | Err[BrokerOperationError]:
             nonlocal call_idx
             call_idx += 1
             if call_idx == 1:
-                return Ok('task-0')
+                return Ok(UUID(int=0))
             return Err(BrokerEnqueueFailed(
                 message='transient error',
                 retryable=True,
@@ -2110,7 +2111,7 @@ class TestCheckScheduleAdditionalPaths:
         # State should still be updated for the one that succeeded
         state_manager.update_after_run.assert_awaited_once()
         update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == 'task-0'
+        assert update_kwargs['task_id'] == UUID(int=0)
         session.commit.assert_awaited_once()
 
     async def test_catch_up_all_failed_rolls_back(self) -> None:
@@ -2231,9 +2232,9 @@ class TestCheckScheduleAdditionalPaths:
 
         slot_times: list[datetime] = []
 
-        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[str]:
+        async def _mock_enqueue(sched: object, *, slot_time: datetime) -> Ok[UUID]:
             slot_times.append(slot_time)
-            return Ok('task-0')
+            return Ok(UUID(int=0))
 
         scheduler._enqueue_scheduled_task = AsyncMock(side_effect=_mock_enqueue)  # type: ignore[method-assign]
 
@@ -2376,7 +2377,7 @@ class TestCheckScheduleAdditionalPaths:
         # First slot enqueues, second fails permanently, third never tried.
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
-                Ok('task-0'),
+                Ok(UUID(int=0)),
                 Err(BrokerInvalidTaskOptions(
                     message='task_options refused',
                     exception=NoCause(),
@@ -2393,7 +2394,7 @@ class TestCheckScheduleAdditionalPaths:
 
         # Progress recorded past the doomed slot (12:00:05) → next 12:00:10.
         update_kwargs = state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == 'task-0'
+        assert update_kwargs['task_id'] == UUID(int=0)
         assert update_kwargs['next_run_at'] == _utc(2025, 6, 1, 12, 0, 10)
         session.commit.assert_awaited_once()
 
@@ -2731,7 +2732,7 @@ class TestEnqueueScheduledTask:
         )
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok(UUID(int=1)))
         scheduler._validate_schedules()
 
         monkeypatch.setattr(_Deadline, 'passed', True)
@@ -2743,7 +2744,7 @@ class TestEnqueueScheduledTask:
             slot_time=_utc(2025, 6, 1, 12, 0, 0),
         )
 
-        assert result == Ok('task-1')
+        assert result == Ok(UUID(int=1))
         enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
         assert enqueue_kwargs['kwargs_json'] == dumps_json({'deadline': 'soon'}).ok_value
 
@@ -2772,7 +2773,7 @@ class TestEnqueueScheduledTask:
         )
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok(UUID(int=1)))
         scheduler._validate_schedules()
 
         result = await scheduler._enqueue_scheduled_task(
@@ -2780,7 +2781,7 @@ class TestEnqueueScheduledTask:
             slot_time=_utc(2025, 6, 1, 12, 0, 0),
         )
 
-        assert result == Ok('task-1')
+        assert result == Ok(UUID(int=1))
         enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
         assert enqueue_kwargs['retention_class_key'] == 'standard_7d'
 
@@ -2802,7 +2803,7 @@ class TestEnqueueScheduledTask:
         )
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok(UUID(int=1)))
         scheduler._validate_schedules()
 
         with patch(
@@ -2814,7 +2815,7 @@ class TestEnqueueScheduledTask:
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
 
-        assert result == Ok('task-1')
+        assert result == Ok(UUID(int=1))
         wire_text = dumps_json({'value': 5}).ok_value
         assert fingerprint.call_args.kwargs['kwargs_json'] == wire_text
 
@@ -2836,7 +2837,7 @@ class TestEnqueueScheduledTask:
         )
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok(UUID(int=1)))
         scheduler._validate_schedules()
 
         with patch(
@@ -2873,14 +2874,14 @@ class TestEnqueueScheduledTask:
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-abc'))
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok(UUID(int=0xabc)))
         scheduler._validate_schedules()
 
         slot = _utc(2025, 6, 1, 12, 0, 0)
         result = await scheduler._enqueue_scheduled_task(schedule, slot_time=slot)
 
         assert not is_err(result)
-        assert result.ok_value == 'task-abc'
+        assert result.ok_value == UUID(int=0xabc)
 
         # Verify broker was called with sent_at = slot_time
         enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
@@ -2900,7 +2901,7 @@ class TestEnqueueScheduledTask:
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-xyz'))
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok(UUID(int=0xf00)))
         scheduler._validate_schedules()
 
         slot = _utc(2025, 6, 1, 12, 0, 0)

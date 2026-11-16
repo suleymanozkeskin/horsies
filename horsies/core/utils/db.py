@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final, Protocol, assert_never, cast
+from uuid import UUID
 
 import psycopg
 from psycopg import InterfaceError, OperationalError
@@ -88,6 +89,35 @@ def register_identity_text_reads(engine: AsyncEngine) -> None:
         dbapi_connection.driver_connection.adapters.register_loader(
             'uuid', TextLoader
         )
+
+
+def uuid_column_value(value: object, *, column: str) -> UUID:
+    """The ``uuid.UUID`` of a non-null uuid column value as a driver reads it.
+
+    An engine with ``register_identity_text_reads`` reads the value as its
+    text; any other psycopg engine reads a ``uuid.UUID``. A connection
+    that a caller passes in (for example to ``rerun_task``) can be either.
+
+    Raises:
+        TypeError: the value is neither; ``column`` names the column.
+        ValueError: the text is not a UUID; ``column`` names the column.
+    """
+    match value:
+        case UUID():
+            return value
+        case str():
+            try:
+                return UUID(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f'uuid column {column} read text that is not a UUID: '
+                    f'{value!r}'
+                ) from exc
+        case _:
+            raise TypeError(
+                f'uuid column {column} read a {type(value).__name__}, '
+                'not text or uuid.UUID'
+            )
 
 
 def _sync_engine_of(engine: AsyncEngine | Engine) -> Engine | None:

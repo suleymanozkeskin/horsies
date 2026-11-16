@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -1530,6 +1531,10 @@ class TestGetRawResultRecordAsync:
 # ---------------------------------------------------------------------------
 
 
+LIST_TASK_ID_1 = UUID('0198c0de-0000-7000-8000-000000000001')
+LIST_TASK_ID_2 = UUID('0198c0de-0000-7000-8000-000000000002')
+
+
 @pytest.mark.unit
 class TestMonitoringQueries:
     """Tests for get_stale_tasks, get_expired_tasks."""
@@ -1553,12 +1558,15 @@ class TestMonitoringQueries:
 
     @pytest.mark.asyncio
     async def test_get_stale_tasks_returns_list_of_dicts(self) -> None:
-        """get_stale_tasks should return Ok(dicts) keyed by column names."""
+        """get_stale_tasks returns Ok(dicts) keyed by column names, ``id`` as UUID.
+
+        The broker engine reads uuid columns as text, so the rows carry text.
+        """
         broker = _make_broker()
         columns = ['id', 'worker_hostname', 'worker_pid', 'last_heartbeat']
         rows = [
-            ('task-1', 'host-1', 1234, None),
-            ('task-2', 'host-2', 5678, None),
+            (str(LIST_TASK_ID_1), 'host-1', 1234, None),
+            (str(LIST_TASK_ID_2), 'host-2', 5678, None),
         ]
         self._setup_session_with_rows(broker, columns, rows)
 
@@ -1568,12 +1576,12 @@ class TestMonitoringQueries:
         rows_out = result.ok_value
         assert len(rows_out) == 2
         assert rows_out[0] == {
-            'id': 'task-1',
+            'id': LIST_TASK_ID_1,
             'worker_hostname': 'host-1',
             'worker_pid': 1234,
             'last_heartbeat': None,
         }
-        assert rows_out[1]['id'] == 'task-2'
+        assert rows_out[1]['id'] == LIST_TASK_ID_2
 
     @pytest.mark.asyncio
     async def test_get_stale_tasks_empty(self) -> None:
@@ -1588,7 +1596,7 @@ class TestMonitoringQueries:
 
     @pytest.mark.asyncio
     async def test_get_expired_tasks_returns_list_of_dicts(self) -> None:
-        """get_expired_tasks should return Ok(dicts) keyed by column names."""
+        """get_expired_tasks returns Ok(dicts) keyed by column names, ``id`` as UUID."""
         broker = _make_broker()
         columns = [
             'id',
@@ -1600,13 +1608,16 @@ class TestMonitoringQueries:
             'good_until',
             'expired_for',
         ]
-        rows = [('task-1', 'slow_task', 'default', 100, None, None, None, '00:05:00')]
+        rows = [
+            (str(LIST_TASK_ID_1), 'slow_task', 'default', 100, None, None, None, '00:05:00'),
+        ]
         self._setup_session_with_rows(broker, columns, rows)
 
         result = await broker.get_expired_tasks()
 
         assert is_ok(result)
         assert len(result.ok_value) == 1
+        assert result.ok_value[0]['id'] == LIST_TASK_ID_1
         assert result.ok_value[0]['task_name'] == 'slow_task'
 
 
@@ -3006,6 +3017,9 @@ class TestSyncFacades:
 # ---------------------------------------------------------------------------
 
 
+TASK_INFO_ID = UUID('0198c0de-0000-7000-8000-0000000000ab')
+
+
 @pytest.mark.unit
 class TestGetTaskInfoAsync:
     """Tests for get_task_info_async: field extraction, optional includes."""
@@ -3027,11 +3041,15 @@ class TestGetTaskInfoAsync:
 
     @pytest.mark.asyncio
     async def test_task_not_found_returns_none(self) -> None:
-        """When task row is None, should return Ok(None)."""
+        """No live row and no staged history read: Ok(None)."""
         broker = _make_broker()
         self._setup_task_info_session(broker, row=None)
 
-        result = await broker.get_task_info_async('missing-id')
+        with patch(
+            'horsies.core.history.reads.detail.staged_detail_published',
+            AsyncMock(return_value=False),
+        ):
+            result = await broker.get_task_info_async(TASK_INFO_ID)
 
         assert is_ok(result)
         assert result.ok_value is None
@@ -3041,12 +3059,11 @@ class TestGetTaskInfoAsync:
         """Basic task (no optional includes) should return Ok(TaskInfo) with base fields."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 19 base columns: id, task_name, status, queue_name, priority,
+        # 18 base columns: task_name, status, queue_name, priority,
         # retry_count, max_retries, next_retry_at, sent_at, enqueued_at, claimed_at,
         # started_at, completed_at, failed_at, worker_hostname, worker_pid,
         # worker_process_name, error_code, execution
         row = (
-            'task-abc',
             'compute',
             'RUNNING',
             'default',
@@ -3068,13 +3085,13 @@ class TestGetTaskInfoAsync:
         )
         self._setup_task_info_session(broker, row=row)
 
-        result = await broker.get_task_info_async('task-abc')
+        result = await broker.get_task_info_async(TASK_INFO_ID)
 
         assert is_ok(result)
         info = result.ok_value
         assert info is not None
         assert isinstance(info, TaskInfo)
-        assert info.task_id == 'task-abc'
+        assert info.task_id == TASK_INFO_ID
         assert info.task_name == 'compute'
         assert info.status == TaskStatus.RUNNING
         assert info.priority == 100
@@ -3103,9 +3120,8 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__h_task_result__":true,"ok":"hello","err":null}'
-        # 19 base + 1 result column
+        # 18 base + 1 result column
         row = (
-            'task-abc',
             'compute',
             'COMPLETED',
             'default',
@@ -3128,7 +3144,7 @@ class TestGetTaskInfoAsync:
         )
         self._setup_task_info_session(broker, row=row)
 
-        result = await broker.get_task_info_async('task-abc', include_result=True)
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
         assert is_ok(result)
         info = result.ok_value
@@ -3147,9 +3163,8 @@ class TestGetTaskInfoAsync:
         """include_failed_reason=True should add failed_reason to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 19 base + 1 failed_reason column
+        # 18 base + 1 failed_reason column
         row = (
-            'task-abc',
             'compute',
             'FAILED',
             'default',
@@ -3173,7 +3188,7 @@ class TestGetTaskInfoAsync:
         self._setup_task_info_session(broker, row=row)
 
         result = await broker.get_task_info_async(
-            'task-abc', include_failed_reason=True
+            TASK_INFO_ID, include_failed_reason=True
         )
 
         assert is_ok(result)
@@ -3186,9 +3201,8 @@ class TestGetTaskInfoAsync:
         """include_result=True with NULL result in DB should return Ok(TaskInfo) with result=None."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 19 base + 1 result column (None)
+        # 18 base + 1 result column (None)
         row = (
-            'task-abc',
             'compute',
             'RUNNING',
             'default',
@@ -3211,7 +3225,7 @@ class TestGetTaskInfoAsync:
         )
         self._setup_task_info_session(broker, row=row)
 
-        result = await broker.get_task_info_async('task-abc', include_result=True)
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
         assert is_ok(result)
         info = result.ok_value
@@ -3230,9 +3244,8 @@ class TestGetTaskInfoAsync:
             '{"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},'
             '"message":"fail","data":null,"exception":null}}'
         )
-        # 19 base + 1 result + 1 failed_reason
+        # 18 base + 1 result + 1 failed_reason
         row = (
-            'task-abc',
             'compute',
             'FAILED',
             'default',
@@ -3257,7 +3270,7 @@ class TestGetTaskInfoAsync:
         self._setup_task_info_session(broker, row=row)
 
         result = await broker.get_task_info_async(
-            'task-abc',
+            TASK_INFO_ID,
             include_result=True,
             include_failed_reason=True,
         )
@@ -3708,7 +3721,7 @@ class TestEnqueueInsertStatement:
         from horsies.core.brokers.postgres import PostgresBroker
 
         return PostgresBroker._enqueue_insert_params(  # pyright: ignore[reportPrivateUsage]
-            task_id='t-1',
+            task_id=LIST_TASK_ID_1,
             task_name='parity_probe',
             queue_name='default',
             priority=100,

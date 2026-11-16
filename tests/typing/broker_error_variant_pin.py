@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import assert_never
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +60,8 @@ from horsies.core.task_decorator import (
 )
 from horsies.core.types.result import Result
 from horsies.core.utils.loop_runner import LoopRunnerError
+
+TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
 
 
 def operation_codes() -> None:
@@ -112,11 +115,11 @@ def owner_only_on_the_conflict(
 
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
-    declared: Result[str, BrokerEnqueueError] = await broker.enqueue_async(
-        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
+    declared: Result[UUID, BrokerEnqueueError] = await broker.enqueue_async(
+        'report', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
+    match await broker.enqueue_async('report', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -128,11 +131,11 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
 
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
-    declared: Result[str, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
-        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
+    declared: Result[UUID, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
+        'report', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
+    match broker.enqueue('report', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -206,18 +209,18 @@ async def enqueue_helpers_return_their_subsets(
         retain_rerun_input=True,
     )
     bind_key = broker._bind_key_after_task_id_conflict  # pyright: ignore[reportPrivateUsage]
-    bound: Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch] = await bind_key(
+    bound: Result[UUID, BrokerEnqueueFailed | BrokerPayloadMismatch] = await bind_key(
         session,
-        task_id='task-1',
+        task_id=TASK_ID,
         task_name='report',
         key_digest=b'key',
         command_fingerprint=b'fingerprint',
         sent_at=good_until,
     )
     verify = broker._verify_enqueue_conflict  # pyright: ignore[reportPrivateUsage]
-    verified: Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch] = await verify(
+    verified: Result[UUID, BrokerEnqueueFailed | BrokerPayloadMismatch] = await verify(
         resources,
-        task_id='task-1',
+        task_id=TASK_ID,
         task_name='report',
         command_fingerprint=b'fingerprint',
         sent_at=good_until,
@@ -237,7 +240,7 @@ async def scheduled_enqueue_returns_only_enqueue_errors(
     slot_time: datetime,
 ) -> None:
     enqueue_slot = scheduler._enqueue_scheduled_task  # pyright: ignore[reportPrivateUsage]
-    enqueued: Result[str, BrokerEnqueueError] = await enqueue_slot(
+    enqueued: Result[UUID, BrokerEnqueueError] = await enqueue_slot(
         schedule, slot_time=slot_time,
     )
     _ = enqueued
@@ -248,5 +251,5 @@ def send_mapping_refuses_the_operation_error(
     operation_error: BrokerOperationFailed,
     payload: TaskSendPayload,
 ) -> None:
-    _ = _map_broker_err(enqueue_error, 'task-id', payload)
-    _ = _map_broker_err(operation_error, 'task-id', payload)  # pyright: ignore[reportArgumentType]
+    _ = _map_broker_err(enqueue_error, TASK_ID, payload)
+    _ = _map_broker_err(operation_error, TASK_ID, payload)  # pyright: ignore[reportArgumentType]

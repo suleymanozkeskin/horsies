@@ -153,7 +153,7 @@ class TestVariantCatalog:
 
 def _history_state(*, status: TaskStatus, is_workflow_task: bool) -> HistoryTaskState:
     return HistoryTaskState(
-        task_id=TASK_ID, status=status, is_workflow_task=is_workflow_task,
+        task_id=uuid.UUID(TASK_ID), status=status, is_workflow_task=is_workflow_task,
     )
 
 
@@ -253,7 +253,7 @@ class TestCancelLiveMiss:
         result = await _cancel_missed(
             monkeypatch,
             published=True,
-            read=TaskStateAbsent(task_id=TASK_ID),
+            read=TaskStateAbsent(task_id=uuid.UUID(TASK_ID)),
         )
 
         assert is_err(result)
@@ -264,7 +264,7 @@ class TestCancelLiveMiss:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         result = await _cancel_missed(
-            monkeypatch, published=True, read=LiveTaskLocation(task_id=TASK_ID),
+            monkeypatch, published=True, read=LiveTaskLocation(task_id=uuid.UUID(TASK_ID)),
         )
 
         assert is_err(result)

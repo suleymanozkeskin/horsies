@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 import psycopg
 from sqlalchemy.ext.asyncio import (
@@ -149,6 +150,7 @@ from horsies.core.utils.db import (
     is_retryable_connection_error,
     SessionSettings,
     register_identity_text_reads,
+    uuid_column_value,
     register_idle_ping,
     register_session_settings,
 )
@@ -537,7 +539,7 @@ def _async_context_err(
 
 
 def _wait_inside_task_err(
-    operation: str, task_id: str,
+    operation: str, task_id: UUID,
 ) -> Err[BrokerWaitInsideTask]:
     """Build the broker error for a result wait in a process that runs task bodies.
 
@@ -548,6 +550,16 @@ def _wait_inside_task_err(
             message=wait_inside_task_message(f'{operation} for task {task_id}'),
         )
     )
+
+
+def _task_list_entry(columns: list[str], row: Any) -> dict[str, Any]:
+    """One entry of the stale or expired task list, keyed by column name.
+
+    The ``id`` value is the ``uuid.UUID`` of the public API.
+    """
+    entry: dict[str, Any] = dict(zip(columns, row))
+    entry['id'] = uuid_column_value(entry['id'], column='horsies_tasks.id')
+    return entry
 
 
 def _cancel_requested() -> bool:
@@ -1636,7 +1648,7 @@ class PostgresBroker:
     @staticmethod
     def _prepare_enqueue(
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         queue_name: str,
         priority: int,
@@ -1732,7 +1744,7 @@ class PostgresBroker:
     @staticmethod
     def _enqueue_insert_params(
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         queue_name: str,
         priority: int,
@@ -1757,7 +1769,7 @@ class PostgresBroker:
         """
         return {
             'idempotency_key_digest': scoped_key_digest,
-            'id': task_id,
+            'id': str(task_id),
             'task_name': task_name,
             'queue_name': queue_name,
             'priority': priority,
@@ -1784,7 +1796,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str = 'default',
         *,
-        task_id: str,
+        task_id: UUID,
         enqueue_sha: str,
         args_json: str | None = None,
         kwargs_json: str | None = None,
@@ -1797,7 +1809,7 @@ class PostgresBroker:
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
-    ) -> Result[str, BrokerEnqueueError]:
+    ) -> Result[UUID, BrokerEnqueueError]:
         """Write one PENDING task row, or answer the send that wrote it.
 
         The row stores ``kwargs_json`` as its ``input`` (``{}`` when there
@@ -1882,12 +1894,12 @@ class PostgresBroker:
         self,
         resources: BrokerResources,
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         command_fingerprint: bytes,
         sent_at: datetime,
         insert_params: dict[str, Any],
-    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
+    ) -> Result[UUID, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Insert one row, then verify the payload on a task id conflict.
 
         Unkeyed enqueue is one atomic INSERT; autocommit skips the
@@ -1921,13 +1933,13 @@ class PostgresBroker:
         self,
         resources: BrokerResources,
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
         sent_at: datetime,
         insert_params: dict[str, Any],
-    ) -> Result[str, BrokerEnqueueError]:
+    ) -> Result[UUID, BrokerEnqueueError]:
         """Claim the key and insert in ONE transaction.
 
         The claim uses the command fingerprint that the row stores, and a
@@ -1990,12 +2002,12 @@ class PostgresBroker:
         self,
         session: AsyncSession,
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
         sent_at: datetime,
-    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
+    ) -> Result[UUID, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Bind a claimed key to an exact existing live task atomically.
 
         The reservation claim already ran in ``session``. Locking the task row
@@ -2011,7 +2023,7 @@ class PostgresBroker:
                     TaskModel.command_fingerprint,
                     TaskModel.sent_at,
                 )
-                .where(TaskModel.id == task_id)
+                .where(TaskModel.id == str(task_id))
                 .with_for_update()
             )
         ).one_or_none()
@@ -2063,7 +2075,7 @@ class PostgresBroker:
                     'SET idempotency_key_digest = :key_digest '
                     'WHERE id = CAST(:task_id AS uuid)'
                 ),
-                {'key_digest': key_digest, 'task_id': task_id},
+                {'key_digest': key_digest, 'task_id': str(task_id)},
             )
         await session.commit()
         return Ok(task_id)
@@ -2072,11 +2084,11 @@ class PostgresBroker:
         self,
         resources: BrokerResources,
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         command_fingerprint: bytes,
         sent_at: datetime,
-    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
+    ) -> Result[UUID, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Verify that the row with a conflicting task_id holds this send.
 
         Called when INSERT ... ON CONFLICT DO NOTHING returns no row. The
@@ -2091,7 +2103,7 @@ class PostgresBroker:
                             TaskModel.command_fingerprint_version,
                             TaskModel.command_fingerprint,
                             TaskModel.sent_at,
-                        ).where(TaskModel.id == task_id),
+                        ).where(TaskModel.id == str(task_id)),
                     )
                 ).fetchone()
         except _DRIVER_ERRORS as exc:
@@ -2145,7 +2157,7 @@ class PostgresBroker:
 
     def _build_raw_result_record(
         self,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         status: TaskStatus,
         result_json: 'str | None',
@@ -2186,7 +2198,7 @@ class PostgresBroker:
     async def _history_result_record(
         self,
         session: AsyncSession,
-        task_id: str,
+        task_id: UUID,
     ) -> 'BrokerResult[RawResultRecord | None] | object':
         """Resolve a result from the task-history side.
 
@@ -2230,7 +2242,7 @@ class PostgresBroker:
 
     def _history_raw_result_record(
         self,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         status: TaskStatus,
         payload: bytes | None,
@@ -2278,7 +2290,7 @@ class PostgresBroker:
     async def _probe_result_row(
         self,
         session: AsyncSession,
-        task_id: str,
+        task_id: UUID,
         *,
         non_terminal_snapshot: bool = False,
     ) -> 'BrokerResult[RawResultRecord | None] | object':
@@ -2365,7 +2377,7 @@ class PostgresBroker:
     async def _probe_live_result_row(
         self,
         session: AsyncSession,
-        task_id: str,
+        task_id: UUID,
         *,
         non_terminal_snapshot: bool = False,
     ) -> 'BrokerResult[RawResultRecord | None] | object':
@@ -2384,7 +2396,7 @@ class PostgresBroker:
         returned as a payload-less record instead of the sentinel.
         """
         probe = await session.execute(
-            GET_TASK_STATUS_NAME_SQL, {'id': task_id},
+            GET_TASK_STATUS_NAME_SQL, {'id': str(task_id)},
         )
         probe_row = probe.fetchone()
         if probe_row is None:
@@ -2401,7 +2413,7 @@ class PostgresBroker:
 
     async def get_raw_result_record_async(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
         """Raw broker fetch of a task's stored result envelope.
@@ -2466,7 +2478,7 @@ class PostgresBroker:
             subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
             match resources.listener:
                 case ListenerEnabled(listener=listener):
-                    listen_r = await listener.listen_payload('task_done', task_id)
+                    listen_r = await listener.listen_payload('task_done', str(task_id))
                     match listen_r:
                         case Ok(queue):
                             q = queue
@@ -2518,7 +2530,7 @@ class PostgresBroker:
                             async def _wait_for_task() -> None:
                                 while True:
                                     note = await q.get()
-                                    if note.payload == task_id:
+                                    if note.payload == str(task_id):
                                         return
 
                             await asyncio.wait_for(
@@ -2560,7 +2572,7 @@ class PostgresBroker:
 
     def get_raw_result_record(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
         """Synchronous wrapper around ``get_raw_result_record_async``.
@@ -2589,11 +2601,11 @@ class PostgresBroker:
             )
 
     async def _unsubscribe_task_done_safely(
-        self, listener: PostgresListener, task_id: str, q: asyncio.Queue[Any],
+        self, listener: PostgresListener, task_id: UUID, q: asyncio.Queue[Any],
     ) -> None:
         """Ensure task_done unsubscribe completes even under repeated cancellation."""
         unsubscribe_task = asyncio.create_task(
-            listener.unsubscribe_payload('task_done', task_id, q)
+            listener.unsubscribe_payload('task_done', str(task_id), q)
         )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
@@ -2681,8 +2693,11 @@ class PostgresBroker:
                     GET_STALE_TASKS_SQL,
                     {'stale_threshold': stale_threshold_minutes},
                 )
-                columns = result.keys()
-                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+                columns = list(result.keys())
+                return Ok([
+                    _task_list_entry(columns, row)
+                    for row in result.fetchall()
+                ])
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
@@ -3117,8 +3132,11 @@ class PostgresBroker:
         try:
             async with resources.session_factory() as session:
                 result = await session.execute(GET_EXPIRED_TASKS_SQL)
-                columns = result.keys()
-                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+                columns = list(result.keys())
+                return Ok([
+                    _task_list_entry(columns, row)
+                    for row in result.fetchall()
+                ])
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
@@ -3660,7 +3678,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str,
         *,
-        task_id: str,
+        task_id: UUID,
         args_json: str | None,
         kwargs_json: str | None,
         priority: int,
@@ -3671,7 +3689,7 @@ class PostgresBroker:
         task_options: Optional[str],
         retention_class_key: RetentionClassKey | None,
         retain_rerun_input: Optional[bool],
-    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
+    ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
         """The unkeyed path of ``enqueue_async``, on the calling thread: the
         same row, the same statement and the same error classification. A
         task id that is taken is compared on the loop runner
@@ -3726,11 +3744,11 @@ class PostgresBroker:
 
     async def _verify_taken_task_id(
         self,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         command_fingerprint: bytes,
         sent_at: datetime,
-    ) -> Result[str, BrokerEnqueueError]:
+    ) -> Result[UUID, BrokerEnqueueError]:
         """``_verify_enqueue_conflict`` on this loop's resource set, for a
         sync send whose INSERT found the task id taken."""
         match await self.select_resources():
@@ -3757,7 +3775,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str = 'default',
         *,
-        task_id: str,
+        task_id: UUID,
         enqueue_sha: str,
         args_json: str | None = None,
         kwargs_json: str | None = None,
@@ -3770,7 +3788,7 @@ class PostgresBroker:
         idempotency_key: Optional[str] = None,
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
-    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
+    ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
         """Synchronous task submission, with the outcomes of ``enqueue_async``.
 
         ``send_route`` decides where the row is written: on the calling
@@ -3828,7 +3846,7 @@ class PostgresBroker:
     async def _history_task_info(
         self,
         session: 'AsyncSession',
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool,
         include_failed_reason: bool,
@@ -3842,12 +3860,6 @@ class PostgresBroker:
         provenance. Attempts decode from the record's snapshot — their
         only home after the move.
         """
-        from horsies.core.history.identity.uuid7 import UUID
-
-        try:
-            UUID(task_id)
-        except ValueError:
-            return Ok(None)
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
             read_task_detail,
@@ -3968,7 +3980,7 @@ class PostgresBroker:
 
     async def get_task_info_async(
         self,
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
@@ -3989,7 +4001,6 @@ class PostgresBroker:
 
             async with resources.session_factory() as session:
                 base_columns = [
-                    'id',
                     'task_name',
                     'status',
                     'queue_name',
@@ -4023,7 +4034,7 @@ class PostgresBroker:
                     WHERE id = :id
                 """
                 )
-                result = await session.execute(query, {'id': task_id})
+                result = await session.execute(query, {'id': str(task_id)})
                 row = result.fetchone()
                 if row is None:
                     # Terminalization moves finished rows to history, so
@@ -4042,8 +4053,6 @@ class PostgresBroker:
                 failed_reason = None
 
                 idx = 0
-                task_id_value = row[idx]
-                idx += 1
                 task_name = row[idx]
                 idx += 1
                 status = TaskStatus(row[idx])
@@ -4124,11 +4133,11 @@ class PostgresBroker:
                 if include_attempts:
                     att_result = await session.execute(
                         SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL,
-                        {'task_id': task_id},
+                        {'task_id': str(task_id)},
                     )
                     attempts = [
                         TaskAttemptInfo(
-                            task_id=att_row[0],
+                            task_id=task_id,
                             attempt=att_row[1],
                             outcome=TaskAttemptOutcome(att_row[2]),
                             will_retry=att_row[3],
@@ -4147,7 +4156,7 @@ class PostgresBroker:
 
                 return Ok(
                     TaskInfo(
-                        task_id=task_id_value,
+                        task_id=task_id,
                         task_name=task_name,
                         status=status,
                         queue_name=queue_name,
@@ -4182,7 +4191,7 @@ class PostgresBroker:
 
     def get_task_info(
         self,
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,

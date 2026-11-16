@@ -642,7 +642,7 @@ async def start_workflow_async(
                     )
                     task_id: str | None = None
                     if is_fast_root:
-                        task_id = mint_task_id()
+                        task_id = str(mint_task_id())
                         # Task-row kwargs = node kwargs + workflow_meta
                         # (mirrors enqueue_workflow_task; args_from/ctx
                         # injection is structurally absent on fast roots).

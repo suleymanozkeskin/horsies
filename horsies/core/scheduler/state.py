@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.models.task_pg import ScheduleStateModel
@@ -238,7 +239,7 @@ class ScheduleStateManager:
     async def update_after_run(
         self,
         schedule_name: str,
-        task_id: str,
+        task_id: UUID,
         executed_at: datetime,
         next_run_at: datetime,
         session: Optional[AsyncSession] = None,
@@ -286,7 +287,7 @@ class ScheduleStateManager:
         self,
         session: AsyncSession,
         schedule_name: str,
-        task_id: str,
+        task_id: UUID,
         executed_at: datetime,
         next_run_at: datetime,
         commit: bool,
@@ -307,7 +308,7 @@ class ScheduleStateManager:
                 'schedule_name': schedule_name,
                 'executed_at': executed_at,
                 'next_run_at': next_run_at,
-                'task_id': task_id,
+                'task_id': str(task_id),
                 'now': datetime.now(timezone.utc),
             },
         )
