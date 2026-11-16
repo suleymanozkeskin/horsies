@@ -598,7 +598,8 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'CLAIMED', started_at = NULL
+            SET status = 'CLAIMED', started_at = NULL,
+                claim_expires_at = NOW() + INTERVAL '1 hour'
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -701,7 +702,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
             SET status = 'CLAIMED',
                 claimed_at = NOW(),
                 claimed_by_worker_id = :wid,
-                claim_expires_at = NULL,
+                claim_expires_at = NOW() + interval '1 hour',
                 good_until = NOW() + interval '1 second'
             WHERE id = :tid
         """),
