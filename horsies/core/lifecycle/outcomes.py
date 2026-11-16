@@ -52,6 +52,7 @@ class GuardKind(Enum):
     WORKFLOW_LINK_STATE = 'WORKFLOW_LINK_STATE'
     FOREIGN_TERMINALIZATION = 'FOREIGN_TERMINALIZATION'
     WORKFLOW_TASK = 'WORKFLOW_TASK'
+    RETRY_COUNT = 'RETRY_COUNT'
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,15 @@ class ObservedWorkflowTask:
     observed_status: TaskStatus
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedRetryCount:
+    """A retry request was computed from ``expected_retry_count``, and the
+    locked row holds ``retry_count``: another writer ended that attempt."""
+
+    expected_retry_count: int
+    retry_count: int
+
+
 type GuardEvidence = (
     ObservedClaim
     | ObservedDeadline
@@ -154,6 +164,7 @@ type GuardEvidence = (
     | ObservedWorkflowLink
     | ObservedForeignTerminalization
     | ObservedWorkflowTask
+    | ObservedRetryCount
 )
 
 
@@ -261,6 +272,7 @@ _GUARD_PAYLOAD_KEYS: dict[GuardKind, frozenset[str]] = {
     GuardKind.WORKFLOW_LINK_STATE: frozenset({'node_status'}),
     GuardKind.FOREIGN_TERMINALIZATION: frozenset(),
     GuardKind.WORKFLOW_TASK: frozenset(),
+    GuardKind.RETRY_COUNT: frozenset({'expected_retry_count', 'retry_count'}),
 }
 
 
@@ -386,6 +398,11 @@ def _decode_evidence(
                     'refusal names the status of the task it refused.'
                 )
             return ObservedWorkflowTask(observed_status=observed.status)
+        case GuardKind.RETRY_COUNT:
+            return ObservedRetryCount(
+                expected_retry_count=_require_int(payload, 'expected_retry_count'),
+                retry_count=_require_int(payload, 'retry_count'),
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -686,64 +703,82 @@ def decode_failed_attempt_row(row: Mapping[str, Any]) -> FailedAttemptOutcome:
             column is missing or unknown, or a column is set or NULL against
             its outcome.
     """
+    shared = _failed_attempt_shared(row, 'failed-attempt')
+    match row['outcome']:
+        case 'APPLIED':
+            task_id, terminal_at, observed = _applied_failure(
+                row, shared, TerminalizationKind.FAIL_RUNNING, 'failed-attempt'
+            )
+            return FailureApplied(
+                task_id=task_id,
+                terminal_at=terminal_at,
+                observed=observed,
+                retry=_decode_retry_refusal(row),
+                after=_decode_after_failure(row),
+            )
+        case 'RETRY_SCHEDULED':
+            return _decode_retry_scheduled(row, shared)
+        case _:
+            return _decode_failure_refusal(row, shared)
+
+
+def _failed_attempt_shared(row: Mapping[str, Any], label: str) -> dict[str, Any]:
+    """The ten shared columns, after the check of the whole row shape."""
     present = frozenset(row.keys())
     expected = _ROW_COLUMNS | _FAILED_ATTEMPT_COLUMNS
     if present != expected:
         raise OutcomeDecodeError(
-            f'failed-attempt row shape does not match the wire contract. '
+            f'{label} row shape does not match the wire contract. '
             f'missing={sorted(expected - present)} '
             f'unexpected={sorted(present - expected)}'
         )
-    shared = {column: row[column] for column in _ROW_COLUMNS}
-    match row['outcome']:
-        case 'APPLIED':
-            return _decode_failure_applied(row, shared)
-        case 'RETRY_SCHEDULED':
-            return _decode_retry_scheduled(row, shared)
-        case _:
-            _require_null_columns(row, _FAILED_ATTEMPT_COLUMNS)
-            match decode_outcome_row(shared):
-                case (
-                    (
-                        AlreadyApplied()
-                        | LostClaim()
-                        | SourceStateConflict()
-                        | TaskAbsent()
-                    ) as refused
-                ):
-                    return refused
-                case Applied():
-                    raise AssertionError('APPLIED is decoded above')
-                case _ as unreachable:
-                    assert_never(unreachable)
+    return {column: row[column] for column in _ROW_COLUMNS}
 
 
-def _decode_failure_applied(
+def _decode_failure_refusal(
     row: Mapping[str, Any],
     shared: Mapping[str, Any],
-) -> FailureApplied:
+) -> AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    _require_null_columns(row, _FAILED_ATTEMPT_COLUMNS)
+    match decode_outcome_row(shared):
+        case (
+            (
+                AlreadyApplied()
+                | LostClaim()
+                | SourceStateConflict()
+                | TaskAbsent()
+            ) as refused
+        ):
+            return refused
+        case Applied():
+            raise AssertionError('APPLIED is decoded by the caller')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _applied_failure(
+    row: Mapping[str, Any],
+    shared: Mapping[str, Any],
+    kind: TerminalizationKind,
+    label: str,
+) -> tuple[str, datetime, ObservedTaskState]:
+    """The shared facts of an APPLIED failure row whose move wrote ``kind``."""
     _require_null_columns(row, frozenset({'retry_count'}))
     _require_dependents_fact(row, is_workflow_task=row['is_workflow_task'] is True)
     match decode_outcome_row(shared):
         case Applied(
-            task_id=task_id, terminal_at=terminal_at, kind=kind, observed=observed
+            task_id=task_id, terminal_at=terminal_at, kind=written, observed=observed
         ):
             pass
         case AlreadyApplied() | LostClaim() | SourceStateConflict() | TaskAbsent():
             raise AssertionError('the shared decoder kept the APPLIED discriminant')
         case _ as unreachable:
             assert_never(unreachable)
-    if kind is not TerminalizationKind.FAIL_RUNNING:
+    if written is not kind:
         raise OutcomeDecodeError(
-            f'failed-attempt APPLIED carries kind {kind.value}, not FAIL_RUNNING'
+            f'{label} APPLIED carries kind {written.value}, not {kind.value}'
         )
-    return FailureApplied(
-        task_id=task_id,
-        terminal_at=terminal_at,
-        observed=observed,
-        retry=_decode_retry_refusal(row),
-        after=_decode_after_failure(row),
-    )
+    return task_id, terminal_at, observed
 
 
 def _decode_retry_refusal(row: Mapping[str, Any]) -> RetryRefusal:
@@ -806,6 +841,73 @@ def _decode_retry_scheduled(
             claimed_at=_optional_datetime(shared, 'observed_claimed_at'),
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# The stale attempt finish
+# ---------------------------------------------------------------------------
+#
+# ``horsies_finish_stale_attempt`` returns the columns of
+# ``horsies_finish_failed_attempt``, never RELEASED. The terminal move writes
+# FAIL_STALE and sends no capacity wake; phase-2 recovery advances the node
+# of a workflow task.
+
+
+@dataclass(frozen=True, slots=True)
+class StaleFailureApplied:
+    """The FAILED attempt row and the move of the stale task committed."""
+
+    task_id: str
+    terminal_at: datetime
+    observed: ObservedTaskState
+    retry: RetryRefusal
+    is_workflow_task: bool
+
+
+type StaleAttemptOutcome = (
+    StaleFailureApplied
+    | RetryScheduled
+    | AlreadyApplied
+    | LostClaim
+    | SourceStateConflict
+    | TaskAbsent
+)
+
+
+def decode_stale_attempt_row(row: Mapping[str, Any]) -> StaleAttemptOutcome:
+    """Decode the row of ``horsies_finish_stale_attempt``.
+
+    Raises:
+        OutcomeDecodeError: the row does not satisfy the wire contract: a
+            column is missing or unknown, a column is set or NULL against its
+            outcome, or an APPLIED row carries a kind other than FAIL_STALE.
+    """
+    shared = _failed_attempt_shared(row, 'stale-attempt')
+    match row['outcome']:
+        case 'APPLIED':
+            task_id, terminal_at, observed = _applied_failure(
+                row, shared, TerminalizationKind.FAIL_STALE, 'stale-attempt'
+            )
+            _ = _require_str(row, 'queue_name')
+            _ = _require_str(row, 'task_name')
+            return StaleFailureApplied(
+                task_id=task_id,
+                terminal_at=terminal_at,
+                observed=observed,
+                retry=_decode_retry_refusal(row),
+                is_workflow_task=_require_bool(row, 'is_workflow_task'),
+            )
+        case 'RETRY_SCHEDULED':
+            return _decode_retry_scheduled(row, shared)
+        case _:
+            return _decode_failure_refusal(row, shared)
+
+
+def _require_bool(source: Mapping[str, Any], key: str) -> bool:
+    value = source.get(key)
+    if not isinstance(value, bool):
+        raise OutcomeDecodeError(f'{key} must be a boolean, got {type(value).__name__}')
+    return value
 
 
 # ---------------------------------------------------------------------------
