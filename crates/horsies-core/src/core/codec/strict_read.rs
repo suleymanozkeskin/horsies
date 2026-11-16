@@ -19,10 +19,16 @@
 //! - An object repeats no key (keys compare after unescaping).
 //! - Stored payloads are UTF-8 and not empty.
 //!
+//! A value text that user code built has two more rules ([`TextRule::UserValue`],
+//! `super::user_value`): at most [`MAX_VALUE_JSON_DEPTH`] levels, and no key
+//! that only the engine writes.
+//!
 //! The functions read the text and build no value. Error texts name a byte
 //! offset, never a value: the text is task input.
 
 use std::collections::HashSet;
+
+use super::user_value::{is_engine_key, MAX_VALUE_JSON_DEPTH};
 
 /// The deepest nesting of arrays and objects that the boundary accepts
 /// (Python `MAX_JSON_DEPTH`).
@@ -56,9 +62,15 @@ pub enum StrictJsonError {
     /// A `\u` escape that leaves a lone UTF-16 surrogate.
     #[error("JSON string at byte {offset} holds a lone UTF-16 surrogate")]
     LoneSurrogate { offset: usize },
-    /// Arrays and objects nested deeper than [`MAX_JSON_DEPTH`].
-    #[error("JSON text is nested deeper than {MAX_JSON_DEPTH} levels")]
-    TooDeep,
+    /// Arrays and objects nested deeper than the bound of the text kind:
+    /// [`MAX_JSON_DEPTH`] for a stored text, [`MAX_VALUE_JSON_DEPTH`] for a
+    /// user value.
+    #[error("JSON text is nested deeper than {limit} levels")]
+    TooDeep { limit: usize },
+    /// A user value holds a key that only the engine writes; the key starts at
+    /// this byte.
+    #[error("JSON object holds a reserved engine key at byte {offset}")]
+    EngineKey { offset: usize },
     /// An object repeats the key that starts at this byte.
     #[error("JSON object repeats the key at byte {offset}")]
     DuplicateKey { offset: usize },
@@ -89,26 +101,58 @@ impl std::fmt::Display for SyntaxReason {
     }
 }
 
+/// Which text the reader checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextRule {
+    /// A stored text: at most [`MAX_JSON_DEPTH`] levels; any key.
+    Stored,
+    /// A value that user code built: at most [`MAX_VALUE_JSON_DEPTH`] levels;
+    /// no key that only the engine writes.
+    UserValue,
+}
+
+impl TextRule {
+    /// The deepest nesting that the rule accepts.
+    pub fn max_depth(self) -> usize {
+        match self {
+            Self::Stored => MAX_JSON_DEPTH,
+            Self::UserValue => MAX_VALUE_JSON_DEPTH,
+        }
+    }
+}
+
 /// Check a stored payload: not empty, UTF-8, then [`check_json_text`].
 pub fn check_json_bytes(payload: &[u8]) -> Result<(), StrictJsonError> {
+    check_json_bytes_with(payload, TextRule::Stored)
+}
+
+/// Check a JSON text against the strict read rule (module docs). Does no
+/// I/O and builds no value.
+pub fn check_json_text(text: &str) -> Result<(), StrictJsonError> {
+    check_json_text_with(text, TextRule::Stored)
+}
+
+/// Check a payload under `rule`: not empty, UTF-8, then [`check_json_text_with`].
+pub fn check_json_bytes_with(payload: &[u8], rule: TextRule) -> Result<(), StrictJsonError> {
     if payload.is_empty() {
         return Err(StrictJsonError::Empty);
     }
     let text = std::str::from_utf8(payload).map_err(|error| StrictJsonError::NotUtf8 {
         offset: error.valid_up_to(),
     })?;
-    check_json_text(text)
+    check_json_text_with(text, rule)
 }
 
-/// Check a JSON text against the strict read rule (module docs). Does no
-/// I/O and builds no value.
-pub fn check_json_text(text: &str) -> Result<(), StrictJsonError> {
+/// Check a JSON text against the strict read rule and the depth and key rules
+/// of `rule`. Does no I/O and builds no value.
+pub fn check_json_text_with(text: &str, rule: TextRule) -> Result<(), StrictJsonError> {
     if text.is_empty() {
         return Err(StrictJsonError::Empty);
     }
     let mut reader = Reader {
         bytes: text.as_bytes(),
         pos: 0,
+        rule,
     };
     reader.skip_whitespace();
     reader.value(0)?;
@@ -122,6 +166,7 @@ pub fn check_json_text(text: &str) -> Result<(), StrictJsonError> {
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    rule: TextRule,
 }
 
 impl Reader<'_> {
@@ -181,8 +226,10 @@ impl Reader<'_> {
     }
 
     fn object(&mut self, depth: usize) -> Result<(), StrictJsonError> {
-        if depth > MAX_JSON_DEPTH {
-            return Err(StrictJsonError::TooDeep);
+        if depth > self.rule.max_depth() {
+            return Err(StrictJsonError::TooDeep {
+                limit: self.rule.max_depth(),
+            });
         }
         self.pos += 1; // '{'
         self.skip_whitespace();
@@ -199,6 +246,9 @@ impl Reader<'_> {
                 Some(_) => return Err(self.syntax(SyntaxReason::UnexpectedCharacter)),
             }
             let key = self.string()?;
+            if self.rule == TextRule::UserValue && is_engine_key(&key) {
+                return Err(StrictJsonError::EngineKey { offset: key_offset });
+            }
             if !keys.insert(key) {
                 return Err(StrictJsonError::DuplicateKey { offset: key_offset });
             }
@@ -227,8 +277,10 @@ impl Reader<'_> {
     }
 
     fn array(&mut self, depth: usize) -> Result<(), StrictJsonError> {
-        if depth > MAX_JSON_DEPTH {
-            return Err(StrictJsonError::TooDeep);
+        if depth > self.rule.max_depth() {
+            return Err(StrictJsonError::TooDeep {
+                limit: self.rule.max_depth(),
+            });
         }
         self.pos += 1; // '['
         self.skip_whitespace();
@@ -595,20 +647,57 @@ mod tests {
     fn nesting_is_bounded_at_300() {
         let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
         assert_eq!(check_json_text(&nested(MAX_JSON_DEPTH)), Ok(()));
-        assert_eq!(
-            check_json_text(&nested(MAX_JSON_DEPTH + 1)),
-            Err(StrictJsonError::TooDeep)
-        );
+        let too_deep = Err(StrictJsonError::TooDeep {
+            limit: MAX_JSON_DEPTH,
+        });
+        assert_eq!(check_json_text(&nested(MAX_JSON_DEPTH + 1)), too_deep);
         let objects = format!(
             "{}1{}",
             "{\"k\":".repeat(MAX_JSON_DEPTH + 1),
             "}".repeat(MAX_JSON_DEPTH + 1)
         );
-        assert_eq!(check_json_text(&objects), Err(StrictJsonError::TooDeep));
+        assert_eq!(check_json_text(&objects), too_deep);
         // A text far deeper than the bound is refused without deep recursion.
+        assert_eq!(check_json_text(&"[".repeat(1_000_000)), too_deep);
+    }
+
+    /// Python `MAX_TYPED_JSON_DEPTH`: a user value of 200 levels passes, 201
+    /// do not; a stored text keeps room for the envelopes around it.
+    #[test]
+    fn a_user_value_is_bounded_at_200() {
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
         assert_eq!(
-            check_json_text(&"[".repeat(1_000_000)),
-            Err(StrictJsonError::TooDeep)
+            check_json_text_with(&nested(MAX_VALUE_JSON_DEPTH), TextRule::UserValue),
+            Ok(())
+        );
+        assert_eq!(
+            check_json_text_with(&nested(MAX_VALUE_JSON_DEPTH + 1), TextRule::UserValue),
+            Err(StrictJsonError::TooDeep {
+                limit: MAX_VALUE_JSON_DEPTH
+            })
+        );
+        assert_eq!(check_json_text(&nested(MAX_VALUE_JSON_DEPTH + 1)), Ok(()));
+    }
+
+    /// Python `_scan_reserved_keys`: a user value with an engine key at any
+    /// depth is refused; a stored text may hold one.
+    #[test]
+    fn a_user_value_holds_no_engine_key() {
+        for (text, offset) in [
+            ("{\"__h_task_result__\":true}", 1),
+            ("[{\"a\":{\"__builtin_task_code__\":\"X\"}}]", 7),
+            ("{\"\\u005f_horsies_x\":1}", 1),
+        ] {
+            assert_eq!(
+                check_json_text_with(text, TextRule::UserValue),
+                Err(StrictJsonError::EngineKey { offset }),
+                "{text}"
+            );
+            assert_eq!(check_json_text(text), Ok(()), "{text}");
+        }
+        assert_eq!(
+            check_json_text_with("{\"note\":\"__h_task_result__\"}", TextRule::UserValue),
+            Ok(())
         );
     }
 
