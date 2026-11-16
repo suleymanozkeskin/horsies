@@ -35,7 +35,8 @@ $$;
 
 -- Starts a tree from a JSON description. p_workflows: [{"id", "name", "on_error", "parent", "parent_index", "depth",
 -- "output", "policy"}], the top-level row first. p_nodes: [{"wf", "idx", "deps", "args_from", "ctx", "join", "min",
--- "allow", "sub", "input", "node_id", "good_until"}]; "wf" defaults to the top-level id. p_failed: [{"wf", "idx",
+-- "allow", "sub", "params", "input", "node_id", "good_until"}]; "wf" defaults to the top-level id; "params" is the
+-- sub_workflow_params of a sub-workflow node (NOT_GIVEN when absent). p_failed: [{"wf", "idx",
 -- "result"}].
 CREATE FUNCTION wft_start(p_workflows jsonb, p_nodes jsonb, p_failed jsonb DEFAULT '[]')
 RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
@@ -59,6 +60,7 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
                coalesce(x ->> 'join', 'all') AS join_type,
                (x ->> 'min')::integer AS min_success,
                coalesce((x ->> 'sub')::boolean, FALSE) AS sub,
+               coalesce(x ->> 'params', 'NOT_GIVEN') AS params,
                (x ->> 'good_until')::timestamptz AS good_until,
                o AS position
         FROM jsonb_array_elements(p_nodes) WITH ORDINALITY AS a(x, o)
@@ -91,6 +93,7 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
         (SELECT array_agg(sub ORDER BY position) FROM n),
         (SELECT array_agg(CASE WHEN sub THEN 'child.wf' END ORDER BY position) FROM n),
         (SELECT array_agg(CASE WHEN sub THEN 'child.key' END ORDER BY position) FROM n),
+        (SELECT array_agg(CASE WHEN sub THEN params END ORDER BY position) FROM n),
         coalesce((SELECT array_agg(wf ORDER BY position) FROM f), ARRAY[]::uuid[]),
         coalesce((SELECT array_agg(idx ORDER BY position) FROM f), ARRAY[]::integer[]),
         coalesce((SELECT array_agg(result ORDER BY position) FROM f), ARRAY[]::text[])

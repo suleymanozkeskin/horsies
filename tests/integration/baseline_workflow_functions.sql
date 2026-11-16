@@ -72,7 +72,7 @@ BEGIN
             ARRAY['default'], ARRAY[50], ARRAY['[]'], ARRAY[NULL::text], ARRAY[NULL::text], ARRAY[FALSE],
             ARRAY['all'], ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[0], ARRAY['ISOLATED'],
             ARRAY[NULL::timestamptz], ARRAY['forever'], ARRAY[FALSE], ARRAY[NULL::text], ARRAY[NULL::text],
-            ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[])
+            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[])
     $q$, '22023', 'start refuses node arrays of different lengths');
     PERFORM wft_refused($q$
         SELECT * FROM wft_start1('00000000-0000-7000-8000-000000000102', 'fail', '[{"idx":0},{"idx":0}]')
@@ -92,6 +92,17 @@ BEGIN
     $q$, '23514', 'start refuses an unknown on_error (table CHECK)');
     PERFORM wft_check(NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-000000000102'),
                       'start refusals write nothing');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000104';
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"sub":true,"params":"GIVEN"},{"idx":2,"sub":true}]');
+    PERFORM wft_check((wft_node(v_wf, 1)).sub_workflow_params = 'GIVEN'
+                      AND (wft_node(v_wf, 2)).sub_workflow_params = 'NOT_GIVEN'
+                      AND (wft_node(v_wf, 0)).sub_workflow_params IS NULL,
+                      'start: sub_workflow_params is stored as passed on sub-workflow nodes, NULL on task nodes');
 END $$;
 
 DO $$
@@ -404,11 +415,11 @@ BEGIN
     INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
         dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options,
         max_retries, execution, good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
-        sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error, created_at, started_at,
-        completed_at)
+        sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at,
+        started_at, completed_at)
     VALUES (horsies_uuidv7(), v_wf, 0, 'n0', 'sub', '{}', 'default', 50, '{}', NULL, NULL, FALSE, 'all', NULL,
-        NULL, NULL, NULL, NULL, NULL, 'READY', NULL, TRUE, NULL, 'child.wf', 'child.key', NULL, NULL, NULL, now(),
-        NULL, NULL);
+        NULL, NULL, NULL, NULL, NULL, 'READY', NULL, TRUE, NULL, 'child.wf', 'child.key', 'NOT_GIVEN', NULL, NULL,
+        NULL, now(), NULL, NULL);
     PERFORM wft_check((SELECT advance_child_workflow_id FROM horsies_workflow_resume(v_wf) WHERE row_kind = 'OUTCOME')
                       = v_wf, 'depth limit: the resume that ends a child names it for the parent advance');
     PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'

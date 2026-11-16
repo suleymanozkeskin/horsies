@@ -1868,8 +1868,9 @@ $$;
 -- Internal: inserts the node rows of a starting tree. A sub-workflow root with a pre-built child (a workflow row whose
 -- parent pair names the node) goes in RUNNING, linked to the child, with started_at; any other node without
 -- dependencies goes in READY; the rest PENDING. dependencies is a JSON array of indexes, workflow_ctx_from a JSON
--- array of node ids, args_from a JSON object of key to index. Refuses (22023) a child workflow row that names no
--- sub-workflow root node.
+-- array of node ids, args_from a JSON object of key to index. sub_workflow_params is the params choice of a
+-- sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the table CHECK refuses another pairing). Refuses
+-- (22023) a child workflow row that names no sub-workflow root node.
 -- Locks: the new node rows. Returns nothing. Python: INSERT_WORKFLOW_TASKS_BULK_SQL (core/workflows/sql.py:46-58;
 -- core/workflows/lifecycle.py:699) and LINK_SUB_WORKFLOW_SQL (core/workflows/sql.py:271-276).
 CREATE FUNCTION horsies_workflow_start_nodes(
@@ -1880,7 +1881,7 @@ CREATE FUNCTION horsies_workflow_start_nodes(
     p_node_join_types text[], p_node_min_successes integer[], p_node_task_options text[],
     p_node_max_retries integer[], p_node_executions text[], p_node_good_untils timestamp with time zone[],
     p_node_retention_class_keys text[], p_node_is_subworkflow boolean[], p_node_sub_workflow_names text[],
-    p_node_sub_definition_keys text[]
+    p_node_sub_definition_keys text[], p_node_sub_workflow_params text[]
 ) RETURNS void
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -1890,7 +1891,8 @@ BEGIN
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
         good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-        sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
+        sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
+        completed_at
     )
     SELECT horsies_uuidv7(), n.workflow_id, n.task_index, n.node_id, n.task_name, n.input, n.queue_name, n.priority,
            d.dependencies, n.args_from::jsonb,
@@ -1902,17 +1904,19 @@ BEGIN
            n.good_until, n.retention_class_key,
            CASE WHEN c.id IS NOT NULL THEN 'RUNNING' WHEN cardinality(d.dependencies) = 0 THEN 'READY'
                 ELSE 'PENDING' END,
-           NULL, n.is_subworkflow, c.id, n.sub_workflow_name, n.sub_definition_key, NULL, NULL, NULL, now(),
+           NULL, n.is_subworkflow, c.id, n.sub_workflow_name, n.sub_definition_key, n.sub_workflow_params,
+           NULL, NULL, NULL, now(),
            CASE WHEN c.id IS NOT NULL THEN now() END, NULL
     FROM unnest(
             p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
             p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
             p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options,
             p_node_max_retries, p_node_executions, p_node_good_untils, p_node_retention_class_keys,
-            p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys
+            p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params
          ) AS n(workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
                 ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-                good_until, retention_class_key, is_subworkflow, sub_workflow_name, sub_definition_key)
+                good_until, retention_class_key, is_subworkflow, sub_workflow_name, sub_definition_key,
+                sub_workflow_params)
     CROSS JOIN LATERAL (
         SELECT ARRAY(
             SELECT e.value::integer
@@ -2060,7 +2064,8 @@ $$;
 -- Starts a workflow tree in one statement. Arguments: the workflow rows of the tree (the top-level row first, then
 -- each child that the core pre-built for a sub-workflow root, with its parent, parent index and depth), the start
 -- call time p_sent_at, every node row of the tree (dependencies, args_from and workflow_ctx_from as one JSON text per
--- node; the typed facts max_retries, execution, good_until and retention_class_key set on task nodes), and the
+-- node; the typed facts max_retries, execution, good_until and retention_class_key set on task nodes; the params
+-- choice sub_workflow_params set on sub-workflow nodes), and the
 -- failed-node records (a sub-workflow root whose child could not be built: its node, and its error envelope).
 -- Steps:
 -- 1. Insert the top-level row with ON CONFLICT (id) DO NOTHING. No row: return EXISTS with the stored name in
@@ -2114,6 +2119,7 @@ CREATE FUNCTION horsies_workflow_start(
     p_node_is_subworkflow boolean[],
     p_node_sub_workflow_names text[],
     p_node_sub_definition_keys text[],
+    p_node_sub_workflow_params text[],
     p_failed_workflow_ids uuid[],
     p_failed_task_indexes integer[],
     p_failed_results text[]
@@ -2137,7 +2143,8 @@ BEGIN
               cardinality(p_node_join_types), cardinality(p_node_min_successes), cardinality(p_node_task_options),
               cardinality(p_node_max_retries), cardinality(p_node_executions), cardinality(p_node_good_untils),
               cardinality(p_node_retention_class_keys), cardinality(p_node_is_subworkflow),
-              cardinality(p_node_sub_workflow_names), cardinality(p_node_sub_definition_keys)],
+              cardinality(p_node_sub_workflow_names), cardinality(p_node_sub_definition_keys),
+              cardinality(p_node_sub_workflow_params)],
         array_position(p_node_workflow_ids, NULL) IS NOT NULL OR array_position(p_node_task_indexes, NULL) IS NOT NULL
         OR array_position(p_node_task_names, NULL) IS NOT NULL OR array_position(p_node_inputs, NULL) IS NOT NULL
         OR array_position(p_node_queue_names, NULL) IS NOT NULL OR array_position(p_node_priorities, NULL) IS NOT NULL
@@ -2163,7 +2170,7 @@ BEGIN
         p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
         p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries,
         p_node_executions, p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow,
-        p_node_sub_workflow_names, p_node_sub_definition_keys
+        p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params
     );
     RETURN QUERY SELECT * FROM horsies_workflow_start_progress(
         p_workflow_ids, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
