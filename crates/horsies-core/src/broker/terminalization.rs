@@ -623,10 +623,12 @@ mod catalog_tests {
         .fetch_one(&pool)
         .await
         .expect("fused def");
+        // The generation half of the fence is pinned by behaviour
+        // (`fused_stale_generation_is_lost_claim`), not by its text: its
+        // NULL arm goes (#697).
         for fragment in [
             "'COMPLETE_FUSED'",
             "claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)",
-            "(p_claimed_at IS NULL OR claimed_at = p_claimed_at)",
             "ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[]",
             "pg_notify(p_notify_channel, p_notify_payload)",
         ] {
