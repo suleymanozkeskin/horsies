@@ -46,14 +46,13 @@ from horsies import (
 )
 from horsies.core.brokers.postgres import (
     PostgresBroker,
+    SendCommand,
     _async_context_err,  # pyright: ignore[reportPrivateUsage]
     _command_fingerprint,  # pyright: ignore[reportPrivateUsage]
     _loop_runner_err,  # pyright: ignore[reportPrivateUsage]
     _parse_enqueue_input,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.brokers.resources import BrokerResources
-from horsies.core.models.schedule import TaskSchedule
-from horsies.core.scheduler.service import Scheduler
 from horsies.core.task_decorator import (
     _map_broker_err,  # pyright: ignore[reportPrivateUsage]
 )
@@ -231,16 +230,17 @@ async def enqueue_helpers_return_their_subsets(
     _ = (stored_input, fingerprint, bound, verified, async_context, loop_runner)
 
 
-async def scheduled_enqueue_returns_only_enqueue_errors(
-    scheduler: Scheduler,
-    schedule: TaskSchedule,
-    slot_time: datetime,
-) -> None:
-    enqueue_slot = scheduler._enqueue_scheduled_task  # pyright: ignore[reportPrivateUsage]
-    enqueued: Result[str, BrokerEnqueueError] = await enqueue_slot(
-        schedule, slot_time=slot_time,
+def send_command_returns_only_the_input_refusals(broker: PostgresBroker) -> None:
+    built: Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions] = (
+        broker.prepare_send_command(
+            task_name='report',
+            queue_name='default',
+            priority=100,
+            kwargs_json=None,
+            task_options=None,
+        )
     )
-    _ = enqueued
+    _ = built
 
 
 def send_mapping_refuses_the_operation_error(

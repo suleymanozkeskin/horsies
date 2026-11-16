@@ -2,8 +2,9 @@
 """A scheduled run stores the options of its task on the row.
 
 The worker reads the timeout, the retry limit and the execution class from
-the row. Each test enters at ``Scheduler._check_schedule`` (the tick's caller
-of the enqueue) and reads the row and the schedule state from the database.
+the row. Each test runs the tick's due read, enters at
+``Scheduler._check_schedule`` (one ``horsies_fire_schedule`` call) and reads
+the row and the schedule state from the database.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import IntervalSchedule, ScheduleConfig, TaskSchedule
 from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
 from horsies.core.scheduler.service import Scheduler
+from horsies.core.scheduler.state import DueScheduleRead
 from horsies.core.task_decorator import effective_priority
 from horsies.core.types.result import Ok
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
@@ -72,6 +74,17 @@ def _app_with_scheduled_task(task_name: str, schedule_name: str) -> Horsies:
     return app
 
 
+async def _fire_due(scheduler: Scheduler, schedule_name: str) -> DueScheduleRead:
+    """Run the due read of one schedule and fire it at the read's database time."""
+    assert scheduler.state_manager is not None
+    read = await scheduler.state_manager.read_due_schedules([schedule_name])
+    [due] = read.due
+    await scheduler._check_schedule(
+        scheduler.schedule_config.schedules[0], due, read.database_now,
+    )
+    return read
+
+
 def _names() -> tuple[str, str]:
     suffix = uuid.uuid4().hex[:12]
     return f'scheduled_options_task_{suffix}', f'scheduled_options_{suffix}'
@@ -112,10 +125,7 @@ async def test_a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task(
             schedule_name,
             check_time - timedelta(seconds=1),
         )
-        await scheduler._check_schedule(
-            scheduler.schedule_config.schedules[0],
-            check_time,
-        )
+        _ = await _fire_due(scheduler, schedule_name)
     finally:
         await scheduler.stop()
 
@@ -149,7 +159,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """The upgrade slot: the row of an earlier version has no options, so its
-    fingerprint differs. The broker returns PAYLOAD_MISMATCH; the scheduler
+    fingerprint differs. The fire answers PAYLOAD_MISMATCH for the slot,
     keeps that row, records the slot as run, and moves to the next slot."""
     task_name, schedule_name = _names()
     app = _app_with_scheduled_task(task_name, schedule_name)
@@ -196,7 +206,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
         assert earlier_row == Ok(slot_task_id)
 
         await _set_next_run_at(session, schedule_name, first_due)
-        await scheduler._check_schedule(schedule, check_time)
+        _ = await _fire_due(scheduler, schedule_name)
     finally:
         await scheduler.stop()
 
