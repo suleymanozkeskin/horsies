@@ -23,9 +23,16 @@ only wanted the module object collapses instead.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
+
+from sqlalchemy.engine import make_url
 
 DEFAULT_URL_ENV_NAMES = ('HORSIES_TEST_DATABASE_URL', 'HORSES_E2E_DB_URL')
 """Overrides, in precedence order."""
+
+TASK_MODULE_URL_ENV_NAME = 'HORSES_E2E_DB_URL'
+"""The variable that every e2e task module reads at import, in the test
+process and in each scheduler or worker subprocess."""
 
 
 def e2e_database_url(*env_names: str) -> str:
@@ -34,11 +41,35 @@ def e2e_database_url(*env_names: str) -> str:
     `env_names` overrides which variables are consulted, for the modules
     that historically read only one of them.
     """
+    return e2e_database_url_in(os.environ, *env_names)
+
+
+def e2e_database_url_in(environment: Mapping[str, str], *env_names: str) -> str:
+    """`e2e_database_url` resolved from `environment` in place of this
+    process's environment: the URL that a subprocess started with
+    `environment` resolves."""
     for name in env_names or DEFAULT_URL_ENV_NAMES:
-        value = os.environ.get(name)
+        value = environment.get(name)
         if value:
             return value
-    password = os.environ.get('DB_PASSWORD', '')
+    password = environment.get('DB_PASSWORD', '')
     return (
         f'postgresql+psycopg://postgres:{password}@localhost:5432/horsies'
     )
+
+
+def database_url_mismatches(expected: str, observed: Mapping[str, str]) -> list[str]:
+    """One line per source in `observed` whose URL differs from `expected`.
+
+    Keys name the source (a module, a subprocess environment); values are
+    the URL that source uses. Passwords are hidden in the lines.
+    """
+    return [
+        f'{source}: {_shown(url)} (expected {_shown(expected)})'
+        for source, url in sorted(observed.items())
+        if url != expected
+    ]
+
+
+def _shown(url: str) -> str:
+    return make_url(url).render_as_string(hide_password=True)
