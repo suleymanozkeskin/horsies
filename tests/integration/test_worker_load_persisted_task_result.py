@@ -30,7 +30,7 @@ from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.worker.finalize import _PlainTaskDone
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import _FINALIZE_STAGE_PHASE2, Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
@@ -95,34 +95,35 @@ async def _insert_task(
     workflow task by default: only a workflow task owes a phase 2.
     """
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='load_result_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='load_result_test')
     is_terminal = status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, result, enqueue_sha,
-                 is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'load_result_test', 'default', 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :result, :enqueue_sha,
-                 :is_workflow_task,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'NEVER_ELIGIBLE')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    claim_expires_at, worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'load_result_test', 'default', 100, '{}', :status, :sent_at,
+                    NOW(), NOW(), 0, 0, NOW(), :is_workflow_task, 'standard_30d',
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE :command_fingerprint END,
+                    FALSE, 'ISOLATED', NOW(),
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
             'is_workflow_task': is_workflow_task,
             'status': 'RUNNING' if is_terminal else status,
-            'result': None if is_terminal else result,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     if is_terminal:
@@ -402,28 +403,26 @@ async def test_unknown_task_err_result_uses_fast_path(
         JsonValue,
     )
     err_result_json = dumps_json(envelope).unwrap()
-    sent_at, sha = compute_test_enqueue_sha(task_name='unknown_task_xyz')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='unknown_task_xyz')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'unknown_task_xyz', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'NEVER_ELIGIBLE')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'unknown_task_xyz', 'default', 100, '{}', 'RUNNING', :sent_at,
+                    NOW(), NOW(), 0, 0, NOW(), TRUE, 'standard_30d', NULL, NULL, FALSE,
+                    'ISOLATED', NOW(), 4242, 'host-1', 'child-1'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     await force_terminal(

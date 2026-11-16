@@ -48,7 +48,7 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.worker.thread_slots import RunCulprit
 from horsies.core.worker.worker import Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
@@ -99,33 +99,32 @@ async def _insert_shared_task(
 ) -> str:
     task_id = str(uuid.uuid4())
     options = _options(auto_retry_for)
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='shared_kill', task_options=options
     )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs, status,
-                 sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at, worker_pid, task_options, execution,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'shared_kill', 'default', 100, '[]', '{}', :status,
-                 :sent_at, NOW(), NOW(), TRUE, 0,
-                 3, NOW(), :sha, :owner,
-                 :claimed_at, :worker_pid, :options, 'SHARED_ASYNC',
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, worker_pid, worker_hostname,
+                    worker_process_name, task_options, execution, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, enqueued_at, is_workflow_task, claim_expires_at
+                ) VALUES (
+                    :id, 'shared_kill', 'default', 100, '{}', :status, :sent_at, NOW(),
+                    NOW(), 0, 3, NOW(), :owner, :claimed_at, :worker_pid, 'host-1',
+                    'child-1', :options, 'SHARED_ASYNC', 'standard_30d', 1,
+                    :command_fingerprint, FALSE, NOW(), FALSE,
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END
+                )
         """),
         {
             'id': task_id,
             'status': status,
             'sent_at': sent_at,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
             'owner': WORKER_ID,
             'claimed_at': CLAIMED_AT,
             'worker_pid': FAKE_DEAD_PID,
@@ -179,7 +178,7 @@ async def _row(session: AsyncSession, task_id: str) -> Row[Any]:
     row = (
         await session.execute(
             text("""
-                SELECT status, error_code, retry_count, execution
+                SELECT status, retry_count, execution
                 FROM horsies_tasks WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
