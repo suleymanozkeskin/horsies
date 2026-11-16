@@ -1,7 +1,8 @@
 //! Ports of Python `tests/unit/test_slot_pool.py` rows about one child
 //! process (`TestExitDescription`, `TestChildSend`, and the argument rows
 //! of `TestBoot` and `TestInterpreterFlags`): how its exit reads and is
-//! described, the arguments it gets, and a frame that reaches it whole.
+//! described, the arguments it gets, a frame that reaches it whole, and a
+//! frame cut by its death.
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -13,7 +14,8 @@ use uuid::Uuid;
 use super::channel::JOINED_WRITE_BODY_BYTES;
 use super::*;
 use crate::worker::executor::protocol::{
-    encode_parent_frame, IsolatedWork, ParentFrame, RunFrame, TaskInputText, TaskKind,
+    encode_child_frame, encode_parent_frame, ChildFrame, IsolatedWork, ParentFrame, ProcessId,
+    ReadyFrame, RssReading, RunFrame, TaskInputText, TaskKind,
 };
 
 const TEST_WAIT: Duration = Duration::from_secs(10);
@@ -132,4 +134,43 @@ async fn a_frame_reaches_the_child_whole_with_a_small_or_a_large_body() {
         let _ = channel.dispose().await;
         assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
     }
+}
+
+/// Python `TestVerdicts::test_half_a_frame_still_unread_is_reported_partial`:
+/// a child that dies after half a frame is lost, and the loss says that a
+/// partial frame was discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn half_a_frame_before_the_death_is_reported_partial() {
+    let ready = ChildFrame::Ready(ReadyFrame {
+        pid: ProcessId::new(1).unwrap(),
+        rss: RssReading::Unreadable,
+    });
+    let bytes = encode_child_frame(&ready).unwrap().to_bytes();
+    let half: String = bytes[..bytes.len() - 1]
+        .iter()
+        .map(|byte| format!("\\{byte:03o}"))
+        .collect();
+    let script = format!(r#"printf '{half}' >&"$0"; exit 9"#);
+    let spawner = Spawner::start().unwrap();
+    let spawned = spawner.handle().spawn(shell(&script)).await.unwrap();
+    let mut channel = ChildChannel::attach(
+        spawned,
+        spawner.handle(),
+        MailboxBound::for_seats(NonZeroUsize::MIN),
+    )
+    .unwrap();
+
+    let wait = channel.await_frame(Some(TEST_WAIT)).await;
+
+    assert_eq!(
+        wait,
+        FrameWait::Lost(ChildLost {
+            cause: LossCause::ChildDied,
+            exit: ChildExit::Reaped(ReapedExit::ExitedWith(9)),
+            partial: PartialFrame::Discarded,
+            pid: channel.pid(),
+        })
+    );
+    let _ = channel.dispose().await;
+    assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
 }

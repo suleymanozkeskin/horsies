@@ -252,9 +252,19 @@ pub(super) fn read_frame() -> String {
 /// it names, then exit at the stop frame. A frame of another task, or a run
 /// frame after the last, ends the child with exit code 3.
 pub(super) fn answer_runs(answers: &[(&ClaimedTask, Vec<ChildFrame>)], runs: usize) -> String {
-    let cases: String = answers
+    let actions: Vec<(&ClaimedTask, String)> = answers
         .iter()
-        .map(|(task, frames)| format!("*{}*) {};; ", task.task_id, send(frames)))
+        .map(|(task, frames)| (*task, send(frames)))
+        .collect();
+    act_on_runs(&actions, runs)
+}
+
+/// As [`answer_runs`], with a shell action for each task in place of its
+/// frames.
+pub(super) fn act_on_runs(actions: &[(&ClaimedTask, String)], runs: usize) -> String {
+    let cases: String = actions
+        .iter()
+        .map(|(task, action)| format!("*{}*) {action};; ", task.task_id))
         .collect();
     let one_run = format!("{}case $meta in {cases}*) exit 3;; esac; ", read_frame());
     format!("{}{}exit 3", one_run.repeat(runs), read_frame())
