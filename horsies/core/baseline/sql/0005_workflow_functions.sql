@@ -492,17 +492,20 @@ BEGIN
 END;
 $$;
 
--- The failure policy of a workflow after one of its nodes went FAILED. Returns TRUE when progression goes on
--- (on_error fail, or a workflow that is not RUNNING with fail), FALSE when it stops (on_error pause).
+-- The failure policy of a workflow after one of its nodes went FAILED. p_error is the error of this failure, as the
+-- bare error object text (NULL: no readable error): the err slot of the node's stored result, or for a node whose
+-- child workflow ended FAILED, CANCELLED or EXPIRED the error of horsies_workflow_child_node_result. Returns TRUE when
+-- progression goes on (on_error fail, or a workflow that is not RUNNING with fail), FALSE when it stops (on_error
+-- pause).
 -- - fail: the workflow error becomes the err slot of the first FAILED node by index, only while RUNNING; a node with
---   no readable error keeps the stored error.
--- - pause: RUNNING to PAUSED with the err slot of this node's stored result (a second failure keeps the first
---   error: the write needs RUNNING), and every RUNNING descendant to PAUSED. Claimed tasks of the paused tree are
---   abandoned later, at their start or claim-time check.
+--   no readable error keeps the stored error. p_error is not used.
+-- - pause: RUNNING to PAUSED with p_error (NULL keeps the stored error; a second failure keeps the first error: the
+--   write needs RUNNING), and every RUNNING descendant to PAUSED. Claimed tasks of the paused tree are abandoned
+--   later, at their start or claim-time check.
 -- Precondition: the caller holds the workflow row FOR UPDATE and wrote the node FAILED.
--- Python: _handle_workflow_task_failure (core/workflows/engine.py:3990-4088).
+-- Python: _handle_workflow_task_failure (core/workflows/engine.py:4002-4100), which stores the error it is given.
 -- Locks: the workflow row (held), then the RUNNING descendant rows level by level in (depth, id) order.
-CREATE FUNCTION horsies_workflow_record_failure(p_workflow_id uuid, p_task_index integer) RETURNS boolean
+CREATE FUNCTION horsies_workflow_record_failure(p_workflow_id uuid, p_error text) RETURNS boolean
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
@@ -523,11 +526,8 @@ BEGIN
             WHERE id = p_workflow_id AND status = 'RUNNING';
             RETURN TRUE;
         WHEN 'pause' THEN
-            SELECT horsies_workflow_err_slot(n.result) INTO v_error
-            FROM horsies_workflow_tasks n
-            WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
             UPDATE horsies_workflows
-            SET status = 'PAUSED', error = coalesce(v_error, error), updated_at = now()
+            SET status = 'PAUSED', error = coalesce(p_error, error), updated_at = now()
             WHERE id = p_workflow_id AND status = 'RUNNING';
             IF FOUND THEN
                 PERFORM horsies_workflow_move_descendants(p_workflow_id, 'RUNNING', 'PAUSED');
@@ -794,7 +794,11 @@ BEGIN
             v_enqueued := v_enqueued || v_new;
             v_failed := horsies_workflow_fail_unbuildable(p_workflow_id, v_new, v_wf.on_error);
             IF cardinality(v_failed) > 0 THEN
-                IF NOT horsies_workflow_record_failure(p_workflow_id, v_failed[1]) THEN
+                IF NOT horsies_workflow_record_failure(
+                    p_workflow_id,
+                    (SELECT horsies_workflow_err_slot(n.result) FROM horsies_workflow_tasks n
+                     WHERE n.workflow_id = p_workflow_id AND n.task_index = v_failed[1])
+                ) THEN
                     UPDATE horsies_workflow_tasks n
                     SET status = 'READY', started_at = NULL
                     WHERE n.workflow_id = p_workflow_id
@@ -1161,30 +1165,20 @@ BEGIN
 END;
 $$;
 
--- Everything a workflow does after one of its nodes was written terminal: the failure policy for a FAILED node
--- (horsies_workflow_record_failure; a pause stops here), the paused guard, promotion of the node's dependents
--- (skipped when p_dependents is 'NONE': the caller knows that no node depends on this one), and the completion
--- check. Returns the owed child starts. p_dependents is 'NONE' or 'READ' (22023 otherwise).
+-- What a workflow does after one of its nodes was written terminal and the failure policy let progression go on:
+-- the paused guard, promotion of the node's dependents (skipped when p_dependents is 'NONE': the caller knows that no
+-- node depends on this one), and the completion check. Returns the owed child starts. p_dependents is 'NONE' or
+-- 'READ' (22023 otherwise).
 -- Precondition: the caller holds the workflow row FOR UPDATE and wrote the node.
--- Python: apply_node_progression (core/workflows/engine.py:1995-2060).
--- Locks: as horsies_workflow_record_failure and horsies_workflow_promote, under the caller's workflow lock.
-CREATE FUNCTION horsies_workflow_progress(p_workflow_id uuid, p_task_index integer, p_dependents text)
+-- Python: apply_node_progression after _handle_workflow_task_failure (core/workflows/engine.py:1973-2040).
+-- Locks: as horsies_workflow_promote, under the caller's workflow lock.
+CREATE FUNCTION horsies_workflow_promote_and_complete(p_workflow_id uuid, p_task_index integer, p_dependents text)
     RETURNS SETOF horsies_workflow_step_row
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
-DECLARE
-    v_node_status text;
 BEGIN
     PERFORM horsies_workflow_require(p_dependents IN ('NONE', 'READ'), 'dependents must be NONE or READ');
-    SELECT n.status INTO v_node_status
-    FROM horsies_workflow_tasks n
-    WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
-    IF v_node_status = 'FAILED' THEN
-        IF NOT horsies_workflow_record_failure(p_workflow_id, p_task_index) THEN
-            RETURN;
-        END IF;
-    END IF;
     IF NOT EXISTS (SELECT 1 FROM horsies_workflows w WHERE w.id = p_workflow_id AND w.status = 'RUNNING') THEN
         RETURN;
     END IF;
@@ -1192,6 +1186,33 @@ BEGIN
         RETURN QUERY SELECT * FROM horsies_workflow_promote(p_workflow_id, ARRAY[p_task_index], NULL, NULL);
     END IF;
     PERFORM horsies_workflow_try_complete(p_workflow_id);
+END;
+$$;
+
+-- Everything a workflow does after one of its nodes was written terminal: for a FAILED node the failure policy with
+-- the err slot of the node's stored result as the error of the failure (horsies_workflow_record_failure; a pause
+-- stops here), then horsies_workflow_promote_and_complete. Returns the owed child starts. p_dependents is 'NONE' or
+-- 'READ' (22023 otherwise).
+-- Precondition: the caller holds the workflow row FOR UPDATE and wrote the node.
+-- Python: apply_node_progression (core/workflows/engine.py:1973-2040).
+-- Locks: as horsies_workflow_record_failure and horsies_workflow_promote, under the caller's workflow lock.
+CREATE FUNCTION horsies_workflow_progress(p_workflow_id uuid, p_task_index integer, p_dependents text)
+    RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_node record;
+BEGIN
+    PERFORM horsies_workflow_require(p_dependents IN ('NONE', 'READ'), 'dependents must be NONE or READ');
+    SELECT n.status, n.result INTO v_node
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
+    IF v_node.status = 'FAILED'
+       AND NOT horsies_workflow_record_failure(p_workflow_id, horsies_workflow_err_slot(v_node.result)) THEN
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_promote_and_complete(p_workflow_id, p_task_index, p_dependents);
 END;
 $$;
 
@@ -1230,10 +1251,15 @@ $$;
 -- - FAILED, CANCELLED or EXPIRED child: FAILED, SUBWORKFLOW_FAILED with sub_workflow_id and sub_workflow_summary.
 -- The summary: status, output (the ok value of a value envelope, else null), the node counts, error_summary (the
 -- message of a stored error object, the first 200 characters of a stored error that is not JSON, else null).
--- Locks: none (the child is terminal and does not change). Returns node_status, node_result and summary.
+-- failure_error: the error that the failure policy of the parent records for a FAILED node, as the bare error object
+-- text. For a FAILED, CANCELLED or EXPIRED child it is SUBWORKFLOW_FAILED with the message "Subworkflow <id> failed"
+-- and the same sub_workflow_id and summary (Python: the error of _ParentNodeFailed); for a FAILED node of a COMPLETED
+-- child, the err slot of node_result; NULL for a COMPLETED node.
+-- Locks: none (the child is terminal and does not change). Returns node_status, node_result, summary and
+-- failure_error.
 CREATE FUNCTION horsies_workflow_child_node_result(
     p_child_workflow_id uuid,
-    OUT node_status text, OUT node_result text, OUT summary text
+    OUT node_status text, OUT node_result text, OUT summary text, OUT failure_error text
 )
     LANGUAGE plpgsql STABLE
     SET plan_cache_mode TO 'force_generic_plan'
@@ -1280,6 +1306,10 @@ BEGIN
             format('Subworkflow %s failed with status %s', p_child_workflow_id, v_child.status),
             NULL, p_child_workflow_id, summary
         );
+        failure_error := (horsies_task_error_envelope(
+            'SUBWORKFLOW_FAILED', format('Subworkflow %s failed', p_child_workflow_id), NULL, p_child_workflow_id,
+            summary
+        )::json -> 'err')::text;
         RETURN;
     END IF;
     CASE v_kind
@@ -1301,6 +1331,7 @@ BEGIN
                 NULL, NULL
             );
     END CASE;
+    failure_error := horsies_workflow_err_slot(node_result);
 END;
 $$;
 
@@ -1309,7 +1340,9 @@ $$;
 -- the same body inside their own statement (they drop its OUTCOME row).
 -- Steps: read the child (not locked: it is terminal and does not change); lock the parent workflow row FOR UPDATE;
 -- write the parent node where it is not terminal (status and result of horsies_workflow_child_node_result, the
--- summary, completed_at); then horsies_workflow_progress for the parent node.
+-- summary, completed_at); for a FAILED node the failure policy of the parent with the failure_error of
+-- horsies_workflow_child_node_result (horsies_workflow_record_failure; a pause stops here); then
+-- horsies_workflow_promote_and_complete for the parent node.
 -- Dispositions: APPLIED; ALREADY_APPLIED (the parent node is terminal; nothing written); CHILD_ABSENT; NOT_A_CHILD
 -- (the workflow has no parent); CHILD_NOT_TERMINAL (nothing written); PARENT_ABSENT (nothing written).
 -- Lock order: parent workflow row, parent node row, then the promotion locks.
@@ -1354,7 +1387,14 @@ BEGIN
         RETURN NEXT horsies_workflow_outcome_row('ALREADY_APPLIED', v_child.parent_workflow_id, FALSE, NULL);
         RETURN;
     END IF;
-    RETURN QUERY SELECT * FROM horsies_workflow_progress(v_child.parent_workflow_id, v_child.parent_task_index, 'READ');
+    IF v_node.node_status = 'FAILED'
+       AND NOT horsies_workflow_record_failure(v_child.parent_workflow_id, v_node.failure_error) THEN
+        RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_child.parent_workflow_id, TRUE, NULL);
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_promote_and_complete(
+        v_child.parent_workflow_id, v_child.parent_task_index, 'READ'
+    );
     RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_child.parent_workflow_id, TRUE, NULL);
 END;
 $$;

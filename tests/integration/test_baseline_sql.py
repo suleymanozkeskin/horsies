@@ -134,6 +134,7 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_workflow_policy_indices_cause',
         'horsies_workflow_progress',
         'horsies_workflow_promote',
+        'horsies_workflow_promote_and_complete',
         'horsies_workflow_promote_level',
         'horsies_workflow_record_failure',
         'horsies_workflow_require',

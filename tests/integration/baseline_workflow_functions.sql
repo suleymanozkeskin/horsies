@@ -437,6 +437,14 @@ BEGIN
                       AND (wft_node(v_wf, 1)).started_at IS NULL
                       AND NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = v_later),
                       'start, root order: root 1 stays READY and its child is not written');
+    PERFORM wft_check(((wft_workflow(v_wf)).error::json ->> 'message') = format('Subworkflow %s failed', v_failing)
+                      AND ((wft_workflow(v_wf)).error::json -> 'error_code' ->> '__builtin_task_code__')
+                          = 'SUBWORKFLOW_FAILED'
+                      AND ((wft_workflow(v_wf)).error::json ->> 'sub_workflow_id') = v_failing::text,
+                      'paused parent of a failed child: the workflow error is "Subworkflow <id> failed", as Python');
+    PERFORM wft_check(((wft_node(v_wf, 0)).result::json -> 'err' ->> 'message')
+                          = format('Subworkflow %s failed with status FAILED', v_failing),
+                      'paused parent of a failed child: the node result keeps the message with the status');
 END $$;
 
 DO $$
