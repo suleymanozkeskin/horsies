@@ -11,6 +11,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
@@ -943,8 +944,9 @@ class Scheduler:
         sent_at is set to slot_time (the logical schedule slot), not wall clock.
         The row stores the task's options text, as a plain ``.send()`` does,
         and the fingerprint covers it. This ensures crash-and-retry produces
-        the same task_id + same SHA, making the INSERT idempotent via ON
-        CONFLICT DO NOTHING.
+        the same task_id + same SHA: a fire of a slot whose task is live
+        answers with that task. A slot fire is a ``SendKind.FIRST`` send, so
+        it does not read history.
 
         Returns Ok(task_id) when the slot's task is enqueued, or already
         exists (with the same command, or with a different command; see
@@ -1006,6 +1008,7 @@ class Scheduler:
             queue_name=validated_queue_name,
             task_id=task_id,
             enqueue_sha=enqueue_sha,
+            send_kind=SendKind.FIRST,
             args_json=None,
             kwargs_json=prepared.kwargs_json,
             priority=priority,
