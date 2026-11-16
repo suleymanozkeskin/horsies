@@ -31,6 +31,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.dispatch_claim import DispatchClaim
+from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.utils.db import PooledStatements
 from tests.broker_resources_support import current_resources
 
@@ -116,13 +117,19 @@ def _probe(broker: PostgresBroker, **cfg_kwargs: Any) -> ClaimMixin:
             self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
             # No task is registered: every claimed row is dispatched.
             self._registered_classes = {}
+            self._queue_cap_hold = QueueCapHold(
+                start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
+            )
 
         def _claim_slot_count(self) -> int:
             # No slot pool: every configured slot counts.
             return cfg.processes
 
-        async def _dispatch_one(self, *args: Any, **kwargs: Any) -> None:
-            return None
+        async def _dispatch_one(
+            self, *args: Any, **kwargs: Any,
+        ) -> asyncio.Future[None]:
+            # A finalizer that does not end while the test runs.
+            return asyncio.get_running_loop().create_future()
 
     return _P()
 

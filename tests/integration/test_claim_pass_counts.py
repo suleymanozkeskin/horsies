@@ -7,6 +7,7 @@ and the flat statement count of an empty capped claim pass.
 
 from __future__ import annotations
 
+import asyncio
 # pyright: reportPrivateUsage=false
 
 import uuid
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.worker.sql import (
     CLAIM_PASS_COUNTS_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -178,12 +180,17 @@ class TestClaimPassCounts:
                 self._claim_runner = PooledStatements(self.sf)
                 self.cfg = cfg
                 self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
+                self._queue_cap_hold = QueueCapHold(
+                    start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
+                )
 
             def _claim_slot_count(self) -> int:
                 # No slot pool: every configured slot counts.
                 return cfg.processes
 
-            async def _dispatch_one(self, *args: Any, **kwargs: Any) -> None:
+            async def _dispatch_one(
+                self, *args: Any, **kwargs: Any,
+            ) -> asyncio.Future[None]:
                 raise AssertionError('empty pass must not dispatch')
 
         probe = _Probe()

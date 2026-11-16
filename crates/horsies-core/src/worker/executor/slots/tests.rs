@@ -49,6 +49,9 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
     }
 }
 
+mod deadline_tests;
+mod settle_tests;
+
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 2,
     "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
     "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;

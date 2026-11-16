@@ -35,6 +35,8 @@ use crate::TaskNode;
 
 const CHILD_KEY: &str = "tests.child_start.child.v1";
 const CHILD_NAME: &str = "child_start_child";
+/// The name of the parent workflow that [`seed_workflow`] writes.
+const PARENT_NAME: &str = "child_start_parent";
 const WORKER: &str = "child-start-worker";
 
 // ---------------------------------------------------------------------------
@@ -66,6 +68,7 @@ fn registry_with_child() -> WorkflowSpecRegistry {
 fn owed(workflow_id: Uuid, parent_depth: i32, definition_key: &str) -> OwedChildStart {
     OwedChildStart {
         workflow_id,
+        workflow_name: PARENT_NAME.to_owned(),
         task_index: 1,
         node_input: "{}".to_owned(),
         args_from: None,
@@ -315,7 +318,9 @@ fn a_registered_child_is_a_tree_under_its_node() {
 
 /// A child with no registration under its key fails the node with
 /// `SUBWORKFLOW_LOAD_FAILED`; a child past the depth limit with
-/// `SUBWORKFLOW_DEPTH_LIMIT_REACHED`.
+/// `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. Each message names the parent workflow
+/// by the name on its `CHILD_START` row (Python
+/// `core/workflows/engine.py:577-581`, `:1017-1033`).
 #[test]
 fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     let workflow_id = Uuid::new_v4();
@@ -331,6 +336,10 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
             .expect("host build"),
     );
     assert_eq!(missing.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        missing.message.as_deref(),
+        Some("Failed to load subworkflow definition for child_start_parent:1")
+    );
     assert_eq!(
         missing.data,
         Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
@@ -348,6 +357,13 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     assert_eq!(
         too_deep.error_code.to_string(),
         "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
+    );
+    assert_eq!(
+        too_deep.message.as_deref(),
+        Some(
+            "Subworkflow not started: the child workflow would have depth 33, \
+             and the limit is 32 (workflow child_start_parent:1)"
+        )
     );
     assert_eq!(
         too_deep.data,
@@ -385,7 +401,9 @@ fn an_args_from_key_that_names_a_static_member_fails_the_node() {
 
 /// The registered builder gets the node input with each `args_from` member
 /// set to the stored result of its `SOURCE` dependency; a builder that fails
-/// fails the node with `WORKFLOW_ENQUEUE_FAILED`.
+/// fails the node with `WORKFLOW_ENQUEUE_FAILED`, the Python class of its
+/// error and its text, and the parent workflow by name (Python
+/// `core/workflows/engine.py:1196-1211`).
 #[test]
 fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     let workflow_id = Uuid::new_v4();
@@ -448,12 +466,16 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     merged.sources = Vec::new();
     let error = failure_error(child_start_kind(&merged, build).expect("host build"));
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
-    assert!(
-        error
-            .message
-            .as_deref()
-            .is_some_and(|message| message.starts_with("Subworkflow build failed: ")),
-        "{error:?}"
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Subworkflow build failed: HorsiesError: error: no merged value \
+             (workflow child_start_parent:1)"
+        )
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
 
@@ -573,6 +595,14 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
         panic!("the failed node stores an error");
     };
     assert_eq!(error.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Failed to load subworkflow definition for child_start_parent:1")
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"definition_key": CHILD_KEY}))
+    );
 }
 
 /// The advance of a parent node promotes its sub-workflow dependent; that
@@ -682,6 +712,14 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
         panic!("the failed root stores an error");
     };
     assert_eq!(error.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Failed to load subworkflow definition for child_start_failed_root:0")
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
+    );
     assert_child_started(&pool, workflow_id, 1, 0).await;
 }
 
