@@ -68,14 +68,6 @@ from horsies.core.models.tasks import (
     TaskInfo,
     TaskResult,
 )
-from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
-from horsies.core.lifecycle.outcomes import (
-    Applied,
-    ObservedStaleness,
-    ObservedTaskState,
-    SourceStateConflict,
-)
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.baseline.install import (
     BaselineCurrent,
