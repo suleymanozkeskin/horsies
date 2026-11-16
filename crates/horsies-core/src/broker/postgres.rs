@@ -49,6 +49,9 @@ use crate::broker::row::task::{
 };
 
 use crate::broker::shared_listener::{SharedNotifyListener, Subscription};
+use crate::broker::task_lists::{
+    BoundedTaskList, StaleMinutes, TASK_LIST_BOUND, TASK_LIST_READ_LIMIT,
+};
 use crate::broker::wait_limit::WaitLimit;
 
 #[cfg(test)]
@@ -439,27 +442,35 @@ ORDER BY attempt DESC";
 /// when no heartbeat exists) is older than `$1` minutes.
 ///
 /// Used for operational monitoring; does NOT mutate any rows.
+/// RUNNING tasks with no runner beat newer than the threshold and a start
+/// older than it, ordered by the latest beat with beatless rows first, then by
+/// id. The verdict reads only the beats of the threshold window; the latest
+/// beat is read only for the stale rows. `$1` is the threshold in minutes,
+/// `$2` the row limit.
 const GET_STALE_TASKS_SQL: &str = "\
-SELECT
-    t.id,
-    t.task_name,
-    t.worker_hostname,
-    t.worker_pid,
-    t.worker_process_name,
-    t.started_at,
-    hb.last_heartbeat
-FROM horsies_tasks t
+WITH stale AS MATERIALIZED (
+    SELECT t.id, t.task_name, t.worker_hostname, t.worker_pid,
+           t.worker_process_name, t.started_at
+    FROM horsies_tasks t
+    WHERE t.status = 'RUNNING'
+      AND t.started_at < NOW() - $1 * INTERVAL '1 minute'
+      AND NOT EXISTS (
+          SELECT 1 FROM horsies_heartbeats r
+          WHERE r.task_id = t.id AND r.role = 'runner'
+            AND r.sent_at >= NOW() - $1 * INTERVAL '1 minute')
+)
+SELECT s.id, s.task_name, s.worker_hostname, s.worker_pid,
+       s.worker_process_name, s.started_at, hb.last_heartbeat
+FROM stale s
 LEFT JOIN LATERAL (
-    SELECT sent_at AS last_heartbeat
+    SELECT h.sent_at AS last_heartbeat
     FROM horsies_heartbeats h
-    WHERE h.task_id = t.id AND h.role = 'runner'
-    ORDER BY sent_at DESC
+    WHERE h.task_id = s.id AND h.role = 'runner'
+    ORDER BY h.sent_at DESC
     LIMIT 1
 ) hb ON TRUE
-WHERE t.status = 'RUNNING'
-  AND t.started_at IS NOT NULL
-  AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - $1 * INTERVAL '1 minute'
-ORDER BY hb.last_heartbeat NULLS FIRST";
+ORDER BY hb.last_heartbeat NULLS FIRST, s.id
+LIMIT $2";
 
 /// Aggregate RUNNING task counts per worker for load visibility.
 ///
@@ -531,6 +542,8 @@ LIMIT $2";
 ///
 /// These tasks will never be claimed because the claim SQL filters on
 /// `good_until > now()`. Useful for detecting capacity issues.
+/// PENDING tasks whose `good_until` has passed on the database clock, oldest
+/// deadline first, with how long ago it passed. `$1` is the row limit.
 const GET_EXPIRED_TASKS_SQL: &str = "\
 SELECT
     id,
@@ -538,12 +551,14 @@ SELECT
     queue_name,
     priority,
     sent_at,
-    good_until
+    enqueued_at,
+    good_until,
+    (EXTRACT(EPOCH FROM NOW() - good_until) * 1000)::bigint AS expired_for_ms
 FROM horsies_tasks
 WHERE status = 'PENDING'
-  AND good_until IS NOT NULL
   AND good_until <= NOW()
-ORDER BY good_until ASC";
+ORDER BY good_until, id
+LIMIT $1";
 
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
@@ -2636,27 +2651,27 @@ impl PostgresBroker {
         }
     }
 
-    /// This is a **read-only** query for operational dashboards and alerting.
-    /// It does not modify any rows. To actually recover stale tasks, use the
-    /// reaper (see `horsies_worker::recovery`).
+    /// RUNNING tasks whose latest runner beat, or their start when they have
+    /// no beat, is older than `stale_threshold_minutes`. Read-only: the
+    /// reaper recovers stale tasks.
     ///
+    /// A threshold outside 0 to one year is `INVALID_INPUT` with no database
+    /// call. At most [`TASK_LIST_BOUND`] rows come back; more is
+    /// [`BoundedTaskList::Truncated`]. A database failure is
+    /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_stale_tasks()` in the Python library.
     pub async fn get_stale_tasks(
         &self,
         stale_threshold_minutes: i32,
-    ) -> Result<Vec<StaleTaskRow>, BrokerError> {
+    ) -> BrokerResult<BoundedTaskList<StaleTaskRow>> {
+        let threshold = StaleMinutes::parse(stale_threshold_minutes)?;
         let rows: Vec<StaleTaskRow> = sqlx::query_as(GET_STALE_TASKS_SQL)
-            .bind(stale_threshold_minutes)
+            .bind(threshold.minutes())
+            .bind(TASK_LIST_READ_LIMIT)
             .fetch_all(&self.pool)
             .await
-            .map_err(BrokerError::Database)?;
-
-        tracing::debug!(
-            count = rows.len(),
-            threshold_min = stale_threshold_minutes,
-            "stale tasks query"
-        );
-        Ok(rows)
+            .map_err(|error| monitoring_query_error("get_stale_tasks", error))?;
+        Ok(BoundedTaskList::from_read(rows, TASK_LIST_BOUND))
     }
 
     /// Latest state snapshot per worker (cluster-wide), including idle workers.
@@ -2715,15 +2730,17 @@ impl PostgresBroker {
     /// filters on `good_until > now()`. Surfacing them helps operators detect
     /// under-provisioned queues or misconfigured deadlines.
     ///
+    /// At most [`TASK_LIST_BOUND`] rows come back, oldest deadline first;
+    /// more is [`BoundedTaskList::Truncated`]. A database failure is
+    /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_expired_tasks()` in the Python library.
-    pub async fn get_expired_tasks(&self) -> Result<Vec<ExpiredTaskRow>, BrokerError> {
+    pub async fn get_expired_tasks(&self) -> BrokerResult<BoundedTaskList<ExpiredTaskRow>> {
         let rows: Vec<ExpiredTaskRow> = sqlx::query_as(GET_EXPIRED_TASKS_SQL)
+            .bind(TASK_LIST_READ_LIMIT)
             .fetch_all(&self.pool)
             .await
-            .map_err(BrokerError::Database)?;
-
-        tracing::debug!(count = rows.len(), "expired tasks query");
-        Ok(rows)
+            .map_err(|error| monitoring_query_error("get_expired_tasks", error))?;
+        Ok(BoundedTaskList::from_read(rows, TASK_LIST_BOUND))
     }
 
     // -----------------------------------------------------------------------
@@ -6189,6 +6206,154 @@ mod result_wait_tests {
         mode.pause(Duration::from_secs(1)).await;
 
         assert!(matches!(mode, ResultWaitMode::Polling));
+    }
+}
+
+#[cfg(test)]
+mod stale_and_expired_list_tests {
+    //! The stale and expired task lists: a threshold of whole minutes from 0
+    //! to one year, a bound of `TASK_LIST_BOUND` rows, Python's verdict and
+    //! order, and the expired record's `enqueued_at` and `expired_for`.
+    use super::*;
+    use serial_test::serial;
+
+    #[tokio::test]
+    async fn a_threshold_outside_one_year_is_refused_before_any_read() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broker = PostgresBroker::from_pool(pool);
+
+        for minutes in [
+            -1,
+            crate::broker::task_lists::MAX_STALE_THRESHOLD_MINUTES + 1,
+        ] {
+            let Err(refused) = broker.get_stale_tasks(minutes).await else {
+                panic!("threshold {minutes} must be refused");
+            };
+            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{minutes}");
+        }
+    }
+
+    async fn seed(
+        pool: &PgPool,
+        task_name: &str,
+        status: &str,
+        good_until_ago_min: Option<i32>,
+    ) -> Uuid {
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at, command_fingerprint_version,
+                 command_fingerprint, status, enqueued_at, started_at, good_until,
+                 retry_count, max_retries, is_workflow_task, updated_at, retain_rerun_input
+             ) VALUES (
+                 $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(), 1,
+                 decode(repeat('0d', 32), 'hex'), $3, NOW() - INTERVAL '20 minutes',
+                 CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '10 minutes' END,
+                 NOW() - $4 * INTERVAL '1 minute',
+                 0, 0, FALSE, NOW(), FALSE
+             )",
+        )
+        .bind(task_id)
+        .bind(task_name)
+        .bind(status)
+        .bind(good_until_ago_min)
+        .execute(pool)
+        .await
+        .expect("seed a baseline task");
+        task_id
+    }
+
+    async fn runner_beat(pool: &PgPool, task_id: Uuid, minutes_ago: i32) {
+        sqlx::query(
+            "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
+             VALUES ($1, 'list-worker', 'runner', NOW() - $2 * INTERVAL '1 minute', 'h', 1)",
+        )
+        .bind(task_id)
+        .bind(minutes_ago)
+        .execute(pool)
+        .await
+        .expect("seed a runner beat");
+    }
+
+    async fn clean(pool: &PgPool, task_name: &str) {
+        sqlx::query(
+            "DELETE FROM horsies_heartbeats WHERE task_id IN (
+                 SELECT id FROM horsies_tasks WHERE task_name = $1)",
+        )
+        .bind(task_name)
+        .execute(pool)
+        .await
+        .expect("clean beats");
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(pool)
+            .await
+            .expect("clean tasks");
+    }
+
+    /// A row with no beat and a row whose latest beat is older than the
+    /// threshold are stale, beatless first; a fresh beat keeps a row out.
+    #[tokio::test]
+    #[serial]
+    async fn the_stale_list_follows_the_latest_beat() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let task_name = format!("stale_list_{}", Uuid::new_v4().simple());
+        let broker = PostgresBroker::from_pool(pool.clone());
+        let beatless = seed(&pool, &task_name, "RUNNING", None).await;
+        let old_beat = seed(&pool, &task_name, "RUNNING", None).await;
+        let fresh_beat = seed(&pool, &task_name, "RUNNING", None).await;
+        runner_beat(&pool, old_beat, 5).await;
+        runner_beat(&pool, fresh_beat, 0).await;
+
+        let list = broker.get_stale_tasks(1).await.expect("stale list");
+
+        let ours: Vec<&StaleTaskRow> = list
+            .rows()
+            .iter()
+            .filter(|row| row.task_name == task_name)
+            .collect();
+        assert_eq!(
+            ours.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![beatless, old_beat]
+        );
+        assert_eq!(ours[0].last_heartbeat, None);
+        assert!(ours[1].last_heartbeat.is_some());
+        clean(&pool, &task_name).await;
+    }
+
+    /// Python's expired record: `enqueued_at` and how long ago the deadline
+    /// passed, on the database clock.
+    #[tokio::test]
+    #[serial]
+    async fn the_expired_list_carries_enqueued_at_and_expired_for() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let task_name = format!("expired_list_{}", Uuid::new_v4().simple());
+        let broker = PostgresBroker::from_pool(pool.clone());
+        let expired = seed(&pool, &task_name, "PENDING", Some(2)).await;
+        let _not_yet = seed(&pool, &task_name, "PENDING", Some(-5)).await;
+
+        let list = broker.get_expired_tasks().await.expect("expired list");
+
+        let ours: Vec<&ExpiredTaskRow> = list
+            .rows()
+            .iter()
+            .filter(|row| row.task_name == task_name)
+            .collect();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].id, expired);
+        assert!(
+            ours[0].expired_for_ms >= 120_000,
+            "{}",
+            ours[0].expired_for_ms
+        );
+        assert!(ours[0].enqueued_at < ours[0].good_until);
+        clean(&pool, &task_name).await;
     }
 }
 

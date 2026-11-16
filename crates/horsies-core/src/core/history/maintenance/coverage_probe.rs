@@ -1,29 +1,29 @@
 //! Set-based validation for required partition coverage.
 
-use std::collections::BTreeMap;
-
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgConnection};
 
-use super::coverage::DeclaredRetentionClass;
+use super::coverage::registered_periods;
 use crate::core::history::commands::{
     open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf, LeafBounds, LeafRef,
     OPEN_END_ANCHOR_SQL,
 };
 use crate::core::history::ddl::classes::{
-    finite_class_parent_name, DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DURATION_DAYS,
-    FOREVER_CLASS_KEY,
+    finite_class_parent_name, FOREVER_CLASS_KEY, PERIOD_CLASS_KIND,
 };
 use crate::core::history::errors::HistoryError;
-use crate::core::history::heartbeats::partitioning::CreateHourlyHeartbeatLeaf;
+use crate::core::history::heartbeats::partitioning::{
+    CreateHourlyHeartbeatLeaf, HEARTBEAT_CLASS_KIND,
+};
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES, TASK_HISTORY_FOREVER,
-    TASK_HISTORY_PARENT,
+    TASK_HISTORY_FOREVER_LEAF, TASK_HISTORY_PARENT,
 };
 use crate::core::history::partitions::catalog::{
-    open_ended_forever_leaf_predicate, open_ended_forever_start_sql, INDEX_SCHEMA_VERSION,
+    AT_LOWER_BOUND_KIND, INDEX_SCHEMA_VERSION, OPEN_LOWER_BOUND_KIND,
 };
 use crate::core::history::partitions::manager::PlannedLeaf;
+use crate::core::history::periods::RetentionDays;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CoverageClassFault {
@@ -61,6 +61,7 @@ struct CoverageProbeRaw {
     leaf_kind: Option<String>,
     class_key: Option<String>,
     leaf_name: Option<String>,
+    lower_bound_kind: Option<String>,
     lower_anchor: Option<DateTime<Utc>>,
     upper_anchor: Option<DateTime<Utc>>,
     detail: Option<String>,
@@ -68,57 +69,38 @@ struct CoverageProbeRaw {
 
 struct ExpectedFiniteClasses {
     class_keys: Vec<String>,
-    durations_us: Vec<i64>,
-    parent_names: Vec<String>,
+    retention_days: Vec<i16>,
 }
 
+/// The period classes the probe requires: the default period and every
+/// declared period, each once.
 fn expected_finite_classes(
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
 ) -> Result<ExpectedFiniteClasses, HistoryError> {
-    let mut expected = BTreeMap::from([(
-        DEFAULT_RETENTION_CLASS_KEY.to_owned(),
-        Duration::days(DEFAULT_RETENTION_DURATION_DAYS),
-    )]);
-    for declared in declared_classes {
-        if declared.duration <= Duration::zero() {
-            return Err(HistoryError::contract(format!(
-                "retention class {:?} has a nonpositive duration",
-                declared.class_key
-            )));
-        }
-        match expected.get(&declared.class_key) {
-            Some(duration) if *duration != declared.duration => {
-                return Err(HistoryError::contract(format!(
-                    "retention class {:?} has conflicting declared durations",
-                    declared.class_key
-                )));
-            }
-            Some(_) => {}
-            None => {
-                expected.insert(declared.class_key.clone(), declared.duration);
-            }
-        }
-    }
-
-    let mut class_keys = Vec::with_capacity(expected.len());
-    let mut durations_us = Vec::with_capacity(expected.len());
-    let mut parent_names = Vec::with_capacity(expected.len());
-    for (class_key, duration) in expected {
-        let duration_us = duration.num_microseconds().ok_or_else(|| {
-            HistoryError::contract("retention duration is outside the supported interval range")
-        })?;
-        class_keys.push(class_key.clone());
-        durations_us.push(duration_us);
-        parent_names.push(finite_class_parent_name(&class_key)?);
+    let periods = registered_periods(declared_periods);
+    let mut class_keys = Vec::with_capacity(periods.len());
+    let mut retention_days = Vec::with_capacity(periods.len());
+    for days in periods {
+        let class_key = days.class_key();
+        finite_class_parent_name(&class_key)?;
+        class_keys.push(class_key);
+        retention_days.push(days.as_stored());
     }
     Ok(ExpectedFiniteClasses {
         class_keys,
-        durations_us,
-        parent_names,
+        retention_days,
     })
 }
 
-fn decode_leaf_repair(row: &CoverageProbeRaw) -> Result<CoverageLeafRepair, HistoryError> {
+/// One required leaf the probe found absent or nonconformant.
+enum ProbedLeafFault {
+    Repair(CoverageLeafRepair),
+    /// The static `forever` leaf with an `OPEN` lower bound. The first migration creates
+    /// it; coverage cannot recreate it.
+    StaticForeverLeaf(CoverageClassFault),
+}
+
+fn decode_leaf_fault(row: &CoverageProbeRaw) -> Result<ProbedLeafFault, HistoryError> {
     let leaf_name = row
         .leaf_name
         .as_deref()
@@ -127,9 +109,29 @@ fn decode_leaf_repair(row: &CoverageProbeRaw) -> Result<CoverageLeafRepair, Hist
         .class_key
         .as_deref()
         .ok_or_else(|| HistoryError::contract("coverage leaf fault has no class key"))?;
-    let lower = row
-        .lower_anchor
-        .ok_or_else(|| HistoryError::contract("coverage leaf fault has no lower bound"))?;
+    let lower = match (
+        row.lower_bound_kind.as_deref(),
+        row.lower_anchor,
+        row.leaf_kind.as_deref(),
+        class_key,
+    ) {
+        (Some(AT_LOWER_BOUND_KIND), Some(lower), _, _) => lower,
+        // Only the static forever leaf has an open lower bound. The first
+        // migration creates it; coverage verifies it and never recreates it.
+        (Some(OPEN_LOWER_BOUND_KIND), None, Some("history"), FOREVER_CLASS_KEY) => {
+            return Ok(ProbedLeafFault::StaticForeverLeaf(CoverageClassFault {
+                class_key: class_key.to_owned(),
+                detail: format!(
+                    "the static forever leaf {leaf_name:?} is absent or nonconformant; the first migration creates it"
+                ),
+            }));
+        }
+        _ => {
+            return Err(HistoryError::contract(
+                "coverage leaf fault has no valid lower bound pair",
+            ));
+        }
+    };
     let upper = row
         .upper_anchor
         .ok_or_else(|| HistoryError::contract("coverage leaf fault has no upper bound"))?;
@@ -137,22 +139,25 @@ fn decode_leaf_repair(row: &CoverageProbeRaw) -> Result<CoverageLeafRepair, Hist
         LeafBounds::new(lower, upper).map_err(|error| HistoryError::contract(error.to_string()))?;
     let leaf = LeafRef::new(leaf_name, class_key, bounds)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
-    match (row.leaf_kind.as_deref(), upper == open_end_anchor()) {
-        (Some("history"), true) => Ok(CoverageLeafRepair::History(PlannedLeaf::OpenEnded(
+    let repair = match (row.leaf_kind.as_deref(), upper == open_end_anchor()) {
+        (Some("history"), true) => CoverageLeafRepair::History(PlannedLeaf::OpenEnded(
             CreateOpenEndedHistoryLeaf::new(leaf)
                 .map_err(|error| HistoryError::contract(error.to_string()))?,
-        ))),
-        (Some("history"), false) => Ok(CoverageLeafRepair::History(PlannedLeaf::Daily(
+        )),
+        (Some("history"), false) => CoverageLeafRepair::History(PlannedLeaf::Daily(
             CreateDailyHistoryLeaf::new(leaf)
                 .map_err(|error| HistoryError::contract(error.to_string()))?,
-        ))),
-        (Some("heartbeat"), _) => Ok(CoverageLeafRepair::Heartbeat(
-            CreateHourlyHeartbeatLeaf::new(leaf)?,
         )),
-        _ => Err(HistoryError::contract(
-            "coverage leaf fault has an unknown leaf kind",
-        )),
-    }
+        (Some("heartbeat"), _) => {
+            CoverageLeafRepair::Heartbeat(CreateHourlyHeartbeatLeaf::new(leaf)?)
+        }
+        _ => {
+            return Err(HistoryError::contract(
+                "coverage leaf fault has an unknown leaf kind",
+            ));
+        }
+    };
+    Ok(ProbedLeafFault::Repair(repair))
 }
 
 /// The coverage probe statement. `series_bound` is the larger horizon, a
@@ -160,9 +165,6 @@ fn decode_leaf_repair(row: &CoverageProbeRaw) -> Result<CoverageLeafRepair, Hist
 /// class, and the cost estimate passes `jit_above_cost`, so PostgreSQL spends
 /// far longer compiling the probe than running it.
 fn coverage_probe_sql(series_bound: i64) -> String {
-    let open_start =
-        open_ended_forever_start_sql("date_trunc('day', db_clock.database_now, 'UTC')");
-    let open_predicate = open_ended_forever_leaf_predicate("catalog");
     format!(
         r#"
 WITH utc_timezone AS MATERIALIZED (
@@ -174,134 +176,105 @@ db_clock AS MATERIALIZED (
     WHERE utc_timezone.value = 'UTC'
 ),
 requested_history AS (
-    SELECT * FROM unnest($1::text[], $2::bigint[], $3::text[])
-        AS requested(class_key, duration_us, parent_name)
+    SELECT * FROM unnest($1::text[], $2::smallint[])
+        AS requested(class_key, retention_days)
 ),
 history_keys AS (
     SELECT class_key FROM requested_history
     UNION
     SELECT class_key FROM {RETENTION_CLASSES}
-    WHERE duration IS NOT NULL AND class_key <> $4
+    WHERE class_kind = '{PERIOD_CLASS_KIND}'
     UNION
-    SELECT $5::text
+    SELECT $4::text
+),
+named_history_keys AS (
+    SELECT
+        keys.class_key,
+        CASE WHEN keys.class_key = $4 THEN $5::text
+             ELSE $7::text || '_' || keys.class_key
+        END AS parent_name
+    FROM history_keys AS keys
 ),
 history_classes AS (
     SELECT
         'history'::text AS leaf_kind,
         keys.class_key,
-        CASE WHEN keys.class_key = $5 THEN $6::text
-             ELSE COALESCE(requested.parent_name, actual.finite_parent_name)
-        END AS parent_name,
-        $7::bigint AS horizon,
+        keys.parent_name,
+        $6::bigint AS horizon,
         interval '1 day' AS leaf_interval,
         CASE
             WHEN actual.class_key IS NULL THEN false
-            WHEN keys.class_key = $5 THEN
-                actual.duration IS NULL
-                AND actual.partition_interval IS NULL
-                AND actual.finite_parent_name IS NULL
+            WHEN keys.class_key = $4 THEN actual.class_kind = 'FOREVER'
             ELSE
-                actual.duration IS NOT NULL
-                AND actual.partition_interval = interval '1 day'
-                AND actual.finite_parent_name = COALESCE(
-                    requested.parent_name, actual.finite_parent_name
-                )
+                actual.class_kind = '{PERIOD_CLASS_KIND}'
                 AND (
-                    requested.duration_us IS NULL
-                    OR actual.duration = requested.duration_us * interval '1 microsecond'
+                    requested.retention_days IS NULL
+                    OR actual.retention_days = requested.retention_days
                 )
         END
         AND parent.oid IS NOT NULL
         AND parent.relkind = 'p'
-        AND octet_length(
-            CASE WHEN keys.class_key = $5 THEN $6::text
-                 ELSE COALESCE(requested.parent_name, actual.finite_parent_name)
-            END
-        ) <= 39
-        AND (
-            CASE WHEN keys.class_key = $5 THEN $6::text
-                 ELSE COALESCE(requested.parent_name, actual.finite_parent_name)
-            END
-        ) ~ '^[a-z][a-z0-9_]*$'
+        AND octet_length(keys.parent_name) <= 39
+        AND keys.parent_name ~ '^[a-z][a-z0-9_]*$'
         AND EXISTS (
             SELECT 1 FROM pg_inherits AS parent_attachment
-            WHERE parent_attachment.inhparent = to_regclass($8)
+            WHERE parent_attachment.inhparent = to_regclass($7)
               AND parent_attachment.inhrelid = parent.oid
               AND NOT parent_attachment.inhdetachpending
         ) AS class_conformant,
         true::boolean AS class_usable,
         CASE
             WHEN actual.class_key IS NULL THEN 'retention class is absent'
-            WHEN keys.class_key = $5 AND NOT (
-                actual.duration IS NULL
-                AND actual.partition_interval IS NULL
-                AND actual.finite_parent_name IS NULL
-            ) THEN 'forever retention class has invalid metadata'
-            WHEN keys.class_key <> $5 AND NOT (
-                actual.duration IS NOT NULL
-                AND actual.partition_interval = interval '1 day'
-                AND actual.finite_parent_name = COALESCE(
-                    requested.parent_name, actual.finite_parent_name
-                )
+            WHEN keys.class_key = $4 AND actual.class_kind <> 'FOREVER'
+                THEN 'forever retention class has invalid metadata'
+            WHEN keys.class_key <> $4 AND NOT (
+                actual.class_kind = '{PERIOD_CLASS_KIND}'
                 AND (
-                    requested.duration_us IS NULL
-                    OR actual.duration = requested.duration_us * interval '1 microsecond'
+                    requested.retention_days IS NULL
+                    OR actual.retention_days = requested.retention_days
                 )
             ) THEN 'finite retention class has invalid metadata'
             WHEN parent.oid IS NULL THEN 'history parent relation is absent'
             WHEN parent.relkind <> 'p' THEN 'history parent relation is not partitioned'
-            WHEN octet_length(
-                CASE WHEN keys.class_key = $5 THEN $6::text
-                     ELSE COALESCE(requested.parent_name, actual.finite_parent_name)
-                END
-            ) > 39 THEN 'history parent name cannot form safe leaf index names'
-            WHEN NOT (
-                CASE WHEN keys.class_key = $5 THEN $6::text
-                     ELSE COALESCE(requested.parent_name, actual.finite_parent_name)
-                END
-            ) ~ '^[a-z][a-z0-9_]*$' THEN 'history parent name is not a safe identifier'
+            WHEN octet_length(keys.parent_name) > 39
+                THEN 'history parent name cannot form safe leaf index names'
+            WHEN NOT keys.parent_name ~ '^[a-z][a-z0-9_]*$'
+                THEN 'history parent name is not a safe identifier'
             ELSE 'history parent is not attached to the task-history root'
         END AS fault_detail
-    FROM history_keys AS keys
+    FROM named_history_keys AS keys
     LEFT JOIN requested_history AS requested USING (class_key)
     LEFT JOIN {RETENTION_CLASSES} AS actual USING (class_key)
-    LEFT JOIN pg_class AS parent ON parent.oid = to_regclass(
-        CASE WHEN keys.class_key = $5 THEN $6::text
-             ELSE COALESCE(requested.parent_name, actual.finite_parent_name)
-        END
-    )
+    LEFT JOIN pg_class AS parent ON parent.oid = to_regclass(keys.parent_name)
 ),
 heartbeat_class AS (
     SELECT
         'heartbeat'::text AS leaf_kind,
-        $4::text AS class_key,
-        $9::text AS parent_name,
-        $10::bigint AS horizon,
+        $3::text AS class_key,
+        $8::text AS parent_name,
+        $9::bigint AS horizon,
         interval '1 hour' AS leaf_interval,
         actual.class_key IS NOT NULL
-        AND actual.duration = $10::bigint * interval '1 hour'
-        AND actual.partition_interval = interval '1 hour'
-        AND actual.finite_parent_name = $9
+        AND actual.class_kind = '{HEARTBEAT_CLASS_KIND}'
+        AND actual.heartbeat_horizon_hours = $9::bigint
         AND parent.oid IS NOT NULL
         AND parent.relkind = 'p' AS class_conformant,
         actual.class_key IS NOT NULL
-        AND actual.partition_interval = interval '1 hour'
-        AND actual.finite_parent_name = $9
+        AND actual.class_kind = '{HEARTBEAT_CLASS_KIND}'
         AND parent.oid IS NOT NULL
         AND parent.relkind = 'p' AS class_usable,
         CASE
             WHEN actual.class_key IS NULL THEN 'heartbeat retention class is absent'
             WHEN NOT (
-                actual.duration = $10::bigint * interval '1 hour'
-                AND actual.partition_interval = interval '1 hour'
-                AND actual.finite_parent_name = $9
+                actual.class_kind = '{HEARTBEAT_CLASS_KIND}'
+                AND actual.heartbeat_horizon_hours = $9::bigint
             ) THEN 'heartbeat retention class has invalid metadata'
             WHEN parent.oid IS NULL THEN 'heartbeat parent relation is absent'
             ELSE 'heartbeat parent relation is not partitioned'
         END AS fault_detail
     FROM (SELECT 1) AS singleton
-    LEFT JOIN {RETENTION_CLASSES} AS actual ON actual.class_key = $4
-    LEFT JOIN pg_class AS parent ON parent.oid = to_regclass($9)
+    LEFT JOIN {RETENTION_CLASSES} AS actual ON actual.class_key = $3
+    LEFT JOIN pg_class AS parent ON parent.oid = to_regclass($8)
 ),
 classes AS (
     SELECT * FROM history_classes
@@ -311,11 +284,15 @@ classes AS (
 desired AS (
     SELECT
         classes.*,
-        classes.leaf_kind = 'history' AND classes.class_key = $5 AS open_ended,
-        open_leaf.leaf_name AS open_leaf_name,
+        classes.leaf_kind = 'history' AND classes.class_key = $4 AS open_ended,
         CASE
-            WHEN classes.leaf_kind = 'history' AND classes.class_key = $5 THEN
-                COALESCE(open_leaf.lower_anchor, {open_start})
+            WHEN classes.leaf_kind = 'history' AND classes.class_key = $4
+                THEN '{OPEN_LOWER_BOUND_KIND}'
+            ELSE '{AT_LOWER_BOUND_KIND}'
+        END AS lower_bound_kind,
+        CASE
+            WHEN classes.leaf_kind = 'history' AND classes.class_key = $4 THEN
+                NULL::timestamptz
             WHEN classes.leaf_kind = 'history' THEN
                 date_trunc('day', db_clock.database_now, 'UTC')
                 + series.value * classes.leaf_interval
@@ -326,15 +303,8 @@ desired AS (
     FROM classes
     CROSS JOIN db_clock
     CROSS JOIN generate_series(0, {series_bound}) AS series(value)
-    LEFT JOIN LATERAL (
-        SELECT catalog.leaf_name, catalog.lower_anchor
-        FROM {LEAF_CATALOG} AS catalog
-        WHERE {open_predicate}
-        ORDER BY catalog.lower_anchor
-        LIMIT 1
-    ) AS open_leaf ON classes.leaf_kind = 'history' AND classes.class_key = $5
     WHERE series.value <= CASE
-        WHEN classes.leaf_kind = 'history' AND classes.class_key = $5 THEN 0
+        WHEN classes.leaf_kind = 'history' AND classes.class_key = $4 THEN 0
         ELSE classes.horizon
     END
 ),
@@ -345,12 +315,7 @@ named_desired AS (
              ELSE desired.lower_anchor + desired.leaf_interval
         END AS upper_anchor,
         CASE
-            WHEN desired.open_ended THEN COALESCE(
-                desired.open_leaf_name,
-                desired.parent_name || '_open_' || to_char(
-                    desired.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD'
-                )
-            )
+            WHEN desired.open_ended THEN '{TASK_HISTORY_FOREVER_LEAF}'
             WHEN desired.leaf_kind = 'history' THEN desired.parent_name || '_' || to_char(
                 desired.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD'
             )
@@ -364,9 +329,9 @@ leaf_state AS (
     SELECT
         desired.*,
         catalog.leaf_name IS NOT NULL
-        AND catalog.parent_name = desired.parent_name
         AND catalog.class_key = desired.class_key
-        AND catalog.lower_anchor = desired.lower_anchor
+        AND catalog.lower_bound_kind = desired.lower_bound_kind
+        AND catalog.lower_anchor IS NOT DISTINCT FROM desired.lower_anchor
         AND catalog.upper_anchor = desired.upper_anchor
         AND catalog.index_schema_version = {INDEX_SCHEMA_VERSION}
         AND catalog.detached_at IS NULL
@@ -374,10 +339,12 @@ leaf_state AS (
         AND leaf.oid IS NOT NULL
         AND attachment.inhrelid IS NOT NULL
         AND NOT attachment.inhdetachpending
-        AND pg_get_expr(leaf.relpartbound, leaf.oid) = catalog.partition_bound
         AND pg_get_expr(leaf.relpartbound, leaf.oid) = format(
-            'FOR VALUES FROM (%L) TO (%L)',
-            desired.lower_anchor,
+            'FOR VALUES FROM (%s) TO (%L)',
+            CASE desired.lower_bound_kind
+                WHEN '{OPEN_LOWER_BOUND_KIND}' THEN 'MINVALUE'
+                ELSE quote_literal(desired.lower_anchor)
+            END,
             desired.upper_anchor
         )
         AND EXISTS (
@@ -387,7 +354,10 @@ leaf_state AS (
               ON id_relation.oid = id_index.indexrelid
             JOIN pg_am AS id_method
               ON id_method.oid = id_relation.relam
-            WHERE id_index.indexrelid = to_regclass(catalog.id_index_name)
+            WHERE id_index.indexrelid = to_regclass(
+                desired.leaf_name || CASE WHEN desired.leaf_kind = 'heartbeat'
+                                          THEN '_probe_idx' ELSE '_task_idx' END
+            )
               AND id_index.indrelid = leaf.oid
               AND id_method.amname = 'btree'
               AND id_index.indisvalid
@@ -534,9 +504,9 @@ summary AS (
               )
         ), false) AS heartbeat_covered_now,
         date_trunc('day', db_clock.database_now, 'UTC')
-            + ($7::bigint + 1) * interval '1 day' AS history_covered_through,
+            + ($6::bigint + 1) * interval '1 day' AS history_covered_through,
         date_trunc('hour', db_clock.database_now, 'UTC')
-            + ($10::bigint + 1) * interval '1 hour' AS heartbeats_covered_through
+            + ($9::bigint + 1) * interval '1 hour' AS heartbeats_covered_through
     FROM db_clock
     CROSS JOIN leaf_state
     GROUP BY db_clock.database_now
@@ -547,6 +517,7 @@ faults AS (
         classes.leaf_kind,
         classes.class_key,
         NULL::text AS leaf_name,
+        NULL::text AS lower_bound_kind,
         NULL::timestamptz AS lower_anchor,
         NULL::timestamptz AS upper_anchor,
         classes.fault_detail AS detail
@@ -558,6 +529,7 @@ faults AS (
         leaf_state.leaf_kind,
         leaf_state.class_key,
         leaf_state.leaf_name,
+        leaf_state.lower_bound_kind,
         leaf_state.lower_anchor,
         leaf_state.upper_anchor,
         'required leaf is absent or nonconformant'::text
@@ -573,6 +545,7 @@ SELECT
     NULL::text AS leaf_kind,
     NULL::text AS class_key,
     NULL::text AS leaf_name,
+    NULL::text AS lower_bound_kind,
     NULL::timestamptz AS lower_anchor,
     NULL::timestamptz AS upper_anchor,
     NULL::text AS detail
@@ -587,6 +560,7 @@ SELECT
     faults.leaf_kind,
     faults.class_key,
     faults.leaf_name,
+    faults.lower_bound_kind,
     faults.lower_anchor,
     faults.upper_anchor,
     faults.detail
@@ -597,7 +571,7 @@ ORDER BY fault_kind NULLS FIRST, class_key NULLS FIRST, lower_anchor NULLS FIRST
     )
 }
 
-/// Binds the probe parameters $1..$10 to `query`.
+/// Binds the probe parameters $1..$9 to `query`.
 fn bind_probe_arguments<'q, O>(
     query: sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>,
     expected: ExpectedFiniteClasses,
@@ -606,8 +580,7 @@ fn bind_probe_arguments<'q, O>(
 ) -> sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments> {
     query
         .bind(expected.class_keys)
-        .bind(expected.durations_us)
-        .bind(expected.parent_names)
+        .bind(expected.retention_days)
         .bind(HEARTBEAT_CLASS_KEY)
         .bind(FOREVER_CLASS_KEY)
         .bind(TASK_HISTORY_FOREVER)
@@ -621,9 +594,9 @@ pub(crate) async fn probe_partition_coverage(
     connection: &mut PgConnection,
     history_horizon_days: u32,
     heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
+    declared_periods: &[RetentionDays],
 ) -> Result<CoverageProbe, HistoryError> {
-    let expected = expected_finite_classes(declared_classes)?;
+    let expected = expected_finite_classes(declared_periods)?;
     let history_horizon = i64::from(history_horizon_days);
     let heartbeat_horizon = i64::from(heartbeat_horizon_hours);
     let sql = coverage_probe_sql(history_horizon.max(heartbeat_horizon));
@@ -654,7 +627,10 @@ pub(crate) async fn probe_partition_coverage(
                     .clone()
                     .ok_or_else(|| HistoryError::contract("class fault has no detail"))?,
             }),
-            Some("leaf") => leaf_repairs.push(decode_leaf_repair(row)?),
+            Some("leaf") => match decode_leaf_fault(row)? {
+                ProbedLeafFault::Repair(repair) => leaf_repairs.push(repair),
+                ProbedLeafFault::StaticForeverLeaf(fault) => class_faults.push(fault),
+            },
             Some(_) => {
                 return Err(HistoryError::contract(
                     "coverage probe returned an unknown fault kind",
@@ -676,19 +652,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expected_classes_deduplicate_equal_declarations_and_reject_conflicts() {
-        let matching = DeclaredRetentionClass {
-            class_key: DEFAULT_RETENTION_CLASS_KEY.to_owned(),
-            duration: Duration::days(DEFAULT_RETENTION_DURATION_DAYS),
-        };
-        let expected = expected_finite_classes(&[matching]).unwrap();
-        assert_eq!(expected.class_keys, vec![DEFAULT_RETENTION_CLASS_KEY]);
+    fn expected_classes_deduplicate_equal_declarations() {
+        let expected = expected_finite_classes(&[RetentionDays::DEFAULT]).unwrap();
+        assert_eq!(expected.class_keys, vec!["standard_30d"]);
+        assert_eq!(expected.retention_days, vec![30]);
 
-        let conflicting = DeclaredRetentionClass {
-            class_key: DEFAULT_RETENTION_CLASS_KEY.to_owned(),
-            duration: Duration::days(7),
-        };
-        assert!(expected_finite_classes(&[conflicting]).is_err());
+        let seven = RetentionDays::parse_period(chrono::Duration::days(7)).unwrap();
+        let expected = expected_finite_classes(&[seven, seven]).unwrap();
+        assert_eq!(expected.class_keys, vec!["standard_7d", "standard_30d"]);
+        assert_eq!(expected.retention_days, vec![7, 30]);
     }
 }
 
