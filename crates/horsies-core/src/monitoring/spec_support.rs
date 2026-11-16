@@ -19,7 +19,7 @@ use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::pages::HistoryWindow;

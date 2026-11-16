@@ -606,14 +606,18 @@ impl OutcomeWriter {
             task_id: task.task_id,
             fence: fence(task, &self.worker_id),
         };
-        let outcomes = terminalize(self.broker.pool(), &command)
-            .await
-            .map_err(|error| FinalizeError {
-                stage: FinalizeStage::Phase1Persist,
-                task_id: task.task_id,
-                message: format!("Failed to terminate orphaned workflow task: {error}"),
-                retryable: error.is_retryable(),
-            })?;
+        let cancelled = match self.broker.core_pools_for_write() {
+            Ok((open, _write)) => {
+                terminalize(open.main(), self.broker.statement_log(), &command).await
+            }
+            Err(error) => Err(error),
+        };
+        let outcomes = cancelled.map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase1Persist,
+            task_id: task.task_id,
+            message: format!("Failed to terminate orphaned workflow task: {error}"),
+            retryable: error.is_retryable(),
+        })?;
         match outcomes.first() {
             Some(TerminalizationOutcome::Applied { .. }) => tracing::info!(
                 task_id = %task.task_id,

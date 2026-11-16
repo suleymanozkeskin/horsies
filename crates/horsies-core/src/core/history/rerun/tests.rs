@@ -8,7 +8,7 @@ use super::operations::{
     rerun_task_in_tx, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::ddl::classes::register_period_class;
 use crate::core::history::identity::fingerprint::EnqueueCommandV1;

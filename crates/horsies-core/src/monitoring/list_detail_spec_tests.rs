@@ -458,7 +458,7 @@ async fn a_task_expired_before_it_started_reports_a_closed_queue_span() {
     let mut task = LiveTask::pending("alpha_task");
     task.good_until = Some(Utc::now() - Duration::minutes(1));
     seed_live(&database.pool, &task).await;
-    let expired = crate::broker::terminalization::terminalize(
+    let expired = crate::broker::terminalization::on_test_pool::terminalize(
         &database.pool,
         &TerminalizationCommand::ExpirePendingTasks {
             batch_size: BatchSize::new(10).expect("a positive batch size"),

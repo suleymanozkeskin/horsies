@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::broker::core_rows::StatementLog;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -144,7 +145,7 @@ struct StaleTaskId {
 #[cfg(test)]
 mod p7_maintenance_tests {
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
     use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -1298,8 +1299,13 @@ async fn run_reaper_pass(
         }
     }
 
-    // Expire unclaimed PENDING tasks whose good_until has passed.
-    match expire_pending_tasks(runtime_pool).await {
+    // Expire unclaimed PENDING tasks whose good_until has passed, on the
+    // main core pool with the reserve.
+    let expired = match broker.core_pools_for_write() {
+        Ok((open, _write)) => expire_pending_tasks(open.main(), broker.statement_log()).await,
+        Err(error) => Err(error),
+    };
+    match expired {
         Ok(count) if count > 0 => {
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
@@ -1927,15 +1933,28 @@ async fn terminate_orphaned_workflow_tasks(
     })
 }
 
-/// Expire unclaimed PENDING tasks whose `good_until` has passed.
+/// Expire unclaimed PENDING tasks whose `good_until` has passed (Python
+/// `expire_pending_tasks`, `core/brokers/postgres.py:3425-3503`).
 ///
 /// Runs `horsies_expire_pending_tasks` in bounded batches (earliest
 /// deadlines first, SKIP LOCKED) so a mass expiry is spread across several
 /// committed statements instead of one transaction that row-locks every
 /// match and flushes two trigger NOTIFYs per row in a single commit (which
-/// can overflow listener queues). No attempt rows are written (the task was
-/// never executed). Returns the number of expired tasks.
-pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::BrokerError> {
+/// can overflow listener queues). Each batch is one statement alone on
+/// `pool`, checked out as reserved work, and commits alone. At most
+/// [`EXPIRE_MAX_BATCHES_PER_PASS`] batches run; the rest waits for the next
+/// pass. No attempt rows are written (the task was never executed). Returns
+/// the number of expired tasks.
+///
+/// Errors: [`crate::broker::BrokerError::Statement`];
+/// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
+/// the wire contract or an outcome other than `APPLIED` (a discovery batch
+/// reports transitioned rows only). The batches before the failed one, and
+/// the failed batch when its statement returned, stay committed.
+pub async fn expire_pending_tasks(
+    pool: &crate::db::CorePool,
+    log: StatementLog,
+) -> Result<u64, crate::broker::BrokerError> {
     let task_error = TaskError::builtin(
         crate::core::OutcomeCode::TaskExpired,
         "task expired before being claimed (good_until passed)",
@@ -1949,17 +1968,49 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
         result_json,
         error_code: "TASK_EXPIRED".to_owned(),
     };
+    let full_batch = u64::from(EXPIRE_BATCH_SIZE.unsigned_abs());
 
     let mut total: u64 = 0;
     for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
-        let expired = crate::broker::terminalization::terminalize(pool, &command).await?;
-        let affected = expired.len() as u64;
+        let expired = crate::broker::terminalization::terminalize(pool, log, &command).await?;
+        let affected = transitioned_count(&expired)?;
         total += affected;
-        if affected < EXPIRE_BATCH_SIZE as u64 {
-            break;
+        if affected < full_batch {
+            return Ok(total);
         }
     }
+    tracing::warn!(
+        expired = total,
+        batches = EXPIRE_MAX_BATCHES_PER_PASS,
+        "pending expiry reached its per-pass bound; the next pass goes on",
+    );
     Ok(total)
+}
+
+/// The number of rows a pending expiry batch moved. The batch reports only
+/// the rows it moved (Python `expire_pending_tasks`), so any outcome other
+/// than `APPLIED` breaks the wire contract.
+fn transitioned_count(
+    outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
+) -> Result<u64, crate::broker::BrokerError> {
+    for outcome in outcomes {
+        match outcome {
+            crate::core::lifecycle::TerminalizationOutcome::Applied { .. } => {}
+            crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. } => {
+                return Err(crate::broker::BrokerError::TerminalizationContract(
+                    format!(
+                        "horsies_expire_pending_tasks: task {} reported {outcome:?}; \
+                     a discovery batch reports moved rows only",
+                        outcome.task_id(),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(outcomes.len() as u64)
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING, in batches of
@@ -2558,7 +2609,7 @@ mod tests {
 
         // Canonical workflow cancellation moves the backing task to history;
         // workflow and linkage then sweep together in one statement.
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
                 workflow_ids: vec![wf_id],

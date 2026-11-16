@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::migrations::install_schema;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
