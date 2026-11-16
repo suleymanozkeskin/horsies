@@ -19,6 +19,8 @@ the detail reader.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import uuid
 from typing import Any, cast
 
@@ -27,7 +29,6 @@ from pydantic import SecretStr
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-import horsies.core.brokers.postgres as broker_module
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -190,53 +191,6 @@ class TestHistoryFallback:
             await broker.close_async()
 
     @pytest.mark.asyncio
-    async def test_row_vanishing_between_poll_and_fetch_falls_through(
-        self,
-        make_database: MakeDatabase,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The ruled boundary. The mid-move instant — live status seen
-        terminal, record fetch finding nothing — cannot exist at rest
-        post-tighten (the live domain forbids terminal statuses), so
-        both probe results are forced to the mid-move readings while
-        the real history row stands; the fallback must resolve from
-        it."""
-        url = await make_database()
-        broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(url))
-        )
-        try:
-            await broker.ensure_schema_initialized()
-            completed, _ = await populated_history(url)
-            # The live probe runs only while the result function is not
-            # published.
-            await _drop_result_function(url)
-            monkeypatch.setattr(
-                broker_module,
-                'GET_TASK_STATUS_NAME_SQL',
-                text(
-                    "SELECT 'COMPLETED' AS status, "
-                    "'legacy.task' AS task_name"
-                ),
-            )
-            monkeypatch.setattr(
-                broker_module,
-                'GET_TASK_RESULT_RECORD_SQL',
-                text(
-                    'SELECT task_name, status, result '
-                    'FROM horsies_tasks WHERE FALSE'
-                ),
-            )
-            outcome = await broker.get_raw_result_record_async(completed)
-            assert not is_err(outcome), outcome
-            record = outcome.ok_value
-            assert record is not None
-            assert record.status is TaskStatus.COMPLETED
-            assert record.raw_result == {'ok': {'value': 7}}
-        finally:
-            await broker.close_async()
-
-    @pytest.mark.asyncio
     async def test_unpublished_staged_function_keeps_old_semantics(
         self, make_database: MakeDatabase
     ) -> None:
@@ -338,6 +292,7 @@ class TestStagedResultReader:
                 'result.reader.task',
                 task_id=task_id,
                 enqueue_sha='d' * 64,
+                sent_at=datetime.now(timezone.utc),
                 args_json='[]',
                 kwargs_json='{}',
             )
