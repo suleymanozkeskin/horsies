@@ -3106,8 +3106,7 @@ class PostgresBroker:
         A worker is live while its latest snapshot is at most
         ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
         the queue is one of its queues and one of its budgets serves the
-        class. A live worker whose snapshot has no ``class_capacity`` is left
-        out and named in ``ClassCoverage.not_recorded``. Reads only.
+        class. Reads only.
         ``Err(MONITORING_QUERY_FAILED)``: a database or network error, a live
         snapshot whose ``class_capacity`` is unreadable, or a read that
         reached its bound (``retryable`` is ``False`` for the last two).
@@ -3137,8 +3136,7 @@ class PostgresBroker:
         """Pending streams with the wait of their oldest due row and their
         coverage, and the budget load of each live worker.
 
-        A live worker whose snapshot has no ``class_capacity`` is left out
-        and named in ``ClassReport.not_recorded``. Reads only.
+        Reads only.
         ``Err(MONITORING_QUERY_FAILED)``: as ``get_class_coverage_async``, or
         a live worker holds rows of a class that its recorded budgets do not
         serve.
