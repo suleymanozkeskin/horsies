@@ -1139,6 +1139,43 @@ impl WorkflowDoneListener {
     }
 }
 
+/// A connection that listens on several channels and keeps each
+/// notification as (channel, payload).
+pub(super) struct Notifications {
+    listener: sqlx::postgres::PgListener,
+}
+
+impl Notifications {
+    pub(super) async fn listen(pool: &PgPool, channels: &[&str]) -> Self {
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+            .await
+            .expect("connect the notification listener");
+        listener
+            .listen_all(channels.iter().copied())
+            .await
+            .unwrap_or_else(|error| panic!("LISTEN {channels:?}: {error}"));
+        Self { listener }
+    }
+
+    /// The (channel, payload) pairs that arrive within [`NOTIFICATION_WAIT`]
+    /// of the last one, at most [`NOTIFICATION_LIMIT`], sorted.
+    pub(super) async fn received(&mut self) -> Vec<(String, String)> {
+        let mut received = Vec::new();
+        while received.len() < NOTIFICATION_LIMIT {
+            match tokio::time::timeout(NOTIFICATION_WAIT, self.listener.recv()).await {
+                Ok(Ok(notification)) => received.push((
+                    notification.channel().to_owned(),
+                    notification.payload().to_owned(),
+                )),
+                Ok(Err(error)) => panic!("the notification listener failed: {error}"),
+                Err(_) => break,
+            }
+        }
+        received.sort();
+        received
+    }
+}
+
 /// Ends seeded workflows that a test leaves RUNNING or PAUSED on the shared
 /// database, so no global pass of another test works on them.
 pub(super) async fn end_workflows(pool: &PgPool, workflow_ids: &[Uuid]) {
