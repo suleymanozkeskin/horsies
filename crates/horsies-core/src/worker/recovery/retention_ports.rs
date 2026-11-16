@@ -19,7 +19,7 @@ use sqlx::{Connection, PgConnection};
 use super::*;
 use crate::broker::client_family::ClientFamily;
 use crate::broker::migrations::install_schema;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
 use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -121,6 +121,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut next_partition_maintenance = tokio::time::Instant::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         pool,
         pool,
         &WorkflowSpecRegistry::new(),
