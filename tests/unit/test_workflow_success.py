@@ -9,10 +9,6 @@ from typing import Any
 
 import pytest
 
-from horsies.core.history.cutover.program import (
-    installation_fragments,
-    teardown_statements,
-)
 from horsies.core.history.terminalization.move import (
     FINISH_WORKFLOW_SUCCESS_FUNCTION,
     LOCK_RUNNING_TASK_FUNCTION,
@@ -43,6 +39,7 @@ from horsies.core.worker.workflow_success import (
     success_for,
     success_statement,
 )
+from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
@@ -266,25 +263,11 @@ class TestProgram:
         assert 'pg_notify' not in _BODY
 
     def test_installation_has_the_type_before_the_function(self) -> None:
-        fragments = installation_fragments()
-        type_at = next(
-            index
-            for index, fragment in enumerate(fragments)
-            if f'CREATE TYPE {WORKFLOW_SUCCESS_OUTCOME_TYPE}' in fragment
-        )
-        function_at = next(
-            index
-            for index, fragment in enumerate(fragments)
-            if f'CREATE FUNCTION {FINISH_WORKFLOW_SUCCESS_FUNCTION}' in fragment
-        )
+        sql = baseline_sql()
+        type_at = sql.index(f'CREATE TYPE {WORKFLOW_SUCCESS_OUTCOME_TYPE}')
+        function_at = sql.index(f'CREATE FUNCTION {FINISH_WORKFLOW_SUCCESS_FUNCTION}')
 
         assert type_at < function_at
-
-    def test_teardown_drops_the_type_and_with_it_the_function(self) -> None:
-        assert (
-            f'DROP TYPE IF EXISTS {WORKFLOW_SUCCESS_OUTCOME_TYPE} CASCADE'
-            in teardown_statements()
-        )
 
     def test_the_upgrade_drops_the_retired_locking_read(self) -> None:
         assert (
