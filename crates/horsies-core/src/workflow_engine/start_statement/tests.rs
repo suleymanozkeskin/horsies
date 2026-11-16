@@ -52,11 +52,17 @@ fn spec_of(name: &str, tasks: Vec<AnyNode>) -> WorkflowSpec {
     }
 }
 
-/// A registry with one static child of one task node under [`CHILD_KEY`].
+/// A registry with one static child of one task node under [`CHILD_KEY`]. The
+/// node has its queue and priority resolved and an object input, as the
+/// start and the task row that SQL mints require.
 fn registry_with_child() -> WorkflowSpecRegistry {
     let mut builder = WorkflowSpecBuilder::new("start_statement_child");
     builder.definition_key(CHILD_KEY);
-    let node = builder.task(TaskNode::<String>::raw("child_task", "null").queue("default"));
+    let node = builder.task(
+        TaskNode::<String>::raw("child_task", "{}")
+            .queue("default")
+            .priority(100),
+    );
     builder.output(node);
     let mut registry = WorkflowSpecRegistry::new();
     registry
@@ -156,20 +162,82 @@ fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
     assert_eq!(arguments.node_executions[0], None);
 }
 
+/// A sub-workflow root whose child has no registration under its key gets
+/// no pre-built child: a failed-node record carries its error envelope
+/// (`SUBWORKFLOW_LOAD_FAILED`), and the start runs in a transaction.
 #[test]
-fn a_subworkflow_root_whose_child_is_not_registered_refuses_the_start() {
+fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
+    let workflow_id = Uuid::new_v4();
     let spec = spec_of("orphan_parent", vec![subworkflow_root(0)]);
 
-    let refused = start_arguments(
+    let arguments = start_arguments(
         &spec,
-        Uuid::new_v4(),
+        workflow_id,
         &WorkflowSpecRegistry::new(),
         &RetentionConfig::default(),
-    );
+    )
+    .expect("arguments");
 
+    assert_eq!(arguments.workflow_ids, vec![workflow_id]);
+    assert!(arguments.has_failed_records());
+    assert_eq!(arguments.failed_workflow_ids, vec![workflow_id]);
+    assert_eq!(arguments.failed_task_indexes, vec![0]);
+    let stored: crate::core::TaskResult<serde_json::Value> =
+        serde_json::from_str(&arguments.failed_results[0]).expect("an error envelope");
+    let crate::core::TaskResult::Err(error) = stored else {
+        panic!("a failed record stores an error");
+    };
+    assert_eq!(error.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+}
+
+/// A sub-workflow root whose registered builder fails gets a failed-node
+/// record with `WORKFLOW_ENQUEUE_FAILED`, naming the workflow and the node.
+#[test]
+fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
+    let workflow_id = Uuid::new_v4();
+    let mut registry = WorkflowSpecRegistry::new();
+    let mut builder = WorkflowSpecBuilder::new("start_statement_child");
+    builder.definition_key(CHILD_KEY);
+    let node = builder.task(
+        TaskNode::<String>::raw("child_task", "{}")
+            .queue("default")
+            .priority(100),
+    );
+    builder.output(node);
+    let failing_builder: crate::core::SpecBuilderFn = Arc::new(
+        |_input: &str| -> Result<WorkflowSpec, crate::core::HorsiesError> {
+            Err(crate::core::HorsiesError::new("the builder refuses"))
+        },
+    );
+    registry
+        .register(RegisteredWorkflowSpec {
+            spec: builder.build().expect("child spec"),
+            spec_builder: Some(failing_builder),
+        })
+        .expect("register the child");
+    let spec = spec_of("failing_builder_parent", vec![subworkflow_root(0)]);
+
+    let arguments = start_arguments(&spec, workflow_id, &registry, &RetentionConfig::default())
+        .expect("arguments");
+
+    assert_eq!(arguments.workflow_ids, vec![workflow_id]);
+    assert_eq!(arguments.failed_task_indexes, vec![0]);
+    let stored: crate::core::TaskResult<serde_json::Value> =
+        serde_json::from_str(&arguments.failed_results[0]).expect("an error envelope");
+    let crate::core::TaskResult::Err(error) = stored else {
+        panic!("a failed record stores an error");
+    };
+    assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
     assert!(
-        matches!(refused, Err(WorkflowError::Validation(_))),
-        "{refused:?}"
+        error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Subworkflow build failed: ")),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 0}))
     );
 }
 

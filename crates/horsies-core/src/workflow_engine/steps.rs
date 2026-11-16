@@ -15,21 +15,27 @@
 //!   statement layer), or `PoolSettings` when a closed handle cannot open its
 //!   pools again. A row that breaks the outcome contract of its function is a
 //!   [`StepContractError`].
+//! - A step that owes child starts runs in a transaction: the step, then
+//!   `horsies_workflow_child_start` for each owed child start
+//!   (`child_start.rs`), then `COMMIT`. The parent node, the child rows and
+//!   the link commit together.
 
-use sqlx::PgPool;
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use crate::broker::core_rows::{column, one_row, query_in, query_on, roll_back, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::core::workflow::node::SubWorkflowParams;
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType,
     PooledConnection, Row, StatementFailure, TypedStatement,
 };
-use crate::workflow_engine::engine::propagate_terminal_child_in_tx;
+use crate::workflow_engine::child_start::{run_child_starts, ChildStartsFailure};
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 // ---------------------------------------------------------------------------
 // Statements
@@ -54,17 +60,21 @@ pub(crate) static CANCEL: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid],
 );
 
-/// The columns that the core reads from a row of `horsies_workflow_step_row`.
-/// `workflow_id` and `task_index` are read on `CHILD_START` rows only.
+/// The columns that the core reads from a row of `horsies_workflow_step_row`:
+/// the `OUTCOME` columns, the `CHILD_START` columns that the host build of a
+/// child reads, and the `SOURCE` columns that its `args_from` members take.
 macro_rules! step_row_select {
     ($call:literal) => {
         concat!(
             "SELECT row_kind, disposition, workflow_id, advance_child_workflow_id, detail, ",
-            "task_index FROM ",
+            "task_index, node_input, args_from, sub_workflow_name, sub_definition_key, ",
+            "sub_workflow_params, parent_depth, source_task_index, source_status, ",
+            "source_task_name, source_definition_key, source_result FROM ",
             $call
         )
     };
 }
+pub(crate) use step_row_select;
 
 /// `horsies_workflow_node_finish(task_id, wake, dependents)`: phase 2 of a
 /// finished workflow task. Parameters: the task id, whether the statement
@@ -85,6 +95,16 @@ pub(crate) static CHILD_FINISH: TypedStatement = TypedStatement::new(
     "horsies_workflow_child_finish",
     step_row_select!("horsies_workflow_child_finish($1)"),
     &[ParameterType::Uuid],
+);
+
+/// `horsies_workflow_phase2_recover(task_id, attempt_bound)`: phase-2
+/// recovery of one record, in the caller's transaction. A retaining
+/// disposition adds one attempt to the record and, at the bound, quarantines
+/// its evidence (`detail`: the verdict).
+pub(crate) static PHASE2_RECOVER: TypedStatement = TypedStatement::new(
+    "horsies_workflow_phase2_recover",
+    step_row_select!("horsies_workflow_phase2_recover($1, $2)"),
+    &[ParameterType::Uuid, ParameterType::Int4],
 );
 
 /// `horsies_workflow_resume(workflow_id)`: resumes a PAUSED workflow tree, in
@@ -141,10 +161,16 @@ pub enum StepContractError {
         function: &'static str,
         count: usize,
     },
-    /// A chain of parent advances did not end within `bound` levels: a
-    /// workflow tree has at most that many.
-    #[error("a chain of parent advances did not end within {bound} levels")]
+    /// A drive of parent advances did not end within `bound` levels
+    /// ([`MAX_PARENT_ADVANCES`]). The levels it ran committed; workflow
+    /// recovery advances the rest.
+    #[error("a drive of parent advances did not end within {bound} levels")]
     ParentChainTooLong { bound: usize },
+    /// A step owed more than `bound` child starts, counting those that its
+    /// child starts owed in turn (`MAX_WORKFLOW_NODES`, the most nodes of one
+    /// workflow spec). The step's transaction rolled back.
+    #[error("a step owed more than {bound} child starts; its transaction rolled back")]
+    TooManyChildStarts { bound: usize },
 }
 
 /// The disposition text of a step function's `OUTCOME` row, as a closed
@@ -310,12 +336,49 @@ pub(crate) struct StepOutcome<D> {
     pub(crate) detail: Option<String>,
 }
 
-/// A sub-workflow node that a step promoted and whose child start is owed in
-/// the step's transaction (a `CHILD_START` row).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OwedChildStart {
-    pub(crate) workflow_id: Uuid,
+/// A terminal dependency of an owed child start (a `SOURCE` row): the stored
+/// result that an `args_from` member naming it takes, with the names that
+/// the member's wrap carries (`source_task_name`, `source_definition_key`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildStartSource {
+    /// The index of the dependency node.
     pub(crate) task_index: i32,
+    /// Its status: `COMPLETED`, `FAILED` or `SKIPPED`.
+    pub(crate) status: String,
+    /// The task name of the dependency node.
+    pub(crate) task_name: String,
+    /// The definition key of a sub-workflow dependency; `None` for a task
+    /// node.
+    pub(crate) definition_key: Option<String>,
+    /// Its stored result text, copied; `None` when the node stores none.
+    pub(crate) result: Option<String>,
+}
+
+/// A sub-workflow node that a step promoted and whose child start is owed in
+/// the step's transaction: a `CHILD_START` row and its `SOURCE` rows. The
+/// node is ENQUEUED with no child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwedChildStart {
+    /// The parent workflow.
+    pub(crate) workflow_id: Uuid,
+    /// The sub-workflow node.
+    pub(crate) task_index: i32,
+    /// The node's stored input, as the client encoded it.
+    pub(crate) node_input: String,
+    /// The node's `args_from` as JSON text (member name to dependency
+    /// index); `None` when it has none.
+    pub(crate) args_from: Option<String>,
+    /// The name of the child workflow; `None` when the row stores none.
+    pub(crate) sub_workflow_name: Option<String>,
+    /// The definition key that resolves the child; `None` when the row
+    /// stores none (the load then fails the node).
+    pub(crate) sub_definition_key: Option<String>,
+    /// The params choice that the client set on the node.
+    pub(crate) sub_workflow_params: SubWorkflowParams,
+    /// The depth of the parent workflow.
+    pub(crate) parent_depth: i32,
+    /// The terminal dependencies of the node.
+    pub(crate) sources: Vec<ChildStartSource>,
 }
 
 /// The rows of one step call.
@@ -325,39 +388,160 @@ pub(crate) struct StepRows<D> {
     pub(crate) owed_child_starts: Vec<OwedChildStart>,
 }
 
-/// How a step run in a transaction ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TransactionStep<D> {
-    /// The step committed and owed no child start.
-    Committed(StepOutcome<D>),
-    /// The step owed child starts. `horsies_workflow_child_start` (#751) is
-    /// not in the baseline yet, so the transaction was rolled back and nothing
-    /// of the step committed. The caller runs the operation on the engine code
-    /// that starts the child in the step's own transaction.
-    RolledBackForChildStarts(Vec<OwedChildStart>),
+/// The child workflows that committed steps ended and whose parent nodes
+/// advance after the commit ([`advance_parents`]), each named once, in the
+/// order the rows named them. Empty when none is owed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OwedParentAdvances {
+    child_workflow_ids: Vec<Uuid>,
 }
 
-/// The values the engine code that starts child workflows reads: the
-/// registry with the child definitions, and the payload and retention
-/// policies of new task rows.
+impl OwedParentAdvances {
+    /// The advance that one `OUTCOME` row names.
+    pub(crate) fn of(advance: ParentAdvance) -> Self {
+        let mut owed = Self::default();
+        owed.add(advance);
+        owed
+    }
+
+    /// Adds the advance that an `OUTCOME` row names, unless it is named
+    /// already.
+    pub(crate) fn add(&mut self, advance: ParentAdvance) {
+        match advance {
+            ParentAdvance::NotOwed => {}
+            ParentAdvance::Owed { child_workflow_id } => {
+                if !self.child_workflow_ids.contains(&child_workflow_id) {
+                    self.child_workflow_ids.push(child_workflow_id);
+                }
+            }
+        }
+    }
+
+    /// Adds every advance of `other` that is not named already.
+    pub(crate) fn extend(&mut self, other: OwedParentAdvances) {
+        for child_workflow_id in other.child_workflow_ids {
+            self.add(ParentAdvance::Owed { child_workflow_id });
+        }
+    }
+
+    /// The owed advances, in order.
+    pub(crate) fn child_workflow_ids(&self) -> &[Uuid] {
+        &self.child_workflow_ids
+    }
+
+    /// Whether no advance is owed.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.child_workflow_ids.is_empty()
+    }
+}
+
+/// A step that committed in its transaction, with every child start that it
+/// owed (and that those owed in turn).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommittedStep<D> {
+    /// The disposition of the step's `OUTCOME` row.
+    pub(crate) disposition: D,
+    /// The detail of the step's `OUTCOME` row.
+    pub(crate) detail: Option<String>,
+    /// The advances that the step and its child starts owe after the commit.
+    pub(crate) parent_advances: OwedParentAdvances,
+}
+
+/// The values that the host build of an owed child start reads: the
+/// registry with the child definitions, and the retention policy that the
+/// typed facts of the child's task nodes take.
 #[derive(Clone, Copy)]
-pub(crate) struct EngineContext<'a> {
+pub(crate) struct ChildBuild<'a> {
     pub(crate) registry: &'a WorkflowSpecRegistry,
-    pub(crate) payload: &'a PayloadPolicy,
     pub(crate) retention: &'a RetentionConfig,
 }
 
-/// A parent advance of a chain failed; the chain goes on from
-/// `child_workflow_id`. The levels before it committed.
+/// A parent advance failed at the level of `failed_child_workflow_id`. The
+/// levels before it committed; that level wrote nothing, or its outcome is
+/// unknown. `owed_after` are the advances still owed after it.
 #[derive(Debug)]
 pub(crate) struct ParentAdvanceFailure {
-    pub(crate) child_workflow_id: Uuid,
+    pub(crate) failed_child_workflow_id: Uuid,
+    pub(crate) owed_after: OwedParentAdvances,
     pub(crate) error: WorkflowError,
 }
 
-/// The most parent advances one chain takes: a workflow tree has at most 33
-/// levels (depth 0 to 32), so a chain from the deepest child has 32.
-pub(crate) const MAX_PARENT_ADVANCES: usize = 33;
+impl ParentAdvanceFailure {
+    /// Every advance still owed, the failed level first: what a retry runs.
+    pub(crate) fn still_owed(&self) -> OwedParentAdvances {
+        let mut owed = OwedParentAdvances::of(ParentAdvance::Owed {
+            child_workflow_id: self.failed_child_workflow_id,
+        });
+        owed.extend(self.owed_after.clone());
+        owed
+    }
+}
+
+/// The most parent advance levels that one drive of [`advance_parents`]
+/// runs: the levels of a tree, depth 0 to [`MAX_SUBWORKFLOW_DEPTH`]. A drive
+/// that reaches the bound with an advance still owed fails closed
+/// ([`StepContractError::ParentChainTooLong`]) and leaves the rest to
+/// workflow recovery (case 1.6: a terminal child under a live parent node).
+pub(crate) const MAX_PARENT_ADVANCES: usize = MAX_SUBWORKFLOW_DEPTH as usize + 1;
+
+/// The parent advances of one drive of [`advance_parents`]: a stack whose
+/// next advance is the last element, and the count of levels run.
+#[derive(Debug)]
+struct ParentAdvanceDrive {
+    pending: Vec<Uuid>,
+    levels: usize,
+}
+
+impl ParentAdvanceDrive {
+    fn new(owed: &OwedParentAdvances) -> Self {
+        Self {
+            pending: owed.child_workflow_ids().iter().rev().copied().collect(),
+            levels: 0,
+        }
+    }
+
+    /// The next advance to run; `None` when none is owed. With
+    /// [`MAX_PARENT_ADVANCES`] levels run and one more owed:
+    /// [`StepContractError::ParentChainTooLong`] at that advance.
+    fn next(&mut self) -> Result<Option<Uuid>, ParentAdvanceFailure> {
+        let Some(child_workflow_id) = self.pending.pop() else {
+            return Ok(None);
+        };
+        match self.levels < MAX_PARENT_ADVANCES {
+            true => {
+                self.levels += 1;
+                Ok(Some(child_workflow_id))
+            }
+            false => Err(self.failure(
+                child_workflow_id,
+                StepContractError::ParentChainTooLong {
+                    bound: MAX_PARENT_ADVANCES,
+                }
+                .into(),
+            )),
+        }
+    }
+
+    /// Adds the advances that a level owes; they run before the rest.
+    fn push(&mut self, owed: &OwedParentAdvances) {
+        self.pending
+            .extend(owed.child_workflow_ids().iter().rev().copied());
+    }
+
+    /// The failure of the level at `failed_child_workflow_id`, with the
+    /// advances still owed after it.
+    fn failure(
+        &mut self,
+        failed_child_workflow_id: Uuid,
+        error: WorkflowError,
+    ) -> ParentAdvanceFailure {
+        ParentAdvanceFailure {
+            failed_child_workflow_id,
+            owed_after: owed_from_stack(std::mem::take(&mut self.pending)),
+            error,
+        }
+    }
+}
 
 /// What `horsies_workflow_pause` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,16 +617,19 @@ pub(crate) async fn cancel(
     Ok(cancel_outcome(rows)?)
 }
 
-/// Resumes a workflow tree in a transaction, as producer work
-/// ([`CheckoutClass::Batch`]). Errors as [`run_in_transaction`].
+/// Resumes a workflow tree in a transaction with its owed child starts, as
+/// producer work ([`CheckoutClass::Batch`]). Errors as
+/// [`run_in_transaction`].
 pub(crate) async fn resume(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-) -> Result<TransactionStep<ResumeDisposition>, WorkflowError> {
+    build: ChildBuild<'_>,
+) -> Result<CommittedStep<ResumeDisposition>, WorkflowError> {
     run_in_transaction(
         broker,
         CheckoutClass::Batch,
         &RESUME.bind().value(&workflow_id).finish(),
+        build,
     )
     .await
 }
@@ -487,19 +674,19 @@ pub(crate) async fn node_finish_alone(
     }
 }
 
-/// Phase 2 of a finished workflow task in a transaction (`BEGIN`, the step
-/// with the dependents read, `COMMIT`), on the worker reserve: the form for a
-/// node from which a sub-workflow node is reachable, and for a phase 2 whose
-/// phase-1 outcome is not at hand.
+/// Phase 2 of a finished workflow task in a transaction, on the worker
+/// reserve: `BEGIN`, the step with the dependents read, one
+/// `horsies_workflow_child_start` per owed child start, `COMMIT`. The form
+/// for a node from which a sub-workflow node is reachable, and for a phase 2
+/// whose phase-1 outcome is not at hand.
 ///
-/// Errors as [`node_finish_alone`]; a failed `BEGIN`, `COMMIT` or `ROLLBACK`
-/// is [`WorkflowError::Broker`] (a `COMMIT` with a lost reply is
-/// `OutcomeUnknown`).
+/// Errors as [`run_in_transaction`].
 pub(crate) async fn node_finish_in_transaction(
     broker: &PostgresBroker,
     task_id: Uuid,
     wake: bool,
-) -> Result<TransactionStep<NodeFinishDisposition>, WorkflowError> {
+    build: ChildBuild<'_>,
+) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
     let dependents_text = Dependents::Read.as_sql();
     run_in_transaction(
         broker,
@@ -510,130 +697,106 @@ pub(crate) async fn node_finish_in_transaction(
             .value(&wake)
             .value(&dependents_text)
             .finish(),
+        build,
     )
     .await
 }
 
-/// Advances the parent nodes above a child workflow that a committed step
-/// ended: `horsies_workflow_child_finish`, one transaction per level, while
-/// the `OUTCOME` row names the next ended child. Python:
-/// `_drive_parent_propagations` (`core/worker/finalize.py:2248-2290`).
+/// Phase-2 recovery of one record in a transaction, on the reserve
+/// ([`CheckoutClass::Reserved`], the reaper's class): `BEGIN`,
+/// `horsies_workflow_phase2_recover` (the body of the node finish with no
+/// wake and the dependents read), one `horsies_workflow_child_start` per
+/// owed child start, `COMMIT`. `attempt_bound` is the quarantine bound of a
+/// retaining record (3 to 1000; the function refuses others with 22023).
 ///
-/// A level that owes child starts is rolled back and runs on the engine code
-/// ([`legacy_child_finish`]), which advances that level and every level above
-/// it in one sqlx transaction; the chain ends there.
+/// Errors as [`run_in_transaction`].
+pub(crate) async fn phase2_recover(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    attempt_bound: i32,
+    build: ChildBuild<'_>,
+) -> Result<CommittedStep<NodeFinishDisposition>, WorkflowError> {
+    run_in_transaction(
+        broker,
+        CheckoutClass::Reserved,
+        &PHASE2_RECOVER
+            .bind()
+            .value(&task_id)
+            .value(&attempt_bound)
+            .finish(),
+        build,
+    )
+    .await
+}
+
+/// Advances the parent nodes above child workflows that committed steps
+/// ended: `horsies_workflow_child_finish`, one transaction per level (with
+/// the child starts that the level owes), while the levels name further
+/// ended children. Python: `_drive_parent_propagations`
+/// (`core/worker/finalize.py:2248-2290`).
 ///
-/// Errors: [`ParentAdvanceFailure`] names the child whose level failed; the
-/// levels before it committed, and that level wrote nothing or its outcome is
-/// unknown. A chain longer than [`MAX_PARENT_ADVANCES`] is
-/// [`StepContractError::ParentChainTooLong`].
+/// The owed advances run in order; the advances that a level owes run
+/// before the next advance of the list. At most [`MAX_PARENT_ADVANCES`]
+/// levels run ([`ParentAdvanceDrive`]).
+///
+/// Errors: [`ParentAdvanceFailure`] names the level that failed and the
+/// advances still owed after it; the levels before it committed. A drive
+/// that reaches the bound is [`StepContractError::ParentChainTooLong`] at
+/// the next level that did not run.
 pub(crate) async fn advance_parents(
     broker: &PostgresBroker,
     class: CheckoutClass,
-    first_child_workflow_id: Uuid,
-    engine: EngineContext<'_>,
+    owed: OwedParentAdvances,
+    build: ChildBuild<'_>,
 ) -> Result<(), ParentAdvanceFailure> {
-    let mut child_workflow_id = first_child_workflow_id;
-    for _level in 0..MAX_PARENT_ADVANCES {
-        let advanced = advance_parent(broker, class, child_workflow_id, engine)
-            .await
-            .map_err(|error| ParentAdvanceFailure {
-                child_workflow_id,
-                error,
-            })?;
-        match advanced {
-            ParentAdvance::NotOwed => return Ok(()),
-            ParentAdvance::Owed {
-                child_workflow_id: next,
-            } => child_workflow_id = next,
+    let mut drive = ParentAdvanceDrive::new(&owed);
+    while let Some(child_workflow_id) = drive.next()? {
+        match advance_parent(broker, class, child_workflow_id, build).await {
+            Ok(next) => drive.push(&next),
+            Err(error) => return Err(drive.failure(child_workflow_id, error)),
         }
     }
-    Err(ParentAdvanceFailure {
-        child_workflow_id,
-        error: StepContractError::ParentChainTooLong {
-            bound: MAX_PARENT_ADVANCES,
-        }
-        .into(),
-    })
+    Ok(())
 }
 
-/// One level of [`advance_parents`]. Returns the next level owed.
+/// The advances of a stack whose next element is the last, in run order.
+fn owed_from_stack(stack: Vec<Uuid>) -> OwedParentAdvances {
+    let mut owed = OwedParentAdvances::default();
+    for child_workflow_id in stack.into_iter().rev() {
+        owed.add(ParentAdvance::Owed { child_workflow_id });
+    }
+    owed
+}
+
+/// One level of [`advance_parents`]. Returns the advances that the level
+/// owes in turn.
 async fn advance_parent(
     broker: &PostgresBroker,
     class: CheckoutClass,
     child_workflow_id: Uuid,
-    engine: EngineContext<'_>,
-) -> Result<ParentAdvance, WorkflowError> {
-    let step = run_in_transaction::<ChildFinishDisposition>(
+    build: ChildBuild<'_>,
+) -> Result<OwedParentAdvances, WorkflowError> {
+    let committed = run_in_transaction::<ChildFinishDisposition>(
         broker,
         class,
         &CHILD_FINISH.bind().value(&child_workflow_id).finish(),
+        build,
     )
     .await?;
-    match step {
-        TransactionStep::Committed(outcome) => {
-            match outcome.disposition {
-                ChildFinishDisposition::Applied => {}
-                ChildFinishDisposition::AlreadyApplied
-                | ChildFinishDisposition::ChildAbsent
-                | ChildFinishDisposition::NotAChild
-                | ChildFinishDisposition::ChildNotTerminal
-                | ChildFinishDisposition::ParentAbsent => tracing::debug!(
-                    child_workflow_id = %child_workflow_id,
-                    disposition = ?outcome.disposition,
-                    detail = ?outcome.detail,
-                    "parent node not advanced; nothing written",
-                ),
-            }
-            Ok(outcome.parent_advance)
-        }
-        TransactionStep::RolledBackForChildStarts(owed) => {
-            tracing::info!(
-                child_workflow_id = %child_workflow_id,
-                owed_child_starts = owed.len(),
-                "parent advance owes child starts; the engine code advances the parent",
-            );
-            legacy_child_finish(broker.pool(), child_workflow_id, engine).await?;
-            Ok(ParentAdvance::NotOwed)
-        }
+    match committed.disposition {
+        ChildFinishDisposition::Applied => {}
+        ChildFinishDisposition::AlreadyApplied
+        | ChildFinishDisposition::ChildAbsent
+        | ChildFinishDisposition::NotAChild
+        | ChildFinishDisposition::ChildNotTerminal
+        | ChildFinishDisposition::ParentAbsent => tracing::debug!(
+            child_workflow_id = %child_workflow_id,
+            disposition = ?committed.disposition,
+            detail = ?committed.detail,
+            "parent node not advanced; nothing written",
+        ),
     }
-}
-
-/// The status and stored result of a child workflow, for
-/// [`legacy_child_finish`].
-const LEGACY_CHILD_STATE_SQL: &str = "SELECT status, result FROM horsies_workflows WHERE id = $1";
-
-/// Advances the parent node of a terminal child workflow on the engine code,
-/// in one sqlx transaction with every level above it
-/// (`engine::propagate_terminal_child_in_tx`). Used only for a level that owes
-/// child starts, until `horsies_workflow_child_start` (#751) is in the
-/// baseline. A child that is gone writes nothing.
-async fn legacy_child_finish(
-    pool: &PgPool,
-    child_workflow_id: Uuid,
-    engine: EngineContext<'_>,
-) -> Result<(), WorkflowError> {
-    let mut transaction = pool.begin().await?;
-    let child: Option<(String, Option<String>)> = sqlx::query_as(LEGACY_CHILD_STATE_SQL)
-        .bind(child_workflow_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
-    let Some((status, result)) = child else {
-        transaction.rollback().await?;
-        return Ok(());
-    };
-    propagate_terminal_child_in_tx(
-        &mut transaction,
-        child_workflow_id,
-        &status,
-        result.as_deref(),
-        engine.registry,
-        engine.payload,
-        engine.retention,
-    )
-    .await?;
-    transaction.commit().await?;
-    Ok(())
+    Ok(committed.parent_advances)
 }
 
 // ---------------------------------------------------------------------------
@@ -675,21 +838,25 @@ pub(crate) async fn checkout(
 }
 
 /// Runs one step statement in a transaction on the broker's main core pool:
-/// `BEGIN`, the step, then `COMMIT` when the step owes no child start, else
-/// `ROLLBACK` ([`TransactionStep::RolledBackForChildStarts`]). A row outside
-/// the contract rolls the transaction back. The write token of the broker
-/// handle is held until the transaction ends.
+/// `BEGIN`, the step, `horsies_workflow_child_start` for each child start
+/// that the step owes (and for each that those owe in turn), then `COMMIT`.
+/// The write token of the broker handle is held until the transaction ends.
 ///
-/// Errors: [`WorkflowError::Broker`] for a failed checkout, `BEGIN`, step,
-/// `COMMIT` or `ROLLBACK` (after a failed statement the connection is
-/// discarded and nothing commits; a `COMMIT` with a lost reply is
-/// `OutcomeUnknown`); [`WorkflowError::StepContract`] for a row outside the
-/// contract (nothing committed).
+/// Errors (nothing committed, except after a `COMMIT` with a lost reply):
+/// - [`WorkflowError::Broker`] for a failed checkout, `BEGIN`, step, child
+///   start, `COMMIT` or `ROLLBACK`. After a failed statement the connection
+///   is discarded; a `COMMIT` with a lost reply is `OutcomeUnknown`.
+/// - [`WorkflowError::StepContract`] for a row outside the contract of the
+///   step or of a child start; the transaction rolls back.
+/// - The refusal of the host build of a child (a value that does not
+///   encode, a stored input that the `args_from` merge refuses, a child spec
+///   that the tree arguments refuse); the transaction rolls back.
 pub(crate) async fn run_in_transaction<D: StepDisposition>(
     broker: &PostgresBroker,
     class: CheckoutClass,
     statement: &BoundStatement<'_>,
-) -> Result<TransactionStep<D>, WorkflowError> {
+    build: ChildBuild<'_>,
+) -> Result<CommittedStep<D>, WorkflowError> {
     let (open, _write) = broker.core_pools_for_write()?;
     let mut connection = checkout(open.main(), class, statement.statement()).await?;
     let mut transaction = connection
@@ -706,18 +873,32 @@ pub(crate) async fn run_in_transaction<D: StepDisposition>(
             return Err(contract.into());
         }
     };
-    match step.owed_child_starts.is_empty() {
-        true => {
-            transaction.commit().await.map_err(BrokerError::from)?;
-            Ok(TransactionStep::Committed(step.outcome))
+    let mut parent_advances = OwedParentAdvances::of(step.outcome.parent_advance);
+    let child_starts = run_child_starts(
+        &mut transaction,
+        broker.statement_log(),
+        step.owed_child_starts,
+        build,
+    )
+    .await;
+    match child_starts {
+        Ok(advances) => parent_advances.extend(advances),
+        // The transaction holds a failed statement: dropping it discards the
+        // connection, and nothing commits.
+        Err(ChildStartsFailure::Statement(failure)) => {
+            return Err(BrokerError::from(failure).into())
         }
-        false => {
+        Err(ChildStartsFailure::Refused(error)) => {
             roll_back(transaction).await?;
-            Ok(TransactionStep::RolledBackForChildStarts(
-                step.owed_child_starts,
-            ))
+            return Err(error);
         }
     }
+    transaction.commit().await.map_err(BrokerError::from)?;
+    Ok(CommittedStep {
+        disposition: step.outcome.disposition,
+        detail: step.outcome.detail,
+        parent_advances,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -762,23 +943,36 @@ pub(crate) fn cancel_outcome(rows: Vec<Row>) -> Result<CancelOutcome, StepContra
 
 /// Decodes the rows of a step function (`SETOF horsies_workflow_step_row`):
 /// exactly one `OUTCOME` row, any number of `CHILD_START` rows, and the
-/// `SOURCE` rows of the owed child starts (not read: the child start that
-/// reads them is #751). Row order does not matter. Pure.
+/// `SOURCE` rows of the owed child starts, each attached to the
+/// `CHILD_START` row of its node. Row order does not matter. Pure.
+///
+/// Errors: [`StepContractError`] for an unknown row kind, a count of
+/// `OUTCOME` rows other than one, a column that does not decode, a params
+/// choice other than `GIVEN` and `NOT_GIVEN`, and a `SOURCE` row whose node
+/// has no `CHILD_START` row.
 pub(crate) fn step_rows<D: StepDisposition>(
     rows: &[Row],
     statement: &TypedStatement,
 ) -> Result<StepRows<D>, StepContractError> {
     let mut outcomes: Vec<StepOutcome<D>> = Vec::with_capacity(1);
-    let mut owed_child_starts = Vec::new();
+    let mut owed_child_starts: Vec<OwedChildStart> = Vec::new();
+    let mut sources: Vec<(Uuid, i32, ChildStartSource)> = Vec::new();
     for row in rows {
         let row_kind: String = column(row, statement, "row_kind")?;
         match row_kind.as_str() {
             "OUTCOME" => outcomes.push(outcome_row(row, statement)?),
-            "CHILD_START" => owed_child_starts.push(OwedChildStart {
-                workflow_id: column(row, statement, "workflow_id")?,
-                task_index: column(row, statement, "task_index")?,
-            }),
-            "SOURCE" => {}
+            "CHILD_START" => owed_child_starts.push(child_start_row(row, statement)?),
+            "SOURCE" => sources.push((
+                column(row, statement, "workflow_id")?,
+                column(row, statement, "task_index")?,
+                ChildStartSource {
+                    task_index: column(row, statement, "source_task_index")?,
+                    status: column(row, statement, "source_status")?,
+                    task_name: column(row, statement, "source_task_name")?,
+                    definition_key: column(row, statement, "source_definition_key")?,
+                    result: column(row, statement, "source_result")?,
+                },
+            )),
             _ => {
                 return Err(StepContractError::UnknownRowKind {
                     function: statement.name(),
@@ -787,6 +981,7 @@ pub(crate) fn step_rows<D: StepDisposition>(
             }
         }
     }
+    attach_sources(&mut owed_child_starts, sources, statement)?;
     let count = outcomes.len();
     match (outcomes.pop(), count) {
         (Some(outcome), 1) => Ok(StepRows {
@@ -798,6 +993,63 @@ pub(crate) fn step_rows<D: StepDisposition>(
             count,
         }),
     }
+}
+
+/// Decodes one `CHILD_START` row, with no sources yet. Pure.
+fn child_start_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<OwedChildStart, StepContractError> {
+    let params_text: String = column(row, statement, "sub_workflow_params")?;
+    let Some(sub_workflow_params) = SubWorkflowParams::from_stored(&params_text) else {
+        return Err(RowDecodeError::Shape {
+            statement: statement.name(),
+            reason: format!(
+                "a CHILD_START row has sub_workflow_params {params_text:?}; \
+                 the contract is GIVEN or NOT_GIVEN"
+            ),
+        }
+        .into());
+    };
+    Ok(OwedChildStart {
+        workflow_id: column(row, statement, "workflow_id")?,
+        task_index: column(row, statement, "task_index")?,
+        node_input: column(row, statement, "node_input")?,
+        args_from: column(row, statement, "args_from")?,
+        sub_workflow_name: column(row, statement, "sub_workflow_name")?,
+        sub_definition_key: column(row, statement, "sub_definition_key")?,
+        sub_workflow_params,
+        parent_depth: column(row, statement, "parent_depth")?,
+        sources: Vec::new(),
+    })
+}
+
+/// Attaches each `SOURCE` row to the owed child start of its node
+/// (`workflow_id`, `task_index`). Pure.
+fn attach_sources(
+    owed_child_starts: &mut [OwedChildStart],
+    sources: Vec<(Uuid, i32, ChildStartSource)>,
+    statement: &TypedStatement,
+) -> Result<(), StepContractError> {
+    let positions: HashMap<(Uuid, i32), usize> = owed_child_starts
+        .iter()
+        .enumerate()
+        .map(|(position, owed)| ((owed.workflow_id, owed.task_index), position))
+        .collect();
+    for (workflow_id, task_index, source) in sources {
+        let Some(&position) = positions.get(&(workflow_id, task_index)) else {
+            return Err(RowDecodeError::Shape {
+                statement: statement.name(),
+                reason: format!(
+                    "a SOURCE row names node {task_index} of workflow {workflow_id}, \
+                     which has no CHILD_START row"
+                ),
+            }
+            .into());
+        };
+        owed_child_starts[position].sources.push(source);
+    }
+    Ok(())
 }
 
 /// Decodes one `OUTCOME` row. Pure.

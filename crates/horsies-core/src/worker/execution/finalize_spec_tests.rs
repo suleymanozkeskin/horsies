@@ -871,16 +871,14 @@ async fn phase_two(
         &PostgresBroker::from_pool(pool.clone()),
         &WorkflowSpecRegistry::new(),
         task_id,
-        true,
         queue,
         is_workflow_task,
         false,
         PhaseTwoForm::NotKnown,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
-    .map(|_parent_advance| ())
+    .map(|_parent_advances| ())
 }
 
 /// The status of the one node of `workflow_id`, and whether a phase-2

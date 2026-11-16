@@ -848,6 +848,7 @@ impl Worker {
         // The reaper's gate and pass run on the worker reserve, which the
         // runtime pool's users cannot exhaust.
         spawn_reaper(
+            Arc::clone(&self.broker),
             self.broker.reserve_pool().clone(),
             self.broker.reserve_maintenance_pool().clone(),
             Arc::clone(&self.workflow_registry),
@@ -2667,12 +2668,10 @@ mod tests {
 
         if let Some(work) = phase2_work {
             let registry = WorkflowSpecRegistry::new();
-            let policy = crate::core::config::payload::PayloadPolicy::default();
             run_phase2(
                 &broker,
                 &registry,
                 work,
-                &policy,
                 &crate::core::RetentionConfig::default(),
             )
             .await;
@@ -3054,7 +3053,6 @@ mod tests {
             &broker,
             &WorkflowSpecRegistry::new(),
             phase2_work,
-            &crate::core::config::payload::PayloadPolicy::default(),
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -3108,7 +3106,6 @@ mod tests {
             &broker,
             &WorkflowSpecRegistry::new(),
             phase2_work,
-            &crate::core::config::payload::PayloadPolicy::default(),
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -3164,12 +3161,10 @@ mod tests {
         assert_eq!(workflow_result, None);
 
         let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
         run_phase2(
             &broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -3220,12 +3215,10 @@ mod tests {
         );
 
         let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
         run_phase2(
             &failed_phase2_broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;

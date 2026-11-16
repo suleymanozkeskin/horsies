@@ -20,7 +20,6 @@ use super::support::*;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::terminalize;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
@@ -240,12 +239,10 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
         &broker,
         &WorkflowSpecRegistry::new(),
         Uuid::new_v4(),
-        true,
         QUEUE,
         false,
         false,
         PhaseTwoForm::NotKnown,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await;

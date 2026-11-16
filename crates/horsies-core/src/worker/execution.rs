@@ -48,8 +48,8 @@ use crate::workflow_engine::phase2_recovery::{
     send_phase2_wake, terminal_status_of_pending_kind, Phase2Wake,
 };
 use crate::workflow_engine::steps::{
-    advance_parents, node_finish_alone, node_finish_in_transaction, Dependents, EngineContext,
-    NodeFinishDisposition, ParentAdvance, ParentAdvanceFailure, StepOutcome, TransactionStep,
+    advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
+    NodeFinishDisposition, OwedParentAdvances,
 };
 
 use crate::worker::retry::{
@@ -1147,7 +1147,7 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
 /// error of the wake is a phase-2 error, never dropped, retryable when the
 /// database error is transient (`is_retryable_sqlx_error`, Python
 /// `_phase2_error`, `core/worker/finalize.py:1676-1697`). Returns the parent
-/// advance that the step owes after its commit.
+/// advances that the step owes after its commit.
 ///
 /// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
 /// when the failure may clear.
@@ -1156,33 +1156,21 @@ pub(crate) async fn finalize_workflow_phase(
     broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     task_id: Uuid,
-    is_success: bool,
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
     phase_two: PhaseTwoForm,
-    payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<ParentAdvance, FinalizeError> {
+) -> Result<OwedParentAdvances, FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
     match is_workflow_task {
         true => {
-            let engine = EngineContext {
+            let build = ChildBuild {
                 registry: workflow_registry,
-                payload: payload_policy,
                 retention,
             };
-            finish_workflow_node(
-                broker,
-                engine,
-                task_id,
-                is_success,
-                queue_name,
-                capacity_notified,
-                phase_two,
-            )
-            .await
+            finish_workflow_node(broker, build, task_id, capacity_notified, phase_two).await
         }
         false => {
             // Skipped when phase 1's statement already sent the wake in the
@@ -1199,7 +1187,7 @@ pub(crate) async fn finalize_workflow_phase(
                     message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
                     retryable: is_retryable_sqlx_error(&error),
                 })?;
-            Ok(ParentAdvance::NotOwed)
+            Ok(OwedParentAdvances::default())
         }
     }
 }
@@ -1218,84 +1206,79 @@ pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
 /// The node finish of a workflow task, in the form that the phase-1 node
 /// facts name (`PhaseTwoStep`):
 ///
-/// | Form | Statement |
+/// | Form | Statements |
 /// |---|---|
 /// | `NoDependents` | `horsies_workflow_node_finish(task, wake, 'NONE')`, one statement in autocommit |
 /// | `DependentsWithoutSubworkflow` | `horsies_workflow_node_finish(task, wake, 'READ')`, one statement in autocommit |
-/// | `SubworkflowReachable`, `NotKnown` | `BEGIN`; `horsies_workflow_node_finish(task, wake, 'READ')`; `COMMIT` |
+/// | `SubworkflowReachable`, `NotKnown` | `BEGIN`; `horsies_workflow_node_finish(task, wake, 'READ')`; `horsies_workflow_child_start` per owed child start; `COMMIT` |
 ///
 /// `wake` is true when phase 1 did not send the capacity wake; the statement
 /// sends it, delivered at its commit.
-///
-/// A transaction-form step that owes child starts is rolled back, and the
-/// phase 2 runs on the engine code (`finalize_phase2`, `horsies_phase2_consume`
-/// with the Rust progression), which starts the child in its own phase-2
-/// transaction: `horsies_workflow_child_start` (#751) is not in the baseline
-/// yet. The engine code sends the wake after its commit.
 ///
 /// A retaining disposition (the stored result did not pass its check) writes
 /// nothing and is a phase-2 error that is not retried; phase-2 recovery
 /// counts the record.
 async fn finish_workflow_node(
     broker: &PostgresBroker,
-    engine: EngineContext<'_>,
+    build: ChildBuild<'_>,
     task_id: Uuid,
-    is_success: bool,
-    queue_name: &str,
     capacity_notified: bool,
     phase_two: PhaseTwoForm,
-) -> Result<ParentAdvance, FinalizeError> {
+) -> Result<OwedParentAdvances, FinalizeError> {
     let wake = !capacity_notified;
     let finished = match phase_two {
         PhaseTwoForm::Step(PhaseTwoStep::NoDependents) => {
-            node_finish_alone(broker, task_id, wake, Dependents::NoneToRead).await
+            node_finish_alone(broker, task_id, wake, Dependents::NoneToRead)
+                .await
+                .map(|outcome| {
+                    (
+                        outcome.disposition,
+                        OwedParentAdvances::of(outcome.parent_advance),
+                    )
+                })
         }
         PhaseTwoForm::Step(PhaseTwoStep::DependentsWithoutSubworkflow) => {
-            node_finish_alone(broker, task_id, wake, Dependents::Read).await
+            node_finish_alone(broker, task_id, wake, Dependents::Read)
+                .await
+                .map(|outcome| {
+                    (
+                        outcome.disposition,
+                        OwedParentAdvances::of(outcome.parent_advance),
+                    )
+                })
         }
         PhaseTwoForm::Step(PhaseTwoStep::SubworkflowReachable) | PhaseTwoForm::NotKnown => {
-            match node_finish_in_transaction(broker, task_id, wake).await {
-                Ok(TransactionStep::Committed(outcome)) => Ok(outcome),
-                Ok(TransactionStep::RolledBackForChildStarts(owed)) => {
-                    tracing::info!(
-                        task_id = %task_id,
-                        owed_child_starts = owed.len(),
-                        "phase 2 owes child starts; the engine code runs it",
-                    );
-                    return finish_workflow_node_on_engine(
-                        broker, engine, task_id, is_success, queue_name, wake,
-                    )
-                    .await;
-                }
-                Err(error) => Err(error),
-            }
+            node_finish_in_transaction(broker, task_id, wake, build)
+                .await
+                .map(|committed| (committed.disposition, committed.parent_advances))
         }
     };
-    let outcome = finished.map_err(|error| FinalizeError {
+    let (disposition, parent_advances) = finished.map_err(|error| FinalizeError {
         stage: FinalizeStage::Phase2Workflow,
         task_id,
         message: format!("workflow node finish failed: {error}"),
         retryable: is_retryable_workflow_error(&error),
     })?;
-    node_finish_outcome(task_id, outcome)
+    node_finish_outcome(task_id, disposition, parent_advances)
 }
 
 /// What a committed node finish leaves owed. Pure, apart from the log.
 fn node_finish_outcome(
     task_id: Uuid,
-    outcome: StepOutcome<NodeFinishDisposition>,
-) -> Result<ParentAdvance, FinalizeError> {
-    match outcome.disposition {
+    disposition: NodeFinishDisposition,
+    parent_advances: OwedParentAdvances,
+) -> Result<OwedParentAdvances, FinalizeError> {
+    match disposition {
         NodeFinishDisposition::Applied | NodeFinishDisposition::AppliedWorkflowEnded => {
-            Ok(outcome.parent_advance)
+            Ok(parent_advances)
         }
         NodeFinishDisposition::AlreadyApplied | NodeFinishDisposition::PendingAbsent => {
             tracing::debug!(
                 task_id = %task_id,
-                disposition = ?outcome.disposition,
+                disposition = ?disposition,
                 "phase 2 found its record applied or absent; nothing written",
             );
-            Ok(outcome.parent_advance)
+            Ok(parent_advances)
         }
         NodeFinishDisposition::Retained(failure) => Err(FinalizeError {
             stage: FinalizeStage::Phase2Workflow,
@@ -1308,42 +1291,6 @@ fn node_finish_outcome(
             retryable: false,
         }),
     }
-}
-
-/// Phase 2 on the engine code, for a step that owes child starts: one sqlx
-/// transaction with the capacity wake when `wake` (delivered at its commit),
-/// the record consume and the Rust progression. The engine code advances
-/// ended child workflows inside its own transaction, so no parent advance is
-/// owed after it.
-async fn finish_workflow_node_on_engine(
-    broker: &PostgresBroker,
-    engine: EngineContext<'_>,
-    task_id: Uuid,
-    is_success: bool,
-    queue_name: &str,
-    wake: bool,
-) -> Result<ParentAdvance, FinalizeError> {
-    let phase2_wake = match wake {
-        true => capacity_wake(queue_name, task_id),
-        false => Phase2Wake::NoWake,
-    };
-    let _disposition = crate::workflow_engine::phase2_recovery::finalize_phase2(
-        broker.pool(),
-        task_id,
-        if is_success { "COMPLETED" } else { "FAILED" },
-        &phase2_wake,
-        engine.registry,
-        engine.payload,
-        engine.retention,
-    )
-    .await
-    .map_err(|error| FinalizeError {
-        stage: FinalizeStage::Phase2Workflow,
-        task_id,
-        message: format!("workflow callback failed: {error}"),
-        retryable: is_retryable_workflow_error(&error),
-    })?;
-    Ok(ParentAdvance::NotOwed)
 }
 
 /// The kind of a task's phase-2 record. The record has no status column: the
@@ -1660,22 +1607,20 @@ pub(crate) async fn run_phase2(
     broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     work: Phase2Work,
-    payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
 ) {
-    let finished = retry_phase2(broker, workflow_registry, &work, payload_policy, retention).await;
+    let finished = retry_phase2(broker, workflow_registry, &work, retention).await;
     match finished {
-        Ok(ParentAdvance::Owed { child_workflow_id }) => {
-            let engine = EngineContext {
+        Ok(owed) if !owed.is_empty() => {
+            let build = ChildBuild {
                 registry: workflow_registry,
-                payload: payload_policy,
                 retention,
             };
-            retry_parent_advances(broker, engine, work.task_id, child_workflow_id).await;
+            retry_parent_advances(broker, build, work.task_id, owed).await;
         }
         // Each failure was logged where it happened; workflow recovery
         // applies the durable phase-2 record.
-        Ok(ParentAdvance::NotOwed) | Err(_) => {}
+        Ok(_) | Err(_) => {}
     }
 }
 
@@ -1757,18 +1702,17 @@ async fn retry_phase1(
 ///
 /// Phase 1 already committed the durable phase-2 record, so every retry sends
 /// the same step. If an earlier try committed (its reply was lost), the step
-/// finds the record gone and reports `ALREADY_APPLIED`; the parent advance
-/// that try owed is then left to workflow recovery (case 1.6).
+/// finds the record gone and reports `ALREADY_APPLIED`; the parent advances
+/// that try owed are then left to workflow recovery (case 1.6).
 ///
-/// Returns the parent advance of the committed step, or the last error (already
-/// logged).
+/// Returns the parent advances of the committed step, or the last error
+/// (already logged).
 async fn retry_phase2(
     broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     work: &Phase2Work,
-    payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<ParentAdvance, FinalizeError> {
+) -> Result<OwedParentAdvances, FinalizeError> {
     let mut attempt: u32 = 0;
     loop {
         if attempt > 0 {
@@ -1786,17 +1730,15 @@ async fn retry_phase2(
             broker,
             workflow_registry,
             work.task_id,
-            work.is_success,
             &work.queue_name,
             work.is_workflow_task,
             work.capacity_notified,
             work.phase_two,
-            payload_policy,
             retention,
         )
         .await;
         match finished {
-            Ok(advance) => return Ok(advance),
+            Ok(owed) => return Ok(owed),
             Err(error) if !error.retryable => {
                 tracing::error!(
                     task_id = %work.task_id,
@@ -1828,58 +1770,53 @@ async fn retry_phase2(
     }
 }
 
-/// Advances the parents above a child workflow that phase 2 ended
+/// Advances the parents above the child workflows that phase 2 ended
 /// ([`advance_parents`], one transaction per level, on the worker reserve),
 /// with up to [`PHASE2_MAX_RETRIES`] retries that go on from the level that
 /// failed (Python's parent-propagation stage, `_retry_finalize_parent`,
 /// `core/worker/finalize.py:2248-2310`). A non-retryable failure, or spent
-/// retries, leave the level to workflow recovery (case 1.6: a terminal child
+/// retries, leave the rest to workflow recovery (case 1.6: a terminal child
 /// under a live parent node). Logs every failure.
 async fn retry_parent_advances(
     broker: &PostgresBroker,
-    engine: EngineContext<'_>,
+    build: ChildBuild<'_>,
     task_id: Uuid,
-    first_child_workflow_id: Uuid,
+    first_owed: OwedParentAdvances,
 ) {
-    let mut child_workflow_id = first_child_workflow_id;
+    let mut owed = first_owed;
     for attempt in 0..=PHASE2_MAX_RETRIES {
         if attempt > 0 {
             let delay = phase_retry_delay(attempt);
             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
-        let failure =
-            match advance_parents(broker, CheckoutClass::Reserved, child_workflow_id, engine).await
-            {
-                Ok(()) => return,
-                Err(failure) => failure,
-            };
-        let ParentAdvanceFailure {
-            child_workflow_id: failed_child,
-            error,
-        } = failure;
-        match is_retryable_workflow_error(&error) {
+        let failure = match advance_parents(broker, CheckoutClass::Reserved, owed, build).await {
+            Ok(()) => return,
+            Err(failure) => failure,
+        };
+        match is_retryable_workflow_error(&failure.error) {
             true => tracing::warn!(
                 task_id = %task_id,
-                child_workflow_id = %failed_child,
+                child_workflow_id = %failure.failed_child_workflow_id,
                 attempt,
-                error = %error,
+                error = %failure.error,
                 "parent advance failed (retryable)",
             ),
             false => {
                 tracing::error!(
                     task_id = %task_id,
-                    child_workflow_id = %failed_child,
-                    error = %error,
+                    child_workflow_id = %failure.failed_child_workflow_id,
+                    owed_after = failure.owed_after.child_workflow_ids().len(),
+                    error = %failure.error,
                     "parent advance failed (non-retryable) — workflow recovery will handle",
                 );
                 return;
             }
         }
-        child_workflow_id = failed_child;
+        owed = failure.still_owed();
     }
     tracing::error!(
         task_id = %task_id,
-        child_workflow_id = %child_workflow_id,
+        child_workflow_ids = ?owed.child_workflow_ids(),
         attempts = PHASE2_MAX_RETRIES,
         "parent advance retries exhausted — workflow recovery will handle",
     );
