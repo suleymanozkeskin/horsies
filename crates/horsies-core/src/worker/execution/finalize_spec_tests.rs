@@ -1051,3 +1051,73 @@ async fn a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried() {
         Ok(()) => panic!("phase 2 returned Ok for a refused wake"),
     }
 }
+
+/// The lock timeout of the phase-2 connection in
+/// `a_transient_error_at_the_consume_is_a_retryable_phase_two_error`: the
+/// bound of its wait for the workflow row that the test holds.
+const CONSUME_LOCK_TIMEOUT: &str = "100ms";
+
+/// Python `test_autocommit_outcomes.py::test_a_dead_connection_fails_phase_two_as_retryable`,
+/// at the consume statement: a transient database error after the wake (a
+/// lock timeout, SQLSTATE 55P03) is a retryable phase-2 error, the node and
+/// its phase-2 record stay, and the retry completes the node (#865; Python
+/// `core/worker/finalize.py:1645-1697`, `core/utils/db.py:232-247`).
+#[tokio::test]
+#[serial]
+async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let workflow_id = seeded.workflow_id.expect("a workflow task has a workflow");
+    let phase_one = finalize(&pool, seeded.task_id, ok_result("done")).await;
+    assert!(
+        matches!(phase_one, Ok(FinalizeOutcome::Terminal { .. })),
+        "{}",
+        describe(&phase_one)
+    );
+    let timeout_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            (*pool.connect_options())
+                .clone()
+                .options([("lock_timeout", CONSUME_LOCK_TIMEOUT)]),
+        )
+        .await
+        .expect("open a pool with a lock timeout");
+    let mut holder = pool.begin().await.expect("begin the lock holder");
+    sqlx::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
+        .bind(workflow_id)
+        .execute(holder.as_mut())
+        .await
+        .expect("lock the workflow row");
+
+    let result = phase_two(&timeout_pool, seeded.task_id, &queue, true).await;
+
+    holder.rollback().await.expect("release the workflow row");
+    timeout_pool.close().await;
+    match result {
+        Err(error) => {
+            assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
+            assert!(error.retryable, "{error}");
+        }
+        Ok(()) => panic!("phase 2 returned Ok while the workflow row was locked"),
+    }
+    assert_eq!(
+        node_and_phase_two_record(&pool, workflow_id, seeded.task_id).await,
+        ("RUNNING".to_owned(), true)
+    );
+    let retry = phase_two(&pool, seeded.task_id, &queue, true).await;
+    assert!(retry.is_ok(), "{retry:?}");
+    assert_eq!(
+        node_and_phase_two_record(&pool, workflow_id, seeded.task_id).await,
+        ("COMPLETED".to_owned(), false)
+    );
+    cleanup(&pool, &seeded).await;
+}

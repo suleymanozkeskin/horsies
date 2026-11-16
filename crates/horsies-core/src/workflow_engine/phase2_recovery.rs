@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::history::errors::HistoryError;
 use crate::core::history::phase2::consumption::{
     consume_phase2, Phase2Disposition, Phase2DispositionKind,
 };
@@ -102,6 +103,25 @@ async fn apply_progression(
     .await
 }
 
+/// A history error of the phase-2 consume or quarantine as a workflow error.
+///
+/// A database error keeps its cause, so `WorkflowError::Database` is
+/// classified by the SQLSTATE rule: a transient error (a lost connection, a
+/// lock timeout) is retried (Python `_finalize_workflow_phase` and
+/// `_phase2_error`, `core/worker/finalize.py:1645-1697`, with
+/// `is_retryable_connection_error`, `core/utils/db.py:232-247`). A contract
+/// or decode error is not transient and stays `WorkflowError::Validation`.
+fn workflow_error_of(error: HistoryError) -> WorkflowError {
+    match error {
+        HistoryError::Database(database_error) => WorkflowError::Database(database_error),
+        HistoryError::ArchiveDecode(_)
+        | HistoryError::Contract(_)
+        | HistoryError::LeafLockNotHeld
+        | HistoryError::LeafLockBusy { .. }
+        | HistoryError::HistoryParentAbsent(_) => WorkflowError::Validation(error.to_string()),
+    }
+}
+
 /// The statement of a phase-2 wake.
 const SEND_WAKE_SQL: &str = "SELECT pg_notify($1, $2)";
 
@@ -158,7 +178,7 @@ pub async fn finalize_phase2(
     send_phase2_wake(transaction.as_mut(), wake).await?;
     let disposition = consume_phase2(&mut transaction, task_id, node_status)
         .await
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+        .map_err(workflow_error_of)?;
     if disposition.disposition == Phase2DispositionKind::AppliedToNode {
         apply_progression(&mut transaction, &disposition, registry, payload, retention).await?;
     }
@@ -210,7 +230,7 @@ pub async fn drive_phase2_recovery(
         let row_result: Result<(Phase2Disposition, bool, Option<String>), WorkflowError> = async {
             let disposition = consume_phase2(&mut transaction, candidate.task_id, node_status)
                 .await
-                .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+                .map_err(workflow_error_of)?;
             if disposition.disposition == Phase2DispositionKind::AppliedToNode {
                 apply_progression(&mut transaction, &disposition, registry, payload, retention)
                     .await?;
@@ -230,7 +250,7 @@ pub async fn drive_phase2_recovery(
                     );
                     let outcome = quarantine_one(&mut transaction, candidate.task_id, &reason)
                         .await
-                        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+                        .map_err(workflow_error_of)?;
                     quarantined = outcome.verdict == QuarantineVerdict::Repointed
                         || outcome.verdict.is_drained();
                     if !quarantined {
