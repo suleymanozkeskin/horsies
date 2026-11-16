@@ -10,14 +10,20 @@ use std::future::Future;
 use std::sync::Arc;
 
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
-use horsies_core::{BrokerError, BrokerErrorCode, PostgresBroker, SchemaInitializationMode};
+use horsies_core::{
+    BrokerError, BrokerErrorCode, ClientFamily, PostgresBroker, SchemaInitializationMode,
+};
 use pyo3::prelude::*;
 use tokio::sync::OnceCell;
+use uuid::Uuid;
 
 use crate::bridge::blocking::call_blocking;
 use crate::bridge::completion_queue::call_async;
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
+use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
+use crate::operations::schema::{install_operation, schema_status_operation};
+use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, Outcome};
 
@@ -37,6 +43,11 @@ impl BrokerConnection {
             .await
             .map(Arc::clone)
     }
+
+    /// The schema mode of the handle's manifest.
+    pub fn schema_mode(&self) -> SchemaMode {
+        self.manifest.schema
+    }
 }
 
 async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, BrokerError> {
@@ -50,7 +61,7 @@ async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, Bro
     let window = manifest.send.idempotency_reservation_window.as_duration();
     PostgresBroker::connect_with_policies(&config, mode, window)
         .await
-        .map(Arc::new)
+        .map(|broker| Arc::new(broker.with_client_family(ClientFamily::Python)))
 }
 
 /// The core handle of one producer manifest.
@@ -112,6 +123,136 @@ impl CoreHandle {
             ping_database_operation(self.connection()),
         )
     }
+
+    /// Apply the embedded migrations and check the schema version, once per
+    /// handle: `SchemaInstalled`, `SchemaInstallNotRun` (an `OBSERVE_ONLY`
+    /// handle), or `BrokerFailure` with `SCHEMA_INIT_FAILED`. Writes.
+    fn install_schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.install_schema",
+            CallKind::Write,
+            install_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `install_schema`.
+    fn install_schema_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.install_schema_async",
+            CallKind::Write,
+            install_operation(self.connection()),
+        )
+    }
+
+    /// The schema state of the database: `SchemaStatusRecord`. Reads only.
+    fn schema_status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.schema_status",
+            CallKind::Read,
+            schema_status_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `schema_status`.
+    fn schema_status_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.schema_status_async",
+            CallKind::Read,
+            schema_status_operation(self.connection()),
+        )
+    }
+
+    /// Enqueue one task: `Enqueued` or one of the send failure classes.
+    /// Writes.
+    fn enqueue(&self, py: Python<'_>, request: &Bound<'_, EnqueueRequest>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.enqueue",
+            CallKind::Write,
+            enqueue_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// The awaitable form of `enqueue`.
+    fn enqueue_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, EnqueueRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.enqueue_async",
+            CallKind::Write,
+            enqueue_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
+    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED`. Reads only.
+    #[pyo3(signature = (task_id, *, include_result, include_failed_reason, include_attempts))]
+    fn task_info(
+        &self,
+        py: Python<'_>,
+        task_id: Uuid,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let parts = TaskInfoParts {
+            result: include_result,
+            failed_reason: include_failed_reason,
+            attempts: include_attempts,
+        };
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.task_info",
+            CallKind::Read,
+            task_info_operation(self.connection(), task_id, parts),
+        )
+    }
+
+    /// The awaitable form of `task_info`.
+    #[pyo3(signature = (task_id, *, include_result, include_failed_reason, include_attempts))]
+    fn task_info_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parts = TaskInfoParts {
+            result: include_result,
+            failed_reason: include_failed_reason,
+            attempts: include_attempts,
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.task_info_async",
+            CallKind::Read,
+            task_info_operation(self.connection(), task_id, parts),
+        )
+    }
 }
 
 /// The core of this process for one call, or the refusal as a Python error.
@@ -126,7 +267,7 @@ fn ping_database_operation(
         let broker = match connection.broker().await {
             Ok(broker) => broker,
             Err(error) => {
-                return Outcome::Failed(BrokerFailure::from_connect_error(
+                return Outcome::Failed(BrokerFailure::from_broker_error(
                     BrokerErrorCode::DbPingFailed,
                     &error,
                 ))
