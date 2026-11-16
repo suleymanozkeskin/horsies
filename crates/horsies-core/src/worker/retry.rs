@@ -25,6 +25,10 @@ use serde::Deserialize;
 pub const MIN_TASK_TIMEOUT_MS: u64 = 1_000;
 /// The largest stored `timeout_ms`, about 49.7 days (Python `MAX_TASK_TIMEOUT_MS`).
 pub const MAX_TASK_TIMEOUT_MS: u64 = 4_294_967_295;
+/// The smallest stored `cancel_grace_ms` (Python `MIN_CANCEL_GRACE_MS`).
+pub const MIN_CANCEL_GRACE_MS: u64 = 100;
+/// The largest stored `cancel_grace_ms` (Python `MAX_CANCEL_GRACE_MS`).
+pub const MAX_CANCEL_GRACE_MS: u64 = 10_000;
 /// The most retries one task can have (Python `MAX_RETRY_ATTEMPTS`).
 pub const MAX_RETRY_ATTEMPTS: u32 = 20;
 /// The largest retry interval in seconds (Python `RetryPolicy.intervals`).
@@ -44,6 +48,7 @@ pub enum StoredOptions {
     /// The row has no options, or the text is a JSON object.
     Readable {
         timeout: StoredTimeout,
+        cancel_grace: StoredCancelGrace,
         retry: StoredRetry,
     },
     /// The text does not parse, or is not a JSON object. The retry policy is
@@ -66,6 +71,31 @@ pub enum StoredTimeout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutRefusal {
     NotAnInteger,
+    BelowMinimum,
+    AboveMaximum,
+}
+
+/// The cancel grace a readable row stores. Only a `SHARED_ASYNC` row needs
+/// one; the dispatch route refuses such a row without a usable grace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredCancelGrace {
+    /// No `cancel_grace_ms` key, or `null`.
+    NotStored,
+    /// A `cancel_grace_ms` from [`MIN_CANCEL_GRACE_MS`] to
+    /// [`MAX_CANCEL_GRACE_MS`].
+    Grace(Duration),
+    /// A `cancel_grace_ms` that is not an int inside the bounds.
+    Invalid(GraceRefusal),
+}
+
+/// Why a stored `cancel_grace_ms` cannot be used (Python
+/// `shared_async_grace_error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraceRefusal {
+    /// The value is a JSON value of this Python type, not an int.
+    NotAnInteger {
+        found: &'static str,
+    },
     BelowMinimum,
     AboveMaximum,
 }
@@ -157,6 +187,7 @@ pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
         None | Some("") => {
             return StoredOptions::Readable {
                 timeout: StoredTimeout::NoTimeout,
+                cancel_grace: StoredCancelGrace::NotStored,
                 retry: StoredRetry::NoPolicy,
             }
         }
@@ -168,6 +199,7 @@ pub fn read_stored_options(task_options: Option<&str>) -> StoredOptions {
         },
         Ok(serde_json::Value::Object(options)) => StoredOptions::Readable {
             timeout: read_timeout(options.get("timeout_ms")),
+            cancel_grace: read_cancel_grace(options.get("cancel_grace_ms")),
             retry: read_retry_policy(options.get("retry_policy")),
         },
         Ok(other) => StoredOptions::Unreadable {
@@ -209,6 +241,65 @@ fn read_timeout(raw: Option<&serde_json::Value>) -> StoredTimeout {
         (Some(ms), _) => StoredTimeout::Limit(Duration::from_millis(ms)),
         (None, Some(_)) => StoredTimeout::Invalid(TimeoutRefusal::BelowMinimum),
         (None, None) => StoredTimeout::Invalid(TimeoutRefusal::NotAnInteger),
+    }
+}
+
+/// Check the stored `cancel_grace_ms` against the enqueue rule of a
+/// `SHARED_ASYNC` row (Python `shared_async_grace_error`). A bool, a float,
+/// a string, a list or an object is not an int.
+fn read_cancel_grace(raw: Option<&serde_json::Value>) -> StoredCancelGrace {
+    let number = match raw {
+        None | Some(serde_json::Value::Null) => return StoredCancelGrace::NotStored,
+        Some(serde_json::Value::Number(number)) => number,
+        Some(other) => {
+            return StoredCancelGrace::Invalid(GraceRefusal::NotAnInteger {
+                found: python_type_name(other),
+            })
+        }
+    };
+    match (number.as_u64(), number.as_i64()) {
+        (Some(ms), _) if ms < MIN_CANCEL_GRACE_MS => {
+            StoredCancelGrace::Invalid(GraceRefusal::BelowMinimum)
+        }
+        (Some(ms), _) if ms > MAX_CANCEL_GRACE_MS => {
+            StoredCancelGrace::Invalid(GraceRefusal::AboveMaximum)
+        }
+        (Some(ms), _) => StoredCancelGrace::Grace(Duration::from_millis(ms)),
+        (None, Some(_)) => StoredCancelGrace::Invalid(GraceRefusal::BelowMinimum),
+        (None, None) => StoredCancelGrace::Invalid(GraceRefusal::NotAnInteger { found: "float" }),
+    }
+}
+
+/// The Python type name of a parsed JSON value, for refusal texts.
+fn python_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "NoneType",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(number) => match number.is_f64() {
+            true => "float",
+            false => "int",
+        },
+        serde_json::Value::String(_) => "str",
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "dict",
+    }
+}
+
+/// The text of a cancel grace refusal, as Python words it.
+pub fn grace_refusal_message(refusal: GraceRefusal) -> String {
+    match refusal {
+        GraceRefusal::NotAnInteger { found: "bool" } => {
+            "stored cancel_grace_ms is a bool, not an int".to_owned()
+        }
+        GraceRefusal::NotAnInteger { found } => {
+            format!("stored cancel_grace_ms is a JSON {found}, not an int")
+        }
+        GraceRefusal::BelowMinimum => {
+            format!("stored cancel_grace_ms is below {MIN_CANCEL_GRACE_MS} ms")
+        }
+        GraceRefusal::AboveMaximum => {
+            format!("stored cancel_grace_ms is above {MAX_CANCEL_GRACE_MS} ms")
+        }
     }
 }
 
@@ -359,6 +450,15 @@ impl StoredOptions {
         }
     }
 
+    /// The cancel grace the options hold. Unreadable options hold none; the
+    /// route refuses them through [`Self::run_permit`] first.
+    pub fn cancel_grace(&self) -> StoredCancelGrace {
+        match self {
+            Self::Readable { cancel_grace, .. } => *cancel_grace,
+            Self::Unreadable { .. } => StoredCancelGrace::NotStored,
+        }
+    }
+
     /// The retry policy the options hold, when one fits its rule.
     pub fn retry(&self) -> &StoredRetry {
         match self {
@@ -368,7 +468,8 @@ impl StoredOptions {
     }
 }
 
-fn timeout_refusal_message(refusal: TimeoutRefusal) -> &'static str {
+/// The text of a timeout refusal, as Python words it.
+pub fn timeout_refusal_message(refusal: TimeoutRefusal) -> &'static str {
     match refusal {
         TimeoutRefusal::NotAnInteger => "stored timeout_ms is not an int",
         TimeoutRefusal::BelowMinimum => "stored timeout_ms is below 1000 ms",

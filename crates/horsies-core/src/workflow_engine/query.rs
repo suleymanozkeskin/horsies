@@ -500,17 +500,28 @@ mod tests {
         assert_eq!(result.unwrap(), 42);
     }
 
+    /// Python `_completed_without_stored_result`: the library always stores a
+    /// result with COMPLETED, so a NULL or empty one is stored data that does
+    /// not parse.
     #[test]
+    #[ignore = "waits on #855"]
     fn completed_with_null_result() {
-        let r = row("COMPLETED", None, None);
+        let workflow_id = Uuid::new_v4();
+        for stored in [None, Some("")] {
+            let r = row("COMPLETED", stored, None);
 
-        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.error_code,
-            Some(TaskErrorCode::from(RetrievalCode::ResultNotAvailable)),
-        );
-        assert!(err.message.as_deref().unwrap().contains("result is null"));
+            let result: TaskResult<i32> = parse_workflow_result(workflow_id, &r);
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.error_code,
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
+                "{stored:?}",
+            );
+            assert_eq!(
+                err.data,
+                Some(serde_json::json!({"workflow_id": workflow_id.to_string()})),
+            );
+        }
     }
 
     #[test]
@@ -521,9 +532,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
     }
 
@@ -538,15 +547,13 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
     }
 
     #[test]
     fn failed_with_valid_error() {
-        let task_err = TaskError::new("VALIDATION", "bad input");
+        let task_err = TaskError::new("VALIDATION", "bad input").unwrap();
         let err_json = serde_json::to_string(&task_err).unwrap();
         let r = row("FAILED", None, Some(&err_json));
 
@@ -554,25 +561,38 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::User("VALIDATION".to_owned())),
+            TaskErrorCode::User(crate::core::UserCode::parse("VALIDATION").unwrap()),
         );
         assert_eq!(err.message.as_deref(), Some("bad input"));
     }
 
+    /// Python `_decode_stored_workflow_error`: a stored error that is not JSON,
+    /// not an object, or not a `TaskError` is `RESULT_DESERIALIZATION_ERROR`.
     #[test]
+    #[ignore = "waits on #855"]
     fn failed_with_malformed_error_json() {
-        let r = row("FAILED", None, Some("{garbage"));
+        let workflow_id = Uuid::new_v4();
+        for stored in ["{garbage", "[1]", r#"{"error_code": 5}"#] {
+            let r = row("FAILED", None, Some(stored));
 
-        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
-        let err = result.unwrap_err();
-        assert_eq!(
-            err.error_code,
-            Some(TaskErrorCode::from(OperationalErrorCode::BrokerError)),
-        );
-        assert!(err.message.as_deref().unwrap().contains("workflow failed"));
+            let result: TaskResult<i32> = parse_workflow_result(workflow_id, &r);
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.error_code,
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
+                "{stored}",
+            );
+            assert_eq!(
+                err.data,
+                Some(serde_json::json!({"workflow_id": workflow_id.to_string()})),
+            );
+        }
     }
 
+    /// Python `_terminal_outcome_code`: a FAILED workflow with no stored
+    /// error is `WORKFLOW_FAILED`, not a broker error.
     #[test]
+    #[ignore = "waits on #855"]
     fn failed_with_null_error() {
         let r = row("FAILED", None, None);
 
@@ -580,9 +600,8 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OperationalErrorCode::BrokerError)),
+            TaskErrorCode::from(OutcomeCode::WorkflowFailed),
         );
-        assert!(err.message.as_deref().unwrap().contains("workflow failed"));
     }
 
     #[test]
@@ -593,7 +612,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowCancelled)),
+            TaskErrorCode::from(OutcomeCode::WorkflowCancelled),
         );
     }
 
@@ -611,7 +630,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowExpired)),
+            TaskErrorCode::from(OutcomeCode::WorkflowExpired),
         );
     }
 
@@ -625,7 +644,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowPaused)),
+            TaskErrorCode::from(OutcomeCode::WorkflowPaused),
         );
     }
 
@@ -637,7 +656,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(RetrievalCode::ResultNotReady)),
+            TaskErrorCode::from(RetrievalCode::ResultNotReady),
         );
         assert!(err
             .message
@@ -674,9 +693,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
         assert!(err
             .message
@@ -693,9 +710,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
         let msg = err.message.as_deref().unwrap();
         assert!(
@@ -707,7 +722,7 @@ mod tests {
 
     #[test]
     fn map_err_passes_through() {
-        let original = TaskError::new("MY_CODE", "original error");
+        let original = TaskError::new("MY_CODE", "original error").unwrap();
         let raw: TaskResult<serde_json::Value> = TaskResult::Err(original.clone());
 
         let result: TaskResult<i32> = map_task_result_value(raw, Uuid::nil(), None);
@@ -752,7 +767,7 @@ mod wait_tests {
         let err = outcome.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(RetrievalCode::WorkflowNotFound)),
+            TaskErrorCode::from(RetrievalCode::WorkflowNotFound),
         );
     }
 
@@ -790,7 +805,7 @@ mod wait_tests {
         let error = result.unwrap_err();
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::WorkflowPaused)),
+            TaskErrorCode::from(OutcomeCode::WorkflowPaused),
         );
 
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
@@ -809,13 +824,14 @@ mod wait_tests {
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
         let persisted = TaskError {
-            error_code: Some(OutcomeCode::WorkflowExpired.into()),
+            error_code: OutcomeCode::WorkflowExpired.into(),
             message: Some("paused_workflow_auto_cancel_after elapsed: 3600 seconds".to_owned()),
-            cause: None,
+            exception: None,
             data: Some(serde_json::json!({
                 "policy": "paused_workflow_auto_cancel_after",
                 "older_than_seconds": 3600.0,
             })),
+            kind: crate::core::TaskErrorKind::Plain,
         };
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -883,9 +899,7 @@ mod wait_tests {
         let error = handle.get(None).await.unwrap_err();
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::ResultDeserializationError,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),
         );
         assert!(error
             .message

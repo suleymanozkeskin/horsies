@@ -19,7 +19,7 @@ from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.fixtures.slots.handles import HANDLE_CLAIMED_AT, task_finished_handle
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 _TEST_APP: Horsies | None = None
 
@@ -58,29 +58,28 @@ TEST_WORKER_ID = 'w-two-phase-test'
 async def _insert_running_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='two_phase_finalize_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='two_phase_finalize_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'two_phase_finalize_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha, :claimed_by_worker_id, :claimed_at, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, is_workflow_task,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'two_phase_finalize_test', 'default', 100, '{}', 'RUNNING',
+                    :sent_at, NOW(), NOW(), 0, 3, NOW(), :claimed_by_worker_id,
+                    :claimed_at, TRUE, 'standard_30d', NULL, NULL, FALSE, 'ISOLATED',
+                    NOW(), 4242, 'host-1', 'child-1'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'claimed_by_worker_id': TEST_WORKER_ID,
             'claimed_at': HANDLE_CLAIMED_AT,
         },
@@ -96,7 +95,7 @@ async def _insert_running_task(session: AsyncSession) -> str:
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
             VALUES
-                (:wf_id, 'two_phase_finalize_wf', 'RUNNING', 'FAIL', 0,
+                (:wf_id, 'two_phase_finalize_wf', 'RUNNING', 'fail', 0,
                  :wf_id, NOW(), NOW(), NOW(), NOW())
         """),
         {'wf_id': workflow_id},
@@ -105,14 +104,16 @@ async def _insert_running_task(session: AsyncSession) -> str:
         text("""
             INSERT INTO horsies_workflow_tasks
                 (id, workflow_id, task_index, node_id, task_name,
-                 task_args, task_kwargs, queue_name, priority,
+                 input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
-                 is_subworkflow, status, task_id, created_at)
+                 is_subworkflow, status, task_id, created_at,
+                 max_retries, execution, retention_class_key)
             VALUES
                 (:id, :wf_id, 0, 'node-0', 'two_phase_finalize_test',
-                 '[]', '{}', 'default', 100,
+                 '{}', 'default', 100,
                  '{}', FALSE, 'all',
-                 FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW())
+                 FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """),
         {
             'id': str(uuid.uuid4()),
