@@ -71,7 +71,7 @@ pytestmark = [
 ]
 
 UTC = timezone.utc
-CLASS_KEY = 'it_prune'
+CLASS_KEY = 'standard_30d'
 HORIZON = heartbeat_horizon(
     stale_after=timedelta(minutes=10),
     finalizing_stale_after=timedelta(minutes=30),
@@ -243,18 +243,18 @@ class TestDeclaredDurationGovernsTheDrop:
         schema = terminalization_schema
         async with schema.engine.begin() as connection:
             short_parent = await register_class(
-                connection, 'it_short_7d', duration_days=7
+                connection, 'standard_7d', duration_days=7
             )
             long_parent = await register_class(
-                connection, 'it_long_30d', duration_days=30
+                connection, 'standard_30d', duration_days=30
             )
 
         # SAME age, ten days: past the 7-day horizon, inside the 30-day one.
         short_leaf = await _make_history_leaf(
-            schema, short_parent, days_ago=10, class_key='it_short_7d'
+            schema, short_parent, days_ago=10, class_key='standard_7d'
         )
         long_leaf = await _make_history_leaf(
-            schema, long_parent, days_ago=10, class_key='it_long_30d'
+            schema, long_parent, days_ago=10, class_key='standard_30d'
         )
 
         pruned = await prune_expired_partitions(
@@ -279,37 +279,28 @@ class TestDeclaredDurationGovernsTheDrop:
             short_leaf.leaf_name
         ]
 
-    async def test_a_sub_day_duration_still_retains_its_whole_leaf(
+    async def test_a_one_day_period_still_retains_its_whole_leaf(
         self, terminalization_schema: HistorySchema
     ) -> None:
         """Retention is a MINIMUM: granularity cannot under-retain.
 
         A leaf spans one day and drops only once its whole day is past
-        the duration, so a 1-hour class keeps yesterday's leaf until an
-        hour after that day ends — never less than the declared hour.
+        the period, so a 1-day class keeps today's leaf. The shortest
+        period is one day (retention_days 1..1825 on the baseline).
 
-        The dropped leaf is two days old, not one: yesterday's leaf drops
-        at 01:00 UTC today, so between 00:00 and 01:00 UTC it is still
-        kept. A two-day-old leaf is past its drop point at any time of day.
+        The dropped leaf is two days old: its day ended yesterday, and a
+        day later it is past its drop point at any time of day.
         """
         schema = terminalization_schema
         async with schema.engine.begin() as connection:
             parent = await register_class(
-                connection, 'it_subday', duration_days=1
-            )
-            await connection.execute(
-                text(
-                    'UPDATE horsies_retention_classes '
-                    "SET duration = interval '1 hour' "
-                    'WHERE class_key = :key'
-                ),
-                {'key': 'it_subday'},
+                connection, 'standard_1d', duration_days=1
             )
         today = await _make_history_leaf(
-            schema, parent, days_ago=0, class_key='it_subday'
+            schema, parent, days_ago=0, class_key='standard_1d'
         )
         two_days_ago = await _make_history_leaf(
-            schema, parent, days_ago=2, class_key='it_subday'
+            schema, parent, days_ago=2, class_key='standard_1d'
         )
 
         pruned = await prune_expired_partitions(
