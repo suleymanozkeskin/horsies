@@ -50,10 +50,8 @@ from horsies.core.history.rerun.operations import (
 from horsies.core.types.status import TaskStatus
 
 from tests.broker_resources_support import current_resources
-from tests.integration.history_seeding import (
-    route_rows,
-    stored_history_status,
-)
+from tests.integration.history_seeding import stored_history_status
+from tests.integration.monitoring_seeding import insert_rows
 from tests.integration.task_history_harness import (
     HistorySchema,
     create_workflow,
@@ -672,7 +670,7 @@ class TestStoredSourceDoesNotDecode:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         source = make_task(status=TaskStatus.FAILED)
-        await route_rows(session, (source,))
+        await insert_rows(session, source)
         count_tasks = text('SELECT count(*) FROM horsies_tasks')
 
         # The status column holds 9 characters; the value is not a member.
