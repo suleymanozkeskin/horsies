@@ -72,9 +72,11 @@ UPDATE horsies_workflow_tasks
 SET task_id = $1::uuid, status = 'ENQUEUED'
 WHERE workflow_id = $2::uuid AND task_index = $3";
 
+/// A linked parent node is RUNNING while its child runs, on every path (Python `LINK_SUB_WORKFLOW_SQL`,
+/// `core/workflows/sql.py:271-275`).
 const LINK_ROOT_SUBWORKFLOW_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
+SET sub_workflow_id = $1::uuid, status = 'RUNNING', started_at = NOW()
 WHERE workflow_id = $2::uuid AND task_index = $3
   AND status = 'READY'";
 

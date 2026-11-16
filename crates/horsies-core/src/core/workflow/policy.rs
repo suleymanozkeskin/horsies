@@ -7,14 +7,6 @@ use crate::core::workflow::status::WorkflowTaskStatus;
 pub struct SuccessCase {
     /// Task indices (into `WorkflowSpec.tasks`) that must be `COMPLETED`.
     pub required_indices: Vec<usize>,
-
-    /// Optional human-readable name for this success case.
-    ///
-    /// When set, this name is preserved in `SubWorkflowSummary.success_case`
-    /// to indicate which case was satisfied. Useful for debugging and
-    /// conditional logic in parent workflows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
 }
 
 /// Custom success criteria for a workflow.
@@ -59,29 +51,6 @@ impl SuccessPolicy {
             })
         })
     }
-
-    /// Evaluate success and return the name of the first satisfied case.
-    ///
-    /// Returns `Some(name)` for the first case that is fully satisfied
-    /// (all required indices COMPLETED). The name comes from `SuccessCase.name`;
-    /// if the satisfied case has no name, returns `None` even though the
-    /// workflow is considered successful.
-    ///
-    /// Use `evaluate()` to get a simple bool, or this method when you need
-    /// to preserve which case was satisfied (e.g., for `SubWorkflowSummary.success_case`).
-    pub fn evaluate_with_case_name(&self, task_statuses: &[WorkflowTaskStatus]) -> Option<String> {
-        for case in &self.cases {
-            let satisfied = case.required_indices.iter().all(|&idx| {
-                task_statuses
-                    .get(idx)
-                    .is_some_and(|s| *s == WorkflowTaskStatus::Completed)
-            });
-            if satisfied {
-                return case.name.clone();
-            }
-        }
-        None
-    }
 }
 
 #[cfg(test)]
@@ -92,7 +61,6 @@ mod tests {
     fn success_case_serde_round_trip() {
         let case = SuccessCase {
             required_indices: vec![0, 2, 4],
-            name: None,
         };
         let json = serde_json::to_string(&case).unwrap();
         let back: SuccessCase = serde_json::from_str(&json).unwrap();
@@ -105,11 +73,9 @@ mod tests {
             cases: vec![
                 SuccessCase {
                     required_indices: vec![0, 1],
-                    name: None,
                 },
                 SuccessCase {
                     required_indices: vec![0, 2],
-                    name: None,
                 },
             ],
             optional_indices: Some(vec![3]),
@@ -124,7 +90,6 @@ mod tests {
         let policy = SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0],
-                name: None,
             }],
             optional_indices: None,
         };
@@ -139,11 +104,9 @@ mod tests {
             cases: vec![
                 SuccessCase {
                     required_indices: vec![0, 1],
-                    name: None,
                 },
                 SuccessCase {
                     required_indices: vec![0, 2],
-                    name: None,
                 },
             ],
             optional_indices: None,
@@ -162,11 +125,9 @@ mod tests {
             cases: vec![
                 SuccessCase {
                     required_indices: vec![0, 1],
-                    name: None,
                 },
                 SuccessCase {
                     required_indices: vec![0, 2],
-                    name: None,
                 },
             ],
             optional_indices: None,
@@ -185,11 +146,9 @@ mod tests {
             cases: vec![
                 SuccessCase {
                     required_indices: vec![0, 1],
-                    name: None,
                 },
                 SuccessCase {
                     required_indices: vec![0, 2],
-                    name: None,
                 },
             ],
             optional_indices: None,
@@ -217,7 +176,6 @@ mod tests {
         let policy = SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0, 99],
-                name: None,
             }],
             optional_indices: None,
         };
@@ -230,7 +188,6 @@ mod tests {
         let policy = SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0],
-                name: None,
             }],
             optional_indices: None,
         };
@@ -243,121 +200,10 @@ mod tests {
         let policy = SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0],
-                name: None,
             }],
             optional_indices: None,
         };
         let statuses = vec![WorkflowTaskStatus::Skipped];
         assert!(!policy.evaluate(&statuses));
-    }
-
-    // -----------------------------------------------------------------------
-    // evaluate_with_case_name tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn case_name_first_satisfied() {
-        let policy = SuccessPolicy {
-            cases: vec![
-                SuccessCase {
-                    required_indices: vec![0, 1],
-                    name: Some("primary".to_owned()),
-                },
-                SuccessCase {
-                    required_indices: vec![0, 2],
-                    name: Some("fallback".to_owned()),
-                },
-            ],
-            optional_indices: None,
-        };
-        let statuses = vec![
-            WorkflowTaskStatus::Completed, // 0
-            WorkflowTaskStatus::Completed, // 1
-            WorkflowTaskStatus::Failed,    // 2
-        ];
-        assert_eq!(
-            policy.evaluate_with_case_name(&statuses),
-            Some("primary".to_owned()),
-        );
-    }
-
-    #[test]
-    fn case_name_second_satisfied() {
-        let policy = SuccessPolicy {
-            cases: vec![
-                SuccessCase {
-                    required_indices: vec![0, 1],
-                    name: Some("primary".to_owned()),
-                },
-                SuccessCase {
-                    required_indices: vec![0, 2],
-                    name: Some("fallback".to_owned()),
-                },
-            ],
-            optional_indices: None,
-        };
-        let statuses = vec![
-            WorkflowTaskStatus::Completed, // 0
-            WorkflowTaskStatus::Failed,    // 1
-            WorkflowTaskStatus::Completed, // 2
-        ];
-        assert_eq!(
-            policy.evaluate_with_case_name(&statuses),
-            Some("fallback".to_owned()),
-        );
-    }
-
-    #[test]
-    fn case_name_none_when_no_case_satisfied() {
-        let policy = SuccessPolicy {
-            cases: vec![SuccessCase {
-                required_indices: vec![0, 1],
-                name: Some("primary".to_owned()),
-            }],
-            optional_indices: None,
-        };
-        let statuses = vec![
-            WorkflowTaskStatus::Failed,    // 0
-            WorkflowTaskStatus::Completed, // 1
-        ];
-        assert!(policy.evaluate_with_case_name(&statuses).is_none());
-    }
-
-    #[test]
-    fn case_name_none_when_unnamed_case_satisfied() {
-        let policy = SuccessPolicy {
-            cases: vec![SuccessCase {
-                required_indices: vec![0],
-                name: None,
-            }],
-            optional_indices: None,
-        };
-        let statuses = vec![WorkflowTaskStatus::Completed];
-        // Satisfied but unnamed -> None
-        assert!(policy.evaluate_with_case_name(&statuses).is_none());
-        // evaluate() should still be true though
-        assert!(policy.evaluate(&statuses));
-    }
-
-    #[test]
-    fn success_case_name_serde_round_trip() {
-        let case = SuccessCase {
-            required_indices: vec![0, 1],
-            name: Some("critical_path".to_owned()),
-        };
-        let json = serde_json::to_string(&case).unwrap();
-        assert!(json.contains("critical_path"));
-        let back: SuccessCase = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, case);
-    }
-
-    #[test]
-    fn success_case_name_none_absent_in_json() {
-        let case = SuccessCase {
-            required_indices: vec![0],
-            name: None,
-        };
-        let json = serde_json::to_string(&case).unwrap();
-        assert!(!json.contains("name"));
     }
 }

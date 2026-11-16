@@ -1082,7 +1082,6 @@ mod tests {
         b.success_policy(SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0, 99],
-                name: None,
             }],
             optional_indices: None,
         });
@@ -1097,7 +1096,6 @@ mod tests {
         b.success_policy(SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0],
-                name: None,
             }],
             optional_indices: Some(vec![50]),
         });
@@ -1268,7 +1266,6 @@ mod tests {
         b.success_policy(SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![2],
-                name: None,
             }],
             optional_indices: Some(vec![0]),
         });
