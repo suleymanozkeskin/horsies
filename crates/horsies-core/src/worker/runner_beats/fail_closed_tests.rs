@@ -759,7 +759,7 @@ fn answer_after_a_second(claimed: &ClaimedTask) -> String {
     let result = encode_child_frame(&ChildFrame::Result(ResultFrame {
         task_id: claimed.task_id,
         end: RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__type":"ok","value":3}"#.to_owned(),
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
