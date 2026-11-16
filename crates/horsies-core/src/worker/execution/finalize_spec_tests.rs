@@ -257,8 +257,10 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
         Ok(FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
+             phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),

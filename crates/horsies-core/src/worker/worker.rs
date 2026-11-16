@@ -1095,7 +1095,7 @@ impl Worker {
                     .await
                     {
                         execution::run_phase2(
-                            broker.pool(),
+                            &broker,
                             &workflow_registry,
                             work,
                             &phase2_policy,
@@ -1158,7 +1158,7 @@ impl Worker {
 
             if let Some(work) = phase2_work {
                 execution::run_phase2(
-                    broker.pool(),
+                    &broker,
                     &workflow_registry,
                     work,
                     &phase2_policy,
@@ -1952,7 +1952,7 @@ mod tests {
             let registry = WorkflowSpecRegistry::new();
             let policy = crate::core::config::payload::PayloadPolicy::default();
             run_phase2(
-                broker.pool(),
+                &broker,
                 &registry,
                 work,
                 &policy,
@@ -2232,6 +2232,184 @@ mod tests {
         );
     }
 
+    /// A node at index 1 of `workflow_id` that depends on node 0.
+    async fn add_dependent_node(pool: &PgPool, workflow_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                'NONE', $1, $2, 1, 'node_1', 'finalize_dependent', '{}', 'default', 100, '{0}',
+                FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Makes `child_id` the child of a new RUNNING parent workflow, linked
+    /// from the parent's sub-workflow node at index 0. Returns the parent id.
+    async fn adopt_as_child_workflow(pool: &PgPool, child_id: Uuid) -> Uuid {
+        let parent_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'finalize_parent', 'RUNNING', 'fail', NULL,
+                'test.finalize.parent.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(parent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE horsies_workflows
+             SET parent_workflow_id = $1, parent_task_index = 0, depth = 1, root_workflow_id = $1
+             WHERE id = $2",
+        )
+        .bind(parent_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
+                sub_workflow_params, created_at, started_at
+            ) VALUES (
+                'NONE', $1, $2, 0, 'child_node', '__sub_workflow:finalize_wf', '{}', 'default',
+                100, '{}', FALSE, 'all', 'RUNNING', TRUE, $3, 'finalize_wf',
+                'test.finalize.v1', 'NOT_GIVEN', NOW(), NOW()
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(parent_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        parent_id
+    }
+
+    /// Phase 1 of a node with a dependent and no sub-workflow node below it
+    /// names the one-statement form, and phase 2 promotes the dependent: the
+    /// dependent node is ENQUEUED with a minted PENDING task row.
+    #[tokio::test]
+    #[serial]
+    async fn phase_two_of_a_node_with_dependents_promotes_them_in_one_statement() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let workflow_id = link_task_to_workflow(&pool, &task_id, None).await;
+        add_dependent_node(&pool, workflow_id).await;
+
+        let phase2_work = execute_and_finalize(
+            Arc::clone(&broker),
+            async_task_fn!(callback_success_task, ()),
+            claimed_workflow_task_row(&task_id, "default", None),
+            "worker-1".to_owned(),
+            "localhost".to_owned(),
+            RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .expect("terminal success should produce phase 2 work");
+        assert_eq!(
+            phase2_work.phase_two,
+            crate::worker::execution::PhaseTwoForm::Step(
+                crate::core::lifecycle::PhaseTwoStep::DependentsWithoutSubworkflow
+            )
+        );
+
+        run_phase2(
+            &broker,
+            &WorkflowSpecRegistry::new(),
+            phase2_work,
+            &crate::core::config::payload::PayloadPolicy::default(),
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
+
+        let (dependent_status, dependent_task): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, task_id FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dependent_status, "ENQUEUED");
+        let minted_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(dependent_task.expect("the promoted node links its task row"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(minted_status, "PENDING");
+        let (workflow_status, _) = fetch_workflow_state(&pool, &workflow_id).await;
+        assert_eq!(workflow_status, "RUNNING");
+    }
+
+    /// The phase 2 that ends a child workflow advances the parent node after
+    /// its commit (`horsies_workflow_child_finish`): the sub-workflow node is
+    /// COMPLETED and the parent workflow completes.
+    #[tokio::test]
+    #[serial]
+    async fn phase_two_that_ends_a_child_workflow_advances_the_parent_node() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let child_id = link_task_to_workflow(&pool, &task_id, None).await;
+        let parent_id = adopt_as_child_workflow(&pool, child_id).await;
+
+        let phase2_work = execute_and_finalize(
+            Arc::clone(&broker),
+            async_task_fn!(callback_success_task, ()),
+            claimed_workflow_task_row(&task_id, "default", None),
+            "worker-1".to_owned(),
+            "localhost".to_owned(),
+            RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .expect("terminal success should produce phase 2 work");
+        run_phase2(
+            &broker,
+            &WorkflowSpecRegistry::new(),
+            phase2_work,
+            &crate::core::config::payload::PayloadPolicy::default(),
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
+
+        let (child_status, _) = fetch_workflow_state(&pool, &child_id).await;
+        assert_eq!(child_status, "COMPLETED");
+        let parent_node_status: String = sqlx::query_scalar(
+            "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+        )
+        .bind(parent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent_node_status, "COMPLETED");
+        let (parent_status, _) = fetch_workflow_state(&pool, &parent_id).await;
+        assert_eq!(parent_status, "COMPLETED");
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_phase1_commit_is_durable_before_phase2_runs() {
@@ -2271,7 +2449,7 @@ mod tests {
         let registry = WorkflowSpecRegistry::new();
         let policy = crate::core::config::payload::PayloadPolicy::default();
         run_phase2(
-            broker.pool(),
+            &broker,
             &registry,
             phase2_work,
             &policy,
@@ -2315,13 +2493,19 @@ mod tests {
         .await
         .expect("terminal success should produce phase 2 work");
 
-        let failed_phase2_pool = test_pool().await;
-        failed_phase2_pool.close().await;
+        // A broker on a database that does not exist: every checkout fails
+        // with a server refusal (3D000), which is not retryable.
+        let missing_database = (*pool.connect_options())
+            .clone()
+            .database(&format!("horsies_missing_{}", Uuid::new_v4().simple()));
+        let failed_phase2_broker = PostgresBroker::from_pool(
+            sqlx::postgres::PgPoolOptions::new().connect_lazy_with(missing_database),
+        );
 
         let registry = WorkflowSpecRegistry::new();
         let policy = crate::core::config::payload::PayloadPolicy::default();
         run_phase2(
-            &failed_phase2_pool,
+            &failed_phase2_broker,
             &registry,
             phase2_work,
             &policy,

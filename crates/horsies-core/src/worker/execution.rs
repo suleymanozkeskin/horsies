@@ -30,14 +30,19 @@ use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadP
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
-    AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand,
-    TerminalizationOutcome, WorkflowSuccessOutcome,
+    AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoStep,
+    TerminalizationCommand, TerminalizationOutcome, WorkflowSuccessOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::db::CheckoutClass;
+use crate::workflow_engine::steps::{
+    advance_parents, node_finish_alone, node_finish_in_transaction, Dependents, EngineContext,
+    NodeFinishDisposition, ParentAdvance, ParentAdvanceFailure, StepOutcome, TransactionStep,
+};
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -66,6 +71,19 @@ pub(crate) enum OwnershipOutcome {
     Aborted,
 }
 
+/// The form of a workflow task's phase-2 statement
+/// (`horsies_workflow_node_finish`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhaseTwoForm {
+    /// The phase-1 outcome named the step from the node facts.
+    Step(PhaseTwoStep),
+    /// The phase-1 outcome is not at hand (a replay of a committed phase-1
+    /// write, a pre-start expiry): the step reads the dependents and runs in
+    /// a transaction. A plain task has no phase-2 statement and carries this
+    /// form too.
+    NotKnown,
+}
+
 /// Outcome of Phase 1 finalize: persisting the terminal task state.
 pub(crate) enum FinalizeOutcome {
     /// Task completed or failed terminally. Needs Phase 2 (workflow callback).
@@ -74,6 +92,8 @@ pub(crate) enum FinalizeOutcome {
         /// Phase 1 already fired the capacity wake (the fused success path
         /// notifies in-statement); Phase 2 must not wake capacity twice.
         capacity_notified: bool,
+        /// The form of the phase-2 statement.
+        phase_two: PhaseTwoForm,
     },
     /// Task was requeued for retry. No workflow callback needed.
     Retried,
@@ -99,6 +119,8 @@ pub(crate) struct Phase2Work {
     pub is_workflow_task: bool,
     /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
     pub capacity_notified: bool,
+    /// The form of the phase-2 statement of a workflow task.
+    pub phase_two: PhaseTwoForm,
 }
 
 /// Which finalize phase failed.
@@ -786,9 +808,10 @@ async fn persist_workflow_success(
         .await
         .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
-        WorkflowSuccessOutcome::SuccessApplied { .. } => Ok(FinalizeOutcome::Terminal {
+        WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
             is_success: true,
             capacity_notified: false,
+            phase_two: PhaseTwoForm::Step(phase_two.step),
         }),
         WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. }) => {
             replay_of_committed_write(broker.pool(), task_id, true).await
@@ -853,11 +876,12 @@ async fn persist_failed_attempt(
             ..
         } => Ok(FinalizeOutcome::Finalized),
         FailedAttemptOutcome::FailureApplied {
-            after: AfterFailure::PhaseTwoOwed(_),
+            after: AfterFailure::PhaseTwoOwed(owed),
             ..
         } => Ok(FinalizeOutcome::Terminal {
             is_success: false,
             capacity_notified: false,
+            phase_two: PhaseTwoForm::Step(owed.step),
         }),
         FailedAttemptOutcome::RetryScheduled {
             retry_count,
@@ -924,6 +948,7 @@ async fn replay_of_committed_write(
             Some(is_success) => Ok(FinalizeOutcome::Terminal {
                 is_success,
                 capacity_notified: false,
+                phase_two: PhaseTwoForm::NotKnown,
             }),
             None => Ok(FinalizeOutcome::Finalized),
         },
@@ -975,52 +1000,190 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
     }
 }
 
-/// Phase 2 of finalization: workflow advancement and worker wake notifications.
+/// Phase 2 of finalization: the node finish of a workflow task, or the
+/// capacity wake of a plain task.
 ///
-/// Separate transaction from Phase 1. If this fails after Phase 1 succeeded,
-/// the terminal task result is already durable and workflow recovery can resume.
+/// Separate from phase 1. If this fails after phase 1 committed, the terminal
+/// task result and its phase-2 record are durable and phase-2 recovery
+/// applies them.
+///
+/// A workflow task runs `horsies_workflow_node_finish` on the worker reserve
+/// ([`finish_workflow_node`]). A plain task sends the capacity wake when
+/// phase 1 did not. Returns the parent advance that the step owes after its
+/// commit.
+///
+/// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
+/// when the statement failure may clear.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_workflow_phase(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     task_id: Uuid,
     is_success: bool,
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
+    phase_two: PhaseTwoForm,
     payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<(), FinalizeError> {
+) -> Result<ParentAdvance, FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
-    if is_workflow_task {
-        crate::workflow_engine::phase2_recovery::finalize_phase2(
-            pool,
-            task_id,
-            if is_success { "COMPLETED" } else { "FAILED" },
-            workflow_registry,
-            payload_policy,
-            retention,
-        )
-        .await
-        .map_err(|e| {
-            let retryable = is_retryable_workflow_error(&e);
-            FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
+    match is_workflow_task {
+        true => {
+            let engine = EngineContext {
+                registry: workflow_registry,
+                payload: payload_policy,
+                retention,
+            };
+            finish_workflow_node(
+                broker,
+                engine,
                 task_id,
-                message: format!("workflow callback failed: {}", e),
-                retryable,
+                is_success,
+                queue_name,
+                capacity_notified,
+                phase_two,
+            )
+            .await
+        }
+        false => {
+            // Skipped when phase 1's statement already sent the wake in the
+            // same commit as the transition.
+            if !capacity_notified {
+                notify_worker_capacity(broker.pool(), queue_name, task_id).await;
             }
-        })?;
+            Ok(ParentAdvance::NotOwed)
+        }
     }
+}
 
-    // Capacity notification — non-fatal if it fails. Skipped when Phase 1's
-    // fused statement already fired the wake in the same commit as the
-    // transition (waking twice would be harmless but wasteful).
-    if !capacity_notified {
-        notify_worker_capacity(pool, queue_name, task_id).await;
+/// The node finish of a workflow task, in the form that the phase-1 node
+/// facts name (`PhaseTwoStep`):
+///
+/// | Form | Statement |
+/// |---|---|
+/// | `NoDependents` | `horsies_workflow_node_finish(task, wake, 'NONE')`, one statement in autocommit |
+/// | `DependentsWithoutSubworkflow` | `horsies_workflow_node_finish(task, wake, 'READ')`, one statement in autocommit |
+/// | `SubworkflowReachable`, `NotKnown` | `BEGIN`; `horsies_workflow_node_finish(task, wake, 'READ')`; `COMMIT` |
+///
+/// `wake` is true when phase 1 did not send the capacity wake; the statement
+/// sends it, delivered at its commit.
+///
+/// A transaction-form step that owes child starts is rolled back, and the
+/// phase 2 runs on the engine code (`finalize_phase2`, `horsies_phase2_consume`
+/// with the Rust progression), which starts the child in its own phase-2
+/// transaction: `horsies_workflow_child_start` (#751) is not in the baseline
+/// yet. The engine code sends the wake after its commit.
+///
+/// A retaining disposition (the stored result did not pass its check) writes
+/// nothing and is a phase-2 error that is not retried; phase-2 recovery
+/// counts the record.
+async fn finish_workflow_node(
+    broker: &PostgresBroker,
+    engine: EngineContext<'_>,
+    task_id: Uuid,
+    is_success: bool,
+    queue_name: &str,
+    capacity_notified: bool,
+    phase_two: PhaseTwoForm,
+) -> Result<ParentAdvance, FinalizeError> {
+    let wake = !capacity_notified;
+    let finished = match phase_two {
+        PhaseTwoForm::Step(PhaseTwoStep::NoDependents) => {
+            node_finish_alone(broker, task_id, wake, Dependents::NoneToRead).await
+        }
+        PhaseTwoForm::Step(PhaseTwoStep::DependentsWithoutSubworkflow) => {
+            node_finish_alone(broker, task_id, wake, Dependents::Read).await
+        }
+        PhaseTwoForm::Step(PhaseTwoStep::SubworkflowReachable) | PhaseTwoForm::NotKnown => {
+            match node_finish_in_transaction(broker, task_id, wake).await {
+                Ok(TransactionStep::Committed(outcome)) => Ok(outcome),
+                Ok(TransactionStep::RolledBackForChildStarts(owed)) => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        owed_child_starts = owed.len(),
+                        "phase 2 owes child starts; the engine code runs it",
+                    );
+                    return finish_workflow_node_on_engine(
+                        broker, engine, task_id, is_success, queue_name, wake,
+                    )
+                    .await;
+                }
+                Err(error) => Err(error),
+            }
+        }
+    };
+    let outcome = finished.map_err(|error| FinalizeError {
+        stage: FinalizeStage::Phase2Workflow,
+        task_id,
+        message: format!("workflow node finish failed: {error}"),
+        retryable: is_retryable_workflow_error(&error),
+    })?;
+    node_finish_outcome(task_id, outcome)
+}
+
+/// What a committed node finish leaves owed. Pure, apart from the log.
+fn node_finish_outcome(
+    task_id: Uuid,
+    outcome: StepOutcome<NodeFinishDisposition>,
+) -> Result<ParentAdvance, FinalizeError> {
+    match outcome.disposition {
+        NodeFinishDisposition::Applied | NodeFinishDisposition::AppliedWorkflowEnded => {
+            Ok(outcome.parent_advance)
+        }
+        NodeFinishDisposition::AlreadyApplied | NodeFinishDisposition::PendingAbsent => {
+            tracing::debug!(
+                task_id = %task_id,
+                disposition = ?outcome.disposition,
+                "phase 2 found its record applied or absent; nothing written",
+            );
+            Ok(outcome.parent_advance)
+        }
+        NodeFinishDisposition::Retained(failure) => Err(FinalizeError {
+            stage: FinalizeStage::Phase2Workflow,
+            task_id,
+            message: format!(
+                "phase-2 record kept: the stored result did not pass its check ({}); \
+                 phase-2 recovery counts it",
+                failure.as_str()
+            ),
+            retryable: false,
+        }),
     }
+}
 
-    Ok(())
+/// Phase 2 on the engine code, for a step that owes child starts: one sqlx
+/// transaction with the record consume and the Rust progression, then the
+/// capacity wake when `wake`. The engine code advances ended child workflows
+/// inside its own transaction, so no parent advance is owed after it.
+async fn finish_workflow_node_on_engine(
+    broker: &PostgresBroker,
+    engine: EngineContext<'_>,
+    task_id: Uuid,
+    is_success: bool,
+    queue_name: &str,
+    wake: bool,
+) -> Result<ParentAdvance, FinalizeError> {
+    let _disposition = crate::workflow_engine::phase2_recovery::finalize_phase2(
+        broker.pool(),
+        task_id,
+        if is_success { "COMPLETED" } else { "FAILED" },
+        engine.registry,
+        engine.payload,
+        engine.retention,
+    )
+    .await
+    .map_err(|error| FinalizeError {
+        stage: FinalizeStage::Phase2Workflow,
+        task_id,
+        message: format!("workflow callback failed: {error}"),
+        retryable: is_retryable_workflow_error(&error),
+    })?;
+    if wake {
+        notify_worker_capacity(broker.pool(), queue_name, task_id).await;
+    }
+    Ok(ParentAdvance::NotOwed)
 }
 
 /// Read the durable phase-2 terminal status after a Phase-1 replay.
@@ -1112,6 +1275,7 @@ pub(crate) async fn finalize_pre_execution_failure(
                 queue_name,
                 is_workflow_task,
                 capacity_notified: false,
+                phase_two: PhaseTwoForm::NotKnown,
             });
         }
         OwnershipOutcome::Aborted => return None,
@@ -1133,12 +1297,14 @@ pub(crate) async fn finalize_pre_execution_failure(
         Some(FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
+            phase_two,
         }) => Some(Phase2Work {
             task_id,
             is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
+            phase_two,
         }),
         Some(FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused)
         | None => None,
@@ -1261,6 +1427,7 @@ pub(crate) async fn execute_and_finalize(
                 queue_name,
                 is_workflow_task,
                 capacity_notified: false,
+                phase_two: PhaseTwoForm::NotKnown,
             });
         }
         OwnershipOutcome::Aborted => return None,
@@ -1323,41 +1490,48 @@ pub(crate) async fn execute_and_finalize(
         Some(FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
+            phase_two,
         }) => Some(Phase2Work {
             task_id,
             is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
+            phase_two,
         }),
         Some(FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused)
         | None => None,
     }
 }
 
-/// Run Phase 2 finalize: workflow advancement + capacity notifications.
+/// Run Phase 2 finalize: the node finish of a workflow task (or the capacity
+/// wake of a plain task), then the parent advances it owes.
 ///
-/// Should be called AFTER the semaphore permit is released.
-/// Uses bounded retries (up to 5) with reload-from-persisted-result for replays.
+/// Should be called AFTER the semaphore permit is released. Phase 2 has up to
+/// [`PHASE2_MAX_RETRIES`] retries; the parent advances that a committed phase 2
+/// owes run after it, one transaction per level, with their own retries
+/// ([`retry_parent_advances`]).
 pub(crate) async fn run_phase2(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
     work: Phase2Work,
     payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
 ) {
-    retry_phase2(
-        pool,
-        workflow_registry,
-        work.task_id,
-        work.is_success,
-        &work.queue_name,
-        work.is_workflow_task,
-        work.capacity_notified,
-        payload_policy,
-        retention,
-    )
-    .await;
+    let finished = retry_phase2(broker, workflow_registry, &work, payload_policy, retention).await;
+    match finished {
+        Ok(ParentAdvance::Owed { child_workflow_id }) => {
+            let engine = EngineContext {
+                registry: workflow_registry,
+                payload: payload_policy,
+                retention,
+            };
+            retry_parent_advances(broker, engine, work.task_id, child_workflow_id).await;
+        }
+        // Each failure was logged where it happened; workflow recovery
+        // applies the durable phase-2 record.
+        Ok(ParentAdvance::NotOwed) | Err(_) => {}
+    }
 }
 
 /// Run Phase 1: the first write and up to [`PHASE1_MAX_RETRIES`] retries of
@@ -1432,105 +1606,137 @@ async fn retry_phase1(
     None
 }
 
-/// Run Phase 2 with bounded retries.
+/// Run Phase 2 with bounded retries: the first try and up to
+/// [`PHASE2_MAX_RETRIES`] retries, each after [`phase_retry_delay`]. Only a
+/// retryable error is retried.
 ///
-/// Phase 1 already committed the durable outbox row, so every retry repeats
-/// the same consume-and-progress transaction without consulting live rows.
-#[allow(clippy::too_many_arguments)]
+/// Phase 1 already committed the durable phase-2 record, so every retry sends
+/// the same step. If an earlier try committed (its reply was lost), the step
+/// finds the record gone and reports `ALREADY_APPLIED`; the parent advance
+/// that try owed is then left to workflow recovery (case 1.6).
+///
+/// Returns the parent advance of the committed step, or the last error (already
+/// logged).
 async fn retry_phase2(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     workflow_registry: &WorkflowSpecRegistry,
-    task_id: Uuid,
-    is_success: bool,
-    queue_name: &str,
-    is_workflow_task: bool,
-    capacity_notified: bool,
+    work: &Phase2Work,
     payload_policy: &PayloadPolicy,
     retention: &RetentionConfig,
-) {
-    // First attempt consumes the durable outbox evidence.
-    match finalize_workflow_phase(
-        pool,
-        workflow_registry,
-        task_id,
-        is_success,
-        queue_name,
-        is_workflow_task,
-        capacity_notified,
-        payload_policy,
-        retention,
-    )
-    .await
-    {
-        Ok(()) => return,
-        Err(e) if !e.retryable => {
-            tracing::error!(
-                task_id = %task_id,
-                error = %e,
-                "Phase 2 finalize failed (non-retryable)",
-            );
-            return;
-        }
-        Err(e) => {
+) -> Result<ParentAdvance, FinalizeError> {
+    let mut attempt: u32 = 0;
+    loop {
+        if attempt > 0 {
+            let delay = phase_retry_delay(attempt);
             tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "Phase 2 finalize failed, scheduling retries",
+                task_id = %work.task_id,
+                attempt,
+                max = PHASE2_MAX_RETRIES,
+                delay_s = format!("{:.1}", delay),
+                "retrying Phase 2 finalize",
             );
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
-    }
-
-    // Retry attempts consume the same durable pending evidence. If a previous
-    // attempt committed, consume reports PENDING_ABSENT and the call is a no-op.
-    for attempt in 1..=PHASE2_MAX_RETRIES {
-        let delay = phase_retry_delay(attempt);
-        tracing::warn!(
-            task_id = %task_id,
-            attempt,
-            max = PHASE2_MAX_RETRIES,
-            delay_s = format!("{:.1}", delay),
-            "retrying Phase 2 finalize",
-        );
-        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
-
-        match finalize_workflow_phase(
-            pool,
+        let finished = finalize_workflow_phase(
+            broker,
             workflow_registry,
-            task_id,
-            is_success,
-            queue_name,
-            is_workflow_task,
-            capacity_notified,
+            work.task_id,
+            work.is_success,
+            &work.queue_name,
+            work.is_workflow_task,
+            work.capacity_notified,
+            work.phase_two,
             payload_policy,
             retention,
         )
-        .await
-        {
-            Ok(()) => return,
-            Err(e) if !e.retryable => {
+        .await;
+        match finished {
+            Ok(advance) => return Ok(advance),
+            Err(error) if !error.retryable => {
                 tracing::error!(
-                    task_id = %task_id,
-                    error = %e,
+                    task_id = %work.task_id,
+                    error = %error,
                     attempt,
-                    "Phase 2 finalize retry failed (non-retryable)",
+                    "Phase 2 finalize failed (non-retryable)",
                 );
-                return;
+                return Err(error);
             }
-            Err(e) => {
+            Err(error) if attempt >= PHASE2_MAX_RETRIES => {
+                tracing::error!(
+                    task_id = %work.task_id,
+                    error = %error,
+                    attempts = PHASE2_MAX_RETRIES,
+                    "Phase 2 finalize retries exhausted — workflow recovery will handle",
+                );
+                return Err(error);
+            }
+            Err(error) => {
                 tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
+                    task_id = %work.task_id,
+                    error = %error,
                     attempt,
-                    "Phase 2 finalize retry failed (retryable)",
+                    "Phase 2 finalize failed (retryable)",
                 );
             }
         }
+        attempt += 1;
     }
+}
 
+/// Advances the parents above a child workflow that phase 2 ended
+/// ([`advance_parents`], one transaction per level, on the worker reserve),
+/// with up to [`PHASE2_MAX_RETRIES`] retries that go on from the level that
+/// failed (Python's parent-propagation stage, `_retry_finalize_parent`,
+/// `core/worker/finalize.py:2248-2310`). A non-retryable failure, or spent
+/// retries, leave the level to workflow recovery (case 1.6: a terminal child
+/// under a live parent node). Logs every failure.
+async fn retry_parent_advances(
+    broker: &PostgresBroker,
+    engine: EngineContext<'_>,
+    task_id: Uuid,
+    first_child_workflow_id: Uuid,
+) {
+    let mut child_workflow_id = first_child_workflow_id;
+    for attempt in 0..=PHASE2_MAX_RETRIES {
+        if attempt > 0 {
+            let delay = phase_retry_delay(attempt);
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+        }
+        let failure =
+            match advance_parents(broker, CheckoutClass::Reserved, child_workflow_id, engine).await
+            {
+                Ok(()) => return,
+                Err(failure) => failure,
+            };
+        let ParentAdvanceFailure {
+            child_workflow_id: failed_child,
+            error,
+        } = failure;
+        match is_retryable_workflow_error(&error) {
+            true => tracing::warn!(
+                task_id = %task_id,
+                child_workflow_id = %failed_child,
+                attempt,
+                error = %error,
+                "parent advance failed (retryable)",
+            ),
+            false => {
+                tracing::error!(
+                    task_id = %task_id,
+                    child_workflow_id = %failed_child,
+                    error = %error,
+                    "parent advance failed (non-retryable) — workflow recovery will handle",
+                );
+                return;
+            }
+        }
+        child_workflow_id = failed_child;
+    }
     tracing::error!(
         task_id = %task_id,
+        child_workflow_id = %child_workflow_id,
         attempts = PHASE2_MAX_RETRIES,
-        "Phase 2 finalize retries exhausted — workflow recovery will handle",
+        "parent advance retries exhausted — workflow recovery will handle",
     );
 }
 
