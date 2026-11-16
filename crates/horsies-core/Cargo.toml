@@ -13,11 +13,6 @@ publish = false
 [lib]
 name = "horsies_core"
 
-# The Rust client crate owns the `horsies` binary name.
-[[bin]]
-name = "horsies-core"
-path = "src/bin/horsies.rs"
-
 [features]
 default = []
 # Retain the source lexeme of every JSON number, for byte-exact rerun-input
@@ -40,7 +35,6 @@ web = [
 ]
 
 [dependencies]
-horsies-macros = { version = "0.1.0-alpha.36", path = "../horsies-macros" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", optional = true }
@@ -62,21 +56,20 @@ thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sha2 = "0.10"
 log = "0.4"
 rand = "0.8"
 gethostname = "0.4"
-clap = { version = "4", features = ["derive"] }
 owo-colors = "4"
 toml = "0.8"
 sysinfo = "0.32"
-tempfile = "3"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+# Tests of the workflow DSL derive `WorkflowInput`.
+horsies-macros = { path = "../horsies-macros" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 serial_test = "3"

@@ -1321,7 +1321,6 @@ async fn provenance_table_is_exhaustive_over_the_live_schema() {
 
 #[test]
 fn public_facade_exports_the_complete_typed_surface() {
-    let _ = crate::rerun_task;
     let command = crate::RerunTask::new(Uuid::nil(), None, None);
     assert_eq!(command.source_task_id(), Uuid::nil());
     let _: crate::RerunOutcome = crate::RerunOutcome::SourceLive {

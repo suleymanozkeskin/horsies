@@ -2,7 +2,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use clap::Parser;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -33,7 +32,6 @@ use crate::core::history::archive::versions::archive_digest;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::names::{LEAF_LOCK_KEY_FUNCTION, TASK_HISTORY_PARENT};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::worker::cli::{Cli, Command};
 
 const P10_DATABASE_PREFIX: &str = "horsies_p10_transcode_";
 
@@ -450,85 +448,6 @@ fn vocabulary_transforms_signature_and_cli_are_pinned() {
         backup_relation_name(id, 2),
         "archive_replaced_000000000000_2"
     );
-
-    for command in [
-        "begin", "plan", "copy", "verify", "swap", "finalize", "finish", "status", "run",
-    ] {
-        let result = Cli::try_parse_from(["horsies", "transcode", command, "--help"]);
-        assert!(result.is_err_and(|error| {
-            error.kind() == clap::error::ErrorKind::DisplayHelp
-                && error.to_string().contains(command)
-        }));
-    }
-    let parsed = Cli::try_parse_from([
-        "horsies",
-        "transcode",
-        "--database-url",
-        "postgresql://invalid/example",
-        "status",
-        "--job-id",
-        "00000000-0000-0000-0000-000000000000",
-    ])
-    .unwrap();
-    assert!(matches!(parsed.command, Command::Transcode(_)));
-}
-
-#[tokio::test]
-#[serial]
-async fn cli_run_refuses_an_undecodable_target_before_maintenance_begins() {
-    use crate::core::history::transcode::target::DecodableTargetRejection;
-    use crate::worker::cli::transcode::{execute_transcode, TranscodeCliError};
-
-    let database = P10Database::create().await;
-    let base = test_db_url();
-    let url = format!(
-        "{}/{}",
-        base.rsplit_once('/').expect("database path in test URL").0,
-        database.name
-    );
-    let parsed = Cli::try_parse_from([
-        "horsies",
-        "transcode",
-        "--database-url",
-        url.as_str(),
-        "run",
-        "--session-id",
-        "00000000-0000-0000-0000-0000000000a1",
-        "--job-id",
-        "00000000-0000-0000-0000-0000000000a2",
-        "--component",
-        "result",
-        "--source-version",
-        "1",
-        "--target-version",
-        "2",
-        "--source-codec",
-        "json-utf8",
-        "--target-codec",
-        "framed-v2",
-    ])
-    .unwrap();
-    let Command::Transcode(args) = parsed.command else {
-        panic!("expected the transcode command");
-    };
-    match execute_transcode(args).await {
-        Err(TranscodeCliError::Target(DecodableTargetRejection::NotDecodable {
-            version: 2,
-            ref codec,
-            ..
-        })) if codec == "framed-v2" => {}
-        other => panic!("unexpected transcode outcome: {other:?}"),
-    }
-    let sessions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_archive_maintenance_sessions")
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    let jobs: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {TRANSCODE_JOBS}"))
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    assert_eq!((sessions, jobs), (0, 0));
 }
 
 #[tokio::test]

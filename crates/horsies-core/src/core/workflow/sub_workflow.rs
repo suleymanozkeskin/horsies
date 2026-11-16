@@ -288,6 +288,7 @@ impl<P, T> SubWorkflowNode<P, T> {
         &self.spec_name
     }
 
+    #[cfg(test)]
     pub(crate) fn definition_key(mut self, key: impl Into<String>) -> Self {
         self.definition_key = Some(key.into());
         self

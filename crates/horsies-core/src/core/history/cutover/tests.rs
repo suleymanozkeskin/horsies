@@ -1,5 +1,4 @@
 use chrono::Utc;
-use clap::Parser;
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, FromRow, PgConnection, PgPool};
@@ -34,7 +33,6 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
-use crate::worker::cli::{Cli, Command};
 
 fn commits(slope: f64, intercept: f64) -> Vec<BatchCommit> {
     (1..=4)
@@ -149,38 +147,6 @@ fn ladder_refuses_fewer_than_two_distinct_commit_points() {
         })
         .is_err());
     }
-}
-
-#[test]
-fn cli_exposes_every_ratified_cutover_subcommand() {
-    for subcommand in [
-        "preflight",
-        "ladder-evaluate",
-        "drain",
-        "install-programs",
-        "prepare",
-        "relocate",
-        "tighten",
-        "validate",
-        "rollback-programs",
-        "status",
-        "run",
-    ] {
-        let result = Cli::try_parse_from(["horsies", "cutover", subcommand, "--help"]);
-        assert!(result.is_err_and(|error| {
-            error.kind() == clap::error::ErrorKind::DisplayHelp
-                && error.to_string().contains(subcommand)
-        }));
-    }
-    let parsed = Cli::try_parse_from([
-        "horsies",
-        "cutover",
-        "--database-url",
-        "postgresql://invalid/example",
-        "status",
-    ])
-    .unwrap();
-    assert!(matches!(parsed.command, Command::Cutover(_)));
 }
 
 const P9_DATABASE_PREFIX: &str = "horsies_p9_cutover_";

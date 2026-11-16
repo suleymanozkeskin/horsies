@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{PostgresBroker, SchemaInitializationMode};
-use crate::{AppConfig, Horsies, PostgresConfig};
+use crate::core::Horsies;
+use crate::AppConfig;
 
 use super::app::{build_router, WebState};
 use super::auth::{
@@ -96,10 +97,9 @@ fn test_state(
     assets: Arc<dyn super::spa::AssetStore>,
 ) -> WebState {
     let broker = Arc::new(PostgresBroker::from_pool(pool));
-    let app = Horsies::with_broker(
-        AppConfig::for_database_url("postgresql://postgres:pw@127.0.0.1:1/none"),
-        Arc::clone(&broker),
-    )
+    let app = Horsies::new(AppConfig::for_database_url(
+        "postgresql://postgres:pw@127.0.0.1:1/none",
+    ))
     .expect("test app");
     WebState {
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
@@ -828,11 +828,7 @@ async fn clean_w4(pool: &PgPool, prefix: &str) {
 async fn migrated_state() -> WebState {
     let pool = migrated_pool().await;
     let broker = Arc::new(PostgresBroker::from_pool(pool));
-    let app = Horsies::with_broker(
-        AppConfig::for_database_url(migrated_database_url().await),
-        Arc::clone(&broker),
-    )
-    .unwrap();
+    let app = Horsies::new(AppConfig::for_database_url(migrated_database_url().await)).unwrap();
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
         task_stats_cache: Arc::new(TaskStatsCache::new()),
@@ -1117,8 +1113,11 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
             .unwrap();
     assert!(unlocked);
     let url = options.to_url_lossy().to_string();
-    let app = Horsies::new_observe_only(AppConfig::for_database_url(&url)).unwrap();
-    let broker = app.get_broker().await.unwrap();
+    let broker = Arc::new(
+        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         broker.schema_initialization_mode(),
         SchemaInitializationMode::ObserveOnly
@@ -1138,7 +1137,6 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     broker.session_pool().close().await;
     anchor.close().await;
     drop(broker);
-    drop(app);
     let suffix = name.strip_prefix("horsies_w4_noddl_").unwrap();
     assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
     sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
@@ -1154,11 +1152,4 @@ async fn default_broker_mode_still_migrates_and_validates() {
         broker.schema_initialization_mode(),
         SchemaInitializationMode::MigrateAndValidate
     );
-    let config = PostgresConfig::from_url("postgresql://postgres:pw@127.0.0.1:1/none");
-    let app = Horsies::new(AppConfig {
-        broker: config,
-        ..AppConfig::for_database_url("postgresql://postgres:pw@127.0.0.1:1/none")
-    })
-    .unwrap();
-    assert!(app.broker_if_initialized().is_none());
 }

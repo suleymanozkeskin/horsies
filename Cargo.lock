@@ -847,7 +847,6 @@ dependencies = [
  "axum",
  "chrono",
  "chrono-tz",
- "clap",
  "form_urlencoded",
  "futures",
  "futures-core",
@@ -868,14 +867,12 @@ dependencies = [
  "sha2",
  "sqlx",
  "sysinfo",
- "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "toml 0.8.23",
  "tower",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

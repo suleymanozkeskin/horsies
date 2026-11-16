@@ -5,9 +5,6 @@ use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::Duration as StdDuration;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -18,9 +15,6 @@ use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage, CoverageOutcome, DeclaredRetentionClass,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::{PayloadPolicy, PostgresConfig, WorkerResilienceConfig};
-use crate::lazy_broker::LazyBroker;
-use crate::task::{TaskFunction, TaskSendOptions};
 
 fn test_db_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -156,7 +150,6 @@ struct StoredFacts {
     prepared_digest_length: Option<i32>,
     inline_length: Option<i32>,
     reference: Option<String>,
-    enqueue_delay_seconds: Option<i64>,
 }
 
 async fn stored_facts(pool: &PgPool, task_id: Uuid) -> StoredFacts {
@@ -174,8 +167,7 @@ async fn stored_facts(pool: &PgPool, task_id: Uuid) -> StoredFacts {
                 prepared_rerun_input_content_type AS content_type,
                 octet_length(prepared_rerun_input_digest) AS prepared_digest_length,
                 octet_length(prepared_rerun_input_inline) AS inline_length,
-                prepared_rerun_input_reference AS reference,
-                EXTRACT(EPOCH FROM (enqueued_at - sent_at))::bigint AS enqueue_delay_seconds
+                prepared_rerun_input_reference AS reference
          FROM horsies_tasks WHERE id = $1",
     )
     .bind(task_id)
@@ -581,87 +573,6 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
         declined_facts.disposition.as_deref(),
         Some("DECLINED_BY_POLICY"),
     );
-}
-
-#[tokio::test]
-#[serial]
-async fn delayed_schedule_retry_preserves_delay_key_and_retention() {
-    let closed_pool = migrated_pool().await;
-    closed_pool.close().await;
-    let failed_lazy = Arc::new(LazyBroker::new(PostgresConfig::from_url(test_db_url())));
-    assert!(
-        failed_lazy
-            .set(Arc::new(PostgresBroker::from_pool(closed_pool)))
-            .is_ok(),
-        "install closed broker",
-    );
-    let resilience = WorkerResilienceConfig {
-        db_retry_initial_ms: 100,
-        db_retry_max_ms: 500,
-        db_retry_max_attempts: 1,
-        notify_poll_interval_ms: 1_000,
-    };
-    let failed_task: TaskFunction<i32, i32> = TaskFunction::new(
-        "p6_delayed_retry".to_owned(),
-        failed_lazy,
-        "default".to_owned(),
-        50,
-        None,
-        Arc::new(AtomicBool::new(false)),
-        false,
-        resilience.clone(),
-        PayloadPolicy::default(),
-        RetentionConfig::default(),
-    );
-    let options = TaskSendOptions::new()
-        .idempotency_key("p6-delayed-key")
-        .retention_class("standard_30d");
-    let error = failed_task
-        .schedule_with_options(options, StdDuration::from_secs(73), 7)
-        .await
-        .expect_err("closed broker must preserve a retryable delayed payload");
-    assert!(error.retryable);
-    let failed_payload = error.payload.as_ref().expect("failed payload");
-    assert_eq!(failed_payload.enqueue_delay_seconds, Some(73));
-    assert_eq!(
-        failed_payload.idempotency_key.as_deref(),
-        Some("p6-delayed-key")
-    );
-    assert_eq!(
-        failed_payload.retention_class_key.as_deref(),
-        Some("standard_30d")
-    );
-
-    let pool = migrated_pool().await;
-    clear_enqueue_state(&pool).await;
-    let live_lazy = Arc::new(LazyBroker::new(PostgresConfig::from_url(test_db_url())));
-    assert!(
-        live_lazy
-            .set(Arc::new(PostgresBroker::from_pool(pool.clone())))
-            .is_ok(),
-        "install live broker",
-    );
-    let live_task: TaskFunction<i32, i32> = TaskFunction::new(
-        "p6_delayed_retry".to_owned(),
-        live_lazy,
-        "default".to_owned(),
-        50,
-        None,
-        Arc::new(AtomicBool::new(false)),
-        false,
-        resilience,
-        PayloadPolicy::default(),
-        RetentionConfig::default(),
-    );
-    let handle = live_task
-        .retry_schedule(&error)
-        .await
-        .expect("retry delayed schedule from captured payload");
-    assert_eq!(Some(handle.task_id()), error.task_id);
-    let facts = stored_facts(&pool, handle.task_id()).await;
-    assert_eq!(facts.enqueue_delay_seconds, Some(73));
-    assert_eq!(facts.idempotency_key_digest_length, Some(32));
-    assert_eq!(facts.retention_class_key.as_deref(), Some("standard_30d"));
 }
 
 #[test]

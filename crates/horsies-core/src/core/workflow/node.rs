@@ -293,6 +293,7 @@ impl<T, I> TaskNode<T, I> {
     ///
     /// Intended for internal spec-builder tests and `TaskFunction::node()`.
     /// External callers should use `#[task]`-generated `node()`.
+    #[cfg(test)]
     pub(crate) fn raw(task_name: impl Into<String>) -> Self {
         Self {
             task_name: task_name.into(),

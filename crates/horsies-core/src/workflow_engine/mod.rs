@@ -2,7 +2,6 @@
 
 pub mod args_merge;
 pub mod bound_handle;
-pub mod bound_spec;
 pub mod engine;
 pub mod error;
 pub mod info;
