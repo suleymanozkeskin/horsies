@@ -21,7 +21,8 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::executor::protocol::{
-    CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StoredOptionsRefusal,
+    CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StopReason,
+    StoredOptionsRefusal,
 };
 use crate::worker::retry::read_stored_options;
 
@@ -290,12 +291,20 @@ fn test_queue() -> String {
 }
 
 fn writer(pool: PgPool) -> OutcomeWriter {
+    writer_with_self_heal(pool, OrphanSelfHeal::On)
+}
+
+fn writer_with_self_heal(pool: PgPool, orphan_self_heal: OrphanSelfHeal) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
-        Arc::new(PostgresBroker::from_pool(pool)),
+        broker,
         Arc::new(WorkflowSpecRegistry::default()),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
+        successes,
+        orphan_self_heal,
     )
 }
 
@@ -567,9 +576,196 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
+/// The number of attempt rows of a task.
+async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("count the attempt rows")
+}
+
+/// A child killed before it set its row RUNNING (each unreported end:
+/// a crash, a loop kill, a timeout): the failed-attempt statement under the
+/// claimed-row rule `RELEASE` puts the CLAIMED row back in the queue in its
+/// class, with no attempt row (Python `_write_ended_attempt`, which sends
+/// the release as its own statement).
+#[tokio::test]
+#[serial]
+async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let ends = [
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut("the child was lost"),
+        },
+        AttemptEnd::KilledForLoop {
+            code: LoopKillCode::TaskBlockedLoop,
+            retry: RetryPlacement::Isolated,
+            reason: FailureDetail::cut("app.py:7 in fetch"),
+        },
+        AttemptEnd::TimedOut {
+            timeout: timeout_ms(1_000),
+            retry: RetryPlacement::SameClass,
+        },
+    ];
+    for end in ends {
+        let queue = test_queue();
+        let (task_id, generation) = seed(
+            &pool,
+            &queue,
+            ExecutionClass::SharedAsync,
+            Held::Claimed,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        )
+        .await;
+        let claimed = claimed_row(
+            task_id,
+            &queue,
+            generation,
+            ExecutionClass::SharedAsync,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        );
+        let label = format!("{end:?}");
+
+        let settled = writer(pool.clone()).settle(&claimed, end).await;
+
+        assert_eq!(settled, Settlement::Written, "{label}");
+        let row = live_row(&pool, task_id).await.expect("the row stays live");
+        assert_eq!(row["status"], "PENDING", "{label}");
+        assert_eq!(row["execution"], "SHARED_ASYNC", "{label}");
+        assert_eq!(row["retry_count"], 0, "{label}");
+        assert_eq!(
+            row["claimed_by_worker_id"],
+            serde_json::Value::Null,
+            "{label}"
+        );
+        assert_eq!(attempt_count(&pool, task_id).await, 0, "{label}");
+        remove_task(&pool, task_id).await;
+    }
+}
+
+/// A task that reached no child, on a row that another claim generation
+/// holds now: the release leaves the row as it is.
+#[tokio::test]
+#[serial]
+async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let earlier_claim = claimed_row(
+        task_id,
+        &queue,
+        generation - chrono::Duration::seconds(5),
+        ExecutionClass::Isolated,
+        None,
+        0,
+    );
+    let before = live_row(&pool, task_id).await;
+
+    let settled = writer(pool.clone())
+        .settle(
+            &earlier_claim,
+            AttemptEnd::NotDispatched(NotRunCause::QueueFull),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NotHeld);
+    assert_eq!(live_row(&pool, task_id).await, before);
+    remove_task(&pool, task_id).await;
+}
+
 // ---------------------------------------------------------------------------
 // The retries of a write
 // ---------------------------------------------------------------------------
+
+/// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
+/// linked to it. Returns the claimed task.
+async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask {
+    let (task_id, generation) = seed(
+        pool,
+        queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .expect("mark the row a workflow task");
+    ClaimedTask {
+        kind: TaskKind::WorkflowTask,
+        ..claimed_row(
+            task_id,
+            queue,
+            generation,
+            ExecutionClass::Isolated,
+            None,
+            0,
+        )
+    }
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_enabled_cancels_the_orphan`
+/// and `::test_orphan_cancel_fences_on_the_dispatched_generation`: a start
+/// that found no linked node cancels the owned orphan of this claim.
+#[tokio::test]
+#[serial]
+async fn a_task_whose_node_is_not_linked_is_cancelled_when_the_self_heal_is_on() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
+
+    let settled = writer_with_self_heal(pool.clone(), OrphanSelfHeal::On)
+        .settle(
+            &claimed,
+            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::Written);
+    let history = history_row(&pool, claimed.task_id).await;
+    assert_eq!(history["status"], "CANCELLED");
+    assert_eq!(history["error_code"], "WORKFLOW_CHECK_FAILED");
+    remove_task(&pool, claimed.task_id).await;
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
+/// with the self-heal off the row stays CLAIMED by this claim.
+#[tokio::test]
+#[serial]
+async fn a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
+
+    let settled = writer_with_self_heal(pool.clone(), OrphanSelfHeal::Off)
+        .settle(
+            &claimed,
+            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    let row = live_row(&pool, claimed.task_id)
+        .await
+        .expect("the row stays live");
+    assert_eq!(row["status"], "CLAIMED");
+    assert_eq!(row["claimed_by_worker_id"], WORKER_ID);
+    remove_task(&pool, claimed.task_id).await;
+}
 
 /// No server listens on port 1, so every write fails with a retryable pool
 /// timeout after 100 ms.

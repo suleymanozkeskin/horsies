@@ -1,6 +1,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod backoff;
+pub mod children;
+pub mod claim_pass;
 mod class_coverage_log;
 pub mod cli;
 pub mod config;
