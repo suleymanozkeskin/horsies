@@ -679,7 +679,7 @@ async fn pause_workflow(
         Ok(workflow_id) => workflow_id,
         Err(response) => return response,
     };
-    action_response(pause_workflow_action(state.broker.pool(), workflow_id).await)
+    action_response(pause_workflow_action(&state.broker, workflow_id).await)
 }
 
 async fn resume_workflow(
@@ -692,7 +692,7 @@ async fn resume_workflow(
     };
     action_response(
         resume_workflow_action(
-            state.broker.pool(),
+            &state.broker,
             workflow_id,
             &state.workflow_registry,
             &state.payload,
@@ -710,5 +710,5 @@ async fn cancel_workflow(
         Ok(workflow_id) => workflow_id,
         Err(response) => return response,
     };
-    action_response(cancel_workflow_action(state.broker.pool(), workflow_id).await)
+    action_response(cancel_workflow_action(&state.broker, workflow_id).await)
 }

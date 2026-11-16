@@ -124,7 +124,7 @@ async def _run_node_a(session: AsyncSession, workflow_id: str) -> _RunningNode:
         await session.execute(
             text("""
                 UPDATE horsies_tasks t
-                SET status = 'RUNNING', claimed = FALSE,
+                SET status = 'RUNNING',
                     claimed_by_worker_id = :worker, claimed_at = :claimed_at,
                     started_at = NOW()
                 FROM horsies_workflow_tasks wt
