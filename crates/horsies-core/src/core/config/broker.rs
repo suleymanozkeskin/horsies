@@ -465,4 +465,29 @@ mod tests {
         );
         assert!(!error.to_string().contains("secret"));
     }
+
+    /// Python `test_app_config.py::TestPostgresConfigPgBouncer::test_a_removed_worker_pool_field_is_refused`
+    /// and `::test_a_removed_child_pool_field_is_refused`: a pool field that
+    /// moved to the worker profile is refused by name, not as an unknown key.
+    #[test]
+    #[ignore = "waits on #746: the removed pool fields are refused as unknown keys"]
+    fn a_removed_pool_field_is_refused_by_name() {
+        for field in [
+            "worker_pool_size",
+            "worker_max_overflow",
+            "worker_child_pool_min_size",
+            "worker_child_pool_max_size",
+            "worker_child_pool_check",
+        ] {
+            let json = format!(r#"{{"database_url": "postgresql://localhost/db", "{field}": 3}}"#);
+            let error = serde_json::from_str::<PostgresConfig>(&json)
+                .expect_err("a removed pool field must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{field} was removed in 0.7.0")),
+                "{error}",
+            );
+        }
+    }
 }
