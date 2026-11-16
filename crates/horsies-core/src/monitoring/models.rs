@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::task::Execution;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCategory {
@@ -284,6 +286,86 @@ pub struct WorkerStateInfo {
     pub cpu_percent: Option<f64>,
     pub slot_health: SlotHealthKind,
     pub down_slots: Vec<DownSlotInfo>,
+}
+
+/// One claim budget of a live worker (Python `BudgetLoadInfo`,
+/// `horsies/monitoring/models.py:354-367`).
+///
+/// `capacity` (children or seats in service) and `serves` come from the
+/// worker's latest snapshot. `in_flight` counts, at the read, its `RUNNING`
+/// rows and `CLAIMED` rows with a live lease of the classes in `serves`.
+/// `free` is `capacity` minus `in_flight`, at least 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BudgetLoadInfo {
+    pub budget: Execution,
+    pub capacity: u64,
+    pub serves: Vec<Execution>,
+    pub in_flight: u64,
+    pub free: u64,
+}
+
+/// The claim budgets of one live worker, in execution class order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkerClassLoadInfo {
+    pub worker_id: String,
+    pub snapshot_at: DateTime<Utc>,
+    pub budgets: Vec<BudgetLoadInfo>,
+}
+
+/// Whether live workers serve a pending stream, tagged by `kind`: `served`,
+/// `no_capacity` or `unserved` (Python `StreamServedInfo`,
+/// `StreamNoCapacityInfo`, `StreamUnservedInfo`,
+/// `horsies/monitoring/models.py:378-400`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamCoverageInfo {
+    /// `workers` counts the live workers that serve the stream; `capacity`
+    /// sums the capacity in service of the budget that serves the class on
+    /// each.
+    Served { workers: usize, capacity: u64 },
+    /// Live workers serve the stream, and none has capacity in service for it.
+    NoCapacity { workers: usize },
+    /// No live worker serves the stream.
+    Unserved,
+}
+
+/// How long the stream's rows wait, tagged by `kind`: `waiting` or
+/// `none_due` (Python `StreamWaitingInfo`, `StreamNoneDueInfo`,
+/// `horsies/monitoring/models.py:403-415`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamWaitInfo {
+    /// At least one row is due. `wait_s` is the wait of the oldest due row,
+    /// in whole seconds.
+    Waiting {
+        oldest_due_at: DateTime<Utc>,
+        wait_s: i64,
+    },
+    /// Every row is due later; `next_due_at` is the earliest due time.
+    NoneDue { next_due_at: DateTime<Utc> },
+}
+
+/// The `PENDING` rows of one queue and one execution class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingStreamInfo {
+    pub queue_name: String,
+    pub execution: Execution,
+    pub coverage: StreamCoverageInfo,
+    pub wait: StreamWaitInfo,
+}
+
+/// Pending streams and the budget load of each live worker (Python
+/// `ClassReportInfo`, `horsies/monitoring/models.py:433-447`).
+///
+/// `checked_at` is database time. A worker is live while its latest snapshot
+/// is at most `live_window_s` old. `streams` is ordered by queue name, then
+/// by execution class. `workers` holds the live workers, by worker id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClassReportInfo {
+    pub checked_at: DateTime<Utc>,
+    pub live_window_s: u64,
+    pub streams: Vec<PendingStreamInfo>,
+    pub workers: Vec<WorkerClassLoadInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

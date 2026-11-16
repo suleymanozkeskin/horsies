@@ -14,7 +14,6 @@ use axum::{Json, Router};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use uuid::Uuid;
 
-use crate::broker::SlotHealth;
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, elapsed_s, get_task_detail, get_workflow_node,
@@ -24,7 +23,7 @@ use crate::monitoring::{
     TaskFilters, TaskListQuery, TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo,
     WorkerStateInfo, WorkflowRunsQuery,
 };
-use crate::monitoring::{DownSlotInfo, SlotHealthKind};
+use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
 
 use super::app::WebState;
 use super::common::{
@@ -50,6 +49,7 @@ pub(crate) fn read_router() -> Router<WebState> {
         )
         .route("/workers/ping", get(read_worker_ping))
         .route("/workers/schedules", get(read_schedules))
+        .route("/workers/classes", get(read_class_report))
         .route("/workers", get(read_workers))
         .route("/workers/{worker_id}/history", get(read_worker_history))
         .route("/events", get(read_events))
@@ -502,32 +502,22 @@ async fn read_schedules(
         .map_err(|error| query_failed("Schedule state", error))
 }
 
+/// Pending streams per (queue, class) with their oldest wait and coverage,
+/// and the budget load of each live worker (Python `read_class_report`,
+/// `horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
+async fn read_class_report(
+    State(state): State<WebState>,
+) -> Result<Json<ClassReportInfo>, ApiError> {
+    let report = state.broker.get_class_report().await.map_err(|error| {
+        ApiError::unavailable(format!("Class report query failed: {}", error.message))
+    })?;
+    Ok(Json(class_report_info(&report)))
+}
+
 /// A snapshot older than this is stale: the worker stopped reporting. The
 /// fleet check counts the same workers as live (Python
 /// `STALE_SNAPSHOT_THRESHOLD_S`, `horsies/web/routes/workers.py:31-35`).
 const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
-
-/// The `slot_health` and `down_slots` fields of [`WorkerStateInfo`] (Python
-/// `slot_health_info`, `horsies/monitoring/execution_classes.py:45-64`).
-fn slot_health_info(slot_health: &SlotHealth) -> (SlotHealthKind, Vec<DownSlotInfo>) {
-    match slot_health {
-        SlotHealth::AllSlotsServing => (SlotHealthKind::AllServing, Vec::new()),
-        SlotHealth::SlotsDown(slots) => (
-            SlotHealthKind::SlotsDown,
-            slots
-                .as_slice()
-                .iter()
-                .map(|down| DownSlotInfo {
-                    slot: down.slot,
-                    cause: down.cause.to_string(),
-                    detail: down.detail.clone(),
-                    down_since: down.down_since,
-                    failed_boots: down.failed_boots.get(),
-                })
-                .collect(),
-        ),
-    }
-}
 
 /// One entry of the worker list (Python `read_workers`,
 /// `horsies/web/routes/workers.py:96-133`).

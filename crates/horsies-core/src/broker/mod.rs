@@ -3,6 +3,10 @@
 pub mod attempt_writes;
 pub mod bound_handle;
 pub mod class_budgets;
+pub mod class_coverage;
+#[cfg(test)]
+mod class_coverage_read_tests;
+pub mod class_coverage_reads;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
 pub mod error;
@@ -28,6 +32,11 @@ mod worker_state_read_tests;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
+pub use class_coverage::{
+    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
+    StreamWait, WorkerClassLoad,
+};
+pub use class_coverage_reads::{LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT};
 pub use error::{is_retryable_sqlx_error, BrokerError};
 pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
