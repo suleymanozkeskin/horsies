@@ -195,6 +195,9 @@ jobs:
           rustup toolchain install
           rustc --version
 
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -245,6 +248,10 @@ jobs:
         run: |
           rustup toolchain install
           rustc --version
+
+      - name: Cache Cargo builds
+        if: steps.changed.outputs.run == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Enforce repository-only package
         if: steps.changed.outputs.run == 'true'
