@@ -13,8 +13,8 @@ use crate::core::history::enqueue::{
 };
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{
-    AnyNode, OnError, WorkflowSpec, WorkflowSpecRegistry, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult,
+    AnyNode, OnError, OperationalErrorCode, TaskError, WorkflowSpec, WorkflowSpecRegistry,
+    WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
 };
 
 use crate::workflow_engine::bound_handle::WorkflowHandle;
@@ -25,19 +25,22 @@ use crate::workflow_engine::parse_good_until_from_options;
 // SQL constants
 // ---------------------------------------------------------------------------
 
-const CHECK_WORKFLOW_EXISTS_SQL: &str = "\
-SELECT id FROM horsies_workflows WHERE id = $1::uuid";
-
+/// Inserts a top-level workflow row. No row comes back when the id exists; the caller then reads its name.
+/// `sent_at` is the caller's start time.
 const INSERT_WORKFLOW_SQL: &str = "\
 INSERT INTO horsies_workflows (
     id, name, status, on_error, output_task_index, success_policy,
     definition_key,
     depth, root_workflow_id, sent_at, created_at, started_at, updated_at
 )
-VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, 0, $1::uuid, NOW(), NOW(), NOW(), NOW())
+VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, 0, $1::uuid, $7, NOW(), NOW(), NOW())
 ON CONFLICT (id) DO NOTHING
 RETURNING id";
 
+const GET_WORKFLOW_NAME_SQL: &str = "\
+SELECT name FROM horsies_workflows WHERE id = $1::uuid";
+
+/// `sent_at` is the time the engine built the child workflow.
 const INSERT_CHILD_WORKFLOW_SQL: &str = "\
 INSERT INTO horsies_workflows (
     id, name, status, on_error, output_task_index, success_policy,
@@ -46,7 +49,7 @@ INSERT INTO horsies_workflows (
     sent_at, created_at, started_at, updated_at
 )
 VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, $7::uuid, $8, $9, $10::uuid,
-        NOW(), NOW(), NOW(), NOW())";
+        $11, NOW(), NOW(), NOW())";
 
 const ENQUEUE_ROOT_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
@@ -69,9 +72,11 @@ UPDATE horsies_workflow_tasks
 SET task_id = $1::uuid, status = 'ENQUEUED'
 WHERE workflow_id = $2::uuid AND task_index = $3";
 
+/// A linked parent node is RUNNING while its child runs, on every path (Python `LINK_SUB_WORKFLOW_SQL`,
+/// `core/workflows/sql.py:271-275`).
 const LINK_ROOT_SUBWORKFLOW_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
+SET sub_workflow_id = $1::uuid, status = 'RUNNING', started_at = NOW()
 WHERE workflow_id = $2::uuid AND task_index = $3
   AND status = 'READY'";
 
@@ -81,26 +86,19 @@ SELECT depth, root_workflow_id
 FROM horsies_workflows
 WHERE id = $1::uuid";
 
-const CHECK_ANCESTOR_WORKFLOW_CHAIN_SQL: &str = "\
-WITH RECURSIVE ancestors AS (
-    SELECT id, name, definition_key, parent_workflow_id
-    FROM horsies_workflows
-    WHERE id = $1::uuid
-  UNION ALL
-    SELECT w.id, w.name, w.definition_key, w.parent_workflow_id
-    FROM horsies_workflows w
-    JOIN ancestors a ON a.parent_workflow_id = w.id
-)
-SELECT id, name, definition_key FROM ancestors";
-
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct ExistsRow {
-    id: Uuid,
+/// What the insert of a top-level workflow row found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkflowRowInsert {
+    /// The row is new; the start goes on in the same transaction.
+    Inserted,
+    /// A workflow with this id and this name exists. The start writes nothing and returns its handle.
+    Existing,
+    /// A workflow with this id exists under another name. The start writes nothing and is refused.
+    IdConflict { existing_name: String },
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -108,13 +106,6 @@ struct ExistsRow {
 struct DepthRow {
     depth: Option<i32>,
     root_workflow_id: Option<Uuid>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct AncestorWorkflowRow {
-    id: Uuid,
-    name: String,
-    definition_key: Option<String>,
 }
 
 /// A workflow_task row prepared in memory for batched insertion.
@@ -155,17 +146,139 @@ pub async fn start_workflow<T>(
     retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     let wf_id = workflow_id.unwrap_or_else(Uuid::new_v4);
-    let wf_name = spec.name.clone();
+    start_workflow_attempt(
+        broker,
+        spec,
+        wf_id,
+        chrono::Utc::now(),
+        registry,
+        payload,
+        retention,
+    )
+    .await
+}
 
-    start_workflow_inner(broker, spec, wf_id, registry, payload, retention)
-        .await
-        .map_err(|e| WorkflowStartError {
-            code: classify_workflow_error(&e),
-            message: format!("{}", e),
-            retryable: is_retryable_workflow_error(&e),
-            workflow_name: wf_name,
+/// One start attempt with a fixed id and start time.
+///
+/// - Outcomes: the handle of the new workflow; the handle of an existing workflow with this id and name
+///   (nothing written); `WORKFLOW_ID_CONFLICT` when the id belongs to another workflow name (nothing written);
+///   `VALIDATION_FAILED` for a spec with no definition key (nothing written, Python
+///   `WorkflowSpec._require_definition_key`); `VALIDATION_FAILED` or `ENQUEUE_FAILED` from the transaction,
+///   which rolled back.
+/// - `sent_at` is the caller's start time; every attempt of one start uses the same value.
+async fn start_workflow_attempt<T>(
+    broker: &Arc<PostgresBroker>,
+    spec: &WorkflowSpec,
+    wf_id: Uuid,
+    sent_at: chrono::DateTime<chrono::Utc>,
+    registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
+    retention: &RetentionConfig,
+) -> WorkflowStartResult<WorkflowHandle<T>> {
+    let refused =
+        |code: WorkflowStartErrorCode, message: String, retryable: bool| WorkflowStartError {
+            code,
+            message,
+            retryable,
+            workflow_name: spec.name.clone(),
             workflow_id: Some(wf_id),
-        })
+        };
+    if let Err(message) = require_definition_key(spec) {
+        return Err(refused(
+            WorkflowStartErrorCode::ValidationFailed,
+            message,
+            false,
+        ));
+    }
+    match start_workflow_inner(broker, spec, wf_id, sent_at, registry, retention).await {
+        Ok(WorkflowRowInsert::Inserted | WorkflowRowInsert::Existing) => Ok(WorkflowHandle::new(
+            wf_id,
+            Arc::clone(broker),
+            Arc::new(registry.clone()),
+            payload.clone(),
+            retention.clone(),
+        )),
+        Ok(WorkflowRowInsert::IdConflict { existing_name }) => Err(refused(
+            WorkflowStartErrorCode::WorkflowIdConflict,
+            format!(
+                "workflow_id '{wf_id}' already exists for workflow name '{existing_name}', \
+                 cannot start workflow name '{}' with the same id",
+                spec.name,
+            ),
+            false,
+        )),
+        Err(error) => Err(refused(
+            classify_workflow_error(&error, &spec.name, wf_id),
+            error.to_string(),
+            is_retryable_workflow_error(&error),
+        )),
+    }
+}
+
+/// Refuses a top-level spec with no definition key, and a sub-workflow node with no definition key of its
+/// child. Python: `WorkflowSpec._require_definition_key` (`core/models/workflow/spec.py:1731-1743`) at start
+/// (`core/workflows/lifecycle.py:315`) and for each sub-workflow node (`lifecycle.py:546`).
+fn require_definition_key(spec: &WorkflowSpec) -> Result<(), String> {
+    let has_key = matches!(
+        spec.definition_key.as_deref().map(str::trim),
+        Some(key) if !key.is_empty()
+    );
+    match has_key {
+        true => require_subworkflow_node_keys(spec).map_err(|error| error.to_string()),
+        false => Err(format!(
+            "WorkflowSpec is missing definition_key: workflow '{}' has no stable \
+             definition_key; set a definition key such as 'your.workflow.v1'",
+            spec.name,
+        )),
+    }
+}
+
+/// The greatest depth of a child workflow. A top-level workflow has depth 0; a child has the depth of its
+/// parent plus 1. Python: `MAX_SUBWORKFLOW_DEPTH` (`core/models/workflow/limits.py`); the baseline CHECK
+/// `horsies_workflows_depth_range` holds the same bound.
+pub(crate) const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
+
+/// The depth of a new child of the workflow `parent_workflow_id` at `parent_depth`.
+///
+/// `Err` is the error that the sub-workflow node at `task_index` stores when the child would pass
+/// [`MAX_SUBWORKFLOW_DEPTH`]: the child is not started, the node fails, and the parent's `on_error` applies
+/// (Python `core/workflows/engine.py:1052-1066`).
+pub(crate) fn child_workflow_depth(
+    parent_depth: i32,
+    parent_workflow_id: Uuid,
+    task_index: i32,
+) -> Result<i32, TaskError> {
+    let child_depth = parent_depth + 1;
+    match child_depth > MAX_SUBWORKFLOW_DEPTH {
+        false => Ok(child_depth),
+        true => Err(TaskError::builtin(
+            OperationalErrorCode::SubworkflowDepthLimitReached,
+            format!(
+                "Subworkflow not started: the child workflow would have depth {child_depth}, \
+                 and the limit is {MAX_SUBWORKFLOW_DEPTH} (workflow {parent_workflow_id}:{task_index})"
+            ),
+        )),
+    }
+}
+
+/// Refuses a sub-workflow node with no definition key: a child is resolved only by its key.
+fn require_subworkflow_node_keys(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
+    let unkeyed = spec.tasks.iter().find(|node| {
+        node.is_subworkflow
+            && !matches!(
+                node.sub_definition_key.as_deref().map(str::trim),
+                Some(key) if !key.is_empty()
+            )
+    });
+    match unkeyed {
+        None => Ok(()),
+        Some(node) => Err(WorkflowError::Validation(format!(
+            "sub-workflow node '{}' of workflow '{}' has no definition_key of its child workflow; \
+             a child workflow is resolved only by its definition_key",
+            node.node_id.as_deref().unwrap_or("?"),
+            spec.name,
+        ))),
+    }
 }
 
 /// Start a workflow with retry and a separate session-capable pool for result
@@ -191,6 +304,8 @@ pub async fn start_workflow_with_retry<T>(
 
     let max_attempts = 1 + START_RETRY_COUNT;
     let wf_id = workflow_id.unwrap_or_else(Uuid::new_v4);
+    // One start time for every attempt, as Python computes it once before its retry loop.
+    let sent_at = chrono::Utc::now();
     let mut last_err: Option<WorkflowStartError> = None;
 
     for attempt in 0..max_attempts {
@@ -213,7 +328,9 @@ pub async fn start_workflow_with_retry<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow(broker, spec, Some(wf_id), registry, payload, retention).await {
+        match start_workflow_attempt(broker, spec, wf_id, sent_at, registry, payload, retention)
+            .await
+        {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 if e.retryable && attempt < max_attempts - 1 {
@@ -228,36 +345,20 @@ pub async fn start_workflow_with_retry<T>(
     Err(last_err.expect("loop ran at least once"))
 }
 
-async fn start_workflow_inner<T>(
+/// Writes the workflow and its nodes in one transaction.
+///
+/// The workflow row goes in first with `ON CONFLICT (id) DO NOTHING`, so a concurrent start with the same id
+/// waits for the first one and then sees its row. An id that exists ends the attempt with no write: the
+/// transaction rolls back.
+async fn start_workflow_inner(
     broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
     wf_id: Uuid,
+    sent_at: chrono::DateTime<chrono::Utc>,
     registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<WorkflowHandle<T>, WorkflowError> {
+) -> Result<WorkflowRowInsert, WorkflowError> {
     let pool = broker.pool();
-    // Idempotent start: if a caller-provided ID already exists, return
-    // the existing handle without creating a new workflow.
-    let existing: Option<ExistsRow> = sqlx::query_as(CHECK_WORKFLOW_EXISTS_SQL)
-        .bind(wf_id)
-        .fetch_optional(pool)
-        .await?;
-
-    if existing.is_some() {
-        tracing::warn!(
-            workflow_id = %wf_id,
-            "workflow already exists, returning existing handle",
-        );
-        return Ok(WorkflowHandle::new(
-            wf_id,
-            Arc::clone(broker),
-            Arc::new(registry.clone()),
-            payload.clone(),
-            retention.clone(),
-        ));
-    }
-
     let on_error_str = match spec.on_error {
         OnError::Fail => "fail",
         OnError::Pause => "pause",
@@ -272,16 +373,27 @@ async fn start_workflow_inner<T>(
     // Wrap the entire start operation in a transaction.
     let mut tx = pool.begin().await?;
 
-    // Insert workflow row.
-    sqlx::query(INSERT_WORKFLOW_SQL)
-        .bind(wf_id)
-        .bind(&spec.name)
-        .bind(on_error_str)
-        .bind(spec.output_index.map(|i| i as i32))
-        .bind(&success_policy_json)
-        .bind(&spec.definition_key)
-        .execute(&mut *tx)
-        .await?;
+    let row = WorkflowRowValues {
+        workflow_id: wf_id,
+        name: &spec.name,
+        on_error: on_error_str,
+        output_task_index: spec.output_index.map(|i| i as i32),
+        success_policy: &success_policy_json,
+        definition_key: spec.definition_key.as_deref(),
+        sent_at,
+    };
+    match insert_workflow_row(&mut tx, &row).await? {
+        WorkflowRowInsert::Inserted => {}
+        existing @ (WorkflowRowInsert::Existing | WorkflowRowInsert::IdConflict { .. }) => {
+            tx.rollback().await?;
+            tracing::warn!(
+                workflow_id = %wf_id,
+                outcome = ?existing,
+                "workflow id already exists; nothing was written",
+            );
+            return Ok(existing);
+        }
+    }
 
     tracing::debug!(workflow_id = %wf_id, name = %spec.name, "workflow created");
 
@@ -290,24 +402,75 @@ async fn start_workflow_inner<T>(
 
     tx.commit().await?;
 
-    Ok(WorkflowHandle::new(
-        wf_id,
-        Arc::clone(broker),
-        Arc::new(registry.clone()),
-        payload.clone(),
-        retention.clone(),
-    ))
+    Ok(WorkflowRowInsert::Inserted)
 }
 
-fn classify_workflow_error(e: &WorkflowError) -> WorkflowStartErrorCode {
-    match e {
+/// The values of a new top-level workflow row.
+struct WorkflowRowValues<'a> {
+    workflow_id: Uuid,
+    name: &'a str,
+    on_error: &'a str,
+    output_task_index: Option<i32>,
+    success_policy: &'a Option<serde_json::Value>,
+    definition_key: Option<&'a str>,
+    sent_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Inserts the workflow row, or reads the name stored under its id.
+///
+/// Python: `INSERT_WORKFLOW_SQL` and `GET_WORKFLOW_NAME_SQL` (`core/workflows/lifecycle.py:420-458`). A row that
+/// conflicted and then disappeared before the name read (a retention delete) gives `Existing`, as in Python.
+async fn insert_workflow_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    row: &WorkflowRowValues<'_>,
+) -> Result<WorkflowRowInsert, sqlx::Error> {
+    let inserted: Option<Uuid> = sqlx::query_scalar(INSERT_WORKFLOW_SQL)
+        .bind(row.workflow_id)
+        .bind(row.name)
+        .bind(row.on_error)
+        .bind(row.output_task_index)
+        .bind(row.success_policy)
+        .bind(row.definition_key)
+        .bind(row.sent_at)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if inserted.is_some() {
+        return Ok(WorkflowRowInsert::Inserted);
+    }
+    let existing_name: Option<String> = sqlx::query_scalar(GET_WORKFLOW_NAME_SQL)
+        .bind(row.workflow_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(match existing_name {
+        Some(existing_name) if existing_name != row.name => {
+            WorkflowRowInsert::IdConflict { existing_name }
+        }
+        Some(_) | None => WorkflowRowInsert::Existing,
+    })
+}
+
+/// Maps a start error to its catalog code.
+///
+/// The start path returns only database, broker, serialization and validation errors. Any other variant is a
+/// defect, so it panics with the workflow and the error; it is not a catalog code.
+fn classify_workflow_error(
+    error: &WorkflowError,
+    workflow_name: &str,
+    workflow_id: Uuid,
+) -> WorkflowStartErrorCode {
+    match error {
         WorkflowError::Serialization(_) | WorkflowError::Validation(_) => {
             WorkflowStartErrorCode::ValidationFailed
         }
         WorkflowError::Database(_) | WorkflowError::Broker(_) => {
             WorkflowStartErrorCode::EnqueueFailed
         }
-        _ => WorkflowStartErrorCode::InternalFailed,
+        WorkflowError::WorkflowNotFound { .. }
+        | WorkflowError::WorkflowTimeout { .. }
+        | WorkflowError::WorkflowError(_)
+        | WorkflowError::InvalidStatus(_) => panic!(
+            "start of workflow '{workflow_name}' ({workflow_id}) returned an error outside the start catalog: {error}"
+        ),
     }
 }
 
@@ -345,23 +508,42 @@ pub async fn retry_start<T>(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the claimable priority for a node about to be persisted.
+/// The queue that the row of a sub-workflow node stores. Python: `core/workflows/lifecycle.py:534`.
+const SUBWORKFLOW_NODE_QUEUE: &str = "default";
+
+/// The priority that the row of a sub-workflow node stores. Python: `core/workflows/lifecycle.py:535`.
+const SUBWORKFLOW_NODE_PRIORITY: i32 = 100;
+
+/// The queue and priority that a node row stores.
+///
+/// A sub-workflow node is never claimed as a task, so it has no queue and no priority; its row stores the
+/// constants of Python. A task node must have both resolved.
+fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), WorkflowError> {
+    match node.is_subworkflow {
+        true => Ok((SUBWORKFLOW_NODE_QUEUE, SUBWORKFLOW_NODE_PRIORITY)),
+        false => {
+            let queue = node.queue.as_deref().ok_or_else(|| {
+                WorkflowError::Validation(format!(
+                    "node '{}' (task '{}') has no resolved queue; \
+                     this indicates a missing resolution step before workflow start",
+                    node.node_id.as_deref().unwrap_or("?"),
+                    node.task_name,
+                ))
+            })?;
+            Ok((queue, resolve_insert_priority(node)?))
+        }
+    }
+}
+
+/// Resolve the claimable priority for a task node about to be persisted.
 ///
 /// A real task node must already have a resolved priority by insert time —
 /// `resolve_node_queue_priority` runs at workflow registration, child-spec
 /// materialization, and `check()`, filling it from the queue config. A `None`
 /// here means a resolution step was skipped, so it is surfaced (fail-closed)
 /// rather than silently persisting a wrong literal — mirroring the queue check
-/// in `insert_workflow_tasks` and Python's `WORKFLOW_UNRESOLVED_PRIORITY`.
-///
-/// Sub-workflow nodes are exempt: their `horsies_workflow_tasks` row is inert
-/// bookkeeping (never claimed as a task; `ENQUEUE_SUBWORKFLOW_TASK` copies no
-/// priority), and `resolve_node_queue_priority` intentionally skips them, so
-/// they keep the historical `100` default.
+/// in `stored_queue_and_priority` and Python's `WORKFLOW_UNRESOLVED_PRIORITY`.
 fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
-    if node.is_subworkflow {
-        return Ok(node.priority.unwrap_or(100));
-    }
     node.priority.ok_or_else(|| {
         WorkflowError::Validation(format!(
             "node '{}' (task '{}') has no resolved priority; \
@@ -394,15 +576,7 @@ fn insert_workflow_tasks<'a>(
         let mut prepared: Vec<PreparedNode> = Vec::with_capacity(tasks.len());
         for task in tasks {
             let is_root = task.dependencies.is_empty();
-            let queue = task.queue.as_deref().ok_or_else(|| {
-                WorkflowError::Validation(format!(
-                    "node '{}' (task '{}') has no resolved queue; \
-                     this indicates a missing resolution step before workflow start",
-                    task.node_id.as_deref().unwrap_or("?"),
-                    task.task_name,
-                ))
-            })?;
-            let priority = resolve_insert_priority(task)?;
+            let (queue, priority) = stored_queue_and_priority(task)?;
 
             // Merge good_until into task_options_json (mirrors Python's lifecycle.py).
             let merged_task_options = crate::workflow_engine::merge_good_until_into_options(
@@ -732,6 +906,10 @@ async fn launch_root_subworkflow(
 
     let parent_depth = depth_row.depth.unwrap_or(0);
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
+    // A root sub-workflow node of a start fails the whole start: the node-level failure of a root child
+    // comes with the start redesign.
+    let child_depth = child_workflow_depth(parent_depth, workflow_id, task.index as i32)
+        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
     // Build the child spec (supports dynamic parameterization if a builder is registered).
     let child_spec = build_child_spec(
@@ -747,7 +925,7 @@ async fn launch_root_subworkflow(
         &child_spec,
         workflow_id,
         task.index as i32,
-        parent_depth + 1,
+        child_depth,
         root_wf_id,
         registry,
         retention,
@@ -792,7 +970,8 @@ pub async fn start_child_workflow_in_tx(
     retention: &RetentionConfig,
 ) -> Result<Uuid, WorkflowError> {
     let child_id = Uuid::new_v4();
-    ensure_no_runtime_subworkflow_cycle(tx, parent_workflow_id, spec).await?;
+    let sent_at = chrono::Utc::now();
+    require_subworkflow_node_keys(spec)?;
 
     let on_error_str = match spec.on_error {
         OnError::Fail => "fail",
@@ -816,6 +995,7 @@ pub async fn start_child_workflow_in_tx(
         .bind(parent_task_index)
         .bind(depth)
         .bind(root_workflow_id)
+        .bind(sent_at)
         .execute(&mut **tx)
         .await?;
 
@@ -832,46 +1012,6 @@ pub async fn start_child_workflow_in_tx(
     insert_workflow_tasks(tx, child_id, &spec.tasks, registry, retention).await?;
 
     Ok(child_id)
-}
-
-/// Find the ancestor that the child workflow would close a cycle through, if any.
-///
-/// Identity is keyed by `definition_key` when both the child and ancestor have
-/// one: distinct keys are distinct workflows even if their `name`s collide
-/// (parity with horsies PR #33). Only when a key is absent do we fall back to
-/// `name` matching, for incomplete definitions.
-fn subworkflow_cycle_ancestor<'a>(
-    ancestors: &'a [AncestorWorkflowRow],
-    child_name: &str,
-    child_key: Option<&str>,
-) -> Option<&'a AncestorWorkflowRow> {
-    ancestors.iter().find(
-        |ancestor| match (child_key, ancestor.definition_key.as_deref()) {
-            (Some(ck), Some(ak)) => ck == ak,
-            _ => ancestor.name == child_name,
-        },
-    )
-}
-
-async fn ensure_no_runtime_subworkflow_cycle(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    parent_workflow_id: Uuid,
-    child_spec: &WorkflowSpec,
-) -> Result<(), WorkflowError> {
-    let ancestors: Vec<AncestorWorkflowRow> = sqlx::query_as(CHECK_ANCESTOR_WORKFLOW_CHAIN_SQL)
-        .bind(parent_workflow_id)
-        .fetch_all(&mut **tx)
-        .await?;
-
-    let child_key = child_spec.definition_key.as_deref();
-    if let Some(ancestor) = subworkflow_cycle_ancestor(&ancestors, &child_spec.name, child_key) {
-        return Err(WorkflowError::Validation(format!(
-            "starting child workflow '{}' would create a nested workflow cycle through ancestor '{}' ({})",
-            child_spec.name, ancestor.name, ancestor.id,
-        )));
-    }
-
-    Ok(())
 }
 
 /// Build a child workflow spec, using the spec_builder callback if available,
@@ -893,8 +1033,8 @@ pub(crate) fn build_child_spec(
     let has_child_inputs = parent_task.args_json.is_some()
         || parent_task.kwargs_json.is_some()
         || !parent_task.args_from.is_empty();
-    let resolved = registry
-        .resolve_child_registration(spec_name, definition_key)
+    let resolved = definition_key
+        .and_then(|key| registry.resolve_child_registration(key))
         .ok_or_else(|| {
             WorkflowError::Validation(format!(
                 "sub-workflow spec not found (definition_key={:?}, name='{}')",
@@ -974,19 +1114,12 @@ mod tests {
 
     fn child_registered_static() -> RegisteredWorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new("child_static");
+        builder.definition_key("tests.child_static.v1");
         let node = builder.task(TaskNode::<String>::raw("hello_task").queue("default"));
         builder.output(node);
         RegisteredWorkflowSpec {
             spec: builder.build().unwrap(),
             spec_builder: None,
-        }
-    }
-
-    fn ancestor(name: &str, key: Option<&str>) -> AncestorWorkflowRow {
-        AncestorWorkflowRow {
-            id: Uuid::new_v4(),
-            name: name.to_owned(),
-            definition_key: key.map(str::to_owned),
         }
     }
 
@@ -1032,19 +1165,139 @@ mod tests {
     }
 
     #[test]
-    fn resolve_insert_priority_defaults_subworkflow_bookkeeping() {
-        // Subworkflow node with no priority keeps the inert 100 default.
+    fn a_subworkflow_node_row_stores_the_python_constants() {
+        let mut node = node_with(true, Some(50));
+        node.queue = None;
+        assert_eq!(stored_queue_and_priority(&node).unwrap(), ("default", 100));
+        node.queue = Some("bulk".to_owned());
+        assert_eq!(stored_queue_and_priority(&node).unwrap(), ("default", 100));
+    }
+
+    #[test]
+    fn a_task_node_row_stores_its_resolved_queue_and_priority() {
         assert_eq!(
-            resolve_insert_priority(&node_with(true, None)).unwrap(),
-            100
+            stored_queue_and_priority(&node_with(false, Some(30))).unwrap(),
+            ("default", 30)
+        );
+        let mut unresolved = node_with(false, Some(30));
+        unresolved.queue = None;
+        let err = stored_queue_and_priority(&unresolved).unwrap_err();
+        assert!(
+            matches!(err, WorkflowError::Validation(ref m) if m.contains("no resolved queue")),
+            "expected fail-closed unresolved-queue error, got: {:?}",
+            err
         );
     }
 
     #[test]
-    fn resolve_insert_priority_preserves_explicit_subworkflow_priority() {
+    fn child_depth_is_bounded_at_32() {
+        let parent = Uuid::new_v4();
+        assert_eq!(child_workflow_depth(0, parent, 1).unwrap(), 1);
+        assert_eq!(child_workflow_depth(31, parent, 1).unwrap(), 32);
+        let error = child_workflow_depth(32, parent, 4).unwrap_err();
         assert_eq!(
-            resolve_insert_priority(&node_with(true, Some(50))).unwrap(),
-            50
+            error
+                .error_code
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("SUBWORKFLOW_DEPTH_LIMIT_REACHED")
+        );
+        let message = error.message.unwrap();
+        assert!(message.contains("depth 33"));
+        assert!(message.contains(&format!("{parent}:4")));
+    }
+
+    fn keyed_spec(definition_key: Option<&str>, tasks: Vec<AnyNode>) -> WorkflowSpec {
+        WorkflowSpec {
+            name: "keyed".to_owned(),
+            definition_key: definition_key.map(str::to_owned),
+            tasks,
+            on_error: OnError::Fail,
+            output_index: None,
+            success_policy: None,
+        }
+    }
+
+    #[test]
+    fn a_spec_with_no_definition_key_is_refused() {
+        let task = node_with(false, Some(10));
+        for key in [None, Some(""), Some("   ")] {
+            let message = require_definition_key(&keyed_spec(key, vec![task.clone()])).unwrap_err();
+            assert!(message.contains("missing definition_key"), "{message}");
+        }
+        assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![task])).is_ok());
+    }
+
+    #[test]
+    fn a_subworkflow_node_with_no_definition_key_is_refused() {
+        let unkeyed = node_with(true, None);
+        let message =
+            require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![unkeyed.clone()]))
+                .unwrap_err();
+        assert!(
+            message.contains("has no definition_key of its child workflow"),
+            "{message}"
+        );
+        let mut keyed = unkeyed;
+        keyed.sub_definition_key = Some("tests.child.v1".to_owned());
+        assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let workflow_id = Uuid::new_v4();
+        let sent_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let no_policy: Option<serde_json::Value> = None;
+        let row = |name: &'static str| WorkflowRowValues {
+            workflow_id,
+            name,
+            on_error: "fail",
+            output_task_index: None,
+            success_policy: &no_policy,
+            definition_key: Some("tests.start.conflict.v1"),
+            sent_at,
+        };
+
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            insert_workflow_row(&mut tx, &row("first_name"))
+                .await
+                .unwrap(),
+            WorkflowRowInsert::Inserted
+        );
+        tx.commit().await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            insert_workflow_row(&mut tx, &row("first_name"))
+                .await
+                .unwrap(),
+            WorkflowRowInsert::Existing
+        );
+        assert_eq!(
+            insert_workflow_row(&mut tx, &row("other_name"))
+                .await
+                .unwrap(),
+            WorkflowRowInsert::IdConflict {
+                existing_name: "first_name".to_owned()
+            }
+        );
+        tx.rollback().await.unwrap();
+
+        let (name, stored_sent_at): (String, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT name, sent_at FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name, "first_name");
+        // The caller's start time is stored (microsecond precision), not the database clock.
+        assert_eq!(
+            stored_sent_at.timestamp_micros(),
+            sent_at.timestamp_micros()
         );
     }
 
@@ -1113,7 +1366,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row.0 == slow_id.to_string()));
         for row in rows {
-            assert_eq!(row.1, "q_bulk_7d");
+            assert_eq!(row.1, "standard_7d");
             assert_eq!(row.2, "NEVER_ELIGIBLE");
             assert_eq!(row.3, 32);
             assert_eq!(row.4, 32);
@@ -1121,39 +1374,6 @@ mod tests {
             assert!(!row.6);
             assert_eq!(Uuid::parse_str(&row.0).unwrap().get_version_num(), 7);
         }
-    }
-
-    #[test]
-    fn cycle_same_name_distinct_keys_is_not_a_cycle() {
-        // Parity with horsies PR #33: distinct definition_keys are distinct
-        // workflows even if their names collide.
-        let ancestors = vec![ancestor("shared", Some("key_parent"))];
-        assert!(
-            subworkflow_cycle_ancestor(&ancestors, "shared", Some("key_child")).is_none(),
-            "same name + distinct keys must not be flagged as a cycle",
-        );
-    }
-
-    #[test]
-    fn cycle_same_key_is_detected() {
-        let ancestors = vec![ancestor("any_name", Some("key_a"))];
-        let hit = subworkflow_cycle_ancestor(&ancestors, "other_name", Some("key_a"));
-        assert!(hit.is_some(), "matching definition_key must be a cycle");
-    }
-
-    #[test]
-    fn cycle_missing_keys_falls_back_to_name() {
-        // Incomplete definitions (no key) still detect a cycle by name.
-        let ancestors = vec![ancestor("recursive", None)];
-        assert!(subworkflow_cycle_ancestor(&ancestors, "recursive", None).is_some());
-        // A keyed child against an unkeyed same-name ancestor also falls back.
-        assert!(subworkflow_cycle_ancestor(&ancestors, "recursive", Some("key_c")).is_some());
-    }
-
-    #[test]
-    fn cycle_distinct_name_and_key_is_not_a_cycle() {
-        let ancestors = vec![ancestor("parent", Some("key_p"))];
-        assert!(subworkflow_cycle_ancestor(&ancestors, "child", Some("key_c")).is_none());
     }
 
     #[test]
@@ -1199,13 +1419,20 @@ mod tests {
     fn build_child_spec_rejects_explicit_input_without_builder() {
         let registered = child_registered_static();
         let parent = SubWorkflowNode::<String, String>::typed("child_static")
+            .definition_key("tests.child_static.v1")
             .set_input("eu".to_owned())
             .unwrap()
             .into_any_node(0);
 
         let mut registry = WorkflowSpecRegistry::new();
         registry.register(registered).unwrap();
-        let err = build_child_spec("child_static", None, &parent, &registry).unwrap_err();
+        let err = build_child_spec(
+            "child_static",
+            parent.sub_definition_key.as_deref(),
+            &parent,
+            &registry,
+        )
+        .unwrap_err();
         match err {
             WorkflowError::Validation(message) => {
                 assert!(message.contains("received params from its parent"));

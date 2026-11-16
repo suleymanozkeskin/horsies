@@ -895,8 +895,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
              enqueued_at = NOW() - INTERVAL '7 minutes',
              started_at = NOW() - INTERVAL '6 minutes',
              created_at = NOW() - INTERVAL '7 minutes',
-             terminal_at = NOW() - INTERVAL '5 minutes',
-             retention_anchor_at = NOW() - INTERVAL '5 minutes'
+             terminal_at = NOW() - INTERVAL '5 minutes'
          WHERE task_id = $1",
     )
     .bind(outside_window.id)

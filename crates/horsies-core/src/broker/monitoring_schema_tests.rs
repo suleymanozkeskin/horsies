@@ -35,17 +35,23 @@ async fn assert_notification(listener: &mut PgListener, channel: &str, payload: 
 async fn seed_task(pool: &PgPool, task_id: Uuid, task_name: &str) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, args, kwargs, status,
-            sent_at, enqueued_at, claimed, is_workflow_task,
-            retry_count, max_retries, enqueue_sha,
-            command_fingerprint_version, command_fingerprint,
-            retention_class_key, retain_rerun_input,
-            prepared_rerun_input_disposition, created_at, updated_at
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, $2, 'default', 100, '[]', '{}', 'PENDING',
-            NOW(), NOW(), FALSE, FALSE, 0, 0, $1::text,
-            1, decode(repeat('07', 32), 'hex'), 'forever', FALSE,
-            'DECLINED_BY_POLICY', NOW(), NOW()
+            $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            1, decode(repeat('07', 32), 'hex'), NULL,
+            'PENDING', NOW(), NULL, NULL, NULL,
+            NULL, NULL, NULL,
+            NULL, NULL, NULL,
+            0, 0, NULL, NULL, FALSE,
+            NOW(), FALSE, NULL, NULL
         )",
     )
     .bind(task_id)
@@ -328,9 +334,65 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         .expect("clean W1 task");
 }
 
+/// Python `tests/integration/test_status_events.py`: a status change other
+/// than the start sends a `horsies_task_status` event; the start (to
+/// RUNNING) sends none.
 #[tokio::test]
 #[serial]
-async fn terminal_move_emits_task_done_without_a_monitoring_status_event() {
+async fn a_start_sends_no_status_event() {
+    let pool = migrated_pool().await;
+    let task_id = Uuid::new_v4();
+    let mut listener = PgListener::connect_with(&pool)
+        .await
+        .expect("connect status listener");
+    listener
+        .listen(TASK_STATUS_CHANNEL)
+        .await
+        .expect("listen status channel");
+
+    seed_task(&pool, task_id, "status_event_task").await;
+    assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
+
+    for (status, sends_event) in [("CLAIMED", true), ("RUNNING", false), ("PENDING", true)] {
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET status = $2,
+                 claim_expires_at = CASE WHEN $2 = 'CLAIMED'
+                     THEN NOW() + interval '1 minute' END
+             WHERE id = $1",
+        )
+        .bind(task_id)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .expect("change status");
+        match sends_event {
+            true => {
+                assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await
+            }
+            false => assert!(
+                timeout(Duration::from_millis(250), listener.recv())
+                    .await
+                    .is_err(),
+                "the start must send no status event"
+            ),
+        }
+    }
+
+    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("clean status event task");
+}
+
+/// Python `tests/integration/test_status_events.py::test_a_completion_sends_the_status_event`
+/// and the move notifications (`core/history/terminalization/move.py`): a
+/// terminal move sends `task_done`, then the `horsies_task_status` event, so
+/// the web app does not show a finished task as still live.
+#[tokio::test]
+#[serial]
+async fn a_terminal_move_sends_task_done_and_the_status_event() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
     let mut listener = PgListener::connect_with(&pool)
@@ -366,12 +428,7 @@ async fn terminal_move_emits_task_done_without_a_monitoring_status_event() {
         }]
     ));
     assert_notification(&mut listener, TASK_DONE_CHANNEL, &task_id.to_string()).await;
-    assert!(
-        timeout(Duration::from_millis(250), listener.recv())
-            .await
-            .is_err(),
-        "pinned Python emits no horsies_task_status event for a live-row delete"
-    );
+    assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
 
     let live_count: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(task_id)

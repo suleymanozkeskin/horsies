@@ -17,6 +17,7 @@ pub mod maintenance;
 pub mod names;
 pub mod outcomes;
 pub mod partitions;
+pub mod periods;
 pub mod phase2;
 pub mod reads;
 pub mod rerun;

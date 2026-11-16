@@ -10,7 +10,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::{TaskError, TaskResult};
-use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
+use crate::core::workflow::handle_types::{HandleOperationError, HandleResult};
 use crate::core::{OperationalErrorCode, RetrievalCode, WorkflowStatus};
 
 use crate::workflow_engine::error::WorkflowError;
@@ -191,19 +191,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     }
 
     fn wrap_error(&self, e: &WorkflowError) -> HandleOperationError {
-        let (code, retryable) = match &e {
-            WorkflowError::WorkflowNotFound { .. } => (HandleErrorCode::WorkflowNotFound, false),
-            WorkflowError::Database(_) | WorkflowError::Broker(_) => {
-                (HandleErrorCode::DbOperationFailed, true)
-            }
-            _ => (HandleErrorCode::InternalFailed, false),
-        };
-        HandleOperationError {
-            code,
-            message: e.to_string(),
-            retryable,
-            workflow_id: self.workflow_id.clone(),
-        }
+        crate::workflow_engine::lifecycle::handle_operation_error(e, self.workflow_id)
     }
 
     fn fold_task_result_error<V>(&self, e: &WorkflowError) -> TaskResult<V> {
@@ -304,7 +292,7 @@ mod tests {
 mod shared_listener_tests {
     //! P2: many concurrently-waiting `WorkflowHandle`s must share the broker's
     //! one process-wide listener, not pin a session-pool connection each. With
-    //! per-handle listeners, more handles than SESSION_POOL_MAX_CONNECTIONS(4)
+    //! per-handle listeners, more handles than the session pool holds
     //! exhaust the session pool and `get()` folds a broker error; the shared
     //! listener lets all of them time out cleanly instead.
     use super::*;

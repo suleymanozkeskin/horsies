@@ -1,11 +1,11 @@
 """The result surface resolves from history — the core promise kept.
 
 Terminalization deletes the live row, so a result wait that only
-polls `horsies_tasks` would never resolve for any task finishing
-after the cutover. These cases run on databases installed by the
-production migration chain, with history populated through the real
-relocation: the absent-live path resolves the terminal record from
-the staged detail read (digest verified over the exact stored bytes
+polls `horsies_tasks` would never resolve for any finished task.
+These cases run on databases installed by the production schema
+install, with history rows seeded through the shared history
+seeding: the absent-live path resolves the terminal record from the
+staged detail read (digest verified over the exact stored bytes
 before parsing); the ruled boundary — the row vanishing between the
 live status poll and the record fetch — falls through to the same
 resolution; a cancelled task resolves with no payload; and a
@@ -25,7 +25,7 @@ from typing import Any, cast
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 import horsies.core.brokers.postgres as broker_module
 from horsies.core.brokers.postgres import PostgresBroker
@@ -42,16 +42,8 @@ from horsies.core.history.reads.lookup_generation import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.history.cutover.tighten import (
-    TightenComplete,
-    confirmation_phrase,
-    tighten_to_frozen,
-)
-from tests.integration.test_task_history_relocation import (
-    install_program_state,
-    insert_legacy_task,
-    relocate_all,
-)
+from tests.integration.history_seeding import route_rows
+from tests.integration.test_monitoring_queries import ago, make_task
 from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
@@ -63,33 +55,59 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration]
 
 
-async def _populated_history(url: str) -> tuple[str, str]:
-    """A migrated, RELOCATED, TIGHTENED database — the state a 0.5.0
-    broker actually serves. History holds one COMPLETED and one
-    CANCELLED task, moved by the real relocation; the staged detail
-    function is valid only against the post-tighten live shape."""
+async def seed_history_task(
+    session: AsyncSession,
+    *,
+    status: TaskStatus,
+    result_json: str | None,
+    is_workflow_task: bool = False,
+    workflow_id: str | None = None,
+) -> str:
+    """Write one terminal ``legacy.task`` row to history; return its id.
+
+    The task was enqueued two hours and started one hour before now, by
+    ``legacy-worker`` on ``legacy-host``. ``result_json`` is the stored
+    result payload; ``workflow_id`` is the history row's workflow link.
+    """
+    task = make_task(
+        task_name='legacy.task',
+        status=status,
+        is_workflow_task=is_workflow_task,
+        worker_id='legacy-worker',
+        worker_hostname='legacy-host',
+        enqueued_at=ago(7200),
+        started_at=ago(3600),
+    )
+    await route_rows(session, (task,))
+    payload = result_json.encode() if result_json is not None else None
+    _ = await session.execute(
+        text(
+            'UPDATE horsies_task_history '
+            'SET result_payload = CAST(:payload AS bytea), '
+            'result_digest = sha256(CAST(:payload AS bytea)), '
+            'workflow_id = CAST(:workflow_id AS uuid) '
+            'WHERE task_id = CAST(:task_id AS uuid)'
+        ),
+        {'payload': payload, 'workflow_id': workflow_id, 'task_id': task.id},
+    )
+    await session.commit()
+    return task.id
+
+
+async def populated_history(url: str) -> tuple[str, str]:
+    """History holds one COMPLETED task with a result and one CANCELLED
+    task without one; the staged readers are published."""
     engine = create_async_engine(url)
     try:
-        async with engine.begin() as connection:
-            await install_program_state(connection)
-            completed = await insert_legacy_task(
-                connection,
-                status='COMPLETED',
-                kind='COMPLETE_LOCKED',
-                result='{"ok": {"value": 7}}',
+        async with AsyncSession(engine) as session:
+            completed = await seed_history_task(
+                session,
+                status=TaskStatus.COMPLETED,
+                result_json='{"ok": {"value": 7}}',
             )
-            cancelled = await insert_legacy_task(
-                connection, status='CANCELLED', kind=None
+            cancelled = await seed_history_task(
+                session, status=TaskStatus.CANCELLED, result_json=None
             )
-            await relocate_all(connection)
-            tightened = await tighten_to_frozen(
-                connection,
-                backup_label='fallback-test',
-                operator_confirmation=confirmation_phrase(
-                    'fallback-test'
-                ),
-            )
-            assert isinstance(tightened, TightenComplete), tightened
         return completed, cancelled
     finally:
         await engine.dispose()
@@ -153,7 +171,7 @@ class TestHistoryFallback:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, cancelled = await _populated_history(url)
+            completed, cancelled = await populated_history(url)
 
             outcome = await broker.get_raw_result_record_async(completed)
             assert not is_err(outcome), outcome
@@ -189,7 +207,7 @@ class TestHistoryFallback:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, _ = await _populated_history(url)
+            completed, _ = await populated_history(url)
             # The live probe runs only while the result function is not
             # published.
             await _drop_result_function(url)
@@ -205,7 +223,7 @@ class TestHistoryFallback:
                 broker_module,
                 'GET_TASK_RESULT_RECORD_SQL',
                 text(
-                    'SELECT task_name, status, result '
+                    'SELECT task_name, status, NULL::text AS result '
                     'FROM horsies_tasks WHERE FALSE'
                 ),
             )
@@ -248,7 +266,7 @@ class TestHistoryFallback:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, _ = await _populated_history(url)
+            completed, _ = await populated_history(url)
             engine = create_async_engine(url)
             try:
                 async with engine.begin() as connection:
@@ -288,7 +306,7 @@ class TestStagedResultReader:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, _ = await _populated_history(url)
+            completed, _ = await populated_history(url)
             warm = await broker.get_raw_result_record_async(completed)
             assert not is_err(warm), warm
 
@@ -314,7 +332,7 @@ class TestStagedResultReader:
         )
         try:
             await broker.ensure_schema_initialized()
-            await _populated_history(url)
+            await populated_history(url)
             task_id = str(uuid.uuid4())
             enqueued = await broker.enqueue_async(
                 'result.reader.task',
@@ -356,11 +374,11 @@ class TestStagedResultReader:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, _ = await _populated_history(url)
+            completed, _ = await populated_history(url)
             await _execute(
                 url,
                 render_staged_result_function(
-                    LookupManifest(leaves=(), birth_floor=None)
+                    LookupManifest(leaves=())
                 ),
             )
             engine = create_async_engine(url)
@@ -398,7 +416,7 @@ class TestStagedResultReader:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, _ = await _populated_history(url)
+            completed, _ = await populated_history(url)
             await _drop_result_function(url)
 
             outcome, statements = await _probe_statements(broker, completed)
@@ -424,7 +442,7 @@ class TestStagedResultReader:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, _ = await _populated_history(url)
+            completed, _ = await populated_history(url)
             warm = await broker.get_raw_result_record_async(completed)
             assert not is_err(warm), warm
             await _drop_result_function(url)
