@@ -225,14 +225,15 @@ exactly as that app configured it.
 
 Instead of migrating, the app reads the highest successful version in
 `horsies_migrations` at startup with a plain `SELECT`, caches the verdict for
-60 seconds, and re-reads lazily. There are four states.
+60 seconds, and re-reads lazily. There are five states.
 
 <!-- members: SchemaState -->
 | State | Condition | Reads | Actions | UI |
 |---|---|---|---|---|
 | `MATCH` | Stored version equals the version this build expects | Served | Permitted, subject to the auth policy | Normal |
 | `MISMATCH` | Stored version differs, older or newer | Served | Force-disabled server-side | Persistent read-only banner naming both versions |
-| `ABSENT` | A **successful** probe observed the `horsies_migrations` table or a successful row missing | — | Disabled | Full-screen state: the database has no horsies schema |
+| `ABSENT` | A **successful** probe found neither `horsies_migrations` nor `horsies_schema_version`, or no successful row in `horsies_migrations` | — | Disabled | Full-screen state: the database has no horsies schema |
+| `ZERO_X` | A **successful** probe observed a horsies 0.x schema: `horsies_schema_version` without `horsies_migrations` (Python 0.x), or a highest version below 1000 (horsies-rust 0.x) | — | Disabled | Full-screen state: the database holds a 0.x schema that this build does not read or upgrade |
 | `UNKNOWN` | The probe has **never** succeeded — connection failure with no prior verdict | — | Disabled | Full-screen state: the database cannot be reached to determine its schema |
 
 `/api/meta` reports the state in the field `schema_state`, with the values in
@@ -248,8 +249,8 @@ Two rules follow from that table:
 - A failed probe that has a prior verdict keeps that verdict until the cache
   expires and a read succeeds.
 
-`ABSENT` and `UNKNOWN` both stop the SPA at a full-screen state, so no read is
-issued from the dashboard.
+`ABSENT`, `ZERO_X` and `UNKNOWN` stop the SPA at a full-screen state, so no
+read is issued from the dashboard.
 
 While the schema does not match, every action endpoint returns 409
 `{"code": "SCHEMA_INCOMPATIBLE"}` regardless of the auth policy, and
@@ -260,7 +261,9 @@ own terms rather than being pre-emptively blocked.
 
 The remedy for `MISMATCH` is to upgrade horsies — workers apply migrations — or
 to run the UI version that matches the stored schema. The remedy for `ABSENT` is
-to start a horsies app or worker against that database.
+to start a horsies app or worker against that database. The remedy for `ZERO_X`
+is a new database: this release does not upgrade a 0.x database, so drain it and
+point the fleet and the monitoring app at a new one.
 
 ## Things to Avoid
 
