@@ -2073,7 +2073,7 @@ class TestPingWorkers:
 _STALE_STARTED_AT = datetime(2025, 1, 1, tzinfo=timezone.utc)
 _STALE_DB_NOW = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
 _CRASH_RETRY_OPTIONS = (
-    '{"retry_policy": {"max_retries": 2, "intervals": [60], '
+    '{"retry_policy": {"max_retries": 2, "intervals": [60, 60], '
     '"backoff_strategy": "fixed", "jitter": false, '
     '"auto_retry_for": ["WORKER_CRASHED"]}}'
 )

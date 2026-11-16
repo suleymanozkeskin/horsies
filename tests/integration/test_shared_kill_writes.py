@@ -65,7 +65,7 @@ def _options(auto_retry_for: list[str]) -> str:
         {
             'retry_policy': {
                 'max_retries': 3,
-                'intervals': [1],
+                'intervals': [1, 1, 1],
                 'backoff_strategy': 'fixed',
                 'jitter': False,
                 'auto_retry_for': auto_retry_for,

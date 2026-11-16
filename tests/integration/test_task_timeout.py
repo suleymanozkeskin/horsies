@@ -321,7 +321,7 @@ async def test_timeout_retries_when_opted_in(
         {
             'retry_policy': {
                 'max_retries': 3,
-                'intervals': [1],
+                'intervals': [1, 1, 1],
                 'backoff_strategy': 'fixed',
                 'jitter': False,
                 'auto_retry_for': ['TASK_TIMEOUT'],

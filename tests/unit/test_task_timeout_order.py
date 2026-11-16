@@ -102,6 +102,7 @@ _STATEMENT_NAMES: dict[int, str] = {
 _TIMEOUT_RETRY_OPTIONS = json.dumps(
     {
         'retry_policy': {
+            'max_retries': 1,
             'auto_retry_for': [OutcomeCode.TASK_TIMEOUT.value],
             'intervals': [30],
             'backoff_strategy': 'fixed',

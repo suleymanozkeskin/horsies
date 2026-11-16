@@ -115,7 +115,7 @@ def _shared_async_work(task_options: object, timeout: StoredTimeout) -> SeatWork
     and grace, or the refusal of the first one that the worker cannot use.
 
     ``task_options`` is the stored column as the claim returns it, and
-    ``timeout`` is ``read_stored_timeout`` of it. A row with no stored
+    ``timeout`` is ``read_claimed_options`` of it. A row with no stored
     timeout is refused with ``TimeoutValueInvalid``: the class needs one.
     """
     match timeout:
@@ -144,7 +144,7 @@ def _shared_thread_work(timeout: StoredTimeout) -> ThreadSeatWork:
     """The work of a ``SHARED_THREAD`` row: the task with its stored
     timeout, or the refusal of a timeout that the worker cannot use.
 
-    ``timeout`` is ``read_stored_timeout`` of the stored column. A row with
+    ``timeout`` is ``read_claimed_options`` of the stored column. A row with
     no stored timeout is refused with ``TimeoutValueInvalid``: the class
     needs one.
     """
@@ -203,7 +203,7 @@ def dispatch_route(
     """The kind of child that runs a claimed row of class ``execution``.
 
     ``task_options`` is the stored column as the claim returns it (text, or
-    None), and ``timeout`` is ``read_stored_timeout`` of it. The claim reads
+    None), and ``timeout`` is ``read_claimed_options`` of it. The claim reads
     only classes that ``plan`` serves, so a class that it does not serve is
     a defect: ``AssertionError``.
     """

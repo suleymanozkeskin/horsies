@@ -102,6 +102,7 @@ async def _running(session: AsyncSession, *, retry_code: str | None) -> Case:
                 'options': json.dumps(
                     {
                         'retry_policy': {
+                            'max_retries': 1,
                             'auto_retry_for': [retry_code],
                             'intervals': [600],
                             'backoff_strategy': 'fixed',
