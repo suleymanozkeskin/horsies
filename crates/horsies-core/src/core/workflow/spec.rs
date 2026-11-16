@@ -994,11 +994,19 @@ mod tests {
     }
 
     #[test]
-    fn e019_kwargs_must_be_object() {
+    fn e019_input_must_be_one_json_value() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(TaskNode::<()>::raw("a").kwargs("[1, 2, 3]"));
+        b.task(TaskNode::<()>::raw("a").input_json("[1, 2"));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    }
+
+    #[test]
+    fn a_non_object_input_without_injected_members_is_accepted() {
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.task(TaskNode::<()>::raw("a").input_json("[1, 2, 3]"));
+        let spec = b.build().unwrap();
+        assert_eq!(spec.tasks[0].input_json.as_deref(), Some("[1, 2, 3]"));
     }
 
     #[test]
