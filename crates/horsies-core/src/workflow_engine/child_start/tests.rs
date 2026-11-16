@@ -427,6 +427,8 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     merged.sources = vec![ChildStartSource {
         task_index: 0,
         status: "COMPLETED".to_owned(),
+        task_name: "source_task".to_owned(),
+        definition_key: None,
         result: Some(r#"{"__h_task_result__":true,"ok":7,"err":null}"#.to_owned()),
     }];
 

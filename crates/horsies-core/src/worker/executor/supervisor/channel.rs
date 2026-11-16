@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -301,9 +302,30 @@ enum Observed {
 
 /// Whether the worker killed this child on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KillMark {
+pub(crate) enum KillMark {
     NotKilled,
     KilledByParent,
+}
+
+/// The mark of a kill by the worker, shared by the channel of one child and
+/// the runner heartbeat watchdog. The watchdog marks a child before it kills
+/// it, so the slot reads the loss as a kill by the worker (Python
+/// `register_kill_mark`, `run_kill_mark`).
+#[derive(Debug, Clone, Default)]
+pub struct WorkerKillMark(Arc<AtomicBool>);
+
+impl WorkerKillMark {
+    /// Record that the worker kills this child.
+    pub fn mark(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn read(&self) -> KillMark {
+        match self.0.load(Ordering::SeqCst) {
+            true => KillMark::KilledByParent,
+            false => KillMark::NotKilled,
+        }
+    }
 }
 
 /// The parent side of one child.
@@ -315,7 +337,7 @@ pub struct ChildChannel {
     reader_task: JoinHandle<()>,
     exit: watch::Receiver<ExitState>,
     spawner: SpawnerHandle,
-    kill_mark: KillMark,
+    kill_mark: WorkerKillMark,
 }
 
 impl ChildChannel {
@@ -350,7 +372,7 @@ impl ChildChannel {
             reader_task,
             exit: spawned.exit,
             spawner,
-            kill_mark: KillMark::NotKilled,
+            kill_mark: WorkerKillMark::default(),
         })
     }
 
@@ -362,6 +384,11 @@ impl ChildChannel {
         self.pid
     }
 
+    /// The kill mark of this child, for the runner heartbeat registry.
+    pub fn kill_mark(&self) -> WorkerKillMark {
+        self.kill_mark.clone()
+    }
+
     /// The process state of the child, for the runner heartbeat: it beats
     /// only children that run.
     pub fn exit_watch(&self) -> watch::Receiver<ExitState> {
@@ -370,6 +397,12 @@ impl ChildChannel {
 
     pub fn has_exited(&self) -> bool {
         *self.exit.borrow() != ExitState::Running
+    }
+
+    /// Whether the reader ended: EOF, a failed read, or a violation. A child
+    /// whose channel closed can never report a result.
+    pub fn channel_closed(&self) -> bool {
+        matches!(self.shared.lock().phase, ReaderPhase::Ended(_))
     }
 
     /// Send one frame, bounded by [`FRAME_WRITE_BOUND`]. A body up to
@@ -490,7 +523,7 @@ impl ChildChannel {
                 }
                 let _ = self.kill_group().await;
                 let exit = self.wait_exit(CHILD_KILL_WAIT).await;
-                let cause = match self.kill_mark {
+                let cause = match self.kill_mark.read() {
                     KillMark::KilledByParent => LossCause::KilledByParent,
                     KillMark::NotKilled => LossCause::ChannelLost,
                 };
@@ -503,7 +536,7 @@ impl ChildChannel {
     /// parent, a channel lost with a live child, a death.
     fn loss_cause(&self) -> LossCause {
         let phase = self.shared.lock().phase.clone();
-        match (phase, self.kill_mark, self.has_exited()) {
+        match (phase, self.kill_mark.read(), self.has_exited()) {
             (ReaderPhase::Ended(ReaderEnd::Violation(violation)), _, _) => violation.loss_cause(),
             (_, KillMark::KilledByParent, _) => LossCause::KilledByParent,
             (
@@ -545,7 +578,7 @@ impl ChildChannel {
 
     /// Kill on the caller's request, and report the loss as such.
     pub async fn kill_for_caller(&mut self) -> KillOutcome {
-        self.kill_mark = KillMark::KilledByParent;
+        self.kill_mark.mark();
         self.kill_group().await
     }
 
