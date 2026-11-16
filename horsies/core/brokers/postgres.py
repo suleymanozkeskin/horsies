@@ -146,6 +146,7 @@ from horsies.core.baseline.migration import (
 )
 from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
 from horsies.core.utils.db import (
+    autocommit_connection,
     is_retryable_connection_error,
     SessionSettings,
     register_identity_text_reads,
@@ -802,50 +803,20 @@ GET_TASK_STATUS_NAME_SQL = text("""
 # Sentinel returned by _probe_result_row while the row is non-terminal.
 _STILL_WAITING = object()
 
-REQUEUE_STALE_CLAIMED_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'PENDING',
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = NOW()
-    FROM (
-        -- Staleness predicate sits inside the locking subquery so only
-        -- genuinely stale rows are row-locked; locking every CLAIMED row
-        -- stalled concurrent lease renewals and made the claim path skip
-        -- reclaimable rows for the duration of this scan.
-        SELECT t2.id
-        FROM horsies_tasks t2
-        LEFT JOIN LATERAL (
-            SELECT sent_at AS last_heartbeat
-            FROM horsies_heartbeats h
-            WHERE h.task_id = t2.id AND h.role = 'claimer'
-            ORDER BY sent_at DESC
-            LIMIT 1
-        ) hb ON TRUE
-        WHERE t2.status = 'CLAIMED'
-          AND (
-            (hb.last_heartbeat IS NULL AND t2.claimed_at IS NOT NULL AND t2.claimed_at < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-            OR (hb.last_heartbeat IS NOT NULL AND hb.last_heartbeat < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL))
-          )
-          -- Never requeue an orphaned workflow task (no workflow_task row in a
-          -- runnable status): re-dispatch can only fail WORKFLOW_CHECK_FAILED
-          -- again, so requeuing is the churn engine. Orphans are cancelled by
-          -- terminate_orphaned_workflow_tasks instead.
-          AND NOT (
-              t2.is_workflow_task = TRUE
-              AND NOT EXISTS (
-                  SELECT 1 FROM horsies_workflow_tasks wt
-                  WHERE wt.task_id = t2.id
-                    AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-              )
-          )
-        FOR UPDATE OF t2 SKIP LOCKED
-    ) s
-    WHERE t.id = s.id
+# One bounded batch of the stale CLAIMED requeue, one statement in autocommit.
+# The function requeues a CLAIMED row with no claimer beat newer than the
+# threshold that was claimed longer ago than the threshold, skips a workflow
+# task with no runnable node and rows another transaction holds, and returns
+# the number of rows it requeued.
+REQUEUE_STALE_CLAIMS_SQL = text("""
+    SELECT horsies_requeue_stale_claims(
+        CAST(:stale_after_ms AS INTEGER), CAST(:batch_size AS INTEGER)
+    )
 """)
+
+REQUEUE_STALE_CLAIMS_BATCH_SIZE: Final = 500
+REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS: Final = 200
+"""Backstop against an unbounded pass; the remainder is requeued next pass."""
 
 # One constant statement for every fresh enqueue. The PostgreSQL dialect
 # Insert construct carries `inherit_cache = False` (SQLAlchemy 2.0.51), so
@@ -3506,28 +3477,52 @@ class PostgresBroker:
         self,
         stale_threshold_ms: int = 120_000,
     ) -> BrokerResult[int]:
-        """Requeue tasks stuck in CLAIMED without recent claimer heartbeat."""
+        """Requeue CLAIMED rows whose worker stopped beating, in bounded batches.
+
+        Each batch is one ``horsies_requeue_stale_claims`` statement in
+        autocommit: a row with no claimer beat newer than the threshold, and
+        claimed longer ago than the threshold, goes back to PENDING (a
+        workflow task with no runnable node stays). Batches repeat until one
+        is short, at most ``REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS``
+        times; past that the remainder waits for the next pass and a warning
+        is logged. Returns the number of rows requeued. A failure reports
+        ``CLEANUP_FAILED``; the batches before it committed.
+        """
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('requeue_stale_claimed', loop_limit)
             case Ok(resources):
                 pass
+        total_requeued = 0
         try:
-            stale_threshold_seconds = stale_threshold_ms / 1000.0
-
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    REQUEUE_STALE_CLAIMED_SQL,
-                    {'stale_threshold': stale_threshold_seconds},
-                )
-                await session.commit()
-                return Ok(getattr(result, 'rowcount', 0))
+                connection = await autocommit_connection(session)
+                for _ in range(REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS):
+                    requeued = (
+                        await connection.execute(
+                            REQUEUE_STALE_CLAIMS_SQL,
+                            {
+                                'stale_after_ms': stale_threshold_ms,
+                                'batch_size': REQUEUE_STALE_CLAIMS_BATCH_SIZE,
+                            },
+                        )
+                    ).scalar_one()
+                    total_requeued += requeued
+                    if requeued < REQUEUE_STALE_CLAIMS_BATCH_SIZE:
+                        return Ok(total_requeued)
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
-                f'requeue_stale_claimed failed: {exc}',
+                f'requeue_stale_claimed failed after requeueing '
+                f'{total_requeued} task(s): {exc}',
                 exc,
             )
+        self.logger.warning(
+            'requeue_stale_claimed reached the per-pass batch cap after '
+            'requeueing %s task(s); the remainder is requeued next pass',
+            total_requeued,
+        )
+        return Ok(total_requeued)
 
     async def audit_orphaned_workflow_tasks(
         self,
