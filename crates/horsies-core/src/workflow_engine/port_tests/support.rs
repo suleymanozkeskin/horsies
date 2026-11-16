@@ -822,7 +822,7 @@ pub(super) async fn finish_node(
 
 /// A failure outcome with a user error code.
 pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Value> {
-    TaskResult::Err(TaskError::new(error_code, message))
+    TaskResult::Err(TaskError::new(error_code, message).expect("a user error code"))
 }
 
 /// A success outcome with `value`.
