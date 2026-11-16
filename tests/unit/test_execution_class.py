@@ -55,6 +55,7 @@ from horsies.core.task_decorator import (
 )
 from horsies.core.types.result import Err, Ok
 from horsies.monitoring.models import TaskDetail
+from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
@@ -728,7 +729,6 @@ class TestEveryInsertPathWritesTheColumn:
                     'execution' if 'execution' in columns else 'MISSING',
                 )
         assert found == {
-            'core/brokers/postgres.py': ['execution'],
             'core/history/rerun/operations.py': ['execution'],
             'core/workflows/sql.py': ['execution'],
         }
@@ -736,18 +736,11 @@ class TestEveryInsertPathWritesTheColumn:
 
 class TestMigrationText:
     def test_the_check_domain_is_the_enum(self) -> None:
-        from horsies.core.schemas.migrations import ADD_TASK_EXECUTION_CHECK_SQL
+        """The task table and the task facts of a workflow node check the
+        class against the same domain."""
+        domain = ', '.join(f"'{member.value}'" for member in Execution)
 
-        expected = "('ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD')"
-        assert ADD_TASK_EXECUTION_CHECK_SQL.text.count(expected) == 2
-
-    def test_the_column_default_is_isolated(self) -> None:
-        from horsies.core.schemas.migrations import ADD_TASK_EXECUTION_COLUMN_SQL
-
-        assert (
-            "ADD COLUMN IF NOT EXISTS execution TEXT NOT NULL DEFAULT 'ISOLATED'"
-            in ADD_TASK_EXECUTION_COLUMN_SQL.text
-        )
+        assert baseline_sql().count(f'execution IN ({domain})') == 2
 
     def test_the_model_column_matches_the_baseline(self) -> None:
         """The baseline table has no database defaults: every insert names
@@ -757,20 +750,26 @@ class TestMigrationText:
         assert str(column.type) == 'TEXT'
         assert column.server_default is None
 
-    def test_the_claim_indexes_have_the_class_as_their_second_key(self) -> None:
-        from horsies.core.schemas.recovery import CLAIM_INDEXES
+    @pytest.mark.parametrize(
+        ('name', 'status'),
+        [
+            ('horsies_tasks_claim_pending', 'PENDING'),
+            ('horsies_tasks_claim_expired_order', 'CLAIMED'),
+        ],
+    )
+    def test_the_claim_indexes_have_the_class_as_their_second_key(
+        self,
+        name: str,
+        status: str,
+    ) -> None:
+        index = (
+            f'CREATE INDEX {name}\n'
+            '    ON horsies_tasks USING btree '
+            '(queue_name, execution, priority, enqueued_at, id)\n'
+            f"    WHERE status = '{status}';"
+        )
 
-        pending, expired = CLAIM_INDEXES
-        assert pending.name == 'idx_horsies_tasks_claim_pending_class'
-        assert "WHERE status = 'PENDING'" in pending.create_sql
-        assert expired.name == 'idx_horsies_tasks_claim_expired_class'
-        assert "WHERE status = 'CLAIMED'" in expired.create_sql
-        for index in CLAIM_INDEXES:
-            assert (
-                '(queue_name, execution, priority, enqueued_at, id)'
-                in index.create_sql
-            )
-            assert index.create_sql.startswith('CREATE INDEX CONCURRENTLY ')
+        assert index in baseline_sql()
 
 
 class TestMonitoringDetail:

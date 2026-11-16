@@ -164,7 +164,6 @@ class FinalizeNoOpReason(Enum):
     """
 
     CLAIM_LOST = 'CLAIM_LOST'
-    OWNERSHIP_UNCONFIRMED = 'OWNERSHIP_UNCONFIRMED'
     WORKFLOW_STOPPED = 'WORKFLOW_STOPPED'
     EXPIRED_PLAIN_TASK = 'EXPIRED_PLAIN_TASK'
     ORPHAN_SELF_HEAL_DISABLED = 'ORPHAN_SELF_HEAL_DISABLED'
@@ -204,11 +203,28 @@ class ApplyTerminalization:
     command: TerminalizationCommand
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseUnconfirmedClaim:
+    """The child did not confirm the start, and no task code ran.
+
+    The RUNNING write raised (a database error, or its bound cancelled it),
+    or a resume refused the abandon on each start attempt. The parent
+    releases the claim at once with the fenced release: the row goes back to
+    the queue only while it is CLAIMED by this worker at ``claimed_at``. A
+    row outside that fence, for example a start that committed before its
+    reply was lost, is left to recovery.
+    """
+
+    task_id: str
+    claimed_at: datetime
+
+
 type FinalizeDecision = (
     NoTerminalAction
     | ScheduleAutomaticRetry
     | ReplayWorkflowPhase2
     | ApplyTerminalization
+    | ReleaseUnconfirmedClaim
 )
 
 
@@ -227,8 +243,8 @@ def classify(report: ChildReport, context: FinalizeContext) -> FinalizeDecision:
         case ResultUndecodable(detail=detail):
             return ApplyTerminalization(_undecodable_command(detail, context))
         case ErrorProduced(error=error):
-            if _is_workflow_stopped(error):
-                return NoTerminalAction(reason=FinalizeNoOpReason.WORKFLOW_STOPPED)
+            # No task error carries WORKFLOW_STOPPED (RESERVED_NON_TASK_CODES):
+            # a stop travels only as the abort reason, before the task ran.
             return ScheduleAutomaticRetry(task_id=context.task_id, error=error)
         case ResultProduced():
             return ApplyTerminalization(_success_command(context))
@@ -265,8 +281,9 @@ def _classify_abort(
         case AbortReason.CLAIM_LOST:
             return NoTerminalAction(reason=FinalizeNoOpReason.CLAIM_LOST)
         case AbortReason.OWNERSHIP_UNCONFIRMED:
-            return NoTerminalAction(
-                reason=FinalizeNoOpReason.OWNERSHIP_UNCONFIRMED,
+            return ReleaseUnconfirmedClaim(
+                task_id=context.task_id,
+                claimed_at=context.claimed_at,
             )
         case AbortReason.WORKFLOW_STOPPED:
             return NoTerminalAction(reason=FinalizeNoOpReason.WORKFLOW_STOPPED)
@@ -367,11 +384,6 @@ def _undecodable_command(
         error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
         failed_reason=None,
     )
-
-
-def _is_workflow_stopped(error: TaskError) -> bool:
-    """The workflow-stop sentinel also travels inside a decoded payload."""
-    return _error_code_of(error) == _WORKFLOW_STOPPED
 
 
 def _error_code_of(error: TaskError) -> str:

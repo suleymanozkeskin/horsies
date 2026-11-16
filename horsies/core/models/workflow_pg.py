@@ -224,6 +224,11 @@ class WorkflowTaskModel(Base):
         String(9), nullable=True
     )
 
+    # REACHABLE when a sub-workflow node is reachable below this node along
+    # the dependency edges, NONE otherwise; written at start from the static
+    # graph (horsies_workflow_tasks_downstream_subworkflow_known).
+    downstream_subworkflow: Mapped[str] = mapped_column(String(9), nullable=False)
+
     # Summary of subworkflow execution (serialized SubWorkflowSummary)
     sub_workflow_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

@@ -8,8 +8,8 @@ or `EXPIRED` must use the lifecycle boundary:
 1. Define or extend an exhaustive command in
    `horsies/core/lifecycle/commands.py`.
 2. Execute it through `horsies/core/lifecycle/persistence.py`.
-3. Define the database mutation only in
-   `horsies/core/schemas/terminalization.py`.
+3. Define the database mutation only in the baseline SQL functions
+   (`horsies/core/baseline/sql/`).
 4. Return a typed outcome. Expected race outcomes are data, not exceptions or
    row-count interpretation.
 5. Add the operation to the lifecycle matrix and exercise its applied,

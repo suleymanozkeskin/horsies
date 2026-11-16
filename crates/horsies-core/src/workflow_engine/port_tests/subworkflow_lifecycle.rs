@@ -66,11 +66,11 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
 async fn recovery_pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> u64 {
     let phase2 = drive_phase2_recovery(
         pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
         0,
         GLOBAL_SCAN_ROW_CAP,
         QUARANTINE_AFTER_ATTEMPTS,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -589,14 +589,11 @@ async fn a_child_task_that_spends_its_retries_fails_the_parent() {
             FailedAttempt::Ended { result_json } => ended = Some(result_json),
         }
     }
-    let result_json = ended.expect("the retries end");
+    let _ = ended.expect("the retries end");
     on_workflow_task_complete(
-        &pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &result_json,
-        false,
         &registry,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

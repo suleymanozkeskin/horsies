@@ -739,11 +739,12 @@ INSERT INTO horsies_workflows (
 INSERT INTO horsies_workflow_tasks (
     id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
     workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-    good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-    sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at, completed_at
+    good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+    sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at,
+    started_at, completed_at
 ) VALUES (
     gen_random_uuid(), '00000000-0000-4000-8000-0000000000f1', 3, 'node_3', 'app.live', '{}', 'default', 50, '{}',
-    NULL, NULL, FALSE, 'all', NULL, NULL, 3, 'SHARED_ASYNC', NULL, 'forever', 'RUNNING',
+    NULL, NULL, FALSE, 'all', NULL, NULL, 3, 'SHARED_ASYNC', NULL, 'forever', 'NONE', 'RUNNING',
     '00000000-0000-4000-8000-0000000000c1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL, now(), now(), NULL
 );
 
