@@ -586,6 +586,10 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .unwrap();
     assert_eq!(live_info.task_id, live);
     assert_eq!(live_info.status, TaskStatus::Pending);
+    assert_eq!(
+        live_info.execution,
+        crate::core::ExecutionClass::Live(crate::core::Execution::Isolated)
+    );
     let live_attempts = live_info.attempts.unwrap();
     assert_eq!(live_attempts.len(), 1);
     assert_eq!(
@@ -1037,7 +1041,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert_eq!(
         raw.raw_result,
         Some(
-            serde_json::json!({"__type": "ok", "value": {"value": 7}})
+            serde_json::json!({"__h_task_result__": true, "ok": {"value": 7}, "err": null})
                 .as_object()
                 .unwrap()
                 .clone()
@@ -1049,6 +1053,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .unwrap();
     assert_eq!(info.status, TaskStatus::Completed);
+    assert_eq!(
+        info.execution,
+        crate::core::ExecutionClass::NotKeptInHistory
+    );
     let attempts = info.attempts.unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].task_id, completed);
@@ -1077,7 +1085,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(failed_error.error_code, expected_error.error_code);
     assert_eq!(failed_error.message, expected_error.message);
-    assert_eq!(failed_error.cause, None);
+    assert_eq!(failed_error.exception, None);
     assert_eq!(failed_error.data, None);
 
     let (expired, _) = seed_source(&pool, TerminalSource::Expired, false, None).await;
@@ -1095,7 +1103,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(expired_error.error_code, expected_error.error_code);
     assert_eq!(expired_error.message, expected_error.message);
-    assert_eq!(expired_error.cause, None);
+    assert_eq!(expired_error.exception, None);
     assert_eq!(expired_error.data, None);
 
     let (cancelled, _) = seed_source(&pool, TerminalSource::Cancelled, false, None).await;
