@@ -141,6 +141,140 @@ mod tests {
         assert_wire_values::<TaskAbsenceReason>(|reason| reason.as_str().to_owned());
     }
 
+    /// The core catalog holds exactly `python`, the members of the Python
+    /// catalog of the same name, in Python's order.
+    fn assert_python_members<E: CodeEnum>(python: &[&str]) {
+        let core: Vec<&str> = E::CATALOG
+            .members
+            .iter()
+            .map(|member| member.value)
+            .collect();
+        assert_eq!(core, python, "{}", E::CATALOG.python_class);
+    }
+
+    #[test]
+    fn broker_send_start_and_monitoring_catalogs_equal_python_s() {
+        // horsies/core/brokers/result_types.py
+        assert_python_members::<BrokerErrorCode>(&[
+            "SCHEMA_INIT_FAILED",
+            "ENQUEUE_FAILED",
+            "PAYLOAD_MISMATCH",
+            "IDEMPOTENCY_KEY_CONFLICT",
+            "TASK_INFO_QUERY_FAILED",
+            "MONITORING_QUERY_FAILED",
+            "DB_PING_FAILED",
+            "WORKER_PING_FAILED",
+            "CLEANUP_FAILED",
+            "CLOSE_FAILED",
+            "LISTENER_START_FAILED",
+            "LISTENER_SUBSCRIBE_FAILED",
+            "NO_BROKER",
+            "NO_TYPE_AVAILABLE",
+            "INVALID_JSON_PAYLOAD",
+            "INVALID_TASK_OPTIONS",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+            "LOOP_RUNNER_FAILED",
+            "INVALID_INPUT",
+            "LISTENER_DISABLED",
+            "WAIT_INSIDE_TASK",
+        ]);
+        // horsies/core/models/task_send_types.py
+        assert_python_members::<TaskSendErrorCode>(&[
+            "SEND_SUPPRESSED",
+            "ASYNC_CONTEXT",
+            "VALIDATION_FAILED",
+            "ENQUEUE_FAILED",
+            "PAYLOAD_MISMATCH",
+            "IDEMPOTENCY_KEY_CONFLICT",
+            "PAYLOAD_TOO_LARGE",
+            "EVENT_LOOP_LIMIT",
+            "LOOP_RUNNER_FAILED",
+        ]);
+        // horsies/core/workflows/start_types.py
+        assert_python_members::<WorkflowStartErrorCode>(&[
+            "BROKER_NOT_CONFIGURED",
+            "VALIDATION_FAILED",
+            "WORKFLOW_ID_CONFLICT",
+            "ENQUEUE_FAILED",
+            "LOOP_RUNNER_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+        ]);
+        // horsies/monitoring/errors.py
+        assert_python_members::<MonitoringQueryErrorCode>(&[
+            "DB_OPERATION_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "HISTORY_CONTRACT_VIOLATION",
+        ]);
+        // horsies/monitoring/task_actions.py
+        assert_python_members::<TaskActionErrorCode>(&[
+            "TASK_NOT_FOUND",
+            "TASK_NOT_CANCELLABLE",
+            "TASK_IS_WORKFLOW_TASK",
+            "DB_OPERATION_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "STORED_DATA_INVALID",
+        ]);
+    }
+
+    #[test]
+    fn status_and_absence_catalogs_equal_python_s() {
+        // horsies/core/types/status.py
+        assert_python_members::<TaskStatus>(&[
+            "PENDING",
+            "CLAIMED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+            "EXPIRED",
+        ]);
+        assert_python_members::<TaskAttemptOutcome>(&["COMPLETED", "FAILED", "WORKER_FAILURE"]);
+        // horsies/core/models/workflow/enums.py
+        assert_python_members::<WorkflowStatus>(&[
+            "PENDING",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "PAUSED",
+            "CANCELLED",
+            "EXPIRED",
+        ]);
+        assert_python_members::<WorkflowTaskStatus>(&[
+            "PENDING",
+            "READY",
+            "ENQUEUED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "SKIPPED",
+        ]);
+        // horsies/core/history/reads/detail.py
+        assert_python_members::<TaskAbsenceReason>(&[
+            "PREDATES_RETAINED_HISTORY",
+            "WITHIN_RETAINED_HISTORY",
+            "NOT_CLASSIFIED",
+        ]);
+    }
+
+    #[test]
+    fn the_handle_catalog_is_python_s_plus_internal_failed() {
+        // horsies/core/models/workflow/handle_types.py, then the one member
+        // that Python does not have: the workflow engine still folds some
+        // errors into INTERNAL_FAILED.
+        assert_python_members::<HandleErrorCode>(&[
+            "WORKFLOW_NOT_FOUND",
+            "DB_OPERATION_FAILED",
+            "STORED_DATA_INVALID",
+            "RESUME_RECOVERY_FAILED",
+            "LOOP_RUNNER_FAILED",
+            "EVENT_LOOP_LIMIT",
+            "ASYNC_CONTEXT",
+            "INTERNAL_FAILED",
+        ]);
+    }
+
     #[test]
     fn class_names_are_unique_and_values_are_unique_per_class() {
         let mut classes = HashSet::new();
