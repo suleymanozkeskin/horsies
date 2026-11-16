@@ -33,6 +33,19 @@ struct ReservationRow {
     observed_fingerprint_version: Option<i16>,
 }
 
+/// The key reservation claim: `$1` key digest, `$2` key scope version, `$3`
+/// reservation window in seconds, `$4` fingerprint version, `$5`
+/// fingerprint, `$6` task id. One row: `outcome`, `task_id`,
+/// `observed_fingerprint_version`.
+pub(crate) fn key_reservation_claim_sql() -> String {
+    format!(
+        "SELECT outcome, task_id, observed_fingerprint_version
+         FROM {KEY_RESERVATION_CLAIM_FUNCTION}(
+             $1, $2, make_interval(secs => $3::double precision), $4, $5, $6
+         )"
+    )
+}
+
 pub async fn claim_key_reservation(
     connection: &mut PgConnection,
     key_digest: &[u8],
@@ -42,12 +55,7 @@ pub async fn claim_key_reservation(
     fingerprint: &[u8],
     task_id: Uuid,
 ) -> Result<ReservationClaim, HistoryError> {
-    let claim_sql = format!(
-        "SELECT outcome, task_id, observed_fingerprint_version
-         FROM {KEY_RESERVATION_CLAIM_FUNCTION}(
-             $1, $2, make_interval(secs => $3::double precision), $4, $5, $6
-         )"
-    );
+    let claim_sql = key_reservation_claim_sql();
     let row: ReservationRow = sqlx::query_as(&claim_sql)
         .bind(key_digest)
         .bind(key_scope_version)
@@ -137,7 +145,8 @@ pub async fn cleanup_expired_reservations_pass(
     Ok(ReservationCleanupPass::Truncated { deleted })
 }
 
-fn decode_reservation_row(
+/// The claim outcome of one reservation row. Pure.
+pub(crate) fn decode_reservation_row(
     outcome: Option<&str>,
     task_id: Option<Uuid>,
     observed_fingerprint_version: Option<i16>,

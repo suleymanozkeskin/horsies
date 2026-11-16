@@ -120,8 +120,6 @@ def _complete(task_id: str, claimed_at: datetime) -> CompleteTaskFused:
         task_id=task_id,
         fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
         result_json=ok_result_json(),
-        notify_channel=CHANNEL,
-        notify_payload=f'capacity:{task_id}',
     )
 
 
@@ -294,7 +292,7 @@ async def test_an_applied_completion_commits_its_rows_and_its_wake(
     assert await _live_row(session, task_id) is None
     assert await _history_rows(session, task_id) == 1
     assert await _attempt_count(session, task_id) == 1
-    assert await _payloads_until_sentinel(listener, session) == [f'capacity:{task_id}']
+    assert await _payloads_until_sentinel(listener, session) == ['capacity']
 
 
 async def test_a_replay_is_already_applied_and_writes_nothing(
@@ -306,7 +304,7 @@ async def test_a_replay_is_already_applied_and_writes_nothing(
     task_id, claimed_at = await insert_task(session, status='RUNNING')
     command = _complete(task_id, claimed_at)
     assert isinstance(await apply_in_autocommit(direct.worker.sf, command), Applied)
-    assert await _payloads_until_sentinel(listener, session) == [f'capacity:{task_id}']
+    assert await _payloads_until_sentinel(listener, session) == ['capacity']
 
     replay = await apply_in_autocommit(direct.worker.sf, command)
 

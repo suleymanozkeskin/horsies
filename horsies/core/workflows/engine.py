@@ -111,8 +111,8 @@ from horsies.core.workflows.sql import (
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
-    SUBWORKFLOW_NODE_FACT_PARAMS,
-    task_node_fact_params,
+    subworkflow_node_kind_params,
+    task_node_kind_params,
     task_node_facts,
     workflow_task_row_params,
 )
@@ -1249,7 +1249,10 @@ async def enqueue_subworkflow_task(
     # its task options. Task options that do not parse are a defect (they
     # come from the task function) and raise SerializationError before any
     # INSERT; the caller's transaction rolls back.
-    from horsies.core.workflows.lifecycle import start_task_node_facts
+    from horsies.core.workflows.lifecycle import (
+        start_task_node_facts,
+        subworkflow_params_of,
+    )
 
     child_node_params: list[dict[str, Any]] = []
     child_root_task_params: list[dict[str, Any]] = []
@@ -1318,7 +1321,7 @@ async def enqueue_subworkflow_task(
                 'join_type': child_sub.join,
                 'min_success': child_sub.min_success,
                 'task_options': None,
-                **SUBWORKFLOW_NODE_FACT_PARAMS,
+                **subworkflow_node_kind_params(subworkflow_params_of(child_sub)),
                 'status': 'PENDING' if child_dep_indices else 'READY',
                 'is_subworkflow': True,
                 'sub_wf_name': child_sub.workflow_def.name,
@@ -1441,7 +1444,7 @@ async def enqueue_subworkflow_task(
                 'join_type': child_task.join,
                 'min_success': child_task.min_success,
                 'task_options': child_task_options_json,
-                **task_node_fact_params(child_facts),
+                **task_node_kind_params(child_facts),
                 'status': 'ENQUEUED'
                 if child_task_id is not None
                 else ('PENDING' if child_dep_indices else 'READY'),

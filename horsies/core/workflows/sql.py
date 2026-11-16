@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from types import MappingProxyType
-from typing import Any, Final
+from enum import Enum
+from typing import Any
 
 from sqlalchemy import text
 
@@ -42,22 +42,24 @@ INSERT_WORKFLOW_SQL = text("""
 #   in the same uncommitted transaction, so the CAS is vacuous.
 # - :is_enqueued is a separate boolean param (not derived from :status) to
 #   avoid psycopg AmbiguousParameter on a twice-used parameter.
-# - the typed node facts (:max_retries, :execution, :good_until,
-#   :retention_class_key) come from task_node_fact_params for a TaskNode and
-#   from SUBWORKFLOW_NODE_FACT_PARAMS for a SubWorkflowNode.
+# - the node-kind parameters (the typed task facts :max_retries, :execution,
+#   :good_until, :retention_class_key, and :sub_workflow_params) come from
+#   task_node_kind_params for a TaskNode and from
+#   subworkflow_node_kind_params for a SubWorkflowNode.
 INSERT_WORKFLOW_TASKS_BULK_SQL = text("""
     INSERT INTO horsies_workflow_tasks
     (id, workflow_id, task_index, node_id, task_name, input,
      queue_name, priority, dependencies, args_from, workflow_ctx_from,
      allow_failed_deps, join_type, min_success, task_options,
      max_retries, execution, good_until, retention_class_key, status,
-     is_subworkflow, sub_workflow_name, sub_definition_key, task_id,
-     started_at, created_at)
+     is_subworkflow, sub_workflow_name, sub_definition_key,
+     sub_workflow_params, task_id, started_at, created_at)
     VALUES (:id, :wf_id, :idx, :node_id, :name, :input, :queue, :priority,
             :deps, :args_from, :ctx_from, :allow_failed, :join_type, :min_success,
             :task_options, :max_retries, :execution, :good_until,
             :retention_class_key, :status, :is_subworkflow, :sub_wf_name,
-            :sub_def_key, :task_id, CASE WHEN :is_enqueued THEN NOW() END, NOW())
+            :sub_def_key, :sub_workflow_params, :task_id,
+            CASE WHEN :is_enqueued THEN NOW() END, NOW())
 """)
 # -- SQL constants for pause_workflow --
 
@@ -204,14 +206,37 @@ def task_node_fact_params(facts: TaskNodeFacts) -> dict[str, Any]:
     }
 
 
-SUBWORKFLOW_NODE_FACT_PARAMS: Final = MappingProxyType({
-    'max_retries': None,
-    'execution': None,
-    'good_until': None,
-    'retention_class_key': None,
-})
-"""The fact parameters of INSERT_WORKFLOW_TASKS_BULK_SQL for a
-SubWorkflowNode: a sub-workflow node has no task facts."""
+class SubWorkflowParams(Enum):
+    """The client's choice for the params of a sub-workflow node.
+
+    Stored in ``horsies_workflow_tasks.sub_workflow_params`` on every
+    sub-workflow node row, and NULL on task node rows
+    (``horsies_workflow_tasks_sub_workflow_params_by_kind``).
+    """
+
+    NOT_GIVEN = 'NOT_GIVEN'
+    """The node definition carries no params for the child's build."""
+
+    GIVEN = 'GIVEN'
+    """The node definition carries params for the child's build."""
+
+
+def task_node_kind_params(facts: TaskNodeFacts) -> dict[str, Any]:
+    """The node-kind parameters of INSERT_WORKFLOW_TASKS_BULK_SQL for a
+    TaskNode: its task facts, and no sub-workflow params choice."""
+    return {**task_node_fact_params(facts), 'sub_workflow_params': None}
+
+
+def subworkflow_node_kind_params(params: SubWorkflowParams) -> dict[str, Any]:
+    """The node-kind parameters of INSERT_WORKFLOW_TASKS_BULK_SQL for a
+    SubWorkflowNode: no task facts, and its params choice."""
+    return {
+        'max_retries': None,
+        'execution': None,
+        'good_until': None,
+        'retention_class_key': None,
+        'sub_workflow_params': params.value,
+    }
 
 
 def workflow_task_row_params(
