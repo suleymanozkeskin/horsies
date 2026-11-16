@@ -412,7 +412,7 @@ async def test_ownership_unconfirmed_releases_the_claim_at_once(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert result == Ok(None)
@@ -442,7 +442,7 @@ async def test_ownership_unconfirmed_leaves_another_generation_claimed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert result == Ok(None)
