@@ -572,8 +572,6 @@ def _terminalize(_conn, _row, _result_json):
             worker_id=_row_worker_id, claimed_at=_row.claimed_at,
         ),
         result_json=_result_json,
-        notify_channel='task_queue_' + str(_row.queue_name or 'default'),
-        notify_payload='capacity:' + str(_row.id),
     )
     _statement, _params = _call_for(_command)
     _returned = _conn.execute(_statement, _params).fetchall()

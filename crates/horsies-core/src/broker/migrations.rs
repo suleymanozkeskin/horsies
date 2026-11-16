@@ -69,6 +69,7 @@ baseline_sql_files!(
     "0001_tables.sql",
     "0002_indexes.sql",
     "0003_interim_functions.sql",
+    "0004_lifecycle_functions.sql",
     "0007_scheduler_monitoring_functions.sql",
 );
 
