@@ -6,12 +6,11 @@
 //! - The listener starts at the first subscription. The session URL is
 //!   parsed and its connection plan is loaded then, not when the broker is
 //!   built, so building a broker reads no file.
-//! - A broker built in [`SchemaInitializationMode::ObserveOnly`], or from a
-//!   pool with no session URL, has no listener. Every subscription is refused
-//!   with [`ListenError::Disabled`] (Python `assume_initialized=True`).
+//! - Every broker built from a config has a listener, observe-only brokers
+//!   included (Python's web tool runs with migrations off and keeps its
+//!   listener). Only a broker built from a pool with no session URL has none:
+//!   every subscription is refused with [`ListenError::NoSessionUrl`].
 //! - A refused plan is not kept: the next subscription loads it again.
-//!
-//! [`SchemaInitializationMode::ObserveOnly`]: crate::broker::SchemaInitializationMode::ObserveOnly
 
 use std::fmt;
 use std::sync::Arc;
@@ -58,29 +57,6 @@ pub(crate) fn default_payload_capacity() -> QueueCapacity {
     }
 }
 
-/// Why a broker has no listener.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ListenerDisabledCause {
-    /// The broker was built in `SchemaInitializationMode::ObserveOnly`, the
-    /// mode of Python's `assume_initialized=True`.
-    ObserveOnly,
-    /// The broker was built from a pool and was given no session URL.
-    NoSessionUrl,
-}
-
-impl fmt::Display for ListenerDisabledCause {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ListenerDisabledCause::ObserveOnly => {
-                formatter.write_str("the broker was built in observe-only mode")
-            }
-            ListenerDisabledCause::NoSessionUrl => {
-                formatter.write_str("the broker was built from a pool with no session URL")
-            }
-        }
-    }
-}
-
 /// Loading the listener's connection plan failed. Nothing was connected.
 #[derive(Debug, thiserror::Error)]
 pub enum ListenerPlanError {
@@ -98,9 +74,10 @@ pub enum ListenerPlanError {
 /// subscribed.
 #[derive(Debug, thiserror::Error)]
 pub enum ListenError {
-    /// The broker has no listener. It does not clear for this broker.
-    #[error("this broker has no listener: {cause}")]
-    Disabled { cause: ListenerDisabledCause },
+    /// The broker was built from a pool with no session URL, so it has no
+    /// listener. It does not clear for this broker.
+    #[error("this broker has no listener: it was built from a pool with no session URL")]
+    NoSessionUrl,
     /// The session URL, the environment or a file the URL names was refused.
     /// The same settings are refused again.
     #[error("the listener cannot start: {0}")]
@@ -114,7 +91,7 @@ pub enum ListenError {
 impl ListenError {
     pub fn transience(&self) -> Transience {
         match self {
-            ListenError::Disabled { .. } | ListenError::PlanRefused(_) => Transience::Permanent,
+            ListenError::NoSessionUrl | ListenError::PlanRefused(_) => Transience::Permanent,
             ListenError::Subscribe(refused) => refused.transience(),
         }
     }
@@ -142,7 +119,8 @@ impl fmt::Debug for SessionUrl {
 #[derive(Debug)]
 enum ListenerSource {
     SessionUrl(SessionUrl),
-    Disabled(ListenerDisabledCause),
+    /// A broker built from a pool with no session URL.
+    NoSessionUrl,
 }
 
 /// The started listener and the session URL it connects to, with the
@@ -212,10 +190,10 @@ impl ProcessListener {
     }
 
     /// No listener: every subscription is refused with
-    /// [`ListenError::Disabled`].
-    pub(crate) fn disabled(cause: ListenerDisabledCause) -> ProcessListener {
+    /// [`ListenError::NoSessionUrl`].
+    pub(crate) fn without_session_url() -> ProcessListener {
         ProcessListener {
-            source: ListenerSource::Disabled(cause),
+            source: ListenerSource::NoSessionUrl,
             started: OnceCell::new(),
         }
     }
@@ -225,7 +203,7 @@ impl ProcessListener {
     /// the listener task; the connection opens at the first subscription.
     pub async fn start(&self) -> Result<&StartedListener, ListenError> {
         match &self.source {
-            ListenerSource::Disabled(cause) => Err(ListenError::Disabled { cause: *cause }),
+            ListenerSource::NoSessionUrl => Err(ListenError::NoSessionUrl),
             ListenerSource::SessionUrl(session_url) => {
                 self.started
                     .get_or_try_init(|| start_listener(session_url.clone()))
@@ -300,30 +278,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_disabled_listener_refuses_every_subscription() {
-        for cause in [
-            ListenerDisabledCause::ObserveOnly,
-            ListenerDisabledCause::NoSessionUrl,
-        ] {
-            let listener = ProcessListener::disabled(cause);
+    async fn a_listener_without_a_session_url_refuses_every_subscription() {
+        let listener = ProcessListener::without_session_url();
 
-            let Err(refused) = listener
-                .subscribe_wake(any_channel(), PayloadFilter::AnyPayload)
-                .await
-            else {
-                panic!("a disabled listener must refuse a wake subscription");
-            };
-            assert!(matches!(refused, ListenError::Disabled { cause: seen } if seen == cause));
-            assert!(!refused.is_retryable());
+        let Err(refused) = listener
+            .subscribe_wake(any_channel(), PayloadFilter::AnyPayload)
+            .await
+        else {
+            panic!("a listener without a session URL must refuse a wake subscription");
+        };
+        assert!(matches!(refused, ListenError::NoSessionUrl));
+        assert!(!refused.is_retryable());
 
-            let Err(refused) = listener
-                .subscribe_payloads(any_channel(), default_payload_capacity())
-                .await
-            else {
-                panic!("a disabled listener must refuse a payload subscription");
-            };
-            assert!(matches!(refused, ListenError::Disabled { .. }));
-        }
+        let Err(refused) = listener
+            .subscribe_payloads(any_channel(), default_payload_capacity())
+            .await
+        else {
+            panic!("a listener without a session URL must refuse a payload subscription");
+        };
+        assert!(matches!(refused, ListenError::NoSessionUrl));
     }
 
     /// A URL that the core's parser refuses fails the subscription, is not
