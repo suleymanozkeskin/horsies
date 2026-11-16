@@ -1440,12 +1440,20 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
         .execute(&mut *connection)
         .await
         .expect("drop rendered guard");
-    sqlx::raw_sql(include_str!(
-        "../../../../migrations/0065_prune_duplicate_identity_guard.sql"
-    ))
-    .execute(&mut *connection)
-    .await
-    .expect("rerun migration 0065");
+    let interim_functions =
+        include_str!("../../../../migrations/1000_baseline/0003_interim_functions.sql");
+    let guard_start = interim_functions
+        .find("CREATE FUNCTION horsies_task_history_duplicate_staged(")
+        .expect("first guard version in the baseline");
+    let guard_end = guard_start
+        + interim_functions[guard_start..]
+            .find("$$;\n")
+            .expect("end of the first guard version")
+        + "$$;\n".len();
+    sqlx::raw_sql(&interim_functions[guard_start..guard_end])
+        .execute(&mut *connection)
+        .await
+        .expect("create the first guard version");
     assert_eq!(guard_marker(&mut connection).await, None);
     assert!(duplicate_guard(&mut connection, clock_violation_id).await);
     assert!(StagedLoaderPublisher

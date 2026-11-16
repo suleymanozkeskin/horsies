@@ -444,12 +444,6 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             false,
             Some(SCHEMA_INCOMPATIBLE),
         ),
-        (
-            SchemaState::CutoverRequired,
-            Some(crate::expected_schema_version()),
-            false,
-            Some(SCHEMA_INCOMPATIBLE),
-        ),
         (SchemaState::Absent, None, false, Some(SCHEMA_INCOMPATIBLE)),
         (SchemaState::Unknown, None, false, Some(SCHEMA_UNKNOWN)),
     ];
@@ -498,8 +492,8 @@ async fn every_action_route_inherits_the_schema_gate() {
     let router = test_router(
         Arc::new(AllowAll),
         status(
-            SchemaState::CutoverRequired,
-            Some(crate::expected_schema_version()),
+            SchemaState::Mismatch,
+            Some(crate::expected_schema_version() - 1),
         ),
         true,
     );
@@ -516,7 +510,7 @@ async fn every_action_route_inherits_the_schema_gate() {
         assert!(body["detail"]
             .as_str()
             .unwrap()
-            .contains("cutover is incomplete"));
+            .contains("Actions are disabled until the versions match"));
     }
 }
 
