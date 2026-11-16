@@ -35,13 +35,17 @@ pub enum ReportedBootCause {
     ThreadStartRefused,
 }
 
-/// Why a child stopped before it set its row RUNNING. Nothing is left to
-/// write for the run: the start's miss path wrote what the case needs.
+/// Why a child stopped before it set its row RUNNING. No task code ran. The
+/// start's miss path wrote what each case needs, except for
+/// `OwnershipUnconfirmed`, whose claim the parent releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     /// The row is not CLAIMED by this worker at this claim generation.
     ClaimLost,
-    /// A resume raced the start twice; the claim lease returns the task.
+    /// The start was not confirmed: the start statement raised (a database
+    /// error, or its bound cancelled it), or a resume raced the start on
+    /// each attempt. The parent releases the claim at once with the fenced
+    /// release.
     OwnershipUnconfirmed,
     /// The workflow of the task is PAUSED or CANCELLED.
     WorkflowStopped,

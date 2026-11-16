@@ -952,6 +952,21 @@ CREATE FUNCTION horsies_node_has_dependents(p_task_id uuid) RETURNS boolean
     )
 $$;
 
+-- horsies_node_downstream_subworkflow: internal. The downstream_subworkflow fact of the node of this task (REACHABLE
+-- or NONE), written at workflow start from the static graph; NULL when no node links the task. Phase 2 of a
+-- REACHABLE node runs in a transaction, because its promotion can owe a child start. Reads the node by task_id
+-- (ix_horsies_workflow_tasks_task_id); takes no lock.
+-- Callers: horsies_finish_workflow_success, horsies_finish_failed_attempt, horsies_finish_stale_attempt, next to
+-- node_has_dependents.
+-- Python: no counterpart; Python's phase 2 always runs in one transaction.
+CREATE FUNCTION horsies_node_downstream_subworkflow(p_task_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT n.downstream_subworkflow::text
+    FROM horsies_workflow_tasks n
+    WHERE n.task_id = p_task_id
+$$;
+
 -- horsies_complete_task_fused: the success of one plain task. Replaces the interim function of the same name.
 --
 -- Guarantee:
@@ -1131,13 +1146,14 @@ $$;
 -- the same name.
 --
 -- Guarantee: in one statement: the fence (RUNNING, owner, claim generation), the COMPLETED attempt row, the move
--- (COMPLETE_LOCKED), which records the phase-2 work, then node_has_dependents. No capacity wake: phase 2 sends it.
+-- (COMPLETE_LOCKED), which records the phase-2 work, then node_has_dependents and downstream_subworkflow. No
+-- capacity wake: phase 2 sends it.
 -- A refusal writes nothing and is classified by horsies_terminalization_miss. Refused (22023): a NULL claim
 -- generation, a plain task. A NULL result is refused with 23502 (not_null_violation), as the move requires one.
 --
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE), then the node row (in the move).
--- Returns one row: the shared outcome columns, queue_name and task_name (APPLIED only), and node_has_dependents
--- (APPLIED only; NULL on every other outcome).
+-- Returns one row: the shared outcome columns, queue_name and task_name (APPLIED only), node_has_dependents and
+-- downstream_subworkflow (APPLIED only; NULL on every other outcome).
 -- Python: horsies_finish_workflow_success (core/history/terminalization/move.py:1285-1392), its call
 -- (core/worker/finalize.py:1322-1372).
 CREATE FUNCTION horsies_finish_workflow_success(
@@ -1158,7 +1174,8 @@ CREATE FUNCTION horsies_finish_workflow_success(
     observed_guard jsonb,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -1192,7 +1209,7 @@ BEGIN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
-               NULL::text, NULL::text, NULL::boolean
+               NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
             p_task_id, 'COMPLETE_LOCKED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
@@ -1233,7 +1250,8 @@ BEGIN
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'COMPLETE_LOCKED'::text,
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
-        v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id);
+        v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id),
+        horsies_node_downstream_subworkflow(p_task_id);
 END
 $$;
 
@@ -1260,7 +1278,7 @@ $$;
 --   the placement is ISOLATED. The delayed retry wake is the caller's, at next_retry_at.
 -- - Terminal: the move (FAIL_RUNNING) and, for a plain task with p_wake TRUE, the capacity wake
 --   pg_notify('task_queue_' || queue_name, 'capacity'), in the same statement. A workflow task gets
---   node_has_dependents; its phase 2 sends the wake.
+--   node_has_dependents and downstream_subworkflow; its phase 2 sends the wake.
 --
 -- Arguments: p_retry_kind NONE | RETRY (p_expected_retry_count, p_retry_delay_s finite and >= 0, p_retry_placement
 -- SAME_CLASS | ISOLATED; NULL for NONE). p_result, the task's error code and failed reason are the terminal values;
@@ -1272,7 +1290,7 @@ $$;
 -- Returns one row: the shared outcome columns (outcome APPLIED, RETRY_SCHEDULED, RELEASED, or a miss outcome),
 -- retry_disposition (APPLIED: NOT_REQUESTED or PAST_DEADLINE), retry_count and next_retry_at (RETRY_SCHEDULED),
 -- good_until (PAST_DEADLINE), is_workflow_task, queue_name, task_name (APPLIED; queue_name also RETRY_SCHEDULED and
--- RELEASED), node_has_dependents (APPLIED of a workflow task; else NULL).
+-- RELEASED), node_has_dependents and downstream_subworkflow (APPLIED of a workflow task; else NULL).
 -- Python: horsies_finish_failed_attempt (core/history/terminalization/move.py:1045-1262), READ_IN_FLIGHT_ATTEMPT_SQL
 -- (core/worker/sql.py:306-314) and its read (core/worker/failed_attempt.py:101-130), the call
 -- (core/worker/failed_attempt.py:298-330, core/worker/finalize.py:1467-1523), the killed-child path
@@ -1311,7 +1329,8 @@ CREATE FUNCTION horsies_finish_failed_attempt(
     is_workflow_task boolean,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -1402,7 +1421,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RELEASED'::text, NULL::timestamptz, NULL::text,
             'CLAIMED'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1416,7 +1435,7 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-               NULL::boolean, NULL::text, NULL::text, NULL::boolean
+               NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
             p_task_id, 'FAIL_RUNNING', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
@@ -1479,7 +1498,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
             'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1495,7 +1514,8 @@ BEGIN
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
-        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END;
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_downstream_subworkflow(p_task_id) END;
 END
 $$;
 
@@ -1592,8 +1612,8 @@ $$;
 --   failure with retry_disposition PAST_DEADLINE). The row goes back to PENDING with every claim and run field
 --   cleared, retry_count + 1, enqueued_at = next_retry_at; the execution class is kept. The delayed retry wake is the
 --   caller's, at next_retry_at.
--- - Failure: the move (FAIL_STALE). No capacity wake, as Python. A workflow task gets node_has_dependents; phase-2
---   recovery runs its phase 2.
+-- - Failure: the move (FAIL_STALE). No capacity wake, as Python. A workflow task gets node_has_dependents and
+--   downstream_subworkflow; phase-2 recovery runs its phase 2.
 --
 -- Arguments: thresholds in ms (>= 0); p_retry_kind NONE | RETRY (p_expected_retry_count, p_retry_delay_s finite
 -- and >= 0; NULL for NONE); the terminal result, error code and failed reason; the attempt message and reason.
@@ -1635,7 +1655,8 @@ CREATE FUNCTION horsies_finish_stale_attempt(
     is_workflow_task boolean,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -1710,7 +1731,7 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-               NULL::boolean, NULL::text, NULL::text, NULL::boolean
+               NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
             p_task_id, 'FAIL_STALE', 'NONE', NULL::text, NULL::timestamptz
         ) AS m;
@@ -1738,7 +1759,7 @@ BEGIN
                 'evaluated_at', v_ctx.evaluated_at
             ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text, NULL::boolean;
+            NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1751,7 +1772,7 @@ BEGIN
                 'retry_count', v_ctx.retry_count
             ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text, NULL::boolean;
+            NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1810,7 +1831,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
             'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1823,7 +1844,8 @@ BEGIN
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
-        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END;
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_downstream_subworkflow(p_task_id) END;
 END
 $$;
 

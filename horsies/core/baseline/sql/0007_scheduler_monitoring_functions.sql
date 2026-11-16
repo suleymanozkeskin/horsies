@@ -473,8 +473,9 @@ $$;
 -- - Sort: p_sort_key is one of enqueued_at, started_at, completed_at, failed_at, status, task_name, queue_name,
 --   priority, retry_count, queue_s (started_at - enqueued_at), exec_s (terminal_at - started_at); p_sort_direction
 --   is ASC or DESC. NULL keys come last in both directions. A live row sorts completed_at, failed_at and exec_s as
---   NULL. Ties break by side (HISTORY before LIVE), then by task id, inside each side and in the merge, so a page
---   does not reorder between polls. Text keys sort in the database collation on both sides and in the merge.
+--   NULL. The order is total, so a page does not reorder between polls: the sort value, then the side rank (LIVE 0
+--   before HISTORY 1, in both directions), then the task id ascending, inside each side and in the merge. Text keys
+--   sort in the database collation on both sides and in the merge.
 -- - Each side reads at most p_offset + p_limit rows in sort order; only nullable keys carry NULLS LAST, so the
 --   default key rides idx_horsies_tasks_enqueued_at (live) and the leaf enqueued_at index (history) in both
 --   directions. The id tie-break is an incremental sort on that index order: it sorts only rows that share one
@@ -701,7 +702,8 @@ BEGIN
             SELECT 'LIVE'::text AS location, t.id AS task_id, t.task_name, t.queue_name, t.priority,
                    t.status::text AS status, t.retry_count, t.max_retries, t.is_workflow_task,
                    NULL::text AS error_code, t.claimed_by_worker_id AS worker_id, t.worker_hostname,
-                   t.enqueued_at, t.started_at, NULL::timestamptz AS terminal_at, %1$s AS sort_value
+                   t.enqueued_at, t.started_at, NULL::timestamptz AS terminal_at, %1$s AS sort_value,
+                   0 AS location_rank
             FROM horsies_tasks AS t
             WHERE %3$s
             ORDER BY %5$s, t.id
@@ -710,14 +712,16 @@ BEGIN
             SELECT 'HISTORY'::text, h.task_id, h.task_name, h.queue_name, h.priority,
                    h.status::text, h.retry_count, h.max_retries, h.is_workflow_task,
                    h.error_code, h.last_claimed_worker_id, h.last_worker_hostname,
-                   h.enqueued_at, h.started_at, h.terminal_at, %2$s
+                   h.enqueued_at, h.started_at, h.terminal_at, %2$s, 1
             FROM horsies_task_history AS h
             WHERE %4$s
             ORDER BY %6$s, h.task_id
             LIMIT $10
         ), page AS (
             SELECT u.*,
-                   row_number() OVER (ORDER BY u.sort_value %7$s NULLS LAST, u.location, u.task_id) AS list_position
+                   row_number() OVER (
+                       ORDER BY u.sort_value %7$s NULLS LAST, u.location_rank, u.task_id
+                   ) AS list_position
             FROM (SELECT * FROM live UNION ALL SELECT * FROM history) AS u
         )
         SELECT 'TOTALS'::text, 0, %8$s,

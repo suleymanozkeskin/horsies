@@ -44,6 +44,7 @@ use crate::core::config::child_sizing::{FINALIZE_BATCH_FLUSHERS, PARENT_POOL_CLA
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::db::{PoolSizing, StatementFailure, Transience};
 
+pub mod statement;
 pub mod stop;
 #[cfg(test)]
 mod tests;

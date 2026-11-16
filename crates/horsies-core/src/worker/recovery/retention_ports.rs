@@ -19,7 +19,7 @@ use sqlx::{Connection, PgConnection};
 use super::*;
 use crate::broker::client_family::ClientFamily;
 use crate::broker::migrations::install_schema;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
 use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -121,9 +121,10 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut next_partition_maintenance = tokio::time::Instant::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         pool,
         pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &recovery,
         &PayloadPolicy::default(),
         retention,
@@ -345,14 +346,14 @@ async fn seed_workflow(pool: &PgPool, status: &str, age_hours: i32) -> Uuid {
 async fn seed_node(pool: &PgPool, workflow_id: Uuid) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
              min_success, task_options, max_retries, execution, good_until,
              retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
              sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
              created_at, started_at, completed_at
          ) VALUES (
-             $1, $2, 0, 'node_0', 'retention_test', '{}', 'default', 100,
+             'NONE', $1, $2, 0, 'node_0', 'retention_test', '{}', 'default', 100,
              '{}', NULL, NULL, FALSE, 'all',
              NULL, NULL, 0, 'ISOLATED', NULL,
              'standard_30d', 'COMPLETED', NULL, FALSE, NULL,
