@@ -13,6 +13,7 @@ pub(crate) mod broker;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod manifest;
 pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;
@@ -31,34 +32,34 @@ pub use crate::core::RegisteredTask;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
-    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, ErrorCategory,
-    ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule, InputField,
-    IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
-    OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig, PostgresConfigError,
-    QueueMode, RecoveryConfig, RecoveryConfigError,
+    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
+    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
+    HandleResult, HourlySchedule, InputField, IntervalSchedule, JoinType, Month, MonthlySchedule,
+    NodeKey, NodeRef, OnError, OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig,
+    PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
     RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
     RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError,
-    SubWorkflowNode, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
-    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions, TaskRegistry,
-    TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
-    TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
-    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
-    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions,
+    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult, TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule,
+    WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta,
+    WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
+    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
+    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
+    WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
 // broker re-exports
 pub use crate::broker::{
-    compute_enqueue_sha, expected_schema_version, run_horsies_migrations, BrokerError,
-    BrokerErrorCode, BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing,
-    ExpiredTaskRow, HeartbeatRow, NotifyListener, PostgresBroker, RawResultRecord,
-    SchemaInitializationMode, SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
-    MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    expected_schema_version, run_horsies_migrations, BrokerError, BrokerErrorCode,
+    BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow,
+    NotifyListener, PostgresBroker, RawResultRecord, SchemaInitializationMode,
+    SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
+    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
+    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 
 // worker re-exports

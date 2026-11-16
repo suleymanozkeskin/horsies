@@ -27,16 +27,14 @@ snapshot rows of 520 workers:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Final, assert_never
+from typing import Any, Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.models.class_coverage import (
     ClassCoverage,
-    ClassesNotRecorded,
     ClassReadRefused,
     ClassReport,
     LiveWorker,
@@ -151,28 +149,18 @@ _IN_FLIGHT_SQL = text("""
 """)
 
 
-@dataclass(frozen=True, slots=True)
-class _LiveSnapshots:
-    """The latest live snapshot of each worker, split by whether it recorded
-    the worker's budgets."""
-
-    workers: tuple[LiveWorker, ...]
-    not_recorded: tuple[ClassesNotRecorded, ...]
-
-
 async def read_class_coverage(
     session: AsyncSession,
 ) -> Result[ClassCoverage, ClassReadRefused]:
     """The fleet check: the coverage of each (queue, class) with PENDING rows.
 
-    Reads only. A live snapshot with no ``class_capacity`` leaves its worker
-    out and names it in ``ClassCoverage.not_recorded``. ``Err``: a live
-    snapshot has an unreadable ``class_capacity``, or a read reached its
-    limit. Database errors propagate.
+    Reads only. ``Err``: a live snapshot has an unreadable
+    ``class_capacity``, or a read reached its limit. Database errors
+    propagate.
     """
     checked_at = await _checked_at(session)
     match await _live_workers(session):
-        case Ok(live):
+        case Ok(workers):
             pass
         case Err(refused):
             return Err(refused)
@@ -190,7 +178,7 @@ async def read_class_coverage(
             ),
         )
     streams = [(row.queue_name, _stored_execution(row.execution)) for row in rows]
-    return Ok(class_coverage(checked_at, live.workers, live.not_recorded, streams))
+    return Ok(class_coverage(checked_at, workers, streams))
 
 
 async def read_class_report(
@@ -198,14 +186,13 @@ async def read_class_report(
 ) -> Result[ClassReport, ClassReadRefused]:
     """Pending streams with their oldest wait, and the budget load of each live worker.
 
-    Reads only. A live snapshot with no ``class_capacity`` leaves its worker
-    out and names it in ``ClassReport.not_recorded``. ``Err``: as
-    ``read_class_coverage``, or a live worker holds rows of a class that its
-    budgets do not serve. Database errors propagate.
+    Reads only. ``Err``: as ``read_class_coverage``, or a live worker holds
+    rows of a class that its budgets do not serve. Database errors
+    propagate.
     """
     checked_at = await _checked_at(session)
     match await _live_workers(session):
-        case Ok(live):
+        case Ok(workers):
             pass
         case Err(refused):
             return Err(refused)
@@ -225,8 +212,8 @@ async def read_class_report(
         StreamHead(row.queue_name, _stored_execution(row.execution), row.enqueued_at)
         for row in rows
     ]
-    in_flight = await _in_flight(session, live.workers)
-    return class_report(checked_at, live.workers, live.not_recorded, heads, in_flight)
+    in_flight = await _in_flight(session, workers)
+    return class_report(checked_at, workers, heads, in_flight)
 
 
 async def _checked_at(session: AsyncSession) -> datetime:
@@ -237,7 +224,7 @@ async def _checked_at(session: AsyncSession) -> datetime:
 
 async def _live_workers(
     session: AsyncSession,
-) -> Result[_LiveSnapshots, ClassReadRefused]:
+) -> Result[tuple[LiveWorker, ...], ClassReadRefused]:
     rows = (
         await session.execute(
             _LIVE_WORKERS_SQL,
@@ -255,25 +242,15 @@ async def _live_workers(
             ),
         )
     workers: list[LiveWorker] = []
-    not_recorded: list[ClassesNotRecorded] = []
     for row in rows:
         match live_worker(
             row.worker_id, row.snapshot_at, row.queues, row.class_capacity
         ):
-            case Ok(snapshot):
-                pass
+            case Ok(worker):
+                workers.append(worker)
             case Err(refused):
                 return Err(refused)
-        match snapshot:
-            case LiveWorker():
-                workers.append(snapshot)
-            case ClassesNotRecorded():
-                not_recorded.append(snapshot)
-            case _ as unreachable:
-                assert_never(unreachable)
-    return Ok(
-        _LiveSnapshots(workers=tuple(workers), not_recorded=tuple(not_recorded)),
-    )
+    return Ok(tuple(workers))
 
 
 async def _in_flight(

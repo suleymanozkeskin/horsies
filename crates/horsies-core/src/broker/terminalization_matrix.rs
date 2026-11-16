@@ -499,7 +499,7 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, 'matrix_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            $1, 'matrix_task', 'default', 100, 'null', NULL, 'ISOLATED',
             'forever', NOW(), NOW(),
             CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END, $9,
             $2, NOW(), $5, $4, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -546,15 +546,15 @@ async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
 async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, task_args,
-            task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-            join_type, status, is_subworkflow, task_id, created_at
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+            created_at, max_retries, execution, retention_class_key
         ) VALUES (
             $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
-            'node_' || $1, 'matrix_task', '[]', '{}',
-            'default', 100, '{}', FALSE, 'all', $3, FALSE, $4, NOW()
+            'node_' || $1, 'matrix_task', 'null', 'default', 100, '{}', FALSE, 'all', $3,
+            FALSE, $4, NOW(), 0, 'ISOLATED', 'standard_30d'
         )",
     )
     .bind(Uuid::new_v4())
@@ -1952,7 +1952,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
              updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
          )
-         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, '{}', NULL,
+         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, 'null', NULL,
                 'ISOLATED', 'forever', NOW(), NOW(),
                 NULL, NULL, NULL,
                 'PENDING', NOW(), NULL, NULL, NULL,
@@ -1975,13 +1975,15 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50000) AS g
          )
          INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name,
+             id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps,
-             join_type, status, is_subworkflow, task_id, created_at
+             join_type, status, is_subworkflow, max_retries, execution,
+             retention_class_key, task_id, created_at
          )
-         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task',
+         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
                 'default', 100, '{}'::integer[], FALSE,
-                'all', 'PENDING', FALSE, task_id, NOW()
+                'all', 'PENDING', FALSE, 3, 'ISOLATED',
+                'standard_30d', task_id, NOW()
          FROM generated",
     )
     .bind(workflow_id)
@@ -3213,6 +3215,10 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
     }
 }
 
+/// The baseline result rule (`horsies_task_history_result_domain`): an
+/// administrative cancel stores no result and no digest; every other kind
+/// stores the payload it was given and its sha256 digest, and the deferred
+/// record of a workflow task carries the same digest.
 #[tokio::test]
 #[serial]
 async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
@@ -3239,12 +3245,6 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
             if deferred {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
             }
-            sqlx::query("UPDATE horsies_tasks SET result = $2 WHERE id = $1")
-                .bind(id)
-                .bind(&payload)
-                .execute(pool)
-                .await
-                .unwrap();
             let mut tx = pool.begin().await.unwrap();
             sqlx::query("SELECT horsies_move_task_to_history($1,$2,$3,NOW(),$4,NULL,NULL)")
                 .bind(id)
@@ -3260,19 +3260,18 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 .execute(tx.as_mut())
                 .await
                 .unwrap();
-            let (result, prior, digest): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as("SELECT result_payload, prior_result_payload, result_digest FROM horsies_task_history WHERE task_id=$1")
-                .bind(id).fetch_one(tx.as_mut()).await.unwrap();
-            let expected_payload = payload.as_ref().map(|v| v.as_bytes().to_vec());
-            match admin {
-                true => {
-                    assert_eq!(prior, expected_payload);
-                    assert!(result.is_none());
-                }
-                false => {
-                    assert_eq!(result, expected_payload);
-                    assert!(prior.is_none());
-                }
-            }
+            let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT result_payload, result_digest FROM horsies_task_history WHERE task_id=$1",
+            )
+            .bind(id)
+            .fetch_one(tx.as_mut())
+            .await
+            .unwrap();
+            let expected_payload = match admin {
+                true => None,
+                false => payload.as_ref().map(|v| v.as_bytes().to_vec()),
+            };
+            assert_eq!(result, expected_payload);
             let expected_digest: Option<Vec<u8>> = sqlx::query_scalar("SELECT sha256($1::bytea)")
                 .bind(&expected_payload)
                 .fetch_one(tx.as_mut())
