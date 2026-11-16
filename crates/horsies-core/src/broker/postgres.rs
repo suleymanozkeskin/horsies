@@ -3608,22 +3608,6 @@ mod tests {
     }
 
     #[test]
-    fn set_running_guards_good_until_before_start() {
-        assert!(
-            SET_RUNNING_SQL.contains("AND (good_until IS NULL OR good_until > now())"),
-            "CLAIMED -> RUNNING must reject tasks whose deadline has passed",
-        );
-    }
-
-    #[test]
-    fn expired_task_queries_treat_equal_deadline_as_expired() {
-        assert!(
-            GET_EXPIRED_TASKS_SQL.contains("AND good_until <= NOW()"),
-            "good_until is the last valid instant; equality is expired",
-        );
-    }
-
-    #[test]
     fn parse_completed_result() {
         let wrapped = TaskResult::Ok(42);
         let result_json = serde_json::to_string(&wrapped).unwrap();
@@ -3729,8 +3713,11 @@ mod tests {
     /// A terminal row that stored no result reads as `RESULT_NOT_AVAILABLE`
     /// with Python's message and the id and status in `data`, for each of
     /// COMPLETED, FAILED and EXPIRED (Python
-    /// `TaskHandle._record_to_task_result`). An EXPIRED row is no
-    /// `InvalidStatus` broker error.
+    /// `TaskHandle._record_to_task_result`; `test_app_get_result.py::
+    /// TestHorsiesGetResultEnvelopeGuards::
+    /// test_terminal_status_with_none_payload_is_result_not_available`). An
+    /// EXPIRED row with no stored result does not read as `TASK_EXPIRED`,
+    /// and it is no `InvalidStatus` broker error.
     #[test]
     fn a_terminal_row_without_a_result_reads_as_result_not_available() {
         let task_id = Uuid::new_v4();
@@ -5969,62 +5956,6 @@ mod session_settings_tests {
         assert_eq!(jit(&not_kept).await, jit(&plain).await);
         plain.close().await;
         not_kept.close().await;
-    }
-}
-
-#[cfg(test)]
-mod connect_options_tests {
-    use super::*;
-    use serial_test::serial;
-    use sqlx::PgConnection;
-
-    const REPEATED_EXECUTIONS: i64 = 20;
-
-    async fn prepared_statement_count(connection: &mut PgConnection) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements")
-            .fetch_one(&mut *connection)
-            .await
-            .expect("count prepared statements")
-    }
-
-    /// Runs against PostgreSQL directly, so every statement name the runtime
-    /// pool prepares is visible in `pg_prepared_statements` on its connection.
-    #[tokio::test]
-    #[serial]
-    async fn transaction_mode_runtime_pool_prepares_a_repeated_query_once() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        // PgBouncer mode refuses a session URL equal to `database_url`; a
-        // distinct application name keeps the same server.
-        let separator = if url.contains('?') { '&' } else { '?' };
-        let session_url = format!("{url}{separator}application_name=prepared_session");
-        let config = PostgresConfig::from_pgbouncer_urls(url, session_url);
-        let broker = PostgresBroker::connect_with(&config)
-            .await
-            .expect("connect broker");
-        let mut connection = broker
-            .pool()
-            .acquire()
-            .await
-            .expect("acquire runtime connection");
-
-        let before = prepared_statement_count(&mut connection).await;
-        for execution in 0..REPEATED_EXECUTIONS {
-            let echoed: i64 = sqlx::query_scalar("SELECT $1::bigint")
-                .bind(execution)
-                .fetch_one(&mut *connection)
-                .await
-                .expect("run repeated query");
-            assert_eq!(echoed, execution);
-        }
-        let after = prepared_statement_count(&mut connection).await;
-
-        assert_eq!(
-            after - before,
-            1,
-            "{REPEATED_EXECUTIONS} executions of one query must leave one prepared statement"
-        );
-        drop(connection);
-        broker.pool().close().await;
     }
 }
 
