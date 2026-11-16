@@ -44,7 +44,7 @@ async fn seed_task(pool: &PgPool, task_id: Uuid, task_name: &str) {
             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
         ) VALUES (
-            $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
+            $1, $2, 'default', 100, 'null', NULL, 'ISOLATED',
             'forever', NOW(), NOW(),
             1, decode(repeat('07', 32), 'hex'), NULL,
             'PENDING', NOW(), NULL, NULL, NULL,
@@ -157,19 +157,17 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
 
     sqlx::query(
         "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, args, kwargs, status,
-            sent_at, enqueued_at, claimed, is_workflow_task,
-            retry_count, max_retries, enqueue_sha,
+            id, task_name, queue_name, priority, input, execution, status,
+            sent_at, enqueued_at, is_workflow_task,
+            retry_count, max_retries,
             command_fingerprint_version, command_fingerprint,
-            retention_class_key, retain_rerun_input,
-            prepared_rerun_input_disposition, created_at, updated_at
+            retention_class_key, retain_rerun_input, created_at, updated_at
         )
         SELECT gen_random_uuid(), 'w1_plan_task_' || (g % 5), 'default',
-               100, '[]', '{}', 'PENDING', NOW(),
-               NOW() - (g || ' seconds')::interval, FALSE, FALSE,
-               0, 0, gen_random_uuid()::text, 1,
-               decode(repeat('08', 32), 'hex'), 'forever', FALSE,
-               'DECLINED_BY_POLICY', NOW(), NOW()
+               100, 'null', 'ISOLATED', 'PENDING', NOW(),
+               NOW() - (g || ' seconds')::interval, FALSE,
+               0, 0, 1,
+               decode(repeat('08', 32), 'hex'), 'forever', FALSE, NOW(), NOW()
         FROM generate_series(1, 2500) AS g",
     )
     .execute(&pool)
