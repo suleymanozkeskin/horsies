@@ -960,12 +960,15 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 
 /// Classify whether a `WorkflowError` is transient (retryable).
 ///
-/// Mirrors Python's `is_retryable_connection_error(exc)` — only DB/broker
-/// connection errors are considered transient. Logic errors (serialization,
-/// not-found, invalid status) are permanent.
+/// Mirrors Python's `is_retryable_connection_error(exc)`
+/// (`core/worker/finalize.py:1676-1697`) — only DB/broker connection errors
+/// are considered transient, by the core's SQLSTATE rule
+/// (`is_retryable_sqlx_error`). Logic errors (serialization, not-found,
+/// invalid status) and a database refusal (for example a wake on a channel
+/// name the server refuses) are permanent.
 fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> bool {
     match e {
-        crate::workflow_engine::WorkflowError::Database(_) => true,
+        crate::workflow_engine::WorkflowError::Database(error) => is_retryable_sqlx_error(error),
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }

@@ -992,8 +992,8 @@ async fn phase_two_of_a_task_without_a_node_wakes_its_queue_once() {
 
 /// Python `test_worker_finalize_workflow_phase.py::test_a_notify_that_fails_on_the_server_is_a_phase2_error`:
 /// the wake and the node write share one transaction. A wake that the
-/// server refuses is a phase-2 error, and the node and its phase-2 record
-/// stay as they were (#722).
+/// server refuses is a phase-2 error that is not retried, and the node and
+/// its phase-2 record stay as they were (#722).
 #[tokio::test]
 #[serial]
 async fn a_wake_that_the_server_refuses_is_a_phase_two_error() {
@@ -1020,6 +1020,7 @@ async fn a_wake_that_the_server_refuses_is_a_phase_two_error() {
     match result {
         Err(error) => {
             assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
+            assert!(!error.retryable, "{error}");
             assert!(error.message.contains("channel name too long"), "{error}");
         }
         Ok(()) => panic!("phase 2 returned Ok for a refused wake"),
