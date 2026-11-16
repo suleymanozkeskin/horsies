@@ -26,6 +26,7 @@ from horsies.core.history.commands import (
     LeafLifecycle,
     LeafRef,
 )
+from horsies.core.history.ddl.classes import finite_class_parent_name
 from horsies.core.history.outcomes import LeafCreated, LeafDropped
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
 from horsies.core.history.partitions.catalog import daily_leaf_name
@@ -140,10 +141,12 @@ class TestDetail:
                     'INSERT INTO horsies_task_attempts '
                     '(task_id, attempt, outcome, will_retry, started_at, '
                     'finished_at, error_code, error_message, failed_reason, '
-                    'worker_id) VALUES '
+                    'worker_id, worker_hostname, worker_pid, '
+                    'worker_process_name) VALUES '
                     "(CAST(:task_id AS uuid), 1, 'FAILED', TRUE, "
                     'statement_timestamp(), statement_timestamp(), '
-                    "'BOOM', 'exploded once', 'TASK_ERROR', :worker)"
+                    "'BOOM', 'exploded once', 'TASK_ERROR', :worker, "
+                    "'it-host', 4242, 'it-proc')"
                 ),
                 {'task_id': task_id, 'worker': WORKER},
             )
@@ -214,6 +217,14 @@ class TestDetail:
                 task_id=ghost, reason=TaskAbsenceReason.NOT_CLASSIFIED
             )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            'The baseline leaf catalog stores no birth floor, so every '
+            'absence reads NOT_CLASSIFIED. PREDATES_RETAINED_HISTORY returns '
+            'when the reason is derived from the record of detached leaves.'
+        ),
+    )
     @pytest.mark.asyncio
     async def test_purged_task_classifies_before_the_retained_floor(
         self, terminalization_schema: HistorySchema
@@ -227,16 +238,7 @@ class TestDetail:
         ).replace(hour=0, minute=0, second=0, microsecond=0)
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
-            parent = (
-                await connection.execute(
-                    text(
-                        'SELECT finite_parent_name '
-                        'FROM horsies_retention_classes '
-                        'WHERE class_key = :key'
-                    ),
-                    {'key': CLASS_KEY},
-                )
-            ).scalar_one()
+            parent = finite_class_parent_name(CLASS_KEY)
             ref = LeafRef(
                 leaf_name=daily_leaf_name(parent, old_lower),
                 class_key=CLASS_KEY,
@@ -260,8 +262,7 @@ class TestDetail:
                 text(
                     'UPDATE horsies_task_history '
                     'SET task_id = CAST(:old_task AS uuid), '
-                    '    terminal_at = :old_terminal, '
-                    '    retention_anchor_at = :old_terminal '
+                    '    terminal_at = :old_terminal '
                     'WHERE task_id = CAST(:seed AS uuid)'
                 ),
                 {
@@ -291,16 +292,6 @@ class TestDetail:
                 publisher,
             )
             assert dropped == LeafDropped(leaf_name=ref.leaf_name)
-            # Retirement recomputes the retained floor; stamp the
-            # surviving leaves' birth metadata and republish so the
-            # manifest carries a floor the classifier can compare to.
-            await connection.execute(
-                text(
-                    'UPDATE horsies_task_history_leaf_catalog '
-                    'SET min_birth_at = statement_timestamp() '
-                    'WHERE dropped_at IS NULL'
-                )
-            )
             await publisher.republish(connection)
             absent = await read_task_detail(connection, task_id=old_task)
             assert absent == TaskDetailAbsent(
@@ -386,16 +377,7 @@ class TestPagesFacetsAggregates:
         keep an in-range one."""
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
-            parent = (
-                await connection.execute(
-                    text(
-                        'SELECT finite_parent_name '
-                        'FROM horsies_retention_classes '
-                        'WHERE class_key = :key'
-                    ),
-                    {'key': CLASS_KEY},
-                )
-            ).scalar_one()
+            parent = finite_class_parent_name(CLASS_KEY)
             old_lower = (
                 datetime.now(UTC) - timedelta(days=10)
             ).replace(hour=0, minute=0, second=0, microsecond=0)

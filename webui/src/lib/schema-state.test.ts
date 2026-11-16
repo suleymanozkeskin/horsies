@@ -4,6 +4,7 @@ import { deriveCanAct } from '@/actions/capability';
 import {
   NO_SCHEMA_MESSAGE,
   SCHEMA_UNREACHABLE_MESSAGE,
+  ZERO_X_SCHEMA_MESSAGE,
   schemaBannerMessage,
   schemaMismatchMessage,
   schemaState,
@@ -28,6 +29,7 @@ describe('schema state', () => {
     ['MATCH', 'match'],
     ['MISMATCH', 'mismatch'],
     ['ABSENT', 'absent'],
+    ['ZERO_X', 'zero_x'],
     ['UNKNOWN', 'unknown'],
   ];
 
@@ -53,6 +55,11 @@ describe('schema state', () => {
     ).toBe('unknown');
     expect(
       schemaState(
+        meta({ schema_state: 'ZERO_X', schema_version: 65, expected_schema_version: 1000 })
+      )
+    ).toBe('zero_x');
+    expect(
+      schemaState(
         meta({ schema_state: 'ABSENT', schema_version: null })
       )
     ).toBe('absent');
@@ -73,6 +80,16 @@ describe('schema copy', () => {
     expect(schemaBannerMessage(mismatched, 'mismatch')).toBe(
       schemaMismatchMessage(mismatched)
     );
+  });
+
+  it('names a new database as the remedy for a 0.x schema', () => {
+    expect(ZERO_X_SCHEMA_MESSAGE).toBe(
+      'This database holds a horsies 0.x schema, which this version does not ' +
+        'read or upgrade. Drain it and point the fleet and this tool at a new ' +
+        'database.'
+    );
+    // A worker start cannot fix a 0.x database: the copy must not say so.
+    expect(ZERO_X_SCHEMA_MESSAGE).not.toContain('Start a horsies app or worker');
   });
 
   it('tells the operator that the tool never initializes the schema', () => {

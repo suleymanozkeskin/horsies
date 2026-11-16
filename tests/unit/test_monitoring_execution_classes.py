@@ -9,7 +9,6 @@ import pytest
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    ClassesNotRecorded,
     ClassReport,
     NoneDue,
     OldestWaiting,
@@ -23,7 +22,6 @@ from horsies.core.models.health import (
     WORKER_STATE_LIVE_WINDOW_S,
     AllSlotsServing,
     DownSlot,
-    SlotHealthNotRecorded,
     SlotsDown,
 )
 from horsies.core.models.tasks import Execution
@@ -36,9 +34,6 @@ AT = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
 class TestSlotHealthInfo:
     def test_all_serving_has_no_down_slot(self) -> None:
         assert slot_health_info(AllSlotsServing()) == ('all_serving', [])
-
-    def test_not_recorded_has_no_down_slot(self) -> None:
-        assert slot_health_info(SlotHealthNotRecorded()) == ('not_recorded', [])
 
     def test_down_slots_carry_the_described_cause(self) -> None:
         down = DownSlot(
@@ -90,7 +85,6 @@ class TestClassReportInfo:
                 ),
             ),
             workers=(),
-            not_recorded=(),
         )
         body = class_report_info(report).model_dump(mode='json')
 
@@ -122,7 +116,6 @@ class TestClassReportInfo:
                     (BudgetLoad(Execution.ISOLATED, 4, tuple(Execution), in_flight=6),),
                 ),
             ),
-            not_recorded=(),
         )
         body = class_report_info(report).model_dump(mode='json')
 
@@ -140,17 +133,4 @@ class TestClassReportInfo:
                     },
                 ],
             },
-        ]
-
-    def test_workers_left_out_are_listed_by_id(self) -> None:
-        report = ClassReport(
-            checked_at=AT,
-            streams=(),
-            workers=(),
-            not_recorded=(ClassesNotRecorded('w-old', AT),),
-        )
-        body = class_report_info(report).model_dump(mode='json')
-
-        assert body['not_recorded'] == [
-            {'worker_id': 'w-old', 'snapshot_at': '2026-11-10T12:00:00Z'},
         ]

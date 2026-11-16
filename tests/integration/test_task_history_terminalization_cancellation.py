@@ -1,9 +1,8 @@
 """The cancellation family against real PostgreSQL.
 
-Administrative cancellation proves the ratified projection: the canonical
-result is null, the pre-cancellation output survives only as the
-separately named prior payload with the digest computed over it, and the
-operation's literals are database-owned. The orphan single proves the
+Administrative cancellation proves the ratified projection: the result
+domain is null and the operation's literals are database-owned. The
+orphan single proves the
 kind-aware linkage lookup in both directions — no link and terminal-only
 link — plus the fence-before-guard classification and the fail-closed
 distinct-workflows guard. The sweep proves the builder-rendered batch
@@ -12,18 +11,19 @@ moving only orphans among mixed candidates.
 
 from __future__ import annotations
 
-from hashlib import sha256
 from typing import Any
-from uuid import uuid4
 
 import pytest
+from psycopg.errors import UniqueViolation
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.integration.task_history_harness import (
     HistorySchema,
+    create_workflow,
     insert_live_task,
+    link_workflow_node,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
@@ -80,65 +80,22 @@ async def link_node(
     workflow_id: str | None = None,
     task_index: int = 0,
 ) -> str:
-    node_workflow = workflow_id if workflow_id is not None else str(uuid4())
-    await connection.execute(
-        text(
-            'INSERT INTO horsies_workflow_tasks '
-            '(id, workflow_id, task_id, task_index, status) VALUES '
-            '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-            'CAST(:task_id AS uuid), :task_index, :status)'
-        ),
-        {
-            'node_id': str(uuid4()),
-            'workflow_id': node_workflow,
-            'task_id': task_id,
-            'task_index': task_index,
-            'status': status,
-        },
+    node_workflow = (
+        workflow_id
+        if workflow_id is not None
+        else await create_workflow(connection, status='RUNNING')
+    )
+    await link_workflow_node(
+        connection,
+        task_id,
+        workflow_id=node_workflow,
+        node_status=status,
+        task_index=task_index,
     )
     return node_workflow
 
 
 class TestAdministrativeCancel:
-    @pytest.mark.asyncio
-    async def test_prior_result_swap_archives_the_ratified_projection(
-        self, terminalization_schema: HistorySchema
-    ) -> None:
-        prior = '{"ok":"the pre-cancellation output"}'
-        async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
-            task_id = await insert_live_task(
-                connection,
-                class_key=CLASS_KEY,
-                worker=WORKER,
-                live_result=prior,
-            )
-            outcome = await cancel_admin(connection, task_id)
-            assert outcome.outcome == 'APPLIED'
-            assert outcome.terminalization_kind == 'CANCEL_ADMIN'
-            row = (
-                await connection.execute(
-                    text(
-                        'SELECT status, terminalization_kind, '
-                        'result_payload, '
-                        'prior_result_payload, result_digest, error_code, '
-                        'final_failed_reason '
-                        'FROM horsies_task_history '
-                        'WHERE task_id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': task_id},
-                )
-            ).one()
-            assert row.status == 'CANCELLED'
-            # The frozen CHECK pair: a prior payload exists only beside the
-            # administrative kind, and the digest column serves the prior.
-            assert row.terminalization_kind == 'CANCEL_ADMIN'
-            assert row.result_payload is None
-            assert bytes(row.prior_result_payload) == prior.encode()
-            assert bytes(row.result_digest) == sha256(prior.encode()).digest()
-            assert row.error_code == 'TASK_CANCELLED'
-            assert row.final_failed_reason == 'Cancelled via monitoring API'
-
     @pytest.mark.asyncio
     async def test_no_prior_output_archives_all_null_result_domain(
         self, terminalization_schema: HistorySchema
@@ -148,20 +105,27 @@ class TestAdministrativeCancel:
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            await cancel_admin(connection, task_id)
+            outcome = await cancel_admin(connection, task_id)
+            assert outcome.outcome == 'APPLIED'
+            assert outcome.terminalization_kind == 'CANCEL_ADMIN'
             row = (
                 await connection.execute(
                     text(
-                        'SELECT result_payload, prior_result_payload, '
-                        'result_digest FROM horsies_task_history '
+                        'SELECT status, terminalization_kind, '
+                        'result_payload, result_digest, error_code, '
+                        'final_failed_reason '
+                        'FROM horsies_task_history '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
                     {'task_id': task_id},
                 )
             ).one()
+            assert row.status == 'CANCELLED'
+            assert row.terminalization_kind == 'CANCEL_ADMIN'
             assert row.result_payload is None
-            assert row.prior_result_payload is None
             assert row.result_digest is None
+            assert row.error_code == 'TASK_CANCELLED'
+            assert row.final_failed_reason == 'Cancelled via monitoring API'
 
     @pytest.mark.asyncio
     async def test_permitted_source_set_is_the_callers(
@@ -315,6 +279,9 @@ class TestOrphanSingle:
     async def test_links_to_distinct_workflows_fail_closed(
         self, terminalization_schema: HistorySchema
     ) -> None:
+        """A task backs at most one node: the unique index on the node's
+        task_id refuses the second link, so no cancel can find a task
+        linked to two workflows."""
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
             task_id = await insert_live_task(
@@ -325,11 +292,16 @@ class TestOrphanSingle:
                 is_workflow_task=True,
             )
             await link_node(connection, task_id, status='COMPLETED')
-            await link_node(
-                connection, task_id, status='FAILED', task_index=1
+            with pytest.raises(IntegrityError) as refused:
+                async with connection.begin_nested():
+                    await link_node(
+                        connection, task_id, status='FAILED', task_index=1
+                    )
+            cause = refused.value.orig
+            assert isinstance(cause, UniqueViolation)
+            assert cause.diag.constraint_name == (
+                'ix_horsies_workflow_tasks_task_id'
             )
-            with pytest.raises(DBAPIError, match='multiple workflows'):
-                await cancel_orphan(connection, task_id)
 
 
 class TestOrphanSweep:
