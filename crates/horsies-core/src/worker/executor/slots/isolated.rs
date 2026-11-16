@@ -22,23 +22,19 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use tokio::time::Instant;
 
+use super::board::SlotPhase;
+use super::booting::{boot_child, lost_after_kill, BootSlot, Booted};
 use super::dispatch::{AttemptEnd, NotRunCause};
-use super::pool::{
-    Answer, DownState, ExitNotSeen, IsolatedSlotState, MemoryLimit, PoolFailure, PoolShared,
-    QueuedRun, TaskLimit,
-};
+use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::route::IsolatedDeadline;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
     BodyEnd, ChildFrame, FailureDetail, ParentFrame, RssReading, RunEnd, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{
-    boot_end_of, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause, BootReply,
-    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, MailboxBound, SpawnError,
-    CHILD_KILL_WAIT, CHILD_READY_TIMEOUT,
+    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, MailboxBound, CHILD_KILL_WAIT,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, RegistryClosed};
 
@@ -47,20 +43,6 @@ use crate::worker::runner_beats::{DispatchRunner, HeldChild, RegistryClosed};
 /// of cancel rounds, the 15 s bound of the finalizing marker, and 10 s of
 /// margin (Python `ISOLATED_LEFTOVER_BACKSTOP_S`).
 pub const ISOLATED_LEFTOVER_BACKSTOP: Duration = Duration::from_millis(26_300);
-
-/// The end of a boot attempt.
-enum BootAttempt {
-    Ready(ChildChannel),
-    Ended(BootEnd),
-    Stopped,
-}
-
-/// The end of the boot loop of a slot.
-enum Booted {
-    Child(ChildChannel),
-    PoolStopped,
-    PoolFailed,
-}
 
 /// What the slot does after one task.
 enum AfterRun {
@@ -78,239 +60,36 @@ enum FirstAnswer {
     DrainDeadline,
 }
 
-/// The slot task: boot a child, serve it, replace it, until the pool stops
-/// or fails.
+/// The slot task: boot a child, serve it, replace it, until the pools stop
+/// or fail. `index` is the slot's index on the board.
 pub(super) async fn run_slot(shared: Arc<PoolShared>, index: usize) {
     loop {
-        match boot_child(&shared, index).await {
+        let boot = BootSlot {
+            board: &shared.board,
+            index,
+            spawner: &shared.spawner,
+            command: &shared.config.command,
+            init: &shared.config.init,
+            mailbox: MailboxBound::for_seats(NonZeroUsize::MIN),
+        };
+        match boot_child(&boot).await {
             Booted::Child(channel) => serve_generation(&shared, index, channel).await,
             Booted::PoolStopped | Booted::PoolFailed => return,
         }
-        match shared.stop.is_cancelled() || shared.failed.is_cancelled() {
+        match shared.board.not_serving() {
             true => return,
-            false => shared.set(index, IsolatedSlotState::Booting),
+            false => shared.board.set(index, SlotPhase::Booting),
         }
     }
-}
-
-/// Wait `wait`, or less when the pool stops or fails.
-async fn pause(shared: &PoolShared, wait: Duration) {
-    tokio::select! {
-        () = tokio::time::sleep(wait) => {}
-        () = shared.stop.cancelled() => {}
-        () = shared.failed.cancelled() => {}
-    }
-}
-
-/// Boot until a child is ready, by the restart rules.
-async fn boot_child(shared: &PoolShared, index: usize) -> Booted {
-    let mut counts = BootCounts::default();
-    loop {
-        match (shared.stop.is_cancelled(), shared.failed.is_cancelled()) {
-            (true, _) => return Booted::PoolStopped,
-            (false, true) => return Booted::PoolFailed,
-            (false, false) => {}
-        }
-        let failure = match boot_attempt(shared).await {
-            BootAttempt::Ready(channel) => {
-                if let IsolatedSlotState::Down(down) = shared.state(index) {
-                    tracing::warn!(
-                        slot = index,
-                        failed_boots = down.failed_boots.get(),
-                        cause = %down.cause,
-                        "an isolated slot is back in service",
-                    );
-                }
-                shared.set(index, IsolatedSlotState::Idle { pid: channel.pid() });
-                return Booted::Child(channel);
-            }
-            BootAttempt::Stopped => return Booted::PoolStopped,
-            BootAttempt::Ended(BootEnd::ChildHookFailed) => {
-                shared.fail(PoolFailure::ChildHookFailed);
-                return Booted::PoolFailed;
-            }
-            BootAttempt::Ended(BootEnd::Failed(failure)) => failure,
-        };
-        let failed_boots_while_down = match shared.state(index) {
-            IsolatedSlotState::Down(down) => down.failed_boots.get(),
-            IsolatedSlotState::Booting
-            | IsolatedSlotState::Idle { .. }
-            | IsolatedSlotState::Busy { .. }
-            | IsolatedSlotState::Retiring => 0,
-        };
-        let decision = counts.after_failure(
-            failure.cause,
-            shared.pool_at_failure(index),
-            failed_boots_while_down,
-        );
-        match decision {
-            BootDecision::OutsideKillSpared {
-                kills_in_a_row,
-                wait,
-            } => {
-                tracing::warn!(
-                    slot = index,
-                    kills_in_a_row,
-                    "a booting child was killed from outside"
-                );
-                pause(shared, wait).await;
-            }
-            BootDecision::Retry { counted, wait } => {
-                shared.set(index, IsolatedSlotState::Booting);
-                tracing::warn!(slot = index, counted, failure = %failure, "a child boot attempt failed");
-                pause(shared, wait).await;
-            }
-            BootDecision::SlotDown {
-                counted,
-                failed_boots,
-                wait,
-            } => {
-                let down_since = match shared.state(index) {
-                    IsolatedSlotState::Down(down) => down.down_since,
-                    IsolatedSlotState::Booting
-                    | IsolatedSlotState::Idle { .. }
-                    | IsolatedSlotState::Busy { .. }
-                    | IsolatedSlotState::Retiring => Utc::now(),
-                };
-                tracing::warn!(
-                    slot = index,
-                    counted,
-                    failed_boots = failed_boots.get(),
-                    wait_s = wait.as_secs_f64(),
-                    failure = %failure,
-                    "an isolated slot is down",
-                );
-                shared.set(
-                    index,
-                    IsolatedSlotState::Down(DownState {
-                        cause: failure.cause,
-                        detail: failure.detail.as_str().to_owned(),
-                        down_since,
-                        failed_boots,
-                    }),
-                );
-                pause(shared, wait).await;
-            }
-            BootDecision::Exhausted { attempts } => {
-                shared.fail(PoolFailure::BootAttemptsExhausted {
-                    attempts,
-                    last: failure,
-                });
-                return Booted::PoolFailed;
-            }
-        }
-    }
-}
-
-fn spawn_failure(error: &SpawnError) -> Option<BootFailure> {
-    match error {
-        SpawnError::ResourceShortage { errno, detail } => Some(BootFailure::new(
-            BootFailureCause::ResourceShortage(*errno),
-            detail,
-        )),
-        SpawnError::SpawnFailed { .. } | SpawnError::TooManyChildren | SpawnError::QueueFull => {
-            Some(BootFailure::new(
-                BootFailureCause::SpawnFailed,
-                &error.to_string(),
-            ))
-        }
-        SpawnError::SpawnerStopped => None,
-    }
-}
-
-/// Start one child, send its init frame, and wait for its ready frame.
-async fn boot_attempt(shared: &PoolShared) -> BootAttempt {
-    let spawned = match shared.spawner.spawn(shared.config.command.clone()).await {
-        Ok(spawned) => spawned,
-        Err(error) => {
-            return match spawn_failure(&error) {
-                Some(failure) => BootAttempt::Ended(BootEnd::Failed(failure)),
-                None => BootAttempt::Stopped,
-            }
-        }
-    };
-    let child_id = spawned.id;
-    let mut channel = match ChildChannel::attach(
-        spawned,
-        shared.spawner.clone(),
-        MailboxBound::for_seats(NonZeroUsize::MIN),
-    ) {
-        Ok(channel) => channel,
-        Err(error) => {
-            let _ = shared.spawner.kill_session(child_id).await;
-            return BootAttempt::Ended(BootEnd::Failed(BootFailure::new(
-                BootFailureCause::SpawnFailed,
-                &format!("the child socket could not join the runtime: {error}"),
-            )));
-        }
-    };
-    if let Err(failure) = channel
-        .send(&ParentFrame::Init(shared.config.init.clone()))
-        .await
-    {
-        tracing::warn!(pid = channel.pid().get(), failure = %failure, "the init frame could not be sent");
-        let lost = lost_after_kill(&mut channel).await;
-        let _ = channel.dispose().await;
-        return BootAttempt::Ended(boot_end_of(BootReply::Lost(lost)));
-    }
-    let reply = tokio::select! {
-        reply = channel.await_frame(Some(CHILD_READY_TIMEOUT)) => reply,
-        () = shared.stop.cancelled() => {
-            let _ = channel.dispose_lost().await;
-            return BootAttempt::Stopped;
-        }
-    };
-    match reply {
-        FrameWait::Frame(ChildFrame::Ready(_)) => BootAttempt::Ready(channel),
-        FrameWait::Frame(ChildFrame::BootFailed(frame)) => {
-            let _ = channel.dispose_lost().await;
-            BootAttempt::Ended(boot_end_of(BootReply::BootFailed(frame)))
-        }
-        FrameWait::Frame(
-            ChildFrame::Result(_)
-            | ChildFrame::BodyReturned(_)
-            | ChildFrame::LeftWorkEnded(_)
-            | ChildFrame::LeftWorkStuck(_)
-            | ChildFrame::SharedResult(_)
-            | ChildFrame::DeadlineFired(_)
-            | ChildFrame::SecondCancel(_)
-            | ChildFrame::RunStuck(_)
-            | ChildFrame::LeftoverCancel(_)
-            | ChildFrame::LeftoverStuck(_)
-            | ChildFrame::LoopBlocked(_),
-        ) => {
-            let lost = channel.discard_violating_child().await;
-            let _ = channel.dispose().await;
-            BootAttempt::Ended(boot_end_of(BootReply::Lost(lost)))
-        }
-        FrameWait::Lost(lost) => {
-            let _ = channel.dispose_lost().await;
-            BootAttempt::Ended(boot_end_of(BootReply::Lost(lost)))
-        }
-        FrameWait::Expired => {
-            let _ = channel.dispose_lost().await;
-            BootAttempt::Ended(boot_end_of(BootReply::NotReadyInTime))
-        }
-    }
-}
-
-/// Kill the child by request of the worker, wait for its exit, and
-/// describe its end.
-async fn lost_after_kill(channel: &mut ChildChannel) -> ChildLost {
-    let _ = channel.kill_for_caller().await;
-    let _ = channel.wait_exit(CHILD_KILL_WAIT).await;
-    channel.lost_for(crate::worker::executor::supervisor::LossCause::KilledByParent)
 }
 
 /// Serve tasks on one child until it is lost, retires, or the pool stops.
 async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildChannel) {
     let mut tasks_done: u64 = 0;
     loop {
-        shared.set(index, IsolatedSlotState::Idle { pid: channel.pid() });
         let Some(run) = next_run(shared, &channel).await else {
             break;
         };
-        shared.set(index, IsolatedSlotState::Busy { pid: channel.pid() });
         tasks_done = tasks_done.saturating_add(1);
         match run_one(shared, &mut channel, run).await {
             AfterRun::Serve { rss } => {
@@ -326,13 +105,13 @@ async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildC
             }
             AfterRun::Retire => break,
             AfterRun::ChildGone => {
-                shared.set(index, IsolatedSlotState::Retiring);
+                shared.board.set(index, SlotPhase::Retiring);
                 let _ = channel.dispose_lost().await;
                 return;
             }
         }
     }
-    shared.set(index, IsolatedSlotState::Retiring);
+    shared.board.set(index, SlotPhase::Retiring);
     match channel.has_exited() || channel.channel_closed() {
         true => {
             let _ = channel.dispose_lost().await;
@@ -367,10 +146,8 @@ fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Opti
 async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedRun> {
     let mut exit = channel.exit_watch();
     loop {
-        let cannot_serve = shared.stop.is_cancelled()
-            || shared.failed.is_cancelled()
-            || channel.has_exited()
-            || channel.channel_closed();
+        let cannot_serve =
+            shared.board.not_serving() || channel.has_exited() || channel.channel_closed();
         if cannot_serve {
             return None;
         }
@@ -379,8 +156,8 @@ async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedR
         }
         tokio::select! {
             () = shared.queued.notified() => {}
-            () = shared.stop.cancelled() => {}
-            () = shared.failed.cancelled() => {}
+            () = shared.board.stop.cancelled() => {}
+            () = shared.board.failed.cancelled() => {}
             changed = exit.changed() => {
                 if changed.is_err() {
                     return None;
@@ -400,7 +177,7 @@ async fn first_answer(
     let bound = until.map(|until| until.saturating_duration_since(Instant::now()));
     tokio::select! {
         wait = channel.await_frame(bound) => FirstAnswer::Wait(wait),
-        () = shared.drain_deadline.cancelled() => FirstAnswer::DrainDeadline,
+        () = shared.board.drain_deadline.cancelled() => FirstAnswer::DrainDeadline,
     }
 }
 
@@ -563,7 +340,7 @@ async fn exit_not_seen(
                             return unknown;
                         }
                     }
-                    () = shared.stop.cancelled() => return unknown,
+                    () = shared.board.stop.cancelled() => return unknown,
                 }
             }
         }
