@@ -82,7 +82,7 @@ async def _seed_paused_workflow_with_claimed_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'FAIL', 0, :id,
+            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id},
@@ -90,13 +90,15 @@ async def _seed_paused_workflow_with_claimed_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
             VALUES (:id, :workflow_id, 0, 'node_0', 'abandon_after_resume',
-                    '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-                    'ENQUEUED', :task_id, NOW())
+                    '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+                    'ENQUEUED', :task_id, NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {'id': str(uuid.uuid4()), 'workflow_id': workflow_id, 'task_id': task_id},
     )

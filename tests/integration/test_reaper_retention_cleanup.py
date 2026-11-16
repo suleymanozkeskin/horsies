@@ -129,7 +129,7 @@ async def test_expired_terminal_workflows_deleted(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, 'wf_old_done', 'COMPLETED', 'FAIL', 0, :id,
+            (:id, 'wf_old_done', 'COMPLETED', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours')
     """), {'id': old_completed_wf})
@@ -140,7 +140,7 @@ async def test_expired_terminal_workflows_deleted(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at)
         VALUES
-            (:id, 'wf_old_running', 'RUNNING', 'FAIL', 0, :id,
+            (:id, 'wf_old_running', 'RUNNING', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours')
     """), {'id': old_running_wf})
@@ -151,7 +151,7 @@ async def test_expired_terminal_workflows_deleted(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, 'wf_recent_done', 'COMPLETED', 'FAIL', 0, :id,
+            (:id, 'wf_recent_done', 'COMPLETED', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour',
              NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')
     """), {'id': recent_completed_wf})
@@ -160,13 +160,15 @@ async def test_expired_terminal_workflows_deleted(
     for wf_id in (old_completed_wf, old_running_wf):
         await session.execute(text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                (id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
-                 is_subworkflow, status, created_at)
+                 is_subworkflow, status, created_at,
+                 max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node_0', 'retention_test', '[]', '{}',
+                (:id, :wf_id, 0, 'node_0', 'retention_test', '{}',
                  'default', 100, '{}', FALSE, 'all',
-                 FALSE, 'COMPLETED', NOW())
+                 FALSE, 'COMPLETED', NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """), {'id': str(uuid.uuid4()), 'wf_id': wf_id})
 
     await session.commit()
@@ -202,21 +204,23 @@ async def _insert_doomed_workflow(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, :name, 'COMPLETED', 'FAIL', 0, :id,
+            (:id, :name, 'COMPLETED', 'fail', 0, :id,
              NOW(), NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours')
     """), {'id': workflow_id, 'name': name})
     for index in range(node_count):
         await session.execute(text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 created_at)
+                 created_at,
+                 max_retries, execution, retention_class_key)
             VALUES
                 (:id, :wf_id, :task_index, :node_id, 'retention_budget_test',
-                 '[]', '{}', 'default', 100, '{}', FALSE, 'all',
-                 FALSE, 'COMPLETED', NOW())
+                 '{}', 'default', 100, '{}', FALSE, 'all',
+                 FALSE, 'COMPLETED', NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """), {
             'id': str(uuid.uuid4()),
             'wf_id': workflow_id,
@@ -310,7 +314,7 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
             (id, name, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at, completed_at)
         VALUES
-            (:id, 'wf_policy_complete_with_live_task', 'COMPLETED', 'FAIL', 0, :id,
+            (:id, 'wf_policy_complete_with_live_task', 'COMPLETED', 'fail', 0, :id,
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours')
@@ -340,13 +344,15 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
     })
     await session.execute(text("""
         INSERT INTO horsies_workflow_tasks
-            (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+            (id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type,
-             is_subworkflow, status, task_id, created_at)
+             is_subworkflow, status, task_id, created_at,
+             max_retries, execution, retention_class_key)
         VALUES
-            (:id, :wf_id, 0, 'join', 'workflow_join_barrier', '[]', '{}',
+            (:id, :wf_id, 0, 'join', 'workflow_join_barrier', '{}',
              'normal', 50, '{}', FALSE, 'all',
-             FALSE, 'ENQUEUED', :task_id, NOW() - INTERVAL '48 hours')
+             FALSE, 'ENQUEUED', :task_id, NOW() - INTERVAL '48 hours',
+             0, 'ISOLATED', 'standard_30d')
     """), {
         'id': str(uuid.uuid4()),
         'wf_id': workflow_id,

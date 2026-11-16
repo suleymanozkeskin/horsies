@@ -278,6 +278,10 @@ CREATE TABLE horsies_workflow_tasks (
     sub_workflow_id uuid,
     sub_workflow_name character varying(255),
     sub_definition_key character varying(255),
+    -- The client's choice for a sub-workflow node's params: GIVEN when the node definition carries params for
+    -- the child's build, NOT_GIVEN when it carries none. Set exactly on sub-workflow nodes; see
+    -- horsies_workflow_tasks_sub_workflow_params_by_kind.
+    sub_workflow_params character varying(9),
     sub_workflow_summary text,
     result text,
     error text,
@@ -307,6 +311,17 @@ CREATE TABLE horsies_workflow_tasks (
         )
     ),
     CONSTRAINT horsies_workflow_tasks_subworkflow_fields CHECK (NOT is_subworkflow OR task_id IS NULL),
+    CONSTRAINT horsies_workflow_tasks_sub_workflow_params_by_kind CHECK (
+        (
+            is_subworkflow
+            AND sub_workflow_params IS NOT NULL
+            AND sub_workflow_params IN ('NOT_GIVEN', 'GIVEN')
+        )
+        OR (
+            NOT is_subworkflow
+            AND sub_workflow_params IS NULL
+        )
+    ),
     -- The bounds are those of horsies_tasks.
     CONSTRAINT horsies_workflow_tasks_task_facts_by_kind CHECK (
         (
