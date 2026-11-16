@@ -9,6 +9,7 @@ use crate::core::history::phase2::consumption::{
     consume_phase2, Phase2Disposition, Phase2DispositionKind,
 };
 use crate::core::history::phase2::quarantine::{quarantine_one, QuarantineVerdict};
+use crate::core::lifecycle::TerminalizationKind;
 use crate::core::types::status::TaskStatus;
 use crate::workflow_engine::engine::apply_phase2_progression_in_tx;
 
@@ -68,6 +69,53 @@ fn node_status_for_terminal_task(status: &str) -> Result<&'static str, WorkflowE
     } else {
         "FAILED"
     })
+}
+
+/// A phase-2 record names a kind whose terminal move writes no phase-2
+/// record. The pending CHECK admits five kinds, so this is a value that the
+/// table refuses or that a later schema added.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("phase-2 record names terminalization kind {kind:?}, which writes no phase-2 record")]
+pub(crate) struct PendingKindWithoutPhase2 {
+    pub kind: String,
+}
+
+/// The task status that the terminal move wrote with the kind of a phase-2
+/// record (Python `terminal_status_of_pending_kind`).
+///
+/// The move pairs each kind with one terminal status and refuses any other
+/// pair, and only five kinds write a phase-2 record: `COMPLETE_LOCKED` is
+/// COMPLETED; `FAIL_RUNNING` and `FAIL_STALE` are FAILED; `EXPIRE_CLAIMED`
+/// and `EXPIRE_PENDING` are EXPIRED. No cancel kind writes a record, so a
+/// record never stands for a CANCELLED task. Every other value, known kind
+/// or not, is `PendingKindWithoutPhase2`. Pure.
+pub(crate) fn terminal_status_of_pending_kind(
+    kind: &str,
+) -> Result<TaskStatus, PendingKindWithoutPhase2> {
+    match TerminalizationKind::parse(kind) {
+        Some(TerminalizationKind::CompleteLocked) => Ok(TaskStatus::Completed),
+        Some(TerminalizationKind::FailRunning | TerminalizationKind::FailStale) => {
+            Ok(TaskStatus::Failed)
+        }
+        Some(TerminalizationKind::ExpireClaimed | TerminalizationKind::ExpirePending) => {
+            Ok(TaskStatus::Expired)
+        }
+        Some(
+            TerminalizationKind::CompleteFused
+            | TerminalizationKind::CancelAdmin
+            | TerminalizationKind::CancelOrphan
+            | TerminalizationKind::CancelOrphanSweep
+            | TerminalizationKind::PauseAbandonClaim
+            | TerminalizationKind::PauseAbandonClaimBatch
+            | TerminalizationKind::PauseAbandonWorkflow
+            | TerminalizationKind::WorkflowCancelClaim
+            | TerminalizationKind::WorkflowCancelClaimBatch
+            | TerminalizationKind::WorkflowCancelWorkflow,
+        )
+        | None => Err(PendingKindWithoutPhase2 {
+            kind: kind.to_owned(),
+        }),
+    }
 }
 
 async fn apply_progression(
@@ -403,6 +451,62 @@ mod tests {
             assert!(node_status_for_terminal_task(&status.to_string()).is_err());
         }
         assert!(node_status_for_terminal_task("UNKNOWN").is_err());
+    }
+
+    #[test]
+    fn a_complete_locked_record_stands_for_a_completed_task() {
+        assert_eq!(
+            terminal_status_of_pending_kind("COMPLETE_LOCKED"),
+            Ok(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn a_running_or_stale_failure_record_stands_for_a_failed_task() {
+        for kind in ["FAIL_RUNNING", "FAIL_STALE"] {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Ok(TaskStatus::Failed),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expiry_record_stands_for_an_expired_task() {
+        for kind in ["EXPIRE_CLAIMED", "EXPIRE_PENDING"] {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Ok(TaskStatus::Expired),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Every kind that writes no phase-2 record, and a value that is no kind,
+    /// is refused with the value named.
+    #[test]
+    fn every_other_kind_writes_no_phase_two_record() {
+        let record_kinds = [
+            TerminalizationKind::CompleteLocked,
+            TerminalizationKind::FailRunning,
+            TerminalizationKind::FailStale,
+            TerminalizationKind::ExpireClaimed,
+            TerminalizationKind::ExpirePending,
+        ];
+        let other_kinds = TerminalizationKind::ALL
+            .into_iter()
+            .filter(|kind| !record_kinds.contains(kind))
+            .map(TerminalizationKind::as_str);
+        for kind in other_kinds.chain(["KIND_FROM_THE_FUTURE", ""]) {
+            assert_eq!(
+                terminal_status_of_pending_kind(kind),
+                Err(PendingKindWithoutPhase2 {
+                    kind: kind.to_owned()
+                }),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
