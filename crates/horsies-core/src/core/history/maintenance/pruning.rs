@@ -44,17 +44,17 @@ pub struct LeafSweep<E> {
     pub reach: PruneReach,
 }
 
-/// Whether one swept leaf counts toward `MAX_PRUNE_LEAVES_PER_PASS`: the leaf
-/// ends detached or dropped. A busy, blocked, not-expired or quarantine-refused
-/// leaf does not count. A detached leaf whose drop is refused counts, because
-/// the detach outcome does not tell a detach of this pass from an earlier one.
+/// Whether one swept leaf counts toward `MAX_PRUNE_LEAVES_PER_PASS`: this
+/// pass detached it or dropped it. A busy, blocked, not-expired or
+/// quarantine-refused leaf does not count, and neither does a leaf an earlier
+/// pass detached whose drop is refused now.
 pub(crate) fn sweep_counts_toward_bound(
     detach: &DetachExpiredLeafOutcome,
     drop: Option<&LeafDrop>,
 ) -> bool {
     match (detach, drop) {
+        (DetachExpiredLeafOutcome::Detached { .. }, _) => true,
         (_, Some(LeafDrop::Dropped { .. })) => true,
-        (DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }), _) => true,
         (DetachExpiredLeafOutcome::Inspection(_), _)
         | (DetachExpiredLeafOutcome::Busy { .. }, _)
         | (DetachExpiredLeafOutcome::QuarantineRefused(_), _) => false,
@@ -88,22 +88,12 @@ impl PrunePass {
     pub fn detached_count(&self) -> usize {
         self.heartbeat_swept
             .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.detach,
-                    DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
-                )
-            })
+            .filter(|entry| matches!(entry.detach, DetachExpiredLeafOutcome::Detached { .. }))
             .count()
             + self
                 .history_swept
                 .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry.detach,
-                        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
-                    )
-                })
+                .filter(|entry| matches!(entry.detach, DetachExpiredLeafOutcome::Detached { .. }))
                 .count()
     }
 
@@ -252,8 +242,11 @@ async fn sweep_history_leaf<P: LoaderPublication>(
             .map_err(|error| HistoryError::contract(error.to_string()))?;
     let detach = detach_expired_leaf(pool, &detach_command, publisher, &NoQuarantine).await?;
     let detached = match &detach {
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
-        _ => {
+        DetachExpiredLeafOutcome::Detached { .. }
+        | DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
+        DetachExpiredLeafOutcome::Busy { .. }
+        | DetachExpiredLeafOutcome::Inspection(_)
+        | DetachExpiredLeafOutcome::QuarantineRefused(_) => {
             let mut connection = pool.acquire().await?;
             matches!(
                 inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,

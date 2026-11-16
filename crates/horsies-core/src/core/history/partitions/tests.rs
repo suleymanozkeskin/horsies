@@ -35,7 +35,8 @@ use crate::core::history::maintenance::coverage::{
     StartupCoverageOutcome,
 };
 use crate::core::history::maintenance::pruning::{
-    prune_expired_partitions, sweep_expired_history_leaves, LeafSweep, PruneReach,
+    prune_expired_partitions, sweep_counts_toward_bound, sweep_expired_history_leaves, LeafSweep,
+    PruneReach,
 };
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
@@ -1024,6 +1025,44 @@ async fn conformant_leaf_skips_a_busy_lock_and_missing_leaf_returns_busy() {
         .rollback()
         .await
         .expect("release parent relation lock");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_second_detach_reports_the_leaf_detached_by_the_first() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let lower =
+        utc_day_start(database_now(&mut clock).await.expect("database now") - Duration::days(5));
+    drop(clock);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let command =
+        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let first = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+        .await
+        .expect("first detach");
+    assert_eq!(
+        first,
+        DetachExpiredLeafOutcome::Detached {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }
+    );
+    let second = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+        .await
+        .expect("second detach");
+    assert!(matches!(
+        second,
+        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+    ));
+    assert!(!sweep_counts_toward_bound(&second, None));
+    assert!(sweep_counts_toward_bound(&first, None));
     database.drop().await;
 }
 
@@ -2064,7 +2103,7 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         .expect("detach expired leaf");
     assert!(matches!(
         detached,
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(&database.pool)
@@ -2110,7 +2149,7 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         )
         .await
         .expect("detach referenced leaf"),
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     let mut transaction = database.pool.begin().await.expect("begin refused drop");
     let refused = drop_detached_leaf(
@@ -2183,7 +2222,7 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
         detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
             .await
             .expect("detach expired leaf"),
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     let mut transaction = database.pool.begin().await.expect("begin drop");
     assert!(matches!(
@@ -2255,7 +2294,7 @@ async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
     assert_eq!(swept[0].leaf_name, newer.leaf_name());
     assert!(matches!(
         swept[0].detach,
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     database.drop().await;
 }
@@ -2878,10 +2917,7 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
                         detach_expired_leaf(&database.pool, &command, &publisher, &NoQuarantine)
                             .await
                             .unwrap();
-                    assert!(matches!(
-                        result,
-                        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
-                    ));
+                    assert!(matches!(result, DetachExpiredLeafOutcome::Detached { .. }));
                 }
             }
             let finalize = FinalizeInterruptedLeafDetach::new(leaf.clone(), Some(5_000)).unwrap();

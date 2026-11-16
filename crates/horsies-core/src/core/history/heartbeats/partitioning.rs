@@ -515,8 +515,11 @@ async fn sweep_heartbeat_leaf<P: LoaderPublication>(
             .map_err(|error| HistoryError::contract(error.to_string()))?;
     let detach = detach_expired_leaf(pool, &detach_command, publisher, &NoQuarantine).await?;
     let detached = match &detach {
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
-        _ => {
+        DetachExpiredLeafOutcome::Detached { .. }
+        | DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
+        DetachExpiredLeafOutcome::Busy { .. }
+        | DetachExpiredLeafOutcome::Inspection(_)
+        | DetachExpiredLeafOutcome::QuarantineRefused(_) => {
             let mut connection = pool.acquire().await?;
             matches!(
                 inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
