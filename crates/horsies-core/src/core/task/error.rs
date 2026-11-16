@@ -34,10 +34,13 @@ pub enum OperationalErrorCode {
     ResultDeserializationError,
     WorkflowEnqueueFailed,
     SubworkflowLoadFailed,
+    /// Workflow recovery failed with a persistent error in `workflow_recovery_failure_limit` reaper
+    /// passes, so the workflow failed closed.
+    WorkflowRecoveryLimitReached,
 }
 
 impl OperationalErrorCode {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::UnhandledError,
         Self::TaskError,
         Self::WorkerCrashed,
@@ -47,6 +50,7 @@ impl OperationalErrorCode {
         Self::ResultDeserializationError,
         Self::WorkflowEnqueueFailed,
         Self::SubworkflowLoadFailed,
+        Self::WorkflowRecoveryLimitReached,
     ];
 }
 
@@ -549,6 +553,7 @@ mod tests {
             OperationalErrorCode::ResultDeserializationError,
             OperationalErrorCode::WorkflowEnqueueFailed,
             OperationalErrorCode::SubworkflowLoadFailed,
+            OperationalErrorCode::WorkflowRecoveryLimitReached,
         ];
         for code in codes {
             let builtin = BuiltInTaskCode::Operational(code.clone());

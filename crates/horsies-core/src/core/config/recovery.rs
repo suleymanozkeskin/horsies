@@ -91,6 +91,13 @@ pub struct RecoveryConfig {
     #[serde(default = "default_phase2_quarantine_after_attempts")]
     pub phase2_quarantine_after_attempts: u32,
 
+    /// Reaper passes in which the recovery of a workflow may fail with a persistent error before the
+    /// workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED` (3-1000). A retryable database or connection
+    /// error does not count, so a database outage cannot fail a workflow. The count is stored, so a worker
+    /// restart keeps it, and it has no reset.
+    #[serde(default = "default_workflow_recovery_failure_limit")]
+    pub workflow_recovery_failure_limit: u32,
+
     /// How often the reaper checks for stale tasks (1s–10min).
     #[serde(default = "default_check_interval")]
     pub check_interval_ms: u64,
@@ -145,6 +152,8 @@ struct RecoveryConfigWire {
     crashed_worker_recovery_grace_ms: u64,
     #[serde(default = "default_phase2_quarantine_after_attempts")]
     phase2_quarantine_after_attempts: u32,
+    #[serde(default = "default_workflow_recovery_failure_limit")]
+    workflow_recovery_failure_limit: u32,
     #[serde(default = "default_check_interval")]
     check_interval_ms: u64,
     #[serde(default = "default_heartbeat_interval")]
@@ -193,6 +202,7 @@ impl<'de> Deserialize<'de> for RecoveryConfig {
             finalizing_stale_threshold_ms: wire.finalizing_stale_threshold_ms,
             crashed_worker_recovery_grace_ms: wire.crashed_worker_recovery_grace_ms,
             phase2_quarantine_after_attempts: wire.phase2_quarantine_after_attempts,
+            workflow_recovery_failure_limit: wire.workflow_recovery_failure_limit,
             check_interval_ms: wire.check_interval_ms,
             runner_heartbeat_interval_ms: wire.runner_heartbeat_interval_ms,
             claimer_heartbeat_interval_ms: wire.claimer_heartbeat_interval_ms,
@@ -219,6 +229,9 @@ fn default_crashed_worker_recovery_grace() -> u64 {
 fn default_phase2_quarantine_after_attempts() -> u32 {
     25
 }
+fn default_workflow_recovery_failure_limit() -> u32 {
+    25
+}
 fn default_orphan_task_audit_interval() -> u64 {
     60_000
 }
@@ -243,6 +256,7 @@ impl Default for RecoveryConfig {
             finalizing_stale_threshold_ms: 300_000,
             crashed_worker_recovery_grace_ms: 10_000,
             phase2_quarantine_after_attempts: 25,
+            workflow_recovery_failure_limit: 25,
             check_interval_ms: 30_000,
             runner_heartbeat_interval_ms: 30_000,
             claimer_heartbeat_interval_ms: 30_000,
@@ -399,6 +413,20 @@ impl RecoveryConfig {
             errors.push(RecoveryConfigError::AboveMaximum {
                 field: "phase2_quarantine_after_attempts",
                 value: u64::from(self.phase2_quarantine_after_attempts),
+                max: 1_000,
+            });
+        }
+
+        if self.workflow_recovery_failure_limit < 3 {
+            errors.push(RecoveryConfigError::BelowMinimum {
+                field: "workflow_recovery_failure_limit",
+                value: u64::from(self.workflow_recovery_failure_limit),
+                min: 3,
+            });
+        } else if self.workflow_recovery_failure_limit > 1_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "workflow_recovery_failure_limit",
+                value: u64::from(self.workflow_recovery_failure_limit),
                 max: 1_000,
             });
         }
@@ -906,6 +934,42 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(config.validate().len(), 1);
+        }
+    }
+
+    #[test]
+    fn workflow_recovery_failure_limit_bounds_and_default_are_exact() {
+        let from_empty: RecoveryConfig = serde_json::from_str("{}").expect("defaults deserialize");
+        assert_eq!(from_empty.workflow_recovery_failure_limit, 25);
+        assert_eq!(
+            RecoveryConfig::default().workflow_recovery_failure_limit,
+            25
+        );
+
+        for value in [3, 1_000] {
+            let config = RecoveryConfig {
+                workflow_recovery_failure_limit: value,
+                ..Default::default()
+            };
+            assert!(config.validate().is_empty());
+        }
+        for value in [2, 1_001] {
+            let config = RecoveryConfig {
+                workflow_recovery_failure_limit: value,
+                ..Default::default()
+            };
+            let errors = config.validate();
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(
+                errors[0],
+                RecoveryConfigError::BelowMinimum {
+                    field: "workflow_recovery_failure_limit",
+                    ..
+                } | RecoveryConfigError::AboveMaximum {
+                    field: "workflow_recovery_failure_limit",
+                    ..
+                }
+            ));
         }
     }
 
