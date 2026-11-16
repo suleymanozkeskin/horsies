@@ -893,6 +893,136 @@ async fn worker_list_carries_the_slot_health() {
     );
 }
 
+/// A listed state of a worker that started at `worker_started_at`, whose
+/// snapshot is at `snapshot_at`, read by a list statement at `read_at`.
+fn listed_worker(
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+    worker_started_at: chrono::DateTime<chrono::Utc>,
+    read_at: chrono::DateTime<chrono::Utc>,
+) -> crate::broker::health::ListedWorkerState {
+    let stored = crate::broker::health::StoredWorkerState {
+        worker_id: "w-clock".to_owned(),
+        snapshot_at,
+        hostname: "itest-host".to_owned(),
+        pid: 4242,
+        processes: 2,
+        max_claim_batch: 0,
+        max_claim_per_worker: 2,
+        cluster_wide_cap: None,
+        queues: vec!["default".to_owned()],
+        queue_priorities: serde_json::json!({}),
+        queue_max_concurrency: serde_json::json!({}),
+        recovery_config: serde_json::json!({}),
+        tasks_running: 0,
+        tasks_claimed: 0,
+        memory_usage_mb: None,
+        memory_percent: None,
+        cpu_percent: None,
+        children_memory_mb: None,
+        worker_started_at,
+        slots_down: serde_json::json!([]),
+        class_capacity: serde_json::json!({}),
+    };
+    crate::broker::health::ListedWorkerState {
+        snapshot: stored.into_snapshot().expect("a readable stored row"),
+        read_at,
+    }
+}
+
+/// The worker list measures the snapshot age, the staleness and the uptime
+/// to the database clock of the list statement, not to the web host clock
+/// (#765). The instants are days before any run of this test, so an age
+/// measured to the host clock is days long and stale.
+#[test]
+fn worker_list_ages_are_measured_to_the_read_time() {
+    let snapshot_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
+        .single()
+        .expect("a valid instant");
+    let started_at = snapshot_at - chrono::TimeDelta::hours(1);
+    let threshold = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64;
+
+    let fresh = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(30),
+    ));
+    let at_threshold = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(threshold),
+    ));
+    let past_threshold = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(threshold + 1),
+    ));
+
+    assert_eq!(fresh.snapshot_age_s, Some(30));
+    assert!(!fresh.stale);
+    assert_eq!(fresh.uptime_s, Some(3_630));
+    assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
+    assert!(!at_threshold.stale, "stale only past the live window");
+    assert_eq!(past_threshold.snapshot_age_s, Some(threshold + 1));
+    assert!(past_threshold.stale);
+}
+
+/// A snapshot written ten minutes before the read in database time is stale,
+/// whatever the web host clock is (#765). Python
+/// `test_web_api.py::TestWorkerReads::test_worker_list_answers` for the
+/// shape: 200 and a JSON array.
+#[tokio::test]
+#[serial]
+async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let worker_id = format!("itest-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now() - interval '10 minutes', 'itest-host', 4242, 2, 0, 2,
+            ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, now() - interval '1 hour',
+            '[]'::jsonb, '{}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let worker = body
+        .as_array()
+        .expect("the worker list is a JSON array")
+        .iter()
+        .find(|entry| entry["worker_id"] == worker_id.as_str())
+        .expect("the worker is listed");
+    assert_eq!(worker["stale"], true);
+    let age = worker["snapshot_age_s"]
+        .as_i64()
+        .expect("an age in seconds");
+    assert!(age >= 600, "snapshot_age_s {age}");
+    let uptime = worker["uptime_s"].as_i64().expect("an uptime in seconds");
+    assert!(uptime >= 3_600, "uptime_s {uptime}");
+}
+
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
 /// The web tests share one database, so the test reads only its own queue
 /// and worker.

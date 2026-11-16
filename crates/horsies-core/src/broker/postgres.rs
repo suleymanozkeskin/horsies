@@ -30,8 +30,9 @@ use crate::core::{
 
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
-    read_worker_snapshot, read_worker_snapshots, DatabasePing, StoredWorkerState,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
+    ListedWorkerState, ListedWorkerStateRow, StoredWorkerState, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
@@ -487,6 +488,11 @@ LIMIT $2";
 /// index scan, so the previous `DISTINCT ON (worker_id)` form read every
 /// retained snapshot in the timeseries to return one row per worker.
 /// Parity with horsies PR #170.
+///
+/// Each row also has `read_at`, the `statement_timestamp()` of this
+/// statement: the database clock, one value for every row. The web worker
+/// list measures ages from it (Python measures them with the web host clock,
+/// `horsies/web/routes/workers.py:108-119`).
 const LIST_WORKER_STATES_SQL: &str = "\
 WITH RECURSIVE latest AS (
     (
@@ -515,7 +521,7 @@ WITH RECURSIVE latest AS (
         LIMIT 1
     ) nxt
 )
-SELECT * FROM latest";
+SELECT latest.*, statement_timestamp() AS read_at FROM latest";
 
 /// Latest snapshot for a single worker.
 const GET_WORKER_STATE_LATEST_SQL: &str = "\
@@ -2492,11 +2498,23 @@ impl PostgresBroker {
     /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
     /// worker and the column (Python `postgres.py:2961-3034`).
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
-        let rows: Vec<StoredWorkerState> = sqlx::query_as(LIST_WORKER_STATES_SQL)
+        let listed = self.list_worker_states_with_read_time().await?;
+        Ok(listed.into_iter().map(|state| state.snapshot).collect())
+    }
+
+    /// [`list_worker_states`](Self::list_worker_states), with the database
+    /// clock of the list statement on each entry (`read_at`,
+    /// `statement_timestamp()`). The web worker list measures the snapshot
+    /// age, the staleness and the uptime from it. Same statement, same
+    /// errors; reads only.
+    pub(crate) async fn list_worker_states_with_read_time(
+        &self,
+    ) -> BrokerResult<Vec<ListedWorkerState>> {
+        let rows: Vec<ListedWorkerStateRow> = sqlx::query_as(LIST_WORKER_STATES_SQL)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| monitoring_query_error("list_worker_states", e))?;
-        read_worker_snapshots("list_worker_states", rows)
+        read_listed_worker_states("list_worker_states", rows)
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.

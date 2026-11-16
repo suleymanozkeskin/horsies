@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use uuid::Uuid;
 
+use crate::broker::health::ListedWorkerState;
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, elapsed_s, get_task_detail, get_workflow_node,
@@ -521,8 +522,14 @@ const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
 
 /// One entry of the worker list (Python `read_workers`,
 /// `horsies/web/routes/workers.py:96-133`).
-fn worker_state(snapshot: crate::broker::WorkerStateSnapshot) -> WorkerStateInfo {
-    let age = elapsed_s(Some(snapshot.snapshot_at), None);
+///
+/// The snapshot age, the staleness and the uptime are measured to `read_at`,
+/// the database clock of the list statement: `snapshot_at` and
+/// `worker_started_at` are database times too. Python measures them to the
+/// web host clock (`workers.py:108-119`).
+pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
+    let ListedWorkerState { snapshot, read_at } = listed;
+    let age = elapsed_s(Some(snapshot.snapshot_at), Some(read_at));
     let (slot_health, down_slots) = slot_health_info(&snapshot.slot_health);
     WorkerStateInfo {
         worker_id: snapshot.worker_id,
@@ -532,7 +539,7 @@ fn worker_state(snapshot: crate::broker::WorkerStateSnapshot) -> WorkerStateInfo
         snapshot_age_s: age,
         stale: age.unwrap_or_default() > STALE_SNAPSHOT_THRESHOLD_S,
         worker_started_at: snapshot.worker_started_at,
-        uptime_s: elapsed_s(Some(snapshot.worker_started_at), None),
+        uptime_s: elapsed_s(Some(snapshot.worker_started_at), Some(read_at)),
         processes: snapshot.processes,
         queues: snapshot.queues,
         queue_max_concurrency: snapshot.queue_max_concurrency,
@@ -550,10 +557,14 @@ fn worker_state(snapshot: crate::broker::WorkerStateSnapshot) -> WorkerStateInfo
 async fn read_workers(
     State(state): State<WebState>,
 ) -> Result<Json<Vec<WorkerStateInfo>>, ApiError> {
-    let snapshots = state.broker.list_worker_states().await.map_err(|error| {
-        ApiError::unavailable(format!("Worker state query failed: {}", error.message))
-    })?;
-    Ok(Json(snapshots.into_iter().map(worker_state).collect()))
+    let listed = state
+        .broker
+        .list_worker_states_with_read_time()
+        .await
+        .map_err(|error| {
+            ApiError::unavailable(format!("Worker state query failed: {}", error.message))
+        })?;
+    Ok(Json(listed.into_iter().map(worker_state).collect()))
 }
 
 #[derive(Debug)]
