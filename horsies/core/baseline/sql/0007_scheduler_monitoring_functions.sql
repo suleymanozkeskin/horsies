@@ -1027,12 +1027,14 @@ $$;
 -- codes of its built-in family, and DOMAIN every non-empty code outside the built-in taxonomy; a live row has no
 -- error code, so an error-code or category filter drops the live side; p_retried_only keeps rows with
 -- retry_count > 0. It changes nothing.
+-- - Fails closed on a broken history contract: a history row in the scope whose status is none of the seven (the
+--   history table has no status CHECK) raises data_corrupted (XX001) and returns no count. The caller reports it as
+--   a broken history contract.
 -- Lock order: none (a plain read).
 -- Returns: rows 1..7 for PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, CANCELLED and EXPIRED in this order, with
--- task_count 0 for a status that no task has. After them, one row for each stored status that is none of the seven
--- (only a history row can hold one: the history table has no status CHECK), at positions 8.. in byte order of the
--- status text. The caller reports such a row as a broken history contract.
--- Raises 22004 for a NULL argument and 22023 for a broken scope precondition (horsies_monitoring_check_scope).
+-- task_count 0 for a status that no task has.
+-- Raises 22004 for a NULL argument, 22023 for a broken scope precondition (horsies_monitoring_check_scope), and
+-- XX001 for a stored status that is not a task status (the message names it).
 -- Replaces: horsies/monitoring/queries.py:935-1005 (task_stats) and horsies/core/history/reads/aggregates.py:63-76
 -- (history_scoped_status_counts_statement): a session of 4 round trips with two statements, so two snapshots, and
 -- the sum and the zero fill in client code.
@@ -1057,6 +1059,9 @@ AS $$
 #variable_conflict use_column
 DECLARE
     v_category_codes text[];
+    v_position integer;
+    v_status text;
+    v_count bigint;
 BEGIN
     PERFORM horsies_monitoring_check_scope(
         p_window_lower, p_window_upper, ARRAY[]::text[], p_error_categories, p_builtin_codes, p_builtin_categories
@@ -1070,8 +1075,9 @@ BEGIN
         FROM unnest(p_builtin_codes, p_builtin_categories) AS m(code, category)
         WHERE m.category = ANY(p_error_categories)
     );
-    -- EXECUTE plans the statement with the argument values, so an empty filter folds away.
-    RETURN QUERY EXECUTE $q$
+    -- EXECUTE plans the statement with the argument values, so an empty filter folds away. A stored status that is
+    -- none of the seven comes first, with no position, so the refusal comes before any row.
+    FOR v_position, v_status, v_count IN EXECUTE $q$
         WITH side_counts AS (
             SELECT t.status::text AS status, count(*) AS task_count
             FROM horsies_tasks AS t
@@ -1109,13 +1115,24 @@ BEGIN
         FROM fixed AS f
         LEFT JOIN merged AS m ON m.status = f.status
         UNION ALL
-        SELECT (7 + row_number() OVER (ORDER BY m.status COLLATE "C"))::integer, m.status, m.task_count
+        SELECT NULL::integer, m.status, m.task_count
         FROM merged AS m
         WHERE NOT EXISTS (SELECT 1 FROM fixed AS f WHERE f.status = m.status)
-        ORDER BY 1
+        ORDER BY 1 NULLS FIRST
     $q$
     USING p_window_lower, p_window_upper, p_task_names, p_queue_names, p_worker_ids, p_error_codes,
-          p_error_categories, p_retried_only, v_category_codes, p_builtin_codes;
+          p_error_categories, p_retried_only, v_category_codes, p_builtin_codes
+    LOOP
+        IF v_position IS NULL THEN
+            RAISE EXCEPTION 'horsies_monitoring_task_stats: % history row(s) in the window hold status %, which is '
+                'not a task status', v_count, v_status
+                USING ERRCODE = 'data_corrupted';
+        END IF;
+        row_position := v_position;
+        status := v_status;
+        task_count := v_count;
+        RETURN NEXT;
+    END LOOP;
 END;
 $$;
 
@@ -1124,24 +1141,30 @@ $$;
 -- Guarantee: one group per value of the group column, over the live table and the history window
 -- [p_window_lower, p_window_upper) on terminal_at, read in one statement and so in one snapshot. The group column
 -- is the current claim (claimed_by_worker_id) on the live side and the last claim (last_claimed_worker_id) in
--- history for 'worker', task_name for 'task_name', queue_name for 'queue'. On both sides a NULL value counts in the
--- group 'unknown', in one group with a stored value 'unknown'. Every filter of the task list scopes the rows, with
--- the rules of the task list (see horsies_monitoring_task_stats; here the status filter applies too).
+-- history for 'worker', task_name for 'task_name', queue_name for 'queue'. Every filter of the task list scopes the
+-- rows, with the rules of the task list (see horsies_monitoring_task_stats; here the status filter applies too).
+-- - A group is a stored value (group_kind 'VALUE', group_value the worker id, task name or queue name) or, for
+--   'worker' only, the rows with no claim on either side (group_kind 'UNCLAIMED', group_value NULL). A worker whose
+--   id is the text 'unknown' is a VALUE group of its own, apart from the UNCLAIMED group. Task and queue names are
+--   never NULL, so the other two columns give VALUE groups only.
 -- - Each group has total, a count per status (a row whose stored status is none of the seven counts only in total)
 --   and retried (rows with retry_count > 0).
 -- - The TOTAL row sums every group, also the groups past the limit; group_count is the number of groups.
 -- - Groups come by total, highest first, then by the group text in byte order (UTF-8 byte order is code-point
---   order); at most p_limit (1..500) groups. An empty scope gives no group and a TOTAL row of zeros.
+--   order). The UNCLAIMED group takes the place of its label 'unknown' in that order; a VALUE group 'unknown' with
+--   the same total comes before it. At most p_limit (1..500) groups. An empty scope gives no group and a TOTAL row
+--   of zeros.
 -- It changes nothing.
 -- Lock order: none (a plain read).
--- Returns: first the row_kind 'TOTAL' row (row_position 0, group_value NULL, group_count set), then one row_kind
--- 'GROUP' row per group (row_position 1..n, group_count NULL).
+-- Returns: first the row_kind 'TOTAL' row (row_position 0, group_kind and group_value NULL, group_count set), then
+-- one row_kind 'GROUP' row per group (row_position 1..n, group_kind set, group_count NULL).
 -- Raises 22004 for a NULL argument and 22023 for an unknown group column, a limit outside 1..500 or a broken scope
 -- precondition (horsies_monitoring_check_scope).
 -- Replaces: horsies/monitoring/queries.py:1076-1253 (task_breakdown) and
 -- horsies/core/history/reads/aggregates.py:85-105 (history_breakdown_statement): a session of 4 round trips with two
 -- statements, so two snapshots, every group of both sides read into the client, and the merge, the order, the cap
--- and the total in client code.
+-- and the total in client code. Python labels the unclaimed rows 'unknown' and so merges them with a worker of that
+-- name.
 CREATE FUNCTION horsies_monitoring_task_breakdown(
     p_window_lower timestamp with time zone,
     p_window_upper timestamp with time zone,
@@ -1159,6 +1182,7 @@ CREATE FUNCTION horsies_monitoring_task_breakdown(
 ) RETURNS TABLE (
     row_kind text,
     row_position integer,
+    group_kind text,
     group_value text,
     group_count bigint,
     total bigint,
@@ -1212,7 +1236,8 @@ BEGIN
     RETURN QUERY EXECUTE format(
         $q$
         WITH side_groups AS (
-            SELECT COALESCE(%1$s, 'unknown')::text AS group_value, t.status::text AS status,
+            SELECT CASE WHEN %1$s IS NULL THEN 'UNCLAIMED' ELSE 'VALUE' END AS group_kind,
+                   %1$s::text AS group_value, t.status::text AS status,
                    count(*) AS status_count, count(*) FILTER (WHERE t.retry_count > 0) AS retried_count
             FROM horsies_tasks AS t
             WHERE cardinality($7) = 0 AND cardinality($8) = 0
@@ -1221,9 +1246,10 @@ BEGIN
               AND (cardinality($5) = 0 OR t.queue_name = ANY($5))
               AND (cardinality($6) = 0 OR t.claimed_by_worker_id = ANY($6))
               AND (NOT $9 OR t.retry_count > 0)
-            GROUP BY 1, 2
+            GROUP BY 1, 2, 3
             UNION ALL
-            SELECT COALESCE(%2$s, 'unknown')::text, h.status::text,
+            SELECT CASE WHEN %2$s IS NULL THEN 'UNCLAIMED' ELSE 'VALUE' END,
+                   %2$s::text, h.status::text,
                    count(*), count(*) FILTER (WHERE h.retry_count > 0)
             FROM horsies_task_history AS h
             WHERE h.terminal_at >= $1 AND h.terminal_at < $2
@@ -1238,9 +1264,10 @@ BEGIN
                   OR ('DOMAIN' = ANY($8) AND h.error_code <> '' AND h.error_code <> ALL($11))
               )
               AND (NOT $9 OR h.retry_count > 0)
-            GROUP BY 1, 2
+            GROUP BY 1, 2, 3
         ), groups AS MATERIALIZED (
-            SELECT s.group_value,
+            SELECT s.group_kind, s.group_value,
+                   COALESCE(s.group_value, 'unknown') AS sort_text,
                    sum(s.status_count)::bigint AS total,
                    COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'PENDING'), 0)::bigint AS pending,
                    COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'CLAIMED'), 0)::bigint AS claimed,
@@ -1251,14 +1278,14 @@ BEGIN
                    COALESCE(sum(s.status_count) FILTER (WHERE s.status = 'EXPIRED'), 0)::bigint AS expired,
                    sum(s.retried_count)::bigint AS retried
             FROM side_groups AS s
-            GROUP BY s.group_value
+            GROUP BY s.group_kind, s.group_value
         ), top_groups AS (
             SELECT g.*
             FROM groups AS g
-            ORDER BY g.total DESC, g.group_value COLLATE "C"
+            ORDER BY g.total DESC, g.sort_text COLLATE "C", g.group_kind = 'UNCLAIMED'
             LIMIT $12
         )
-        SELECT 'TOTAL'::text, 0, NULL::text, count(*)::bigint,
+        SELECT 'TOTAL'::text, 0, NULL::text, NULL::text, count(*)::bigint,
                COALESCE(sum(g.total), 0)::bigint, COALESCE(sum(g.pending), 0)::bigint,
                COALESCE(sum(g.claimed), 0)::bigint, COALESCE(sum(g.running), 0)::bigint,
                COALESCE(sum(g.completed), 0)::bigint, COALESCE(sum(g.failed), 0)::bigint,
@@ -1267,9 +1294,11 @@ BEGIN
         FROM groups AS g
         UNION ALL
         SELECT 'GROUP'::text,
-               (row_number() OVER (ORDER BY tg.total DESC, tg.group_value COLLATE "C"))::integer,
-               tg.group_value, NULL::bigint, tg.total, tg.pending, tg.claimed, tg.running, tg.completed, tg.failed,
-               tg.cancelled, tg.expired, tg.retried
+               (row_number() OVER (
+                   ORDER BY tg.total DESC, tg.sort_text COLLATE "C", tg.group_kind = 'UNCLAIMED'
+               ))::integer,
+               tg.group_kind, tg.group_value, NULL::bigint, tg.total, tg.pending, tg.claimed, tg.running,
+               tg.completed, tg.failed, tg.cancelled, tg.expired, tg.retried
         FROM top_groups AS tg
         ORDER BY 2
         $q$,

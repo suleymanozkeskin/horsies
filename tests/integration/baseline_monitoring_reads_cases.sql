@@ -398,7 +398,7 @@ SELECT test_raises('stats refuse a taxonomy whose arrays differ in length',
 ------------------------------------------------------------------------------------------------------------------------
 
 -- The rows as 'group=total/pending/claimed/running/completed/failed/cancelled/expired/retried', the TOTAL row first
--- as 'TOTAL:<group_count>=...'.
+-- as 'TOTAL:<group_count>=...', the UNCLAIMED group as '(unclaimed)=...'.
 CREATE FUNCTION test_breakdown(
     p_group_by text,
     p_statuses text[],
@@ -412,7 +412,11 @@ CREATE FUNCTION test_breakdown(
 ) RETURNS text[]
     LANGUAGE sql STABLE AS $$
     SELECT array_agg(
-        CASE b.row_kind WHEN 'TOTAL' THEN 'TOTAL:' || b.group_count ELSE b.group_value END || '='
+        CASE
+            WHEN b.row_kind = 'TOTAL' THEN 'TOTAL:' || b.group_count
+            WHEN b.group_kind = 'UNCLAIMED' THEN '(unclaimed)'
+            ELSE b.group_value
+        END || '='
         || concat_ws('/', b.total, b.pending, b.claimed, b.running, b.completed, b.failed, b.cancelled, b.expired,
                      b.retried)
         ORDER BY b.row_position
@@ -424,10 +428,10 @@ CREATE FUNCTION test_breakdown(
 $$;
 
 SELECT test_check(
-    'breakdown by worker: NULL claims are unknown; ties by total break in byte order',
+    'breakdown by worker: rows with no claim are the UNCLAIMED group; ties by total break in byte order',
     test_breakdown('worker', '{}', '{}', '{}', '{}', '{}', '{}', FALSE, 500) = ARRAY[
-        'TOTAL:4=12/1/1/2/2/4/1/1/5', 'w-1=4/0/1/1/1/0/1/0/2', 'w-2=4/0/0/1/1/2/0/0/2', 'unknown=3/1/0/0/0/1/0/1/1',
-        'W-3=1/0/0/0/0/1/0/0/0'],
+        'TOTAL:4=12/1/1/2/2/4/1/1/5', 'w-1=4/0/1/1/1/0/1/0/2', 'w-2=4/0/0/1/1/2/0/0/2',
+        '(unclaimed)=3/1/0/0/0/1/0/1/1', 'W-3=1/0/0/0/0/1/0/0/0'],
     test_breakdown('worker', '{}', '{}', '{}', '{}', '{}', '{}', FALSE, 500)::text
 );
 SELECT test_check(
@@ -453,7 +457,8 @@ SELECT test_check(
 SELECT test_check(
     'breakdown: a status filter scopes the groups and the total',
     test_breakdown('worker', '{RUNNING,FAILED}', '{}', '{}', '{}', '{}', '{}', FALSE, 500) = ARRAY[
-        'TOTAL:4=6/0/0/2/0/4/0/0/2', 'w-2=3/0/0/1/0/2/0/0/1', 'W-3=1/0/0/0/0/1/0/0/0', 'unknown=1/0/0/0/0/1/0/0/0',
+        'TOTAL:4=6/0/0/2/0/4/0/0/2', 'w-2=3/0/0/1/0/2/0/0/1', 'W-3=1/0/0/0/0/1/0/0/0',
+        '(unclaimed)=1/0/0/0/0/1/0/0/0',
         'w-1=1/0/0/1/0/0/0/0/1'],
     test_breakdown('worker', '{RUNNING,FAILED}', '{}', '{}', '{}', '{}', '{}', FALSE, 500)::text
 );
@@ -472,7 +477,7 @@ SELECT test_check(
 SELECT test_check(
     'breakdown: filters combine across dimensions',
     test_breakdown('worker', '{}', '{alpha,beta}', '{default}', '{}', '{}', '{}', FALSE, 500) = ARRAY[
-        'TOTAL:3=5/1/0/1/1/1/1/0/1', 'unknown=2/1/0/0/0/1/0/0/1', 'w-1=2/0/0/0/1/0/1/0/0',
+        'TOTAL:3=5/1/0/1/1/1/1/0/1', '(unclaimed)=2/1/0/0/0/1/0/0/1', 'w-1=2/0/0/0/1/0/1/0/0',
         'w-2=1/0/0/1/0/0/0/0/0'],
     test_breakdown('worker', '{}', '{alpha,beta}', '{default}', '{}', '{}', '{}', FALSE, 500)::text
 );
@@ -489,6 +494,29 @@ SELECT test_check(
 )
 FROM horsies_monitoring_task_breakdown(test_lower(), test_upper(), 'queue', '{}', '{}', '{}', '{}', '{}', '{}', FALSE,
     test_codes(), test_code_categories(), 500) AS b;
+
+SELECT test_check(
+    'breakdown: group_kind VALUE carries the value, UNCLAIMED has no value, TOTAL has neither',
+    array_agg(b.row_kind || ':' || COALESCE(b.group_kind, '-') || ':' || COALESCE(b.group_value, '-')
+        ORDER BY b.row_position)
+        = ARRAY['TOTAL:-:-', 'GROUP:VALUE:w-1', 'GROUP:VALUE:w-2', 'GROUP:UNCLAIMED:-', 'GROUP:VALUE:W-3'],
+    array_agg(b.row_kind || ':' || COALESCE(b.group_kind, '-') || ':' || COALESCE(b.group_value, '-')
+        ORDER BY b.row_position)::text
+)
+FROM horsies_monitoring_task_breakdown(test_lower(), test_upper(), 'worker', '{}', '{}', '{}', '{}', '{}', '{}',
+    FALSE, test_codes(), test_code_categories(), 500) AS b;
+SELECT test_check(
+    'breakdown: task name and queue groups are all VALUE groups',
+    bool_and(b.group_kind = 'VALUE' AND b.group_value IS NOT NULL) FILTER (WHERE b.row_kind = 'GROUP'),
+    array_agg(b.group_kind)::text
+)
+FROM (
+    SELECT * FROM horsies_monitoring_task_breakdown(test_lower(), test_upper(), 'task_name', '{}', '{}', '{}', '{}',
+        '{}', '{}', FALSE, test_codes(), test_code_categories(), 500)
+    UNION ALL
+    SELECT * FROM horsies_monitoring_task_breakdown(test_lower(), test_upper(), 'queue', '{}', '{}', '{}', '{}', '{}',
+        '{}', FALSE, test_codes(), test_code_categories(), 500)
+) AS b;
 
 SELECT test_raises('breakdown refuses an unknown group column',
     $q$SELECT * FROM test_breakdown('host', '{}', '{}', '{}', '{}', '{}', '{}', FALSE, 10)$q$, '22023');
@@ -738,28 +766,43 @@ COMMIT;
 BEGIN;
 SELECT test_live_task('00000000-0000-4000-8000-0000000000d1', 'CLAIMED', 'alpha', 'default', 'unknown', 0, FALSE);
 SELECT test_check(
-    'breakdown: a stored worker id ''unknown'' and the NULL claims are one group',
+    'breakdown: a VALUE group ''unknown'' comes before the UNCLAIMED group of the same total',
+    test_breakdown('worker', '{PENDING,CLAIMED}', '{}', '{}', '{}', '{}', '{}', FALSE, 500) = ARRAY[
+        'TOTAL:3=3/1/2/0/0/0/0/0/2', 'unknown=1/0/1/0/0/0/0/0/0', '(unclaimed)=1/1/0/0/0/0/0/0/1',
+        'w-1=1/0/1/0/0/0/0/0/1'],
+    test_breakdown('worker', '{PENDING,CLAIMED}', '{}', '{}', '{}', '{}', '{}', FALSE, 500)::text
+);
+SELECT test_check(
+    'breakdown: a worker named ''unknown'' is its own group, apart from the rows with no claim',
     test_breakdown('worker', '{}', '{}', '{}', '{}', '{}', '{}', FALSE, 500) = ARRAY[
-        'TOTAL:4=13/1/2/2/2/4/1/1/5', 'unknown=4/1/1/0/0/1/0/1/1', 'w-1=4/0/1/1/1/0/1/0/2', 'w-2=4/0/0/1/1/2/0/0/2',
-        'W-3=1/0/0/0/0/1/0/0/0'],
+        'TOTAL:5=13/1/2/2/2/4/1/1/5', 'w-1=4/0/1/1/1/0/1/0/2', 'w-2=4/0/0/1/1/2/0/0/2',
+        '(unclaimed)=3/1/0/0/0/1/0/1/1', 'W-3=1/0/0/0/0/1/0/0/0', 'unknown=1/0/1/0/0/0/0/0/0'],
     test_breakdown('worker', '{}', '{}', '{}', '{}', '{}', '{}', FALSE, 500)::text
 );
 ROLLBACK;
 
--- The history table has no status CHECK. A stored status that is none of the seven comes after the seven in the
--- counts (the caller reports it), and counts only in the breakdown total.
+-- The history table has no status CHECK. A stored status that is none of the seven makes the counts fail closed
+-- with data_corrupted, and counts only in the breakdown total (as Python's breakdown).
 BEGIN;
 SELECT test_history_task('00000000-0000-4000-8000-0000000000d2', 'STALE', 'alpha', 'default', 'w-1',
     test_base() - interval '1 hour', 0, NULL, NULL, '[]');
+SELECT test_raises('stats: a stored status outside the seven is data_corrupted',
+    $q$SELECT * FROM horsies_monitoring_task_stats(test_lower(), test_upper(), '{}', '{}', '{}', '{}', '{}', FALSE,
+        test_codes(), test_code_categories())$q$, 'XX001');
+DO $$
+BEGIN
+    PERFORM * FROM horsies_monitoring_task_stats(test_lower(), test_upper(), '{}', '{}', '{}', '{}', '{}', FALSE,
+        test_codes(), test_code_categories());
+    PERFORM test_check('stats: the refusal names the status', FALSE, 'the call succeeded');
+EXCEPTION WHEN data_corrupted THEN
+    PERFORM test_check('stats: the refusal names the status', SQLERRM LIKE '%status STALE,%', SQLERRM);
+END;
+$$;
 SELECT test_check(
-    'stats: a stored status outside the seven is a row after them',
-    array_agg(s.row_position || ':' || s.status || '=' || s.task_count ORDER BY s.row_position) = ARRAY[
-        '1:PENDING=1', '2:CLAIMED=1', '3:RUNNING=2', '4:COMPLETED=2', '5:FAILED=4', '6:CANCELLED=1', '7:EXPIRED=1',
-        '8:STALE=1'],
-    array_agg(s.row_position || ':' || s.status || '=' || s.task_count ORDER BY s.row_position)::text
-)
-FROM horsies_monitoring_task_stats(test_lower(), test_upper(), '{}', '{}', '{}', '{}', '{}', FALSE, test_codes(),
-    test_code_categories()) AS s;
+    'stats: a stored status outside the scope does not refuse the counts',
+    test_stats('{beta}', '{}', '{}', '{}', '{}', FALSE) = ARRAY[0, 0, 1, 0, 2, 1, 0]::bigint[],
+    test_stats('{beta}', '{}', '{}', '{}', '{}', FALSE)::text
+);
 SELECT test_check(
     'breakdown: a stored status outside the seven counts only in total',
     test_breakdown('task_name', '{}', '{}', '{default}', '{w-1}', '{}', '{}', FALSE, 500) = ARRAY[

@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.integration]
 
 CASE_FILES: Final = {
     'baseline_scheduler_monitoring_cases.sql': 76,
-    'baseline_monitoring_reads_cases.sql': 78,
+    'baseline_monitoring_reads_cases.sql': 83,
 }
 """Each case file with its number of cases. A case added to a file changes it."""
 
