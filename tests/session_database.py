@@ -3,10 +3,15 @@
 The install refuses a database that holds a horsies schema other than this
 build's baseline, so the database suites cannot use a shared, long-lived
 database. ``session_database_url`` creates a database whose name matches
-``horsies_test_<32 hex>`` on the server of the base URL, once per process,
-and drops it when the process exits. It never drops or changes a database
-whose name does not match that pattern; it drops stale matching databases
-that no session is connected to.
+``<prefix><32 hex>`` on the server of the base URL, once per process, and
+drops it when the process exits. It never drops or changes a database whose
+name does not match that pattern; it drops stale matching databases that no
+session is connected to.
+
+Every database that the test suites create starts with one prefix
+(``database_name_prefix``): ``horsies_test_``, or the value of
+``HORSIES_TEST_DATABASE_PREFIX``. Runs that share one server set different
+prefixes, so no run creates, sweeps or drops a database of another run.
 
 The created URL is written to ``HORSIES_TEST_DATABASE_URL`` and
 ``HORSES_E2E_DB_URL``, so worker subprocesses and the helpers that read
@@ -29,8 +34,12 @@ from sqlalchemy.engine import make_url
 
 from horsies.core.utils.url import to_psycopg_url
 
-SESSION_DATABASE_PREFIX: Final = 'horsies_test_'
-_SESSION_DATABASE_NAME: Final = re.compile(r'^horsies_test_[0-9a-f]{32}$')
+DATABASE_PREFIX_VARIABLE: Final = 'HORSIES_TEST_DATABASE_PREFIX'
+DEFAULT_DATABASE_PREFIX: Final = 'horsies_test_'
+# A lowercase identifier that ends in '_', at most 24 bytes: the longest
+# generated name ('<prefix>iso_<32 hex>') then stays inside PostgreSQL's
+# 63-byte identifier limit.
+_DATABASE_PREFIX_FORM: Final = re.compile(r'^[a-z][a-z0-9_]{0,22}_$')
 _SETUP_LOCK_KEY: Final = 'horsies_test_session_database_setup'
 _URL_VARIABLES: Final = ('HORSIES_TEST_DATABASE_URL', 'HORSES_E2E_DB_URL')
 
@@ -48,8 +57,33 @@ def base_database_url() -> str:
     return f'postgresql+psycopg://postgres:{password}@localhost:5432/horsies'
 
 
+def database_name_prefix() -> str:
+    """The prefix of every database name that the test suites create.
+
+    Reads ``HORSIES_TEST_DATABASE_PREFIX``; unset or empty gives
+    ``horsies_test_``. Raises ``RuntimeError`` for a value outside
+    ``[a-z][a-z0-9_]{0,22}_``, because the stale-database sweeps drop
+    databases by this prefix. Reads the environment only.
+    """
+    value = os.environ.get(DATABASE_PREFIX_VARIABLE, '')
+    match value:
+        case '':
+            return DEFAULT_DATABASE_PREFIX
+        case _ if _DATABASE_PREFIX_FORM.fullmatch(value) is not None:
+            return value
+        case _:
+            raise RuntimeError(
+                f'{DATABASE_PREFIX_VARIABLE}={value!r} is not a lowercase '
+                "identifier of at most 24 bytes that ends in '_'"
+            )
+
+
+def _session_name_pattern(prefix: str) -> re.Pattern[str]:
+    return re.compile(rf'^{re.escape(prefix)}[0-9a-f]{{32}}$')
+
+
 def _checked_name(name: str) -> str:
-    if _SESSION_DATABASE_NAME.fullmatch(name) is None:
+    if _session_name_pattern(database_name_prefix()).fullmatch(name) is None:
         raise RuntimeError(f'refuse to drop a database the test session did not create: {name!r}')
     return name
 
@@ -60,7 +94,9 @@ def _admin_connection(base_url: str) -> psycopg.Connection[tuple[object, ...]]:
 
 
 def _create(base_url: str) -> tuple[str, psycopg.Connection[tuple[object, ...]]]:
-    name = f'{SESSION_DATABASE_PREFIX}{uuid.uuid4().hex}'
+    prefix = database_name_prefix()
+    session_name = _session_name_pattern(prefix)
+    name = f'{prefix}{uuid.uuid4().hex}'
     url = make_url(base_url).set(database=name).render_as_string(hide_password=False)
     with _admin_connection(base_url) as admin:
         admin.execute('SELECT pg_advisory_lock(hashtext(%s))', (_SETUP_LOCK_KEY,))
@@ -72,10 +108,10 @@ def _create(base_url: str) -> tuple[str, psycopg.Connection[tuple[object, ...]]]
                   AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)
                 ORDER BY d.datname
                 """,
-                (SESSION_DATABASE_PREFIX, SESSION_DATABASE_PREFIX),
+                (prefix, prefix),
             ).fetchall()
             for (stale_name,) in stale:
-                if _SESSION_DATABASE_NAME.fullmatch(str(stale_name)) is not None:
+                if session_name.fullmatch(str(stale_name)) is not None:
                     admin.execute(
                         sql.SQL('DROP DATABASE IF EXISTS {}').format(sql.Identifier(str(stale_name)))
                     )
