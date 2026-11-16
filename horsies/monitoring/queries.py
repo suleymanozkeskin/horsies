@@ -38,6 +38,7 @@ multiplies the load.
 
 from __future__ import annotations
 
+import typing
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -68,10 +69,7 @@ from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import BrokerResources, EventLoopLimit
-from horsies.core.models.task_pg import (
-    ScheduleStateModel,
-    TaskModel,
-)
+from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.tasks import (
     BUILTIN_CODE_REGISTRY,
     Execution,
@@ -104,7 +102,6 @@ from horsies.core.history.reads.pages import (
     history_page_statement,
     history_sort_expression,
 )
-from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import decode_task_error, validate_task_result_envelope
@@ -500,19 +497,6 @@ def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
             return end - summary.started_at
         case _:
             return getattr(summary, field)
-
-
-def _run_summary(run: WorkflowModel) -> WorkflowRunSummary:
-    """Map a workflow row to its summary shape."""
-    return WorkflowRunSummary(
-        id=run.id,
-        name=run.name,
-        definition_key=run.definition_key,
-        status=run.status,
-        created_at=run.created_at,
-        completed_at=run.completed_at,
-        wall_s=elapsed_s(run.created_at, run.completed_at),
-    )
 
 
 def _node_exec_s(
@@ -1520,22 +1504,6 @@ async def get_task_detail(
 # --------------------------------------------------------------------------- #
 # Workflow queries
 # --------------------------------------------------------------------------- #
-# The node columns each read maps. The payload columns (input, result) stay
-# unfetched; ``raiseload=True`` turns an access to any other column into an
-# immediate error.
-_RUN_NODE_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
-    WorkflowTaskModel.id,
-    WorkflowTaskModel.task_index,
-    WorkflowTaskModel.node_id,
-    WorkflowTaskModel.task_name,
-    WorkflowTaskModel.status,
-    WorkflowTaskModel.dependencies,
-    WorkflowTaskModel.allow_failed_deps,
-    WorkflowTaskModel.is_subworkflow,
-    WorkflowTaskModel.sub_workflow_id,
-    WorkflowTaskModel.started_at,
-    WorkflowTaskModel.completed_at,
-)
 
 
 def _node_error(task_index: int, stored: str | None) -> str | None:
@@ -1571,22 +1539,66 @@ def _node_error(task_index: int, stored: str | None) -> str | None:
         ) from exc
 
 
+_WORKFLOW_NAMES_SQL = text(
+    'SELECT row_kind, row_position, workflow_name, list_state, row_bound '
+    'FROM horsies_monitoring_workflow_names() ORDER BY row_position NULLS LAST'
+)
+
+_WORKFLOW_RUNS_SQL = text(
+    'SELECT row_position, workflow_id, workflow_name, definition_key, status, '
+    'created_at, completed_at '
+    'FROM horsies_monitoring_workflow_runs('
+    'CAST(:name AS text), CAST(:status AS text), CAST(:run_limit AS integer)) '
+    'ORDER BY row_position'
+)
+
+_WORKFLOW_RUN_SQL = text(
+    'SELECT row_kind, row_position, workflow_id, workflow_name, definition_key, '
+    'status, created_at, started_at, completed_at, task_index, node_id, task_name, '
+    'dependencies, allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, '
+    'child_failed '
+    'FROM horsies_monitoring_workflow_run(CAST(:workflow_id AS uuid)) '
+    'ORDER BY row_position NULLS FIRST'
+)
+
+_SCHEDULES_SQL = text(
+    'SELECT row_kind, row_position, schedule_name, last_run_at, next_run_at, '
+    'last_task_id, run_count, updated_at, list_state, row_bound '
+    'FROM horsies_monitoring_schedules() ORDER BY row_position NULLS LAST'
+)
+
+
+def _list_end(rows: Sequence[RowMapping], item_kind: str) -> tuple[Sequence[RowMapping], bool]:
+    """The item rows of a bounded list, and whether the function cut the list.
+
+    The last row is the LIST_END row; its bound is ``LIST_ROW_BOUND``.
+    """
+    match rows:
+        case [*items, end]:
+            pass
+        case _:
+            raise AssertionError('the list function answered no LIST_END row')
+    assert _column(end, 'row_kind', str) == 'LIST_END', end['row_kind']
+    assert _column(end, 'row_bound', int) == LIST_ROW_BOUND, end['row_bound']
+    assert all(_column(item, 'row_kind', str) == item_kind for item in items), item_kind
+    match _column(end, 'list_state', str):
+        case 'COMPLETE':
+            return items, False
+        case 'TRUNCATED':
+            return items, True
+        case other:
+            raise AssertionError(f'list state {other!r} is not COMPLETE or TRUNCATED')
+
+
 async def list_workflow_names(
     broker: PostgresBroker,
 ) -> MonitoringResult[list[str]]:
     """Distinct names of root workflow runs, for the run-picker filter.
 
     At most ``LIST_ROW_BOUND`` names, in the database collation; a longer
-    list is cut, and the cut is logged as a warning.
+    list is cut, and the cut is logged as a warning. One statement
+    (``horsies_monitoring_workflow_names``).
     """
-    stmt = (
-        select(WorkflowModel.name)
-        .where(WorkflowModel.parent_workflow_id.is_(None))
-        .distinct()
-        .order_by(WorkflowModel.name)
-        .limit(LIST_ROW_BOUND + 1)
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('workflow names query', loop_limit)
@@ -1594,14 +1606,14 @@ async def list_workflow_names(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            names = (await session.execute(stmt)).scalars().all()
+        rows = await _call_function(resources, _WORKFLOW_NAMES_SQL, {})
     except SQLAlchemyError as exc:
         return _db_err('workflow names query', exc)
 
-    if len(names) > LIST_ROW_BOUND:
+    items, cut = _list_end(rows, 'NAME')
+    if cut:
         _log_cut_list('workflow names', 'root workflow names')
-    return Ok(list(names[:LIST_ROW_BOUND]))
+    return Ok([_column(row, 'workflow_name', str) for row in items])
 
 
 def _log_cut_list(read: str, rows: str) -> None:
@@ -1611,6 +1623,21 @@ def _log_cut_list(read: str, rows: str) -> None:
         read,
         LIST_ROW_BOUND,
         rows,
+    )
+
+
+def _run_summary(row: RowMapping) -> WorkflowRunSummary:
+    """A run's summary from a runs row or a RUN row."""
+    created_at = _column(row, 'created_at', datetime)
+    completed_at = _optional_time(row, 'completed_at')
+    return WorkflowRunSummary(
+        id=_column(row, 'workflow_id', str),
+        name=_column(row, 'workflow_name', str),
+        definition_key=_optional_text(row, 'definition_key'),
+        status=_column(row, 'status', str),
+        created_at=created_at,
+        completed_at=completed_at,
+        wall_s=elapsed_s(created_at, completed_at),
     )
 
 
@@ -1626,20 +1653,8 @@ async def list_workflow_runs(
     Runs created at one time come by id, highest first, so a page does not
     reorder between polls. ``name`` and ``status`` are independent
     exact-match filters combined with AND; a status no run carries yields an
-    empty list.
+    empty list. One statement (``horsies_monitoring_workflow_runs``).
     """
-    conditions: list[ColumnElement[bool]] = [WorkflowModel.parent_workflow_id.is_(None)]
-    if name is not None:
-        conditions.append(WorkflowModel.name == name)
-    if status is not None:
-        conditions.append(WorkflowModel.status == status)
-    stmt = (
-        select(WorkflowModel)
-        .where(*conditions)
-        .order_by(WorkflowModel.created_at.desc(), WorkflowModel.id.desc())
-        .limit(limit.value)
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('workflow runs query', loop_limit)
@@ -1647,12 +1662,72 @@ async def list_workflow_runs(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            runs = (await session.execute(stmt)).scalars().all()
+        rows = await _call_function(
+            resources,
+            _WORKFLOW_RUNS_SQL,
+            {'name': name, 'status': status, 'run_limit': limit.value},
+        )
     except SQLAlchemyError as exc:
         return _db_err('workflow runs query', exc)
 
-    return Ok([_run_summary(run) for run in runs])
+    return Ok([_run_summary(row) for row in rows])
+
+
+def _run_node(row: RowMapping) -> WorkflowNodeInfo:
+    """One NODE row of ``horsies_monitoring_workflow_run``."""
+    assert _column(row, 'row_kind', str) == 'NODE', row['row_kind']
+    node_status = _column(row, 'status', str)
+    started_at = _optional_time(row, 'started_at')
+    completed_at = _optional_time(row, 'completed_at')
+    return WorkflowNodeInfo(
+        task_index=_column(row, 'task_index', int),
+        node_id=_optional_text(row, 'node_id'),
+        task_name=_column(row, 'task_name', str),
+        node_status=node_status,
+        is_subworkflow=_column(row, 'is_subworkflow', bool),
+        sub_workflow_id=_optional_text(row, 'sub_workflow_id'),
+        allow_failed_deps=_column(row, 'allow_failed_deps', bool),
+        started_at=started_at,
+        completed_at=completed_at,
+        exec_s=_node_exec_s(node_status, started_at, completed_at),
+        child_total=_optional_int(row, 'child_total'),
+        child_failed=_optional_int(row, 'child_failed'),
+    )
+
+
+def _dependencies(row: RowMapping) -> list[int]:
+    """The task indexes a node depends on."""
+    value: object = row['dependencies']
+    assert isinstance(value, list), f'dependencies: expected a list, got {value!r}'
+    dependencies: list[int] = []
+    for each in typing.cast(list[object], value):
+        assert isinstance(each, int), f'dependency {each!r} is not an index'
+        dependencies.append(each)
+    return dependencies
+
+
+def _run_detail(run_row: RowMapping, node_rows: Sequence[RowMapping]) -> WorkflowRunDetail:
+    """The run, its nodes in task_index order, its edges and its failed nodes.
+
+    An edge joins a dependency to the node that names it; a dependency on an
+    index the run does not have makes no edge.
+    """
+    nodes = [_run_node(row) for row in node_rows]
+    known_indices = {node.task_index for node in nodes}
+    edges = [
+        WorkflowEdge(from_index=dependency, to_index=node.task_index)
+        for node, row in zip(nodes, node_rows, strict=True)
+        for dependency in _dependencies(row)
+        if dependency in known_indices
+    ]
+    failed_indices = [node.task_index for node in nodes if node.node_status == 'FAILED']
+    return WorkflowRunDetail(
+        run=_run_summary(run_row),
+        nodes=nodes,
+        edges=edges,
+        failed_count=len(failed_indices),
+        failed_indices=failed_indices,
+    )
 
 
 async def get_workflow_run(
@@ -1663,17 +1738,12 @@ async def get_workflow_run(
 
     Works for any run id, root or subworkflow, so a subworkflow node is
     drilled into by calling this again with that node's ``sub_workflow_id``.
-    Edges pointing at an index the run does not have are dropped.
+    Edges pointing at an index the run does not have are dropped. One
+    statement (``horsies_monitoring_workflow_run``), so the run, its nodes and
+    the child counts come from one snapshot.
     """
     if not _is_uuid_text(workflow_id):
         return Ok(None)
-    run_stmt = select(WorkflowModel).where(WorkflowModel.id == workflow_id)
-    nodes_stmt = (
-        select(WorkflowTaskModel)
-        .options(load_only(*_RUN_NODE_COLUMNS, raiseload=True))
-        .where(WorkflowTaskModel.workflow_id == workflow_id)
-        .order_by(WorkflowTaskModel.task_index)
-    )
 
     match await broker.select_resources():
         case Err(loop_limit):
@@ -1682,81 +1752,25 @@ async def get_workflow_run(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            run = (await session.execute(run_stmt)).scalar_one_or_none()
-            if run is None:
-                return Ok(None)
-            node_rows = (await session.execute(nodes_stmt)).scalars().all()
-
-            # Direct-child status rollup for subworkflow nodes: one grouped
-            # count over the child runs' node rows, keyed by child run id.
-            sub_ids = [
-                row.sub_workflow_id
-                for row in node_rows
-                if row.is_subworkflow and row.sub_workflow_id is not None
-            ]
-            child_rollup: dict[str, tuple[int, int]] = {}
-            if sub_ids:
-                rollup_stmt = (
-                    select(
-                        WorkflowTaskModel.workflow_id,
-                        func.count(),
-                        func.count().filter(WorkflowTaskModel.status == 'FAILED'),
-                    )
-                    .where(WorkflowTaskModel.workflow_id.in_(sub_ids))
-                    .group_by(WorkflowTaskModel.workflow_id)
-                )
-                child_rollup = {
-                    child_id: (total, failed)
-                    for child_id, total, failed in (
-                        (await session.execute(rollup_stmt)).tuples().all()
-                    )
-                }
+        rows = await _call_function(
+            resources, _WORKFLOW_RUN_SQL, {'workflow_id': workflow_id},
+        )
     except SQLAlchemyError as exc:
-        return _db_err('workflow run detail query', exc)
+        return _function_err('workflow run detail query', exc)
 
-    known_indices = {row.task_index for row in node_rows}
-    nodes: list[WorkflowNodeInfo] = []
-    edges: list[WorkflowEdge] = []
-    for row in node_rows:
-        counts = (
-            child_rollup.get(row.sub_workflow_id)
-            if row.is_subworkflow and row.sub_workflow_id is not None
-            else None
-        )
-        child_total, child_failed = counts if counts is not None else (None, None)
-        nodes.append(
-            WorkflowNodeInfo(
-                task_index=row.task_index,
-                node_id=row.node_id,
-                task_name=row.task_name,
-                node_status=row.status,
-                is_subworkflow=row.is_subworkflow,
-                sub_workflow_id=row.sub_workflow_id,
-                allow_failed_deps=row.allow_failed_deps,
-                started_at=row.started_at,
-                completed_at=row.completed_at,
-                exec_s=_node_exec_s(row.status, row.started_at, row.completed_at),
-                child_total=child_total,
-                child_failed=child_failed,
-            )
-        )
-        for dep_index in row.dependencies:
-            if dep_index in known_indices:
-                edges.append(
-                    WorkflowEdge(from_index=dep_index, to_index=row.task_index)
-                )
-
-    failed_indices = [node.task_index for node in nodes if node.node_status == 'FAILED']
-    return Ok(
-        WorkflowRunDetail(
-            run=_run_summary(run),
-            nodes=nodes,
-            edges=edges,
-            failed_count=len(failed_indices),
-            failed_indices=failed_indices,
-        )
-    )
+    match rows:
+        case [first, *node_rows]:
+            pass
+        case _:
+            raise AssertionError('the run function answered no row')
+    match _column(first, 'row_kind', str):
+        case 'ABSENT':
+            assert not node_rows, 'an ABSENT run has no node row'
+            return Ok(None)
+        case 'RUN':
+            return Ok(_run_detail(first, node_rows))
+        case other:
+            raise AssertionError(f'workflow run row kind {other!r} is not RUN or ABSENT')
 
 
 _WORKFLOW_NODE_SQL = text(
@@ -1870,16 +1884,9 @@ async def list_schedules(
 
     Schedules due at one time come by name, so the list does not reorder
     between polls. At most ``LIST_ROW_BOUND`` schedules; a longer list is
-    cut, and the cut is logged as a warning.
+    cut, and the cut is logged as a warning. One statement
+    (``horsies_monitoring_schedules``).
     """
-    stmt = (
-        select(ScheduleStateModel)
-        .order_by(
-            ScheduleStateModel.next_run_at.asc(), ScheduleStateModel.schedule_name.asc()
-        )
-        .limit(LIST_ROW_BOUND + 1)
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('schedule state query', loop_limit)
@@ -1887,23 +1894,23 @@ async def list_schedules(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            rows = (await session.execute(stmt)).scalars().all()
+        rows = await _call_function(resources, _SCHEDULES_SQL, {})
     except SQLAlchemyError as exc:
         return _db_err('schedule state query', exc)
 
-    if len(rows) > LIST_ROW_BOUND:
+    items, cut = _list_end(rows, 'SCHEDULE')
+    if cut:
         _log_cut_list('schedule state', 'schedules')
     return Ok(
         [
             ScheduleStateInfo(
-                schedule_name=row.schedule_name,
-                last_run_at=row.last_run_at,
-                next_run_at=row.next_run_at,
-                last_task_id=row.last_task_id,
-                run_count=row.run_count,
-                updated_at=row.updated_at,
+                schedule_name=_column(row, 'schedule_name', str),
+                last_run_at=_optional_time(row, 'last_run_at'),
+                next_run_at=_column(row, 'next_run_at', datetime),
+                last_task_id=_optional_text(row, 'last_task_id'),
+                run_count=_column(row, 'run_count', int),
+                updated_at=_column(row, 'updated_at', datetime),
             )
-            for row in rows[:LIST_ROW_BOUND]
+            for row in items
         ]
     )

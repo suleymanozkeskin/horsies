@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Final, LiteralString
 
 import psycopg
 from pydantic import SecretStr
@@ -26,6 +27,9 @@ from tests.dualrun.databases import DualRunDatabase
 from tests.integration.monitoring_seeding import SeedRow, insert_rows
 
 type MakeDatabase = Callable[[], DualRunDatabase]
+
+_SNAPSHOT_ROW_LIMIT: Final = 30_000
+"""Rows per table the before-and-after snapshot reads; a bound test seeds 10,001."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +56,7 @@ def _broker_url(database: DualRunDatabase) -> str:
 
 def _raw_snapshot(database: DualRunDatabase) -> RawSnapshot:
     with psycopg.connect(database.url, autocommit=True) as connection:
-        match read_raw_snapshot(connection, BASELINE_CATALOG):
+        match read_raw_snapshot(connection, BASELINE_CATALOG, row_limit=_SNAPSHOT_ROW_LIMIT):
             case Err(failed):
                 raise AssertionError(f'the snapshot read failed: {failed}')
             case Ok(snapshot):
@@ -104,17 +108,26 @@ async def _read_on[A](
         await broker.close_async()
 
 
+def _run_statements(database: DualRunDatabase, statements: Sequence[LiteralString]) -> None:
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        for statement in statements:
+            _ = connection.execute(statement)
+
+
 def read_dual_run[A](
     make_database: MakeDatabase,
     rows: Sequence[SeedRow],
     pairs: Sequence[ReadPair[A]],
+    *,
+    seed_statements: Sequence[LiteralString] = (),
 ) -> tuple[ReadAnswers[A], ...]:
-    """Install the baseline, seed ``rows``, then run each pair on that state.
+    """Install the baseline, seed ``rows`` and ``seed_statements``, then run each pair on that state.
 
     Asserts that the raw snapshot after every read equals the one before.
     """
     database = make_database()
     asyncio.run(_install_and_seed(database, rows))
+    _run_statements(database, seed_statements)
     before = _raw_snapshot(database)
     answers = asyncio.run(_read_on(database, pairs))
     after = _raw_snapshot(database)
