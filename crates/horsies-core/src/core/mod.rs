@@ -13,7 +13,10 @@ pub mod types;
 pub mod workflow;
 
 // Re-exports for convenience.
-pub use app::{Horsies, ResolvedEnqueue, WorkflowBuilderRegistration, WorkflowRegistrationBuilder};
+pub use app::{
+    Horsies, PreparedSchedules, ResolvedEnqueue, ScheduleSendFacts, WorkflowBuilderRegistration,
+    WorkflowRegistrationBuilder,
+};
 pub use config::{
     mask_database_url, AppConfig, AppConfigError, CronEnumTerm, CronNumericTerm, CronOrdinal,
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
