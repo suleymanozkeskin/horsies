@@ -21,6 +21,8 @@
 //!
 //! Each migration runs in one transaction. The runner writes its bookkeeping
 //! row after the migration SQL, in the same transaction, and names every value.
+//! Migration 1000 also publishes the history readers in that transaction, so
+//! a database that holds the baseline holds its readers.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +37,9 @@ use sqlx::{Acquire, Executor, PgConnection, PgPool};
 use tokio::time::{sleep, Instant};
 
 use crate::broker::error::{BrokerError, InstallLockFailure};
+use crate::core::history::errors::HistoryError;
+use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 /// Name of the horsies-owned migrations bookkeeping table.
 pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
@@ -70,6 +75,7 @@ baseline_sql_files!(
     "0002_indexes.sql",
     "0003_interim_functions.sql",
     "0005_workflow_functions.sql",
+    "0006_history_functions.sql",
     "0007_scheduler_monitoring_functions.sql",
 );
 
@@ -416,6 +422,12 @@ fn sqlx_error_sqlstate(err: &sqlx::Error) -> Option<String> {
 }
 
 /// Apply one migration and write its bookkeeping row in one transaction.
+///
+/// Migration 1000 also publishes the history readers from the leaf catalog
+/// it creates, before its bookkeeping row, in the same transaction (Python
+/// publishes them before its install returns: `publish_history_readers`,
+/// `horsies/core/baseline/install.py`). A failed publication rolls the
+/// migration back.
 async fn apply_migration(
     conn: &mut PgConnection,
     migration: &Migration,
@@ -425,6 +437,12 @@ async fn apply_migration(
     tx.execute(migration.sql.as_ref()).await.map_err(|error| {
         BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
     })?;
+    if migration.version == BASELINE_MIGRATION_VERSION {
+        let _published = StagedLoaderPublisher
+            .republish(&mut tx)
+            .await
+            .map_err(|error| reader_publication_error(error, migration.version))?;
+    }
     let execution_time_ns: i64 = start.elapsed().as_nanos().try_into().unwrap_or(i64::MAX);
     sqlx::query(&format!(
         "INSERT INTO {MIGRATIONS_TABLE} \
@@ -439,6 +457,24 @@ async fn apply_migration(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// A failed reader publication inside a migration's transaction. A database
+/// error keeps the form of a failed migration statement, so a deadlock is
+/// retried as one; a broken history contract is not retryable.
+fn reader_publication_error(error: HistoryError, version: i64) -> BrokerError {
+    match error {
+        HistoryError::Database(error) => {
+            BrokerError::Migration(MigrateError::ExecuteMigration(error, version))
+        }
+        error @ (HistoryError::ArchiveDecode(_)
+        | HistoryError::Contract(_)
+        | HistoryError::LeafLockNotHeld
+        | HistoryError::LeafLockBusy { .. }
+        | HistoryError::HistoryParentAbsent(_)) => BrokerError::HistoryReadContract(format!(
+            "publishing the history readers in migration {version}: {error}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +802,56 @@ mod tests {
             }
             other => panic!("expected Dirty, got {other:?}"),
         }
+        database.drop().await;
+    }
+
+    /// Migration 1000 publishes the history readers: on a fresh database
+    /// every rendered reader exists and is current, and the detail reader
+    /// answers an unknown id with no row (Python
+    /// `tests/integration/test_baseline_install.py`,
+    /// `test_install_returns_with_the_history_readers_published`).
+    #[tokio::test]
+    #[serial]
+    async fn fresh_database_has_its_history_readers_after_migration() {
+        use crate::core::history::reads::publisher::rendered_reader_signatures;
+
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations(&database.pool).await.unwrap();
+
+        let signatures: Vec<String> = rendered_reader_signatures().to_vec();
+        let missing: Vec<String> = sqlx::query_scalar(
+            "SELECT reader.signature FROM unnest($1::text[]) AS reader(signature) \
+             WHERE to_regprocedure(reader.signature) IS NULL ORDER BY 1",
+        )
+        .bind(signatures)
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+        assert!(missing.is_empty(), "missing readers: {missing:?}");
+
+        let mut connection = database.pool.acquire().await.unwrap();
+        assert!(!StagedLoaderPublisher
+            .needs_republication(&mut connection)
+            .await
+            .unwrap());
+        let manifest: Vec<String> = sqlx::query_scalar(
+            "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            manifest,
+            vec!["horsies_task_history_forever_open".to_owned()]
+        );
+        let detail_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_task_detail_staged($1)")
+                .bind(Uuid::new_v4())
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(detail_rows, 0);
+        drop(connection);
         database.drop().await;
     }
 

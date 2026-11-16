@@ -867,10 +867,11 @@ $$;
 --   the id's UUIDv7 birth). With p_with_result, the stored result envelope; with p_with_attempts, the stored attempt
 --   snapshot and its digest.
 -- - Both: the workflow link (the node whose task_id is this task) by ix_horsies_workflow_tasks_task_id.
--- - ABSENT: no row in either place. absence_reason, by the one rule of absence (issue #668), read in the same
---   snapshot: NOT_CLASSIFIED when the id is not a UUIDv7; PREDATES_RETAINED_HISTORY when its birth is before the
---   latest upper anchor of the detached leaves of PERIOD classes plus 5 s (the clock allowance of the readers), so
---   retention can have removed it; WITHIN_RETAINED_HISTORY otherwise, also when retention has detached no leaf.
+-- - ABSENT: no row in either place. absence_reason from horsies_task_absence_reason (0006_history_functions.sql),
+--   the one rule of absence that the rerun read also uses, read in the same snapshot: NOT_CLASSIFIED when the id is
+--   not a UUIDv7; PREDATES_RETAINED_HISTORY when its birth is before the latest upper anchor of the detached leaves
+--   of PERIOD classes plus 5 s, so retention can have removed it; WITHIN_RETAINED_HISTORY otherwise, also when
+--   retention has detached no leaf.
 -- - The caller decodes the stored status text and the attempt snapshot, and checks the digests.
 -- Lock order: none (a plain read; no row lock, no advisory lock).
 -- Returns: one row. Columns by location:
@@ -932,12 +933,9 @@ CREATE FUNCTION horsies_monitoring_task_detail(
 AS $$
 #variable_conflict use_column
 DECLARE
-    c_clock_allowance CONSTANT interval := interval '5 seconds';
     v_detail record;
     v_location text;
     v_row horsies_task_history;
-    v_birth timestamp with time zone;
-    v_detached_upper timestamp with time zone;
 BEGIN
     IF p_task_id IS NULL OR p_with_result IS NULL OR p_with_attempts IS NULL THEN
         RAISE EXCEPTION 'horsies_monitoring_task_detail: task id and both part flags are required'
@@ -990,14 +988,6 @@ BEGIN
         RETURN;
     END IF;
 
-    -- The one rule of absence (issue #668).
-    v_birth := horsies_uuid7_birth(p_task_id);
-    IF v_birth IS NOT NULL THEN
-        SELECT max(leaf.upper_anchor) INTO v_detached_upper
-        FROM horsies_task_history_leaf_catalog AS leaf
-        JOIN horsies_retention_classes AS class ON class.class_key = leaf.class_key
-        WHERE class.class_kind = 'PERIOD' AND leaf.detached_at IS NOT NULL;
-    END IF;
     RETURN QUERY
     SELECT 'ABSENT'::text, p_task_id, NULL::character varying, NULL::character varying, NULL::integer, NULL::text,
            NULL::boolean, NULL::integer, NULL::integer, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz,
@@ -1005,12 +995,7 @@ BEGIN
            NULL::character varying, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::text, NULL::text,
            NULL::text, NULL::smallint, NULL::bytea, NULL::bytea, NULL::smallint, NULL::bytea, NULL::bytea,
            NULL::uuid, NULL::integer,
-           CASE
-               WHEN v_birth IS NULL THEN 'NOT_CLASSIFIED'
-               WHEN v_detached_upper IS NOT NULL AND v_birth < v_detached_upper + c_clock_allowance
-                   THEN 'PREDATES_RETAINED_HISTORY'
-               ELSE 'WITHIN_RETAINED_HISTORY'
-           END;
+           horsies_task_absence_reason(p_task_id);
 END;
 $$;
 
