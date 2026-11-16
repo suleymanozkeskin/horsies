@@ -36,9 +36,7 @@ from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
-    ClassCapacityNotRecorded,
     DownSlot,
-    SlotHealthNotRecorded,
     SlotsDown,
 )
 from horsies.core.models.payload import PayloadPolicy
@@ -1751,7 +1749,6 @@ class TestWorkerStateReads:
     @pytest.mark.parametrize(
         ('stored', 'expected'),
         [
-            (None, SlotHealthNotRecorded()),
             ([], AllSlotsServing()),
             (
                 [
@@ -1776,7 +1773,7 @@ class TestWorkerStateReads:
                 ),
             ),
         ],
-        ids=['not-recorded', 'all-serving', 'one-down'],
+        ids=['all-serving', 'one-down'],
     )
     async def test_the_snapshot_carries_the_slot_health(
         self,
@@ -1810,7 +1807,6 @@ class TestWorkerStateReads:
     @pytest.mark.parametrize(
         ('stored', 'expected'),
         [
-            (None, ClassCapacityNotRecorded()),
             ({}, ClassBudgets(())),
             (
                 {'ISOLATED': {'capacity': 2, 'serves': ['ISOLATED']}},
@@ -1819,7 +1815,7 @@ class TestWorkerStateReads:
                 ),
             ),
         ],
-        ids=['not-recorded', 'serves-no-class', 'one-budget'],
+        ids=['serves-no-class', 'one-budget'],
     )
     async def test_the_snapshot_carries_the_class_capacity(
         self,
