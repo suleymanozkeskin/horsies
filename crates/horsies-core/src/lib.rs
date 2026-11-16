@@ -66,6 +66,7 @@ pub use crate::broker::{
     TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
     WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
+pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
 // worker re-exports
 pub use crate::worker::{
