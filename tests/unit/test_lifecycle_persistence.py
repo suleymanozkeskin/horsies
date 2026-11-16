@@ -289,8 +289,6 @@ def _fused_command(task_id: str) -> CompleteTaskFused:
         task_id=task_id,
         fence=OwnedClaim(worker_id='worker-1', claimed_at=_NOW),
         result_json='{"ok":null}',
-        notify_channel='task_queue_default',
-        notify_payload=f'capacity:{task_id}',
     )
 
 
@@ -314,44 +312,40 @@ def test_a_batch_of_several_rows_runs_the_batch_function() -> None:
 
 
 def test_the_batch_parameter_holds_each_command_in_input_order() -> None:
-    """Six text-or-null fields per command; the generation keeps its
-    microseconds and its UTC offset."""
+    """Three text fields per command, and one worker id for the batch; the
+    generation keeps its microseconds and its UTC offset."""
     generation = datetime(
         2026, 11, 12, 9, 30, 0, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30)),
     )
     later = CompleteTaskFused(
         task_id='b',
-        fence=OwnedClaim(worker_id='worker-2', claimed_at=generation),
+        fence=OwnedClaim(worker_id='worker-1', claimed_at=generation),
         result_json='{"ok":"quote \\" é 𝄞"}',
-        notify_channel='task_queue_other',
-        notify_payload='capacity:b',
     )
 
     parameters = _fused_batch_parameters(
         FusedCompletionBatch(commands=(later, _fused_command('a'))),
     )
 
-    assert list(parameters) == ['batch']
+    assert list(parameters) == ['batch', 'worker_id']
+    assert parameters['worker_id'] == 'worker-1'
     batch_text = parameters['batch']
     assert isinstance(batch_text, str)
     assert json.loads(batch_text) == [
-        [
-            'b',
-            'worker-2',
-            '2026-11-12T09:30:00.123456+05:30',
-            '{"ok":"quote \\" é 𝄞"}',
-            'task_queue_other',
-            'capacity:b',
-        ],
-        [
-            'a',
-            'worker-1',
-            '2026-08-04T00:00:00+00:00',
-            '{"ok":null}',
-            'task_queue_default',
-            'capacity:a',
-        ],
+        ['b', '2026-11-12T09:30:00.123456+05:30', '{"ok":"quote \\" é 𝄞"}'],
+        ['a', '2026-08-04T00:00:00+00:00', '{"ok":null}'],
     ]
+
+
+def test_a_batch_belongs_to_one_worker() -> None:
+    other = CompleteTaskFused(
+        task_id='b',
+        fence=OwnedClaim(worker_id='worker-2', claimed_at=_NOW),
+        result_json='{"ok":null}',
+    )
+
+    with pytest.raises(ValueError, match='one worker'):
+        FusedCompletionBatch(commands=(_fused_command('a'), other))
 
 
 def test_the_single_fused_completion_answers_without_ordinality() -> None:
