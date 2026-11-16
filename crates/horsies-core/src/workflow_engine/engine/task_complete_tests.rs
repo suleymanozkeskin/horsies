@@ -149,7 +149,7 @@ async fn complete(
     on_workflow_task_complete(
         broker,
         task_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &RetentionConfig::default(),
     )
     .await

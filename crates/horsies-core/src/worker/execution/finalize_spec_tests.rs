@@ -856,7 +856,7 @@ async fn phase_two(
 ) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         &PostgresBroker::from_pool(pool.clone()),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         task_id,
         queue,
         is_workflow_task,

@@ -1207,8 +1207,11 @@ impl From<ChildSpecError> for WorkflowError {
 }
 
 /// Build the child spec from the parent node's encoded input (`input_json`,
-/// as the client encoded it). A child registered without a `spec_builder`
-/// refuses a node that gives params (`SubWorkflowParams::Given`).
+/// as the client encoded it). A child registered without a builder refuses a
+/// node that gives params (`SubWorkflowParams::Given`); the refusal text names
+/// the client's builder hook ([`WorkflowSpecRegistry::builder_hook`]: Python
+/// `build_with()`, Rust `spec_builder`; Python's text,
+/// `core/workflows/engine.py:1185-1189`).
 ///
 /// The builder takes the input with each `args_from` entry replaced by its
 /// `inner` result envelope.
@@ -1238,8 +1241,9 @@ pub(crate) fn materialize_child_spec(
                 (None, SubWorkflowParams::Given) => Err(ChildSpecError {
                     error_type: ChildSpecErrorType::RuntimeError,
                     text: format!(
-                        "child workflow '{}' received params from its parent, but the registered child has no spec_builder",
+                        "subworkflow '{}' received runtime parameters but has no {} that accepts them",
                         registered.spec.name,
+                        registry.builder_hook().as_str(),
                     ),
                 }),
                 (None, SubWorkflowParams::NotGiven) => Ok(registered.spec.clone()),
@@ -1430,7 +1434,7 @@ mod tests {
             &broker,
             &spec,
             Some(workflow_id),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1541,7 +1545,8 @@ mod tests {
                 Err(HorsiesError::new("the builder refuses")
                     .with_code(crate::core::ErrorCode::WorkflowCycleDetected))
             });
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let mut registered = child_registered_static();
         registered.spec_builder = Some(builder);
         registry.register(registered).unwrap();
@@ -1568,6 +1573,39 @@ mod tests {
         }
     }
 
+    /// Params given to a child registered without a builder: the `RuntimeError`
+    /// text names the builder hook of the client that built the registry.
+    /// Python's text names `build_with()` (`core/workflows/engine.py:1185-1189`).
+    #[test]
+    fn the_params_refusal_names_the_builder_hook_of_the_client() {
+        for hook in [
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            crate::core::registry::BuilderHookName::new("build_with()"),
+        ] {
+            let mut registry = WorkflowSpecRegistry::new(hook);
+            registry.register(child_registered_static()).unwrap();
+            let resolved = registry
+                .resolve_child_registration("tests.child_static.v1")
+                .expect("the child is registered");
+
+            let failure =
+                materialize_child_spec(resolved, SubWorkflowParams::Given, "{}", &registry)
+                    .unwrap_err();
+
+            assert_eq!(
+                failure,
+                ChildSpecError {
+                    error_type: ChildSpecErrorType::RuntimeError,
+                    text: format!(
+                        "subworkflow 'child_static' received runtime parameters but has no {} \
+                         that accepts them",
+                        hook.as_str(),
+                    ),
+                }
+            );
+        }
+    }
+
     /// A stored input with an `args_from` entry that has no `inner` is a refused stored input: the
     /// builder does not run, and the node fails with `WORKFLOW_ENQUEUE_FAILED` and the refusal.
     #[test]
@@ -1576,7 +1614,8 @@ mod tests {
             Arc::new(|_input: &str| -> Result<WorkflowSpec, HorsiesError> {
                 panic!("the builder does not run for a refused stored input")
             });
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let mut registered = child_registered_static();
         registered.spec_builder = Some(builder);
         registry.register(registered).unwrap();
@@ -1634,7 +1673,7 @@ mod tests {
             &broker,
             &spec,
             Some(workflow_id),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1731,7 +1770,7 @@ mod tests {
                 &broker,
                 &spec,
                 Some(workflow_id),
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
             )
@@ -1805,7 +1844,7 @@ mod tests {
                 &broker,
                 &spec,
                 Some(workflow_id),
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
             )
@@ -1863,7 +1902,7 @@ mod tests {
             &broker,
             &spec,
             Some(workflow_id),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1922,7 +1961,7 @@ mod tests {
             &broker,
             &spec,
             Some(workflow_id),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1989,7 +2028,8 @@ mod tests {
     async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let retention = RetentionConfig::default();
         let workflow_id = Uuid::new_v4();
         let sent_at = chrono::Utc::now() - chrono::Duration::minutes(5);
@@ -2075,7 +2115,8 @@ mod tests {
             .queue_retention
             .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let workflow_id = Uuid::new_v4();
 
         let _: WorkflowHandle<serde_json::Value> = start_workflow(
@@ -2147,7 +2188,7 @@ mod tests {
             &spec,
             workflow_id,
             started,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2225,7 +2266,8 @@ mod tests {
         .input_json(r#"{"region":"eu"}"#)
         .into_any_node(0);
 
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         registry.register_definition(registered).unwrap();
         let child = build_child_spec(
             "child_dynamic",
@@ -2250,7 +2292,8 @@ mod tests {
                 .definition_key("tests.child_static.v1")
                 .into_any_node(0);
 
-            let mut registry = WorkflowSpecRegistry::new();
+            let mut registry =
+                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
             registry.register(child_registered_static()).unwrap();
             let child = build_child_spec(
                 "child_static",
@@ -2260,9 +2303,11 @@ mod tests {
             );
             match (child, accepted) {
                 (Ok(spec), true) => assert_eq!(spec.name, "child_static"),
-                (Err(WorkflowError::Validation(message)), false) => {
-                    assert!(message.contains("has no spec_builder"), "{message}")
-                }
+                (Err(WorkflowError::Validation(message)), false) => assert_eq!(
+                    message,
+                    "RuntimeError: subworkflow 'child_static' received runtime parameters \
+                     but has no spec_builder that accepts them"
+                ),
                 (other, _) => panic!("{input} {params:?}: unexpected {other:?}"),
             }
         }
@@ -2302,7 +2347,8 @@ mod tests {
         .unwrap()
         .into_any_node(0);
 
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         registry.register(registered).unwrap();
         let err = build_child_spec(
             "child_static",
@@ -2312,11 +2358,11 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            WorkflowError::Validation(message) => {
-                assert!(message.starts_with("RuntimeError: "), "{message}");
-                assert!(message.contains("received params from its parent"));
-                assert!(message.contains("has no spec_builder"));
-            }
+            WorkflowError::Validation(message) => assert_eq!(
+                message,
+                "RuntimeError: subworkflow 'child_static' received runtime parameters \
+                 but has no spec_builder that accepts them"
+            ),
             other => panic!("unexpected error: {}", other),
         }
     }

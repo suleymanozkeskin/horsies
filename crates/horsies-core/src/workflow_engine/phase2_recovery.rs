@@ -563,7 +563,9 @@ mod tests {
         drive_phase2_recovery(
             pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             grace_ms,
             max_rows,
             attempt_bound,
@@ -1179,7 +1181,9 @@ mod tests {
         let summary = drive_phase2_recovery(
             &pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             0,
             1,
             25,
@@ -1298,7 +1302,9 @@ mod tests {
         let summary = drive_phase2_recovery(
             &pool,
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(),
+            &crate::core::WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
             0,
             1,
             1,
