@@ -46,7 +46,11 @@ from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring import queries as queries_module
 from horsies.monitoring import (
+    Breakdown,
     BreakdownLimit,
+    BreakdownUnclaimedGroup,
+    BreakdownValueGroup,
+    MonitoringResult,
     TaskPage,
     WorkflowRunsLimit,
     ErrorCategory,
@@ -63,6 +67,7 @@ from horsies.monitoring import (
     list_workflow_names,
     list_workflow_runs,
     TaskSummary,
+    categorize_error_code,
     task_breakdown,
     task_facets,
     task_stats,
@@ -413,6 +418,30 @@ class TestTaskStats:
         assert is_ok(result)
         assert sum(row.count for row in result.ok_value) == expected_total
 
+    async def test_a_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(status=TaskStatus.FAILED)
+        await insert_rows(session, task, make_task(status=TaskStatus.PENDING))
+
+        async with stored_history_status(session, task.id, 'NOT_KNOWN'):
+            result = await task_stats(
+                broker,
+                window=_test_window(),
+                task_names=[],
+                queues=[],
+                workers=[],
+                error_codes=[],
+                error_categories=[],
+                retried_only=False,
+            )
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert 'NOT_KNOWN' in error.message
+
 
 # --------------------------------------------------------------------------- #
 # task_facets
@@ -467,7 +496,6 @@ class TestTaskFacets:
             event.remove(engine, 'before_cursor_execute', _record)
 
         assert is_ok(result)
-        assert len([s for s in statements if 'GROUPING SETS' in s]) == 1
         assert len(statements) == 1
 
     async def test_ties_follow_the_database_collation(
@@ -525,13 +553,24 @@ class TestTaskFacets:
                 for index in range(distinct_codes)
             ],
         )
-        sql, params = queries_module.facets_statement(
-            window=_test_window().history,
-            statuses=[],
-            retried_only=False,
-        )
-
-        rows = (await session.execute(text(sql), params)).all()
+        window = _test_window()
+        builtin = sorted(BUILTIN_CODE_REGISTRY)
+        rows = (
+            await session.execute(
+                text(
+                    'SELECT facet FROM horsies_monitoring_task_facets('
+                    'CAST(:lower AS timestamptz), CAST(:upper AS timestamptz), '
+                    "CAST('{}' AS text[]), FALSE, "
+                    'CAST(:codes AS text[]), CAST(:categories AS text[]))'
+                ),
+                {
+                    'lower': window.lower,
+                    'upper': window.upper,
+                    'codes': builtin,
+                    'categories': [_builtin_category(code) for code in builtin],
+                },
+            )
+        ).all()
         result = await task_facets(
             broker,
             window=_test_window(),
@@ -818,7 +857,7 @@ class TestTaskFacets:
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestTaskBreakdown:
-    """Group pivot: rollup row, 'unknown' NULL key, limit independent of TOTAL."""
+    """Group pivot: counts of every group, the unclaimed group, limit independent of the total."""
 
     async def test_groups_by_worker_with_rollup_total(
         self, broker: PostgresBroker, session: AsyncSession
@@ -847,12 +886,11 @@ class TestTaskBreakdown:
         assert is_ok(result)
         breakdown = result.ok_value
         rows = {row.group: row for row in breakdown.groups}
-        assert rows['w1'].total == 2
-        assert rows['w1'].completed == 1
-        assert rows['w1'].failed == 1
-        assert rows['w1'].retried == 1
-        assert rows['w2'].running == 1
-        assert breakdown.total.group == 'TOTAL'
+        assert rows[BreakdownValueGroup(value='w1')].total == 2
+        assert rows[BreakdownValueGroup(value='w1')].completed == 1
+        assert rows[BreakdownValueGroup(value='w1')].failed == 1
+        assert rows[BreakdownValueGroup(value='w1')].retried == 1
+        assert rows[BreakdownValueGroup(value='w2')].running == 1
         assert breakdown.total.total == 3
         assert breakdown.group_count == 2
 
@@ -876,30 +914,65 @@ class TestTaskBreakdown:
         assert is_ok(result)
         assert result.ok_value.groups == []
         assert result.ok_value.group_count == 0
-        assert result.ok_value.total.group == 'TOTAL'
         assert result.ok_value.total.total == 0
 
-    async def test_null_group_key_is_labelled_unknown(
+    async def test_tasks_no_worker_claimed_are_the_unclaimed_group(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        await insert_rows(session, make_task(worker_id=None))
-
-        result = await task_breakdown(
-            broker,
-            window=_test_window(),
-            group_by='worker',
-            statuses=[],
-            task_names=[],
-            queues=[],
-            workers=[],
-            error_codes=[],
-            error_categories=[],
-            retried_only=False,
-            limit=BreakdownLimit(value=50),
+        await insert_rows(
+            session,
+            make_task(worker_id=None),
+            make_task(worker_id=None, status=TaskStatus.CANCELLED),
         )
 
+        result = await _worker_breakdown(broker)
+
         assert is_ok(result)
-        assert [row.group for row in result.ok_value.groups] == ['unknown']
+        assert [(row.group, row.total) for row in result.ok_value.groups] == [
+            (BreakdownUnclaimedGroup(), 2),
+        ]
+
+    async def test_a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_task(worker_id='unknown', status=TaskStatus.COMPLETED),
+            make_task(worker_id=None),
+        )
+
+        result = await _worker_breakdown(broker)
+
+        assert is_ok(result)
+        breakdown = result.ok_value
+        assert [(row.group, row.total) for row in breakdown.groups] == [
+            (BreakdownValueGroup(value='unknown'), 2),
+            (BreakdownUnclaimedGroup(), 1),
+        ]
+        assert breakdown.group_count == 2
+        assert breakdown.total.total == sum(row.total for row in breakdown.groups)
+
+    async def test_with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(worker_id=None, status=TaskStatus.COMPLETED),
+            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_task(worker_id='a-worker', status=TaskStatus.RUNNING),
+            make_task(worker_id='zz-worker', status=TaskStatus.RUNNING),
+        )
+
+        result = await _worker_breakdown(broker)
+
+        assert is_ok(result)
+        assert [row.group for row in result.ok_value.groups] == [
+            BreakdownValueGroup(value='a-worker'),
+            BreakdownValueGroup(value='unknown'),
+            BreakdownUnclaimedGroup(),
+            BreakdownValueGroup(value='zz-worker'),
+        ]
 
     async def test_limit_caps_groups_but_not_total_or_group_count(
         self, broker: PostgresBroker, session: AsyncSession
@@ -955,8 +1028,8 @@ class TestTaskBreakdown:
         assert is_ok(result)
         assert result.ok_value.group_by == 'task_name'
         assert [row.group for row in result.ok_value.groups] == [
-            'alpha_task',
-            'beta_task',
+            BreakdownValueGroup(value='alpha_task'),
+            BreakdownValueGroup(value='beta_task'),
         ]
 
     async def test_filters_apply_to_groups_and_total(
@@ -983,8 +1056,36 @@ class TestTaskBreakdown:
         )
 
         assert is_ok(result)
-        assert [row.group for row in result.ok_value.groups] == ['w1']
+        assert [row.group for row in result.ok_value.groups] == [
+            BreakdownValueGroup(value='w1'),
+        ]
         assert result.ok_value.total.total == 1
+
+
+def _builtin_category(code: str) -> str:
+    """The category of a built-in error code, as the facet function takes it."""
+    match categorize_error_code(code):
+        case ErrorCategory() as category:
+            return category.value
+        case None:
+            raise AssertionError(f'built-in code {code!r} has no category')
+
+
+async def _worker_breakdown(broker: PostgresBroker) -> MonitoringResult[Breakdown]:
+    """The worker breakdown of every task in the test window, with no filter."""
+    return await task_breakdown(
+        broker,
+        window=_test_window(),
+        group_by='worker',
+        statuses=[],
+        task_names=[],
+        queues=[],
+        workers=[],
+        error_codes=[],
+        error_categories=[],
+        retried_only=False,
+        limit=BreakdownLimit(value=50),
+    )
 
 
 # --------------------------------------------------------------------------- #

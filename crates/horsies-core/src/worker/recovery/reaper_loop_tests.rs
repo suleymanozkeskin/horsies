@@ -161,7 +161,9 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
         Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
         pool.clone(),
         pool.clone(),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         maintenance_only_recovery(),
         PayloadPolicy::default(),
         RetentionConfig::default(),

@@ -547,11 +547,11 @@ async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
 async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
             created_at, max_retries, execution, retention_class_key
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1, 'matrix_task', 'null', 'default', 100, '{}', FALSE, 'all', $3,
@@ -1965,12 +1965,12 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50000) AS g
          )
          INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps,
              join_type, status, is_subworkflow, max_retries, execution,
              retention_class_key, task_id, created_at
          )
-         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
+         SELECT 'NONE', node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
                 'default', 100, '{}'::integer[], FALSE,
                 'all', 'PENDING', FALSE, 3, 'ISOLATED',
                 'standard_30d', task_id, NOW()

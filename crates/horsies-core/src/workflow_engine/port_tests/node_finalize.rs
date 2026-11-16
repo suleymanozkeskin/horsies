@@ -32,7 +32,7 @@ use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOut
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{
     confirm_ownership_and_set_running, finalize_workflow_phase, persist_terminal_state,
-    FinalizeError, FinalizeOutcome, FinalizeStage, OwnershipOutcome,
+    FinalizeError, FinalizeOutcome, FinalizeStage, OwnershipOutcome, PhaseTwoForm,
 };
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
@@ -77,7 +77,7 @@ async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
     start(
         pool,
         &spec(name, vec![task_node(0, &format!("{name}_task")), dependent]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
 }
@@ -172,21 +172,21 @@ async fn finalize(
     .await?;
     let owed = match &outcome {
         FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
-        } => Some((*is_success, *capacity_notified)),
+            phase_two: form,
+            ..
+        } => Some((*capacity_notified, *form)),
         FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused => None,
     };
-    if let Some((is_success, capacity_notified)) = owed {
+    if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
-            pool,
-            &WorkflowSpecRegistry::new(),
+            &broker,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             claimed.id,
-            is_success,
             &claimed.queue_name,
             claimed.is_workflow_task,
             capacity_notified,
-            &PayloadPolicy::default(),
+            form,
             &RetentionConfig::default(),
         )
         .await?;
@@ -198,10 +198,10 @@ async fn finalize(
 fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match result {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -210,15 +210,10 @@ fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
     }
 }
 
-/// Whether phase 1 applied the success and phase 2 ran.
+/// Whether phase 1 applied a terminal write that owes phase 2, and phase 2
+/// ran. The outcome carries no status: the callers drive a success.
 fn is_a_finalized_success(result: &Result<FinalizeOutcome, FinalizeError>) -> bool {
-    matches!(
-        result,
-        Ok(FinalizeOutcome::Terminal {
-            is_success: true,
-            ..
-        })
-    )
+    matches!(result, Ok(FinalizeOutcome::Terminal { .. }))
 }
 
 /// (task_index, status, linked to a task) of each node (Python's `_nodes`).
@@ -586,24 +581,27 @@ async fn seed_owed_phase_two(
 }
 
 /// Phase 2 of a success of `task_id`, with its capacity wake on `queue_name`.
+/// The phase-1 outcome is not at hand, so the step reads the dependents in a
+/// transaction (`PhaseTwoForm::NotKnown`).
 async fn phase_two(
     pool: &PgPool,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
+    let broker = PostgresBroker::from_pool(pool.clone());
     finalize_workflow_phase(
-        pool,
-        &WorkflowSpecRegistry::new(),
+        &broker,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         task_id,
-        true,
         queue_name,
         is_workflow_task,
         false,
-        &PayloadPolicy::default(),
+        PhaseTwoForm::NotKnown,
         &RetentionConfig::default(),
     )
     .await
+    .map(|_parent_advances| ())
 }
 
 fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeError {
@@ -689,7 +687,9 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
                 let workflow_id = start(
                     &pool,
                     &spec("finalize_wake", vec![task_node(0, "finalize_wake_task")]),
-                    &WorkflowSpecRegistry::new(),
+                    &WorkflowSpecRegistry::new(
+                        crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                    ),
                 )
                 .await;
                 let task_id = node(&pool, workflow_id, 0)

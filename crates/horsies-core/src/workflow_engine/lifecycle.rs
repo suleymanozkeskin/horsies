@@ -3,17 +3,15 @@ use std::collections::VecDeque;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
+use crate::core::WorkflowSpecRegistry;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::workflow_engine::engine;
+use crate::db::CheckoutClass;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
-    stored_sub_workflow_params,
+use crate::workflow_engine::steps::{
+    self, advance_parents, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
 };
 
 #[cfg(test)]
@@ -24,12 +22,6 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-const CANCEL_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND status IN ('PENDING', 'RUNNING', 'PAUSED')
-RETURNING id";
 
 /// Lock the workflow row first, before any workflow_task rows, so the cancel
 /// transaction acquires `{horsies_workflows, horsies_workflow_tasks}` in the same
@@ -100,95 +92,10 @@ WHERE id = $1 AND status = 'PAUSED'
   AND updated_at < NOW() - ($3::double precision * INTERVAL '1 second')
 RETURNING id";
 
-const PAUSE_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'PAUSED', updated_at = NOW()
-WHERE id = $1 AND status = 'RUNNING'
-RETURNING id";
-
-const RESUME_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'RUNNING', updated_at = NOW()
-WHERE id = $1 AND status = 'PAUSED'
-RETURNING id";
-
-/// Check if a workflow exists (regardless of status).
-const CHECK_WORKFLOW_EXISTS_SQL: &str = "\
-SELECT id FROM horsies_workflows WHERE id = $1";
-
-/// Current status of a workflow (for the idempotent resume path).
-const GET_WORKFLOW_STATUS_SQL: &str = "\
-SELECT status FROM horsies_workflows WHERE id = $1";
-
-const FIND_PENDING_TASKS_SQL: &str = "\
-SELECT task_index, dependencies, task_name, input,
-       queue_name, priority, args_from, workflow_ctx_from,
-       allow_failed_deps, join_type, min_success,
-       node_id, task_options
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1::uuid AND status = 'PENDING'";
-
-const FIND_READY_TASKS_SQL: &str = "\
-SELECT task_index, task_name, input,
-       queue_name, priority, task_options, node_id,
-       args_from, workflow_ctx_from, dependencies, is_subworkflow,
-       sub_workflow_name, sub_definition_key, sub_workflow_params
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1::uuid AND status = 'READY'";
-
-/// Find terminal deps for a PENDING task (used for resume re-evaluation).
-const FIND_TERMINAL_DEPS_SQL: &str = "\
-SELECT task_index
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1 AND task_index = ANY($2)
-  AND status IN ('COMPLETED', 'FAILED', 'SKIPPED')";
-
-// An engine-minted task row carries no command fingerprint, no idempotency
-// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
-// `sent_at` is the start call time of the node's workflow ($11).
-const ENQUEUE_TASK_SQL: &str = "\
-INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, input, task_options, execution,
-    retention_class_key, sent_at, created_at,
-    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-    status, enqueued_at, retry_count, max_retries, good_until,
-    is_workflow_task, updated_at,
-    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-)
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
-        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
-        'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
-
-const LINK_ENQUEUED_TASK_SQL: &str = "\
-UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
-FROM horsies_workflows w
-WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
-  AND wt.status = 'READY'
-  AND w.id = wt.workflow_id
-  AND w.status = 'RUNNING'";
-
 /// Find RUNNING child workflows of a given parent.
 const FIND_RUNNING_CHILDREN_SQL: &str = "\
 SELECT id FROM horsies_workflows
 WHERE parent_workflow_id = $1 AND status = 'RUNNING'";
-
-/// The cancellable descendants of a workflow, at any depth, in the core's workflow lock order
-/// (`depth`, `id`). The walk passes terminal workflows too, so a cancellable grandchild under a terminal child
-/// is found (Python `SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL`). The depth CHECK (0..32) bounds the walk.
-const SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL: &str = "\
-WITH RECURSIVE descendants AS (
-    SELECT id, status, depth
-    FROM horsies_workflows
-    WHERE parent_workflow_id = $1
-    UNION ALL
-    SELECT child.id, child.status, child.depth
-    FROM horsies_workflows child
-    JOIN descendants parent ON child.parent_workflow_id = parent.id
-)
-SELECT id FROM descendants
-WHERE status IN ('PENDING', 'RUNNING', 'PAUSED')
-ORDER BY depth, id";
 
 /// Pause a single child workflow (RUNNING -> PAUSED).
 const PAUSE_CHILD_WORKFLOW_SQL: &str = "\
@@ -206,31 +113,6 @@ SET status = 'READY', task_id = NULL, started_at = NULL
 WHERE wt.task_id = ANY($1)
   AND wt.status IN ('ENQUEUED', 'RUNNING')";
 
-/// Find PAUSED child workflows of a given parent.
-const FIND_PAUSED_CHILDREN_SQL: &str = "\
-SELECT id, depth, root_workflow_id FROM horsies_workflows
-WHERE parent_workflow_id = $1 AND status = 'PAUSED'";
-
-/// Resume a single child workflow (PAUSED -> RUNNING).
-const RESUME_CHILD_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'RUNNING', updated_at = NOW()
-WHERE id = $1 AND status = 'PAUSED'";
-
-/// Get parent depth and root workflow ID (used for sub-workflow launch on resume).
-const GET_WORKFLOW_DEPTH_SQL: &str = "\
-SELECT depth, root_workflow_id
-FROM horsies_workflows
-WHERE id = $1";
-
-/// Link a sub-workflow task to its child workflow. A linked parent node is RUNNING while its child runs
-/// (Python `LINK_SUB_WORKFLOW_SQL`, `core/workflows/sql.py:271-275`).
-const LINK_SUBWORKFLOW_SQL: &str = "\
-UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1, status = 'RUNNING', started_at = NOW()
-WHERE workflow_id = $2 AND task_index = $3
-  AND status = 'READY'";
-
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -239,65 +121,6 @@ WHERE workflow_id = $2 AND task_index = $3
 #[allow(dead_code)]
 struct IdRow {
     id: Uuid,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct TerminalDepRow {
-    task_index: i32,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct PendingTaskRow {
-    task_index: i32,
-    dependencies: Vec<i32>,
-    task_name: String,
-    input: String,
-    queue_name: String,
-    priority: i32,
-    args_from: Option<serde_json::Value>,
-    workflow_ctx_from: Option<Vec<String>>,
-    allow_failed_deps: bool,
-    join_type: String,
-    min_success: Option<i32>,
-    node_id: Option<String>,
-    task_options: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct ReadyTaskRow {
-    task_index: i32,
-    task_name: String,
-    input: String,
-    queue_name: String,
-    priority: i32,
-    task_options: Option<String>,
-    node_id: Option<String>,
-    args_from: Option<serde_json::Value>,
-    workflow_ctx_from: Option<Vec<String>>,
-    dependencies: Vec<i32>,
-    is_subworkflow: bool,
-    sub_workflow_name: Option<String>,
-    sub_definition_key: Option<String>,
-    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
-    /// `GIVEN`); `NULL` on a task node.
-    sub_workflow_params: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct ChildWorkflowRow {
-    id: Uuid,
-    depth: Option<i32>,
-    root_workflow_id: Option<Uuid>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct DepthRow {
-    depth: Option<i32>,
-    root_workflow_id: Option<Uuid>,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +139,10 @@ fn to_handle_error(e: WorkflowError, workflow_id: Uuid) -> HandleOperationError 
 ///   so, as Python's `is_retryable_connection_error` (`core/models/workflow/handle.py:928`).
 /// - A stored value that does not parse (an unknown status, a stored JSON value) is `STORED_DATA_INVALID`,
 ///   not retryable: the same call gets the same answer (`core/models/workflow/handle_types.py:33-57`).
+/// - A failure of a step on the statement layer (`WorkflowError::Broker` with `BrokerError::Statement`) is
+///   `DB_OPERATION_FAILED`, retryable by the statement layer's transience.
+/// - A step row outside its function's contract (`StepContract`) is `INTERNAL_FAILED`, not retryable: the
+///   core and the installed baseline disagree.
 /// - The remaining variants keep `INTERNAL_FAILED` until resume runs through its SQL function; Python
 ///   raises them.
 pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> HandleOperationError {
@@ -331,7 +158,8 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         }
         WorkflowError::WorkflowTimeout { .. }
         | WorkflowError::WorkflowError(_)
-        | WorkflowError::Validation(_) => (HandleErrorCode::InternalFailed, false),
+        | WorkflowError::Validation(_)
+        | WorkflowError::StepContract(_) => (HandleErrorCode::InternalFailed, false),
     };
     HandleOperationError {
         code,
@@ -354,115 +182,50 @@ async fn admit_workflow_write(broker: &PostgresBroker, workflow_id: Uuid) -> Han
         .map_err(|error| to_handle_error(WorkflowError::Broker(error), workflow_id))
 }
 
-/// Check if a workflow exists. Returns `Err(WorkflowNotFound)` if not.
-async fn ensure_workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<(), WorkflowError> {
-    let exists: Option<IdRow> = sqlx::query_as(CHECK_WORKFLOW_EXISTS_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
-    if exists.is_none() {
-        return Err(WorkflowError::WorkflowNotFound { workflow_id });
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Cancel a workflow.
+/// Cancels a workflow tree: `horsies_workflow_cancel`, one statement in autocommit (Python
+/// `WorkflowHandle.cancel_async`, `core/models/workflow/handle.py:1588-1765`).
 ///
-/// Transitions RUNNING/PAUSED -> CANCELLED. Skips all non-terminal
-/// workflow_tasks and cancels any enqueued horsies_tasks.
+/// The function locks the root row, then its PENDING, RUNNING and PAUSED descendants in `(depth, id)`
+/// order, then the live tasks behind their nodes in id order, then their live nodes; it sets every locked
+/// workflow CANCELLED with `completed_at`, moves the tasks behind ENQUEUED nodes to history as cancelled,
+/// and skips the waiting nodes. A node whose task already started stays RUNNING until the task ends. The
+/// CANCELLED status change fires the `workflow_done` trigger per row.
 ///
-/// Returns `true` if the workflow was actually cancelled. The handle's client family is checked before
-/// the first write (`admit_workflow_write`).
+/// Outcomes:
+/// - `Ok(true)`: the tree is cancelled.
+/// - `Ok(false)`: the workflow is COMPLETED, FAILED, CANCELLED or EXPIRED; nothing was written.
+/// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+/// - `DB_OPERATION_FAILED`: the client family check refused the handle, or the statement failed
+///   (retryable by the statement layer's transience; an `OutcomeUnknown` may have committed).
+/// - `INTERNAL_FAILED`: a row outside the function's contract.
+///
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    cancel_workflow_inner(broker.pool(), workflow_id)
-        .await
-        .map_err(|e| to_handle_error(e, workflow_id))
-}
-
-/// Lock the workflow row + backing tasks + workflow_tasks, flip the workflow
-/// status to CANCELLED, and run the backing-task cleanup, in the caller's
-/// transaction, so the locks are held from before the status flip through commit.
-/// Worker claiming uses `FOR UPDATE SKIP LOCKED`, so these locks close the window
-/// where a worker could claim a queued task during the uncommitted cancellation
-/// (horsies #65).
-///
-/// Lock order (N6): the workflow row is locked first, before any
-/// workflow_task rows, matching `COMPLETE_WORKFLOW_TASK_SQL` (workflows before
-/// workflow_tasks). Opposite orders across the two paths deadlock under
-/// contention.
-///
-/// Returns `true` if the workflow was non-terminal and got cancelled; `false` writes nothing.
-async fn cancel_one_workflow_steps(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workflow_id: Uuid,
-) -> Result<bool, WorkflowError> {
-    // Workflow row first — see the lock-order invariant above and on
-    // COMPLETE_WORKFLOW_TASK_SQL.
-    sqlx::query(LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    // Re-lock backing tasks: an in-flight enqueue may have linked a new task
-    // row while we waited on the workflow_task locks above.
-    sqlx::query(LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-
-    let cancelled: Option<IdRow> = sqlx::query_as(CANCEL_WORKFLOW_SQL)
-        .bind(workflow_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-
-    if cancelled.is_none() {
-        return Ok(false);
+    match steps::cancel(broker, workflow_id).await {
+        Ok(CancelOutcome::Cancelled {
+            cancelled_workflow_ids,
+            cancelled_task_ids,
+        }) => {
+            tracing::info!(
+                workflow_id = %workflow_id,
+                cancelled_workflows = cancelled_workflow_ids.len(),
+                cancelled_tasks = cancelled_task_ids.len(),
+                "workflow cancelled",
+            );
+            Ok(true)
+        }
+        Ok(CancelOutcome::NotCancellable) => Ok(false),
+        Ok(CancelOutcome::NotFound) => Err(to_handle_error(
+            WorkflowError::WorkflowNotFound { workflow_id },
+            workflow_id,
+        )),
+        Err(error) => Err(to_handle_error(error, workflow_id)),
     }
-
-    // Cancel not-yet-started horsies_tasks (PENDING/CLAIMED/RUNNING) for
-    // ENQUEUED wf_tasks, so workers cannot pick them up after we commit. The
-    // function verifies the workflow's CANCELLED status in-statement, so it
-    // must follow the flip above; the #176 lock order (workflow row first,
-    // then task rows) is preserved because this transaction already holds
-    // both.
-    let outcomes = crate::broker::terminalization::terminalize_in_tx(
-        tx,
-        &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
-            workflow_ids: vec![workflow_id],
-        },
-    )
-    .await
-    .map_err(WorkflowError::Broker)?;
-    // Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
-    sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
-        .bind(workflow_id)
-        .execute(&mut **tx)
-        .await?;
-    // Skip ENQUEUED wf_tasks whose horsies_tasks were just cancelled.
-    sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
-        .bind(workflow_id)
-        .bind(
-            outcomes
-                .iter()
-                .map(|outcome| outcome.task_id())
-                .collect::<Vec<_>>(),
-        )
-        .execute(&mut **tx)
-        .await?;
-
-    Ok(true)
 }
 
 /// Expire PAUSED workflows older than the configured policy age.
@@ -579,76 +342,44 @@ fn format_python_timedelta(duration: chrono::Duration) -> Result<String, Workflo
     })
 }
 
-/// Cancel a workflow and its cancellable descendants in one transaction (Python
-/// `WorkflowHandle.cancel_async`, `core/models/workflow/handle.py:1588-1765`).
+/// Pauses a workflow tree: `horsies_workflow_pause`, one statement in autocommit (Python
+/// `pause_workflow`, `core/workflows/lifecycle.py:886-994`, with `cascade_pause_to_children`).
 ///
-/// A failure at any step rolls back the whole tree: no part of a tree is cancelled alone. Descendant
-/// workflow rows are locked after the root, in `(depth, id)` order. The CANCELLED status flip fires the
-/// `workflow_done` trigger per row, so no manual notify is sent.
-async fn cancel_workflow_inner(pool: &PgPool, workflow_id: Uuid) -> Result<bool, WorkflowError> {
-    let mut tx = pool.begin().await?;
-    if !cancel_one_workflow_steps(&mut tx, workflow_id).await? {
-        tx.rollback().await?;
-        ensure_workflow_exists(pool, workflow_id).await?;
-        return Ok(false);
-    }
-
-    // Cascade cancellation to non-terminal descendant workflows so RUNNING
-    // children stop executing (parity with horsies PR #66).
-    let descendants: Vec<Uuid> = sqlx::query_scalar(SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL)
-        .bind(workflow_id)
-        .fetch_all(&mut *tx)
-        .await?;
-    for child_id in descendants {
-        let child_cancelled = cancel_one_workflow_steps(&mut tx, child_id).await?;
-        tracing::debug!(
-            parent_workflow_id = %workflow_id,
-            child_workflow_id = %child_id,
-            child_cancelled,
-            "cascade: descendant workflow cancel",
-        );
-    }
-    tx.commit().await?;
-
-    tracing::info!(workflow_id = %workflow_id, "workflow cancelled");
-    Ok(true)
-}
-
-/// Pause a workflow.
+/// The function moves the workflow RUNNING -> PAUSED, then its RUNNING descendants level by level in
+/// `(depth, id)` order; it abandons every CLAIMED task behind an ENQUEUED or RUNNING node of the paused tree
+/// (`PAUSE_ABANDON_WORKFLOW`) and puts the nodes of the abandoned tasks back to READY with no task, so a
+/// resume enqueues new task rows for them. Tasks that already run go on; their results do not enqueue
+/// new work until a resume. The status trigger sends one `workflow_done` per paused workflow at commit.
 ///
-/// Transitions RUNNING -> PAUSED. No new tasks will be enqueued.
-/// Already-running tasks will complete but their results won't
-/// trigger new enqueues until resume.
+/// Outcomes:
+/// - `Ok(true)`: the workflow was RUNNING and is PAUSED with its RUNNING descendants.
+/// - `Ok(false)`: the workflow exists and is not RUNNING; nothing was written.
+/// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+/// - `DB_OPERATION_FAILED` and `INTERNAL_FAILED`: as [`cancel_workflow`].
 ///
-/// Cascades pause to all running child workflows (iterative BFS),
-/// matching Python's `_cascade_pause_to_children()` behavior.
-///
-/// Returns `true` if the workflow was actually paused. The handle's client family is checked before
-/// the first write (`admit_workflow_write`).
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    pause_workflow_inner(broker.pool(), workflow_id)
-        .await
-        .map_err(|e| to_handle_error(e, workflow_id))
-}
-
-async fn pause_workflow_inner(pool: &PgPool, workflow_id: Uuid) -> Result<bool, WorkflowError> {
-    let mut tx = pool.begin().await?;
-    let paused: Option<IdRow> = sqlx::query_as(PAUSE_WORKFLOW_SQL)
-        .bind(workflow_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-    if paused.is_none() {
-        tx.rollback().await?;
-        ensure_workflow_exists(pool, workflow_id).await?;
-        return Ok(false);
+    match steps::pause(broker, workflow_id).await {
+        Ok(PauseOutcome::Paused {
+            paused_workflow_ids,
+            abandoned_task_ids,
+        }) => {
+            tracing::info!(
+                workflow_id = %workflow_id,
+                paused_workflows = paused_workflow_ids.len(),
+                abandoned_tasks = abandoned_task_ids.len(),
+                "workflow paused",
+            );
+            Ok(true)
+        }
+        Ok(PauseOutcome::NotRunning) => Ok(false),
+        Ok(PauseOutcome::NotFound) => Err(to_handle_error(
+            WorkflowError::WorkflowNotFound { workflow_id },
+            workflow_id,
+        )),
+        Err(error) => Err(to_handle_error(error, workflow_id)),
     }
-
-    tracing::info!(workflow_id = %workflow_id, "workflow paused");
-    pause_tree_and_relocate_in_tx(&mut tx, workflow_id).await?;
-    tx.commit().await?;
-    Ok(true)
 }
 
 /// Pause all RUNNING descendants and relocate claimed-but-not-started backing
@@ -706,25 +437,25 @@ pub(crate) async fn pause_tree_and_relocate(
     Ok(paused)
 }
 
-/// Resume a paused workflow.
+/// Resumes a workflow tree: `horsies_workflow_resume`, in a transaction (`BEGIN`, the step, one
+/// `horsies_workflow_child_start` per owed child start, `COMMIT`) on the main core pool as producer work (Python
+/// `resume_workflow`, `core/workflows/lifecycle.py:1084-1263`).
 ///
-/// Transitions PAUSED -> RUNNING. Re-evaluates all PENDING tasks
-/// (checking if deps became terminal while paused), enqueues READY
-/// tasks (including sub-workflow READY tasks), and cascades resume
-/// to all paused child workflows.
+/// The function moves the workflow PAUSED -> RUNNING with its PAUSED descendants, promotes their PENDING nodes,
+/// enqueues their READY nodes (task rows minted), runs the completion checks deepest first, and advances the
+/// parent node of a resumed child that ended, when that parent is resumed too. A READY sub-workflow node owes a
+/// child start, which runs in the same transaction.
 ///
-/// Idempotent: if the workflow is already RUNNING (e.g. a crash committed the
-/// parent PAUSED->RUNNING flip but died before cascading resume to children,
-/// leaving them stranded PAUSED), the re-evaluation, child cascade, and
-/// completion check still run — only the status flip is skipped (C8).
-///
-/// Returns:
-/// - `true` when the workflow was flipped PAUSED -> RUNNING, or when an
-///   already-RUNNING call actually recovered something (children resumed or
-///   ready nodes re-enqueued).
-/// - `Ok(false)` when there was nothing to do: the workflow is already RUNNING
-///   and consistent, or it is in a terminal state.
-/// - `WorkflowNotFound` when the workflow does not exist.
+/// Outcomes:
+/// - `Ok(true)`: the tree was resumed. The parent advances that the step and its child starts owe run after the
+///   commit ([`advance_parents`]). Then the tree recovery pass runs as before.
+/// - `Ok(false)`: the workflow exists and is not PAUSED, RUNNING included; nothing was written (Python's rule).
+/// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+/// - `DB_OPERATION_FAILED`, `INTERNAL_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its
+///   `COMMIT` reply was lost. A refused host build of an owed child (`INTERNAL_FAILED` or `STORED_DATA_INVALID`)
+///   commits nothing.
+/// - `RESUME_RECOVERY_FAILED`, not retryable: the resume committed, and the parent advance or the tree recovery
+///   pass after it failed.
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn resume_workflow(
@@ -735,555 +466,63 @@ pub async fn resume_workflow(
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    let pool = broker.pool();
-    let steps = resume_workflow_inner(pool, workflow_id, registry, payload, retention)
-        .await
-        .map_err(|e| to_handle_error(e, workflow_id))?;
-    match steps {
-        ResumeSteps::NotResumed => Ok(false),
-        ResumeSteps::Ran { changed } => {
-            // Recovery completion pass: a child workflow may have COMPLETED while the
-            // parent was paused, leaving the parent's sub-workflow node stale. Run the
-            // recovery sweep immediately so the parent picks it up now rather than
-            // waiting for the periodic reaper (parity with horsies PR #66). The sweep
-            // is uncapped but restricted to this workflow's tree; resume must recover
-            // the whole tree without scanning or mutating unrelated workflows.
-            // finalizing_grace_ms = 0: resume recovers immediately. The workflow is
-            // RUNNING at this point, so a failure here is RESUME_RECOVERY_FAILED
-            // (Python `core/workflows/lifecycle.py:1234-1262`), not retryable.
-            crate::workflow_engine::recovery::recover_stuck_workflow_tree(
-                pool,
-                registry,
-                workflow_id,
-                0,
-                payload,
-                retention,
-            )
-            .await
-            .map_err(|error| HandleOperationError {
-                code: HandleErrorCode::ResumeRecoveryFailed,
-                message: format!(
-                    "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
-                ),
-                retryable: false,
-                workflow_id,
-            })?;
-            Ok(changed)
-        }
-    }
-}
-
-/// What the resume steps did before the tree recovery pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResumeSteps {
-    /// Nothing to resume: the workflow is terminal, or a PAUSED or PENDING read raced the guarded flip.
-    NotResumed,
-    /// The resume steps ran; the tree recovery pass follows. `changed` is true when the status flipped
-    /// PAUSED -> RUNNING, a child resumed, or a READY node was enqueued.
-    Ran { changed: bool },
-}
-
-async fn resume_workflow_inner(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<ResumeSteps, WorkflowError> {
-    let resumed: Option<IdRow> = sqlx::query_as(RESUME_WORKFLOW_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
-    let status_flipped = resumed.is_some();
-
-    if !status_flipped {
-        // Not PAUSED. Distinguish not-found / terminal / already-RUNNING so a
-        // crash between the parent flip and the child cascade can still be
-        // recovered on retry (C8) instead of returning early.
-        let status: Option<String> = sqlx::query_scalar(GET_WORKFLOW_STATUS_SQL)
-            .bind(workflow_id)
-            .fetch_optional(pool)
-            .await?;
-        match status {
-            None => {
-                return Err(WorkflowError::WorkflowNotFound { workflow_id });
-            }
-            Some(status) => {
-                match WorkflowStatus::try_from(status.as_str())
-                    .map_err(WorkflowError::InvalidStatus)?
-                {
-                    WorkflowStatus::Running => {
-                        tracing::info!(
-                            workflow_id = %workflow_id,
-                            "resume called on an already-RUNNING workflow; running idempotent recovery",
-                        );
-                    }
-                    WorkflowStatus::Completed
-                    | WorkflowStatus::Failed
-                    | WorkflowStatus::Cancelled
-                    | WorkflowStatus::Expired => return Ok(ResumeSteps::NotResumed),
-                    // The guarded UPDATE did not perform the PAUSED -> RUNNING
-                    // transition. Do not mutate from a later PAUSED/PENDING read.
-                    WorkflowStatus::Paused | WorkflowStatus::Pending => {
-                        return Ok(ResumeSteps::NotResumed)
-                    }
-                }
-            }
-        }
-    } else {
-        tracing::info!(workflow_id = %workflow_id, "workflow resumed, re-evaluating pending tasks");
-    }
-
-    // Re-evaluate and enqueue tasks for this workflow.
-    let nodes_enqueued =
-        reevaluate_and_enqueue(pool, workflow_id, registry, payload, retention).await?;
-
-    // Cascade resume to paused child workflows (iterative BFS).
-    let children_resumed =
-        cascade_resume_to_children(pool, workflow_id, registry, payload, retention).await?;
-
-    // Check if all tasks are already terminal (e.g., all pending tasks were
-    // skipped during re-evaluation because upstream deps failed). Without
-    // this, the workflow would remain stuck in RUNNING forever.
-    engine::check_workflow_completion(pool, workflow_id, registry, payload, retention).await?;
-
-    // A genuine PAUSED->RUNNING flip is always a resume. An already-RUNNING
-    // (idempotent) call counts as a resume only if it actually recovered
-    // something — children resumed or ready nodes re-enqueued — so a no-op
-    // retry returns Ok(false) (C8).
-    Ok(ResumeSteps::Ran {
-        changed: status_flipped || children_resumed > 0 || nodes_enqueued > 0,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Cascade resume to children (Gap 14-4)
-// ---------------------------------------------------------------------------
-
-/// Iteratively resume all paused child workflows using BFS.
-///
-/// For each resumed child, re-evaluates PENDING tasks and enqueues READY
-/// tasks (including sub-workflow READY tasks). Mirrors Python's
-/// `_cascade_resume_to_children()`.
-async fn cascade_resume_to_children(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<usize, WorkflowError> {
-    let mut queue: VecDeque<Uuid> = VecDeque::new();
-    queue.push_back(workflow_id);
-    let mut resumed_count = 0usize;
-
-    while let Some(current_id) = queue.pop_front() {
-        // Find paused child workflows.
-        let children: Vec<ChildWorkflowRow> = sqlx::query_as(FIND_PAUSED_CHILDREN_SQL)
-            .bind(&current_id)
-            .fetch_all(pool)
-            .await?;
-
-        for child in children {
-            // Resume child workflow.
-            sqlx::query(RESUME_CHILD_WORKFLOW_SQL)
-                .bind(&child.id)
-                .execute(pool)
-                .await?;
-            resumed_count += 1;
-
-            tracing::debug!(
-                parent_workflow_id = %current_id,
-                child_workflow_id = %child.id,
-                "cascade: child workflow resumed",
-            );
-
-            // Re-evaluate and enqueue tasks for the resumed child.
-            reevaluate_and_enqueue(pool, child.id, registry, payload, retention).await?;
-
-            // Check if child is already complete after re-evaluation.
-            engine::check_workflow_completion(pool, child.id, registry, payload, retention).await?;
-
-            // Add to queue to resume its children.
-            queue.push_back(child.id);
-        }
-    }
-
-    Ok(resumed_count)
-}
-
-// ---------------------------------------------------------------------------
-// Re-evaluate and enqueue logic (shared by resume + cascade)
-// ---------------------------------------------------------------------------
-
-/// Re-evaluate PENDING tasks and enqueue READY tasks for a single workflow.
-///
-/// Uses the engine's `process_dependents` for PENDING tasks to get full
-/// join-type evaluation (all/any/quorum), matching Python's resume behavior
-/// which calls `_try_make_ready_and_enqueue` for each PENDING task.
-///
-/// For already-READY tasks (which were READY at pause time but not yet
-/// enqueued), enqueues directly including sub-workflow READY tasks.
-/// Returns the number of READY nodes successfully enqueued (regular tasks and
-/// launched sub-workflows). In a consistent RUNNING workflow this is 0; a
-/// non-zero count signals recoverable state the resume actually re-enqueued.
-async fn reevaluate_and_enqueue(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<usize, WorkflowError> {
-    let mut enqueued = 0usize;
-    // 1. Re-evaluate PENDING tasks using full join evaluation.
-    //
-    // For each PENDING task, find a terminal dependency and trigger
-    // process_dependents, which calls try_make_ready_and_enqueue with
-    // full join type evaluation (all/any/quorum), condition checks, etc.
-    let pending_tasks: Vec<PendingTaskRow> = sqlx::query_as(FIND_PENDING_TASKS_SQL)
-        .bind(workflow_id)
-        .fetch_all(pool)
-        .await?;
-
-    // Collect unique terminal dependency indices to avoid redundant calls.
-    let mut triggered_dep_indices = std::collections::HashSet::new();
-
-    for task in &pending_tasks {
-        if task.dependencies.is_empty() {
-            continue; // Shouldn't happen (roots are enqueued at start).
-        }
-
-        // Find terminal deps for this task.
-        let terminal_deps: Vec<TerminalDepRow> = sqlx::query_as(FIND_TERMINAL_DEPS_SQL)
-            .bind(workflow_id)
-            .bind(&task.dependencies)
-            .fetch_all(pool)
-            .await?;
-
-        for dep in &terminal_deps {
-            if triggered_dep_indices.insert(dep.task_index) {
-                // Trigger full join evaluation via process_dependents.
-                if let Err(e) = engine::process_dependents(
-                    pool,
-                    workflow_id,
-                    dep.task_index,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await
-                {
-                    tracing::error!(
-                        workflow_id = %workflow_id,
-                        dep_index = dep.task_index,
-                        error = %e,
-                        "failed to re-evaluate dependents on resume",
-                    );
-                }
-            }
-        }
-    }
-
-    // 2. Enqueue all READY tasks (both regular and sub-workflow).
-    // These may be tasks that were READY at pause time, or tasks that
-    // became READY via step 1 but weren't enqueued (e.g., sub-workflows).
-    let ready_tasks: Vec<ReadyTaskRow> = sqlx::query_as(FIND_READY_TASKS_SQL)
-        .bind(workflow_id)
-        .fetch_all(pool)
-        .await?;
-
-    for task in &ready_tasks {
-        if task.is_subworkflow {
-            // Sub-workflow READY task: launch child workflow.
-            match enqueue_subworkflow_on_resume(
-                pool,
-                workflow_id,
-                task,
-                registry,
-                payload,
-                retention,
-            )
-            .await
-            {
-                Ok(()) => enqueued += 1,
-                Err(e) => {
-                    tracing::error!(
-                        workflow_id = %workflow_id,
-                        task_index = task.task_index,
-                        error = %e,
-                        "failed to launch sub-workflow on resume",
-                    );
-                }
-            }
-        } else {
-            // Regular READY task: enqueue into horsies_tasks.
-            let task_id =
-                crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                    WorkflowError::Validation(format!("task identity mint failed: {error}"))
-                })?;
-            let max_retries = crate::workflow_engine::node_max_retries(
-                task.task_index,
-                &task.task_name,
-                task.task_options.as_deref(),
-            )?;
-
-            // Merge args_from if present. A key that the static input also sets fails the node
-            // (Python `core/workflows/engine.py:834-839`); the resume counts it as a handled node.
-            let merged_input = match merge_args_from_for_ready(
-                pool,
-                workflow_id,
-                &task.input,
-                &task.args_from,
-                &task.dependencies,
-            )
-            .await?
-            {
-                ArgsFromMerge::Merged(merged_input) => merged_input,
-                ArgsFromMerge::StaticMemberConflict(conflict) => {
-                    engine::fail_node_at_enqueue(
-                        pool,
-                        workflow_id,
-                        task.task_index,
-                        conflict.node_error(workflow_id, task.task_index, MergedNodeKind::Task),
-                        registry,
-                        payload,
-                        retention,
-                    )
-                    .await?;
-                    enqueued += 1;
-                    continue;
-                }
-            };
-
-            // Inject workflow_ctx for ctx-capable nodes, matching the runtime
-            // promotion path. Without this, a READY `workflow_ctx_from` task
-            // (e.g. reset to READY at pause time) would be enqueued on resume
-            // with no upstream context and fail or produce a wrong result.
-            let merged_input = engine::inject_workflow_ctx_into_input(
-                pool,
-                workflow_id,
-                task.task_index,
-                &task.task_name,
-                task.workflow_ctx_from.as_deref(),
-                merged_input,
-            )
-            .await?;
-
-            let good_until = crate::workflow_engine::node_good_until(
-                task.task_index,
-                &task.task_name,
-                task.task_options.as_deref(),
-            )?;
-            let retention_class_key = retention.resolve_queue_class(&task.queue_name);
-            let facts = prepare_workflow_task_facts(
-                &merged_input,
-                task.task_options.as_deref(),
-                retention_class_key.as_deref(),
-            )
-            .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-
-            // INSERT + LINK in a single transaction so a row whose LINK matches
-            // 0 rows (workflow no longer RUNNING / task no longer READY) is
-            // rolled back rather than left as an orphaned, claimable PENDING
-            // row. Mirrors `enqueue_workflow_task` in engine.rs.
-            let mut tx = pool.begin().await?;
-
-            sqlx::query(ENQUEUE_TASK_SQL)
-                .bind(task_id)
-                .bind(&task.task_name)
-                .bind(&task.queue_name)
-                .bind(task.priority)
-                .bind(&merged_input)
-                .bind(&task.task_options)
-                .bind(facts.execution.as_str())
-                .bind(&facts.retention_class_key)
-                .bind(max_retries)
-                .bind(good_until)
-                .bind(workflow_id)
-                .execute(&mut *tx)
-                .await?;
-
-            let link_result = sqlx::query(LINK_ENQUEUED_TASK_SQL)
-                .bind(&task_id)
-                .bind(workflow_id)
-                .bind(task.task_index)
-                .execute(&mut *tx)
-                .await?;
-
-            if link_result.rows_affected() == 0 {
-                tx.rollback().await?;
-                tracing::debug!(
-                    workflow_id = %workflow_id,
-                    task_index = task.task_index,
-                    "resume ready-task link matched 0 rows (workflow not RUNNING or task not READY), rolled back",
-                );
-                continue;
-            }
-
-            tx.commit().await?;
-            enqueued += 1;
-
-            tracing::debug!(
-                workflow_id = %workflow_id,
-                task_index = task.task_index,
-                task_id = %task_id,
-                "ready task enqueued after resume",
-            );
-        }
-    }
-
-    Ok(enqueued)
-}
-
-// ---------------------------------------------------------------------------
-// Sub-workflow launch on resume (Gap 14-6)
-// ---------------------------------------------------------------------------
-
-/// Launch a child workflow for a sub-workflow READY task during resume.
-///
-/// Resolves the spec from the registry, supports dynamic parameterization
-/// via `spec_builder`, starts the child workflow, and links the parent task.
-///
-/// A child past the depth limit, or a child definition that is not registered under the node's key, fails
-/// the node (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `SUBWORKFLOW_LOAD_FAILED`) and applies the workflow's
-/// `on_error`, as Python's resume does through `enqueue_subworkflow_task`.
-async fn enqueue_subworkflow_on_resume(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    task: &ReadyTaskRow,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
-    let spec_name = task
-        .task_name
-        .strip_prefix("__sub_workflow:")
-        .or(task.sub_workflow_name.as_deref())
-        .unwrap_or(&task.task_name);
-
-    let depth_row: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
-        .bind(workflow_id)
-        .fetch_one(pool)
-        .await?;
-    let child_depth =
-        match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
-            Ok(child_depth) => child_depth,
-            Err(error) => {
-                return engine::fail_node_at_enqueue(
-                    pool,
-                    workflow_id,
-                    task.task_index,
-                    error,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await;
-            }
-        };
-    let Some(registered) = task
-        .sub_definition_key
-        .as_deref()
-        .and_then(|key| registry.resolve_child_registration(key))
-    else {
-        return engine::fail_node_at_enqueue(
-            pool,
-            workflow_id,
-            task.task_index,
-            engine::subworkflow_load_failed_error(spec_name, task.sub_definition_key.as_deref()),
-            registry,
-            payload,
-            retention,
-        )
-        .await;
-    };
-
-    // Build the child spec (supports dynamic parameterization via spec_builder).
-    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
-
-    let merged_input = match merge_args_from_for_ready(
-        pool,
-        workflow_id,
-        &task.input,
-        &task.args_from,
-        &task.dependencies,
-    )
-    .await?
-    {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return engine::fail_node_at_enqueue(
-                pool,
-                workflow_id,
-                task.task_index,
-                conflict.node_error(workflow_id, task.task_index, MergedNodeKind::SubWorkflow),
-                registry,
-                payload,
-                retention,
-            )
-            .await;
-        }
-    };
-    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
-
-    let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
-
-    // Start child workflow + link parent in a single transaction.
-    let mut tx = pool.begin().await?;
-
-    let child_id = start_child_workflow_in_tx(
-        &mut tx,
-        &child_spec,
-        workflow_id,
-        task.task_index,
-        child_depth,
-        root_wf_id,
+    let build = ChildBuild {
         registry,
         retention,
-    )
-    .await?;
-
-    let link_result = sqlx::query(LINK_SUBWORKFLOW_SQL)
-        .bind(&child_id)
-        .bind(workflow_id)
-        .bind(task.task_index)
-        .execute(&mut *tx)
-        .await?;
-
-    if link_result.rows_affected() == 0 {
-        tx.rollback().await?;
-        tracing::debug!(
-            workflow_id = %workflow_id,
-            task_index = task.task_index,
-            "sub-workflow link failed on resume, rolled back",
-        );
-        return Ok(());
+    };
+    let committed = steps::resume(broker, workflow_id, build)
+        .await
+        .map_err(|e| to_handle_error(e, workflow_id))?;
+    match committed.disposition {
+        ResumeDisposition::NotFound => {
+            return Err(to_handle_error(
+                WorkflowError::WorkflowNotFound { workflow_id },
+                workflow_id,
+            ))
+        }
+        ResumeDisposition::NotPaused => return Ok(false),
+        ResumeDisposition::Resumed => {}
     }
-
-    tx.commit().await?;
-
-    tracing::debug!(
-        workflow_id = %workflow_id,
-        task_index = task.task_index,
-        child_workflow_id = %child_id,
-        spec_name,
-        "sub-workflow launched on resume",
-    );
-
-    Ok(())
+    advance_parents(
+        broker,
+        CheckoutClass::Batch,
+        committed.parent_advances,
+        build,
+    )
+    .await
+    .map_err(|failure| resume_recovery_failed(workflow_id, &failure.error))?;
+    // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
+    // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree. finalizing_grace_ms = 0:
+    // resume recovers immediately (Python `core/workflows/lifecycle.py:1234-1262`).
+    crate::workflow_engine::recovery::recover_stuck_workflow_tree(
+        broker.pool(),
+        registry,
+        workflow_id,
+        0,
+        payload,
+        retention,
+    )
+    .await
+    .map_err(|error| resume_recovery_failed(workflow_id, &error))?;
+    Ok(true)
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-use crate::workflow_engine::args_merge::merge_args_from_async as merge_args_from_for_ready;
-use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
+/// The error of a resume that committed and whose work after the commit failed: `RESUME_RECOVERY_FAILED`, not
+/// retryable (the workflow is RUNNING).
+fn resume_recovery_failed(workflow_id: Uuid, error: &WorkflowError) -> HandleOperationError {
+    HandleOperationError {
+        code: HandleErrorCode::ResumeRecoveryFailed,
+        message: format!(
+            "Workflow {workflow_id} resumed; the recovery pass for its tree failed: {error}"
+        ),
+        retryable: false,
+        workflow_id,
+    }
+}
 
 #[cfg(test)]
 mod resume_idempotency_tests {
-    //! C8: a crash after the parent PAUSED->RUNNING flip but before the child
-    //! cascade leaves children stranded PAUSED under a RUNNING parent. Retrying
-    //! `resume_workflow` must recover them (idempotent), not return early.
+    //! Resume outcomes through `horsies_workflow_resume`.
     use super::*;
     use crate::broker::PostgresBroker;
     use serial_test::serial;
@@ -1314,11 +553,11 @@ mod resume_idempotency_tests {
     async fn insert_running_task(pool: &PgPool, wf_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'c8_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'c8_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1363,13 +602,13 @@ mod resume_idempotency_tests {
     /// status change and the cascade commit together (#872).
     #[tokio::test]
     #[serial]
-    #[ignore = "waits on #872"]
-    async fn resume_on_a_running_parent_leaves_a_paused_child_paused() {
+    async fn resume_of_a_running_workflow_writes_nothing() {
         let broker =
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
@@ -1406,7 +645,8 @@ mod resume_idempotency_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         let id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &id, "RUNNING", None).await;
@@ -1435,20 +675,22 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_fails_a_ready_node_whose_args_from_names_a_static_member() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker =
+            PostgresBroker::from_pool(crate::broker::enqueue_history_tests::migrated_pool().await);
+        let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4().to_string();
-        insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
+        insert_workflow(&pool, &workflow_id, "PAUSED", None).await;
         for (index, status, dependencies, input, args_from) in [
-            (0, "COMPLETED", "{}", "null", None),
+            (0, "COMPLETED", "{}", "{}", None),
             (1, "READY", "{0}", r#"{"x": 5}"#, Some(r#"{"x": 0}"#)),
         ] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                     dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
                     created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    $1, $2::uuid, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[],
+                    'NONE', $1, $2::uuid, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[],
                     $7::jsonb, FALSE, 'all', $8, FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -1465,16 +707,15 @@ mod resume_idempotency_tests {
             .expect("insert node");
         }
 
-        let handled = reevaluate_and_enqueue(
-            &pool,
+        assert!(resume_workflow(
+            &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
         .await
-        .expect("resume enqueue path");
-        assert_eq!(handled, 1);
+        .expect("resume"));
 
         let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
             "SELECT status, task_id, result FROM horsies_workflow_tasks
@@ -1500,20 +741,24 @@ mod resume_idempotency_tests {
         cleanup(&pool, &[&workflow_id]).await;
     }
 
+    /// The resume mints the task row of a READY node with the typed facts of the node row: its
+    /// retention class, no command fingerprint, no retained input, and the node's enqueue time.
     #[tokio::test]
     #[serial]
     async fn p6_workflow_enqueue_lifecycle_resume_persists_never_eligible_facts() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker =
+            PostgresBroker::from_pool(crate::broker::enqueue_history_tests::migrated_pool().await);
+        let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4().to_string();
-        insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
+        insert_workflow(&pool, &workflow_id, "PAUSED", None).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '1', 'bulk', 17, '{}',
-                FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+                'NONE', $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '{\"value\": 1}', 'bulk', 17, '{}',
+                FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_7d'
             )",
         )
         .bind(Uuid::new_v4())
@@ -1529,21 +774,16 @@ mod resume_idempotency_tests {
         .execute(&pool)
         .await
         .expect("set the start call time");
-        let mut retention = RetentionConfig::default();
-        retention
-            .queue_retention
-            .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
 
-        let enqueued = reevaluate_and_enqueue(
-            &pool,
+        assert!(resume_workflow(
+            &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
-            &retention,
+            &RetentionConfig::default(),
         )
         .await
-        .expect("resume enqueue path");
-        assert_eq!(enqueued, 1);
+        .expect("resume"));
         // The node holds its enqueue time: the node write and the task insert share a transaction.
         let node_holds_enqueue_time: bool = sqlx::query_scalar(
             "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
@@ -1567,6 +807,7 @@ mod resume_idempotency_tests {
         .fetch_one(&pool)
         .await
         .expect("read resume enqueue facts");
+        // The class is the node row's, stored at start.
         assert_eq!(facts.0, "standard_7d");
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
@@ -1643,11 +884,11 @@ mod p7_lifecycle_tests {
         .expect("seed backing task");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_lifecycle_task', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_lifecycle_task', 'null', 'default', 100, '{}', FALSE,
                 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1662,11 +903,11 @@ mod p7_lifecycle_tests {
     async fn seed_running_node(pool: &PgPool, workflow_id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_running_node', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_running_node', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1675,35 +916,6 @@ mod p7_lifecycle_tests {
         .execute(pool)
         .await
         .expect("seed running workflow node");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn resume_rejects_unknown_persisted_workflow_status_without_mutation() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let workflow_id = Uuid::new_v4();
-        seed_workflow(&pool, workflow_id, "CORRUPT", None).await;
-
-        let error = resume_workflow_inner(
-            &pool,
-            workflow_id,
-            &WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect_err("unknown persisted status must fail closed");
-        assert!(matches!(
-            error,
-            WorkflowError::InvalidStatus(ref status) if status == "CORRUPT"
-        ));
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-                .bind(workflow_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(status, "CORRUPT");
     }
 
     #[tokio::test]
@@ -1721,7 +933,7 @@ mod p7_lifecycle_tests {
         assert!(resume_workflow(
             &PostgresBroker::from_pool(pool.clone()),
             root_id,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1756,7 +968,11 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, workflow_id, "RUNNING", None).await;
         seed_claimed_backing(&pool, workflow_id, old_task_id).await;
 
-        assert!(pause_workflow_inner(&pool, workflow_id).await.unwrap());
+        assert!(
+            pause_workflow(&PostgresBroker::from_pool(pool.clone()), workflow_id)
+                .await
+                .unwrap()
+        );
         let paused: (String, String, Option<Uuid>) = sqlx::query_as(
             "SELECT w.status, wt.status, wt.task_id
              FROM horsies_workflows w
@@ -1784,7 +1000,7 @@ mod p7_lifecycle_tests {
         assert!(resume_workflow(
             &PostgresBroker::from_pool(pool.clone()),
             workflow_id,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1868,10 +1084,10 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
                        'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
@@ -1883,11 +1099,11 @@ mod p7_lifecycle_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'pending', 'p7_child_pending', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'pending', 'p7_child_pending', 'null', 'default', 100, '{}', FALSE,
                 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1912,7 +1128,7 @@ mod p7_lifecycle_tests {
         );
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             parent_id,
             0,
             &PayloadPolicy::default(),
@@ -1953,10 +1169,10 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
                        'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
@@ -1968,11 +1184,11 @@ mod p7_lifecycle_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'pending', 'p7_poison_child_pending', 'null', 'default', 100, '{}',
+                'NONE', $1, $2, 0, 'pending', 'p7_poison_child_pending', 'null', 'default', 100, '{}',
                 FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2028,7 +1244,7 @@ mod p7_lifecycle_tests {
 
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             parent_id,
             0,
             &PayloadPolicy::default(),
@@ -2075,10 +1291,10 @@ mod p7_lifecycle_tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
                        'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
@@ -2095,7 +1311,7 @@ mod p7_lifecycle_tests {
             child_id,
             "COMPLETED",
             None,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2167,11 +1383,11 @@ mod cancel_lock_order_tests {
     async fn insert_wf_task(pool: &PgPool, wf_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'n6_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'n6_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2223,12 +1439,13 @@ mod cancel_lock_order_tests {
             .await
             .expect("conn A locks the workflow row");
 
-        // Run the real cancel transaction concurrently.
+        // Run the real cancel statement concurrently, on a broker of its own.
         let cancel_pool = pool.clone();
         let cancel_wf = wf.clone();
         let cancel_task = tokio::spawn(async move {
-            cancel_workflow_inner(
-                &cancel_pool,
+            let cancel_broker = PostgresBroker::from_pool(cancel_pool);
+            cancel_workflow(
+                &cancel_broker,
                 Uuid::parse_str(&cancel_wf).expect("test identity must be UUID"),
             )
             .await
@@ -2311,11 +1528,11 @@ mod cancel_tree_tests {
     async fn seed_pending_node(pool: &PgPool, workflow_id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  max_retries, execution, retention_class_key, status,
                  is_subworkflow, created_at
-             ) VALUES ($1, $2, 1, 'later', 'later_task', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, 1, 'later', 'later_task', '{}', 'default', 100,
                        '{0}', FALSE, 'all', 0, 'ISOLATED', 'forever', 'PENDING',
                        FALSE, NOW())",
         )
@@ -2509,7 +1726,7 @@ mod client_family_tests {
             resume_workflow(
                 &python,
                 workflow_id,
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
             )

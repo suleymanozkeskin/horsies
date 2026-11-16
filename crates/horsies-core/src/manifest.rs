@@ -10,8 +10,10 @@
 //! A refusal never holds an input value: a database URL can carry a password,
 //! so the cause names the error class and the position in the text only.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::{mask_database_url, PostgresConfig};
 use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
 
@@ -105,6 +107,12 @@ pub struct DatabaseManifest {
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
+    /// TCP keepalives of every core connection (Python `tcp_keepalives` and
+    /// its three values).
+    pub tcp_keepalives: TcpKeepalivesConfig,
+    /// TCP user timeout of every core connection (Python
+    /// `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
 /// Where the session pool (schema work, LISTEN/NOTIFY) connects.
@@ -371,6 +379,8 @@ impl DatabaseManifest {
             pool_timeout: self.pool_timeout.get(),
             pool_recycle: self.pool_recycle,
             echo: self.echo,
+            tcp_keepalives: self.tcp_keepalives,
+            tcp_user_timeout: self.tcp_user_timeout,
         }
     }
 }
@@ -391,8 +401,14 @@ pub struct ManifestRefused {
 /// Pure: no I/O. Refuses unknown fields, missing fields, values outside
 /// their bounds and every manifest version but [`PRODUCER_MANIFEST_VERSION`].
 pub fn parse_producer_manifest(text: &str) -> Result<ProducerManifest, ManifestRefused> {
+    parse_manifest(text)
+}
+
+/// Parse a manifest of type `T` from its JSON text, with the field path of
+/// a refusal and never a value. Pure: no I/O.
+pub(crate) fn parse_manifest<T: DeserializeOwned>(text: &str) -> Result<T, ManifestRefused> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    let parsed: Result<ProducerManifest, _> = serde_path_to_error::deserialize(&mut deserializer);
+    let parsed: Result<T, _> = serde_path_to_error::deserialize(&mut deserializer);
     let manifest = parsed.map_err(|error| {
         let field_path = error.path().to_string();
         let inner = error.into_inner();
@@ -440,7 +456,14 @@ mod tests {
                     "max_overflow": 30,
                     "pool_timeout": 30,
                     "pool_recycle": {{"kind": "AFTER_SECONDS", "seconds": 1800}},
-                    "echo": false
+                    "echo": false,
+                    "tcp_keepalives": {{
+                        "kind": "ON",
+                        "idle_seconds": 30,
+                        "interval_seconds": 10,
+                        "probes": 3
+                    }},
+                    "tcp_user_timeout": {{"kind": "AFTER", "milliseconds": 30000}}
                 }},
                 "schema": "MIGRATE_AND_VALIDATE",
                 "send": {{
@@ -464,6 +487,47 @@ mod tests {
         let config = manifest.database.to_postgres_config(false);
         assert_eq!(config.session_database_url, None);
         assert_eq!(config.pool_size, 30);
+        assert_eq!(config.socket_settings(), crate::db::DEFAULT_SOCKET_SETTINGS);
+    }
+
+    /// The manifest text with its database section changed by `change`.
+    fn changed_manifest(change: impl FnOnce(&mut serde_json::Value)) -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60))
+                .expect("the test manifest is JSON");
+        change(&mut value["database"]);
+        value.to_string()
+    }
+
+    #[test]
+    fn keepalives_off_and_the_system_timeout_reach_the_broker_config() {
+        let text = changed_manifest(|database| {
+            database["tcp_keepalives"] = serde_json::json!({"kind": "OFF"});
+            database["tcp_user_timeout"] = serde_json::json!({"kind": "SYSTEM_DEFAULT"});
+        });
+        let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
+        let settings = manifest
+            .database
+            .to_postgres_config(false)
+            .socket_settings();
+        assert_eq!(settings.keepalives, crate::db::Keepalives::Off);
+        assert_eq!(
+            settings.tcp_user_timeout,
+            crate::db::TcpUserTimeout::SystemDefault
+        );
+    }
+
+    #[test]
+    fn a_socket_value_outside_its_bound_is_refused_with_its_path() {
+        let text = changed_manifest(|database| {
+            database["tcp_keepalives"]["probes"] = serde_json::json!(0);
+        });
+        let refused = parse_producer_manifest(&text).expect_err("zero probes are refused");
+        assert!(
+            refused.field_path.starts_with("database.tcp_keepalives"),
+            "{}",
+            refused.field_path
+        );
     }
 
     #[test]

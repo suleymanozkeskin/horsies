@@ -142,12 +142,12 @@ async fn seed_source(
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, is_subworkflow,
                  max_retries, execution, retention_class_key,
                  task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p8.rerun', $3, 'default',
+             ) VALUES ('NONE', $1, $2, 0, 'root', 'p8.rerun', $3, 'default',
                        50, '{}', FALSE, 'all', 'RUNNING', FALSE,
                        3, 'ISOLATED', 'forever', $4, NOW())",
         )

@@ -19,6 +19,8 @@ pub const ARGS_FROM_ENTRY_KEYS: [&str; 3] = ["source_task_name", "source_definit
 
 /// A dependency row of the node that receives `args_from`: every status, not only terminal ones.
 pub struct DepResult {
+    /// The node id of the dependency; `None` for a node stored without one.
+    pub node_id: Option<String>,
     /// The task name of the dependency node (`__sub_workflow:<name>` for a sub-workflow node).
     pub task_name: String,
     /// The definition key of a sub-workflow node; `None` for a task node.
@@ -116,19 +118,15 @@ impl ArgsFromConflict {
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
-        TaskError {
-            data: Some(serde_json::json!({
-                "workflow_id": workflow_id.to_string(),
-                "task_index": task_index,
-            })),
-            ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
-                format!(
-                    "args_from key '{}' conflicts with static kwarg ({node})",
-                    self.key
-                ),
-            )
-        }
+        crate::workflow_engine::engine::node_not_prepared_error(
+            workflow_id,
+            task_index,
+            OperationalErrorCode::WorkflowEnqueueFailed,
+            format!(
+                "args_from key '{}' conflicts with static kwarg ({node})",
+                self.key
+            ),
+        )
     }
 }
 
@@ -181,6 +179,7 @@ pub(crate) fn merge_args_from_sync(
 #[derive(Debug, sqlx::FromRow)]
 struct DepRow {
     task_index: i32,
+    node_id: Option<String>,
     task_name: String,
     sub_definition_key: Option<String>,
     status: String,
@@ -207,7 +206,7 @@ pub(crate) async fn merge_args_from_async(
     };
 
     let rows: Vec<DepRow> = sqlx::query_as(
-        "SELECT task_index, task_name, sub_definition_key, status, result \
+        "SELECT task_index, node_id, task_name, sub_definition_key, status, result \
          FROM horsies_workflow_tasks \
          WHERE workflow_id = $1 AND task_index = ANY($2)",
     )
@@ -222,6 +221,7 @@ pub(crate) async fn merge_args_from_async(
             (
                 r.task_index,
                 DepResult {
+                    node_id: r.node_id,
                     task_name: r.task_name,
                     sub_definition_key: r.sub_definition_key,
                     status: r.status,
@@ -338,22 +338,36 @@ fn args_from_inner(
         })
 }
 
+/// A stored node input from which [`child_builder_input`] cannot make the builder input: the text does not
+/// read under the strict reader, or an `args_from` entry is malformed. The engine wrote that text, so this is
+/// corrupt stored data, not a user error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredInputRefused {
+    /// Why the text is refused.
+    pub(crate) refusal: String,
+}
+
 /// The input that a child workflow's spec builder reads: each `args_from` entry of an object input replaced by
 /// its `inner` result envelope. The builder runs in the engine, so it gets the result itself, not the wrap that
 /// crosses to a worker (Python `core/workflows/engine.py:1164-1173`). An input with no entry is returned
 /// unchanged.
-pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> {
-    let parsed: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
-        WorkflowError::Validation(format!("stored node input refused: {error}"))
-    })?;
+///
+/// Errors: [`StoredInputRefused`] for a text that does not read or a malformed entry. Pure.
+pub(crate) fn child_builder_input(input: &str) -> Result<String, StoredInputRefused> {
+    let parsed: serde_json::Value =
+        crate::core::codec::from_json_str(input).map_err(|error| StoredInputRefused {
+            refusal: error.to_string(),
+        })?;
     let serde_json::Value::Object(mut object) = parsed else {
         return Ok(input.to_owned());
     };
-    let unwrapped = unwrap_args_from_entries(&mut object)
-        .map_err(|refusal| WorkflowError::Validation(refusal.to_string()))?;
+    let unwrapped =
+        unwrap_args_from_entries(&mut object).map_err(|refusal| StoredInputRefused {
+            refusal: refusal.to_string(),
+        })?;
     match unwrapped.is_empty() {
         true => Ok(input.to_owned()),
-        false => Ok(serde_json::to_string(&object)?),
+        false => Ok(serde_json::Value::Object(object).to_string()),
     }
 }
 
@@ -363,22 +377,25 @@ pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> 
 /// - SKIPPED: `UPSTREAM_SKIPPED` with `data.dependency_index`, also when a result is stored.
 /// - COMPLETED or FAILED with a stored result: that result, read under the stored result rules; one that does
 ///   not read gives `RESULT_DESERIALIZATION_ERROR`.
-/// - COMPLETED or FAILED with no stored result: `RESULT_DESERIALIZATION_ERROR` naming the dependency
-///   (decided: no writer stores such a node, so it is stored data that does not parse).
+/// - COMPLETED or FAILED with a NULL or empty stored result: [`missing_result_error`] (decided: no writer stores
+///   such a node, so it is stored data that does not parse).
 /// - A dependency that is not terminal: `UPSTREAM_SKIPPED`. Python leaves the key out for such a dependency
 ///   (workflow ledger row 18).
 fn dependency_result(dep_idx: i32, dep: &DepResult) -> TaskResult<serde_json::Value> {
     match (dep.status.as_str(), dep.result.as_deref()) {
         ("SKIPPED", _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
-        ("COMPLETED" | "FAILED", Some(text)) => {
+        ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => {
             serde_json::from_str::<TaskResult<serde_json::Value>>(text).unwrap_or_else(|e| {
                 tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
                 TaskResult::Err(dep_parse_error(dep_idx, &e))
             })
         }
-        ("COMPLETED" | "FAILED", None) => {
-            TaskResult::Err(missing_result_error(dep_idx, &dep.status))
-        }
+        (status @ ("COMPLETED" | "FAILED"), _) => TaskResult::Err(missing_result_error(
+            dep_idx,
+            dep.node_id.as_deref(),
+            &dep.task_name,
+            status,
+        )),
         (_, _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
     }
 }
@@ -394,15 +411,24 @@ pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
     }
 }
 
-/// The entry of a terminal dependency with no stored result: `RESULT_DESERIALIZATION_ERROR` naming the
-/// dependency.
-pub(crate) fn missing_result_error(dep_idx: i32, status: &str) -> TaskError {
+/// The entry of a COMPLETED or FAILED dependency whose stored result is NULL or empty:
+/// `RESULT_DESERIALIZATION_ERROR` naming the source node (its id, or `-` when it has none, its index and its
+/// task) and its status, with `data` `{"dependency_index": <index>}`. One form for the three readers: the
+/// baseline function `horsies_workflow_source_value` (`0005_workflow_functions.sql`) and Python
+/// `_missing_result_entry` (`core/workflows/engine.py`) build the same entry. Pure.
+pub(crate) fn missing_result_error(
+    dep_idx: i32,
+    node_id: Option<&str>,
+    task_name: &str,
+    status: &str,
+) -> TaskError {
+    let node = node_id.unwrap_or("-");
     TaskError {
         exception: None,
         error_code: OperationalErrorCode::ResultDeserializationError.into(),
-        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
+        data: Some(serde_json::json!({ "dependency_index": dep_idx })),
         message: Some(format!(
-            "Upstream dependency at index {dep_idx} is {status} with no stored result"
+            "Dependency node {node} (index {dep_idx}, task {task_name}) is {status} with no stored result"
         )),
         kind: TaskErrorKind::Plain,
     }
@@ -425,6 +451,7 @@ mod tests {
 
     fn dep(status: &str, result: Option<String>) -> DepResult {
         DepResult {
+            node_id: Some("source".to_owned()),
             task_name: "produce".to_owned(),
             sub_definition_key: None,
             status: status.to_owned(),
@@ -557,6 +584,7 @@ mod tests {
         deps.insert(
             1,
             DepResult {
+                node_id: Some("child".to_owned()),
                 task_name: "__sub_workflow:child".to_owned(),
                 sub_definition_key: Some("app.child".to_owned()),
                 status: "COMPLETED".to_owned(),
@@ -640,21 +668,37 @@ mod tests {
         assert_eq!(error.data, Some(json!({"dependency_index": 3})));
     }
 
+    /// The entry of `horsies_workflow_source_value` (0005) and Python `_missing_result_entry`, for a NULL and an
+    /// empty stored result.
     #[test]
     fn a_terminal_dependency_with_no_result_gives_result_deserialization_error() {
         for status in ["COMPLETED", "FAILED"] {
-            let mut deps = HashMap::new();
-            deps.insert(2, dep(status, None));
-            let result = merged("{}", &Some(json!({"answer": 2})), &deps);
-            let TaskResult::Err(error) = inner_of(&result, "answer") else {
-                panic!("a dependency with no result must give an error entry");
-            };
-            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
-            assert_eq!(
-                error.data,
-                Some(json!({"dependency_index": 2, "status": status}))
-            );
+            for result in [None, Some(String::new())] {
+                let mut deps = HashMap::new();
+                deps.insert(2, dep(status, result.clone()));
+                let merged = merged("{}", &Some(json!({"answer": 2})), &deps);
+                let TaskResult::Err(error) = inner_of(&merged, "answer") else {
+                    panic!("a {status} dependency with result {result:?} must give an error entry");
+                };
+                let expected = format!(
+                    "Dependency node source (index 2, task produce) is {status} with no stored result"
+                );
+                assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+                assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+                assert_eq!(error.data, Some(json!({"dependency_index": 2})));
+            }
         }
+    }
+
+    /// A node stored without a node id is named `-`, as in the baseline function.
+    #[test]
+    fn a_dependency_with_no_node_id_is_named_with_a_dash() {
+        let error = missing_result_error(4, None, "produce", "COMPLETED");
+        assert_eq!(
+            error.message.as_deref(),
+            Some("Dependency node - (index 4, task produce) is COMPLETED with no stored result")
+        );
+        assert_eq!(error.data, Some(json!({"dependency_index": 4})));
     }
 
     /// A child workflow's builder gets the result envelope, not the wrap (Python

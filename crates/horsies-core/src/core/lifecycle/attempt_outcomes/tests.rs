@@ -32,6 +32,22 @@ fn observed() -> ObservedTaskState {
     }
 }
 
+/// No node facts: the columns of a plain task or a row that wrote nothing.
+fn no_facts() -> NodeFactColumns {
+    NodeFactColumns {
+        node_has_dependents: None,
+        downstream_subworkflow: None,
+    }
+}
+
+/// The node facts that phase 1 returns.
+fn facts(node_has_dependents: bool, downstream_subworkflow: Option<&str>) -> NodeFactColumns {
+    NodeFactColumns {
+        node_has_dependents: Some(node_has_dependents),
+        downstream_subworkflow: downstream_subworkflow.map(str::to_owned),
+    }
+}
+
 /// The shared columns of an APPLIED row of a failed attempt.
 fn applied_raw() -> RawOutcomeRow {
     RawOutcomeRow {
@@ -58,7 +74,7 @@ fn applied_extra() -> FailedAttemptColumns {
         is_workflow_task: Some(false),
         queue_name: Some("q1".to_owned()),
         task_name: Some("task_a".to_owned()),
-        node_has_dependents: None,
+        facts: no_facts(),
     }
 }
 
@@ -80,7 +96,7 @@ fn retry_extra() -> FailedAttemptColumns {
         is_workflow_task: None,
         queue_name: Some("q1".to_owned()),
         task_name: None,
-        node_has_dependents: None,
+        facts: no_facts(),
     }
 }
 
@@ -102,7 +118,7 @@ fn miss_extra() -> FailedAttemptColumns {
         is_workflow_task: None,
         queue_name: None,
         task_name: None,
-        node_has_dependents: None,
+        facts: no_facts(),
     }
 }
 
@@ -158,7 +174,7 @@ fn a_plain_failure_is_applied_and_woken() {
 fn a_workflow_failure_owes_phase_two() {
     let extra = FailedAttemptColumns {
         is_workflow_task: Some(true),
-        node_has_dependents: Some(true),
+        facts: facts(true, Some("NONE")),
         ..applied_extra()
     };
     match decode_written(applied_raw(), extra).unwrap() {
@@ -167,9 +183,74 @@ fn a_workflow_failure_owes_phase_two() {
             AfterFailure::PhaseTwoOwed(PhaseTwoOwed {
                 task_name: "task_a".to_owned(),
                 queue_name: "q1".to_owned(),
+                step: PhaseTwoStep::DependentsWithoutSubworkflow,
             })
         ),
         other => panic!("expected FailureApplied, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_node_facts_give_the_phase_two_step() {
+    let cases = [
+        (facts(false, Some("NONE")), PhaseTwoStep::NoDependents),
+        (facts(false, None), PhaseTwoStep::NoDependents),
+        (
+            facts(true, Some("NONE")),
+            PhaseTwoStep::DependentsWithoutSubworkflow,
+        ),
+        (
+            facts(true, Some("REACHABLE")),
+            PhaseTwoStep::SubworkflowReachable,
+        ),
+    ];
+    for (node_facts, step) in cases {
+        let extra = FailedAttemptColumns {
+            is_workflow_task: Some(true),
+            facts: node_facts,
+            ..applied_extra()
+        };
+        match decode_written(applied_raw(), extra).unwrap() {
+            FailedAttemptOutcome::FailureApplied {
+                after: AfterFailure::PhaseTwoOwed(owed),
+                ..
+            } => assert_eq!(owed.step, step),
+            other => panic!("expected a failure that owes phase 2, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn node_facts_that_disagree_or_are_unknown_fail_closed() {
+    for node_facts in [
+        no_facts(),
+        facts(false, Some("REACHABLE")),
+        facts(true, None),
+        facts(true, Some("SOMETIMES")),
+    ] {
+        let extra = FailedAttemptColumns {
+            is_workflow_task: Some(true),
+            facts: node_facts,
+            ..applied_extra()
+        };
+        assert!(decode_failed_attempt(applied_raw(), extra).is_err());
+    }
+}
+
+#[test]
+fn node_facts_on_a_row_without_phase_two_fail_closed() {
+    let cases = [
+        (applied_raw(), applied_extra()),
+        (retry_raw(), retry_extra()),
+        (miss_raw("LOST_CLAIM"), miss_extra()),
+        (released_raw(), released_extra()),
+    ];
+    for (raw, extra) in cases {
+        let extra = FailedAttemptColumns {
+            facts: facts(true, Some("NONE")),
+            ..extra
+        };
+        assert!(decode_failed_attempt(raw, extra).is_err());
     }
 }
 
@@ -413,7 +494,7 @@ fn a_column_against_its_outcome_fails_closed() {
             "plain_failure_with_the_dependents_fact",
             applied_raw(),
             FailedAttemptColumns {
-                node_has_dependents: Some(false),
+                facts: facts(false, Some("NONE")),
                 ..applied_extra()
             },
         ),
@@ -421,7 +502,7 @@ fn a_column_against_its_outcome_fails_closed() {
             "retry_with_the_dependents_fact",
             retry_raw(),
             FailedAttemptColumns {
-                node_has_dependents: Some(false),
+                facts: facts(false, Some("NONE")),
                 ..retry_extra()
             },
         ),
@@ -429,7 +510,7 @@ fn a_column_against_its_outcome_fails_closed() {
             "refusal_with_the_dependents_fact",
             miss_raw("LOST_CLAIM"),
             FailedAttemptColumns {
-                node_has_dependents: Some(true),
+                facts: facts(true, Some("NONE")),
                 ..miss_extra()
             },
         ),
@@ -503,7 +584,7 @@ fn a_stale_plain_failure_owes_nothing() {
 fn a_stale_workflow_failure_owes_phase_two() {
     let extra = FailedAttemptColumns {
         is_workflow_task: Some(true),
-        node_has_dependents: Some(false),
+        facts: facts(false, Some("NONE")),
         ..applied_extra()
     };
     match decode_stale_attempt(stale_applied_raw(), extra).expect("a stale failure") {
@@ -512,6 +593,7 @@ fn a_stale_workflow_failure_owes_phase_two() {
             AfterStaleFailure::PhaseTwoOwed(PhaseTwoOwed {
                 task_name: "task_a".to_owned(),
                 queue_name: "q1".to_owned(),
+                step: PhaseTwoStep::NoDependents,
             })
         ),
         other => panic!("expected FailureApplied, got {other:?}"),
@@ -635,12 +717,12 @@ fn success_raw() -> RawOutcomeRow {
 fn success_columns(
     queue_name: Option<&str>,
     task_name: Option<&str>,
-    node_has_dependents: Option<bool>,
+    facts: NodeFactColumns,
 ) -> WorkflowSuccessColumns {
     WorkflowSuccessColumns {
         queue_name: queue_name.map(str::to_owned),
         task_name: task_name.map(str::to_owned),
-        node_has_dependents,
+        facts,
     }
 }
 
@@ -649,7 +731,7 @@ fn an_applied_success_owes_phase_two() {
     assert_eq!(
         decode_workflow_success(
             success_raw(),
-            success_columns(Some("q1"), Some("task_a"), Some(false))
+            success_columns(Some("q1"), Some("task_a"), facts(true, Some("REACHABLE")))
         )
         .unwrap(),
         WorkflowSuccessOutcome::SuccessApplied {
@@ -659,6 +741,7 @@ fn an_applied_success_owes_phase_two() {
             phase_two: PhaseTwoOwed {
                 task_name: "task_a".to_owned(),
                 queue_name: "q1".to_owned(),
+                step: PhaseTwoStep::SubworkflowReachable,
             },
         }
     );
@@ -675,7 +758,7 @@ fn a_success_replay_is_already_applied() {
         ..miss_raw("ALREADY_APPLIED")
     };
     assert!(matches!(
-        decode_workflow_success(raw, success_columns(None, None, None)).unwrap(),
+        decode_workflow_success(raw, success_columns(None, None, no_facts())).unwrap(),
         WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. })
     ));
 }
@@ -683,7 +766,11 @@ fn a_success_replay_is_already_applied() {
 #[test]
 fn a_success_refusal_is_decoded() {
     assert!(matches!(
-        decode_workflow_success(miss_raw("LOST_CLAIM"), success_columns(None, None, None)).unwrap(),
+        decode_workflow_success(
+            miss_raw("LOST_CLAIM"),
+            success_columns(None, None, no_facts())
+        )
+        .unwrap(),
         WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::LostClaim { .. })
     ));
 }
@@ -694,37 +781,42 @@ fn a_success_against_its_outcome_fails_closed() {
         (
             "applied_of_another_kind",
             applied_raw(),
-            success_columns(Some("q1"), Some("task_a"), Some(false)),
+            success_columns(Some("q1"), Some("task_a"), facts(true, Some("NONE"))),
         ),
         (
             "applied_without_a_queue",
             success_raw(),
-            success_columns(None, Some("task_a"), Some(false)),
+            success_columns(None, Some("task_a"), facts(true, Some("NONE"))),
         ),
         (
             "applied_without_a_task_name",
             success_raw(),
-            success_columns(Some("q1"), None, Some(false)),
+            success_columns(Some("q1"), None, facts(true, Some("NONE"))),
         ),
         (
             "applied_without_the_dependents_fact",
             success_raw(),
-            success_columns(Some("q1"), Some("task_a"), None),
+            success_columns(Some("q1"), Some("task_a"), no_facts()),
+        ),
+        (
+            "applied_with_disagreeing_node_facts",
+            success_raw(),
+            success_columns(Some("q1"), Some("task_a"), facts(false, Some("REACHABLE"))),
         ),
         (
             "refusal_with_a_queue",
             miss_raw("LOST_CLAIM"),
-            success_columns(Some("q1"), None, None),
+            success_columns(Some("q1"), None, no_facts()),
         ),
         (
             "refusal_with_the_dependents_fact",
             miss_raw("LOST_CLAIM"),
-            success_columns(None, None, Some(true)),
+            success_columns(None, None, facts(false, Some("NONE"))),
         ),
         (
             "unknown_outcome",
             miss_raw("APPLIED_ELSEWHERE"),
-            success_columns(None, None, None),
+            success_columns(None, None, no_facts()),
         ),
     ];
     for (name, raw, columns) in cases {

@@ -1,42 +1,83 @@
+//! The worker: claims rows, runs each task in a child process of the
+//! executor, and writes how each attempt ended (Python
+//! `core/worker/worker.py`, `Worker.start`, `run_forever`, `stop`).
+//!
+//! User code never runs in the worker process. The worker starts the
+//! children of its profile before any database work, then claims with the
+//! budgets of the children in service, submits each row to the pool of its
+//! kind, and settles each end with the outcome writer.
+
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, Notify};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
+use crate::broker::claims::{ClaimClasses, ClaimPassRequest, ClaimedRow};
 use crate::broker::health::WORKER_PING_CHANNEL;
 use crate::broker::process_listener::{default_payload_capacity, fixed_channel};
-use crate::broker::{ClaimedTaskRow, PostgresBroker};
+use crate::broker::PostgresBroker;
 use crate::core::config::app::AppConfig;
+use crate::core::config::worker_profile::{SelectedProfile, TaskLimitSetting};
 use crate::core::history::maintenance::coverage::{
     ensure_startup_coverage_in_pool, StartupCoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::db::{
-    ChannelName, PayloadEvent, PayloadFilter, PayloadSubscription, WakeEvent, WakeSubscription,
+    ChannelName, PayloadEvent, PayloadFilter, PayloadSubscription, Reserve, WakeEvent,
+    WakeSubscription,
 };
-
 use crate::worker::backoff::RetryBackoff;
+use crate::worker::children::{
+    attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, ChildLaunch,
+    ChildrenStopped, PoolFacts, WorkerChildren,
+};
+use crate::worker::claim_pass::{
+    claim_for_dispatch, BrokerClaimSteps, ClaimBatchLimit, ClaimPassCounts, RegisteredClasses,
+};
 use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
-use crate::worker::execution;
-use crate::worker::heartbeat::spawn_claimer_heartbeat;
-use crate::worker::recovery::{new_reaper_health, spawn_reaper};
-use crate::worker::runner_beats::{
-    launch_runner_beats, runner_beat_pool, BeatSender, DispatchRunner, FailClosedState,
-    FailClosedStop, LiveDispatches, RegistryClosed, StaleRunningRecovery,
+use crate::worker::executor::placement::WorkerThreads;
+use crate::worker::executor::protocol::TaskInputText;
+use crate::worker::executor::slots::{
+    describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
+    BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask, OrphanSelfHeal,
+    OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts, TaskKind,
 };
+use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
+use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
+use crate::worker::finalize_batch::stop::drain_then_close;
+use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
+use crate::worker::heartbeat::spawn_claimer_heartbeat;
+use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
+use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
+use crate::worker::retry::read_stored_options;
+use crate::worker::runner_beats::{
+    launch_runner_beats, runner_beat_pool, BeatSender, FailClosedState, FailClosedStop,
+    LiveDispatches, RunnerBeatWatch, StaleRunningRecovery,
+};
+use crate::worker::worker_state::ClaimColumns;
+
+/// How long the stop waits for the outcome writes in flight after the pools
+/// stopped (Python `_FINALIZER_DRAIN_TIMEOUT_S`). The children have ended,
+/// so this bounds database work, not task run time.
+pub const OUTCOME_WRITE_DRAIN: Duration = Duration::from_secs(30);
+
+/// How long the stop waits for the spawner thread to reap every child.
+pub const SPAWNER_STOP_WAIT: Duration = CHILD_KILL_WAIT;
+
+/// The error text of a failed start hook (Python `_HOOK_FAILURE_MESSAGE`).
+pub const CHILD_HOOK_FAILURE_MESSAGE: &str = "on_child_process_start hook failed in a worker \
+     child (see the child log line above for the hook name); fix the hook, the worker will not \
+     restart-loop on it";
 
 /// Decode a liveness ping and reply when it is a broadcast or addressed to
 /// this worker.
@@ -209,19 +250,6 @@ async fn handle_worker_ping(
     Ok(())
 }
 
-/// Release local capacity before waking the claim loop.
-struct ExecutionPermit {
-    permit: Option<OwnedSemaphorePermit>,
-    released: Arc<Notify>,
-}
-
-impl Drop for ExecutionPermit {
-    fn drop(&mut self) {
-        drop(self.permit.take());
-        self.released.notify_one();
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum ClaimWake {
     Cancelled,
@@ -308,6 +336,195 @@ async fn wait_for_claim_wake(
     }
 }
 
+/// Why the children stopped the worker while it ran (Python
+/// `_slot_failure_loop`, `_stop_for_baseline`).
+#[derive(Debug, Clone, PartialEq)]
+enum ChildrenStop {
+    /// A start hook failed in a replacement child: a graceful stop, with no
+    /// restart loop (Python `_stop_for_child_hook_failure`).
+    HookFailed,
+    /// No replacement child can start: the worker exits non-zero.
+    PoolFailed(PoolFailure),
+    /// The first child of a kind that was down at the first start has a
+    /// baseline at or above the memory limit of its kind.
+    BaselineOverLimit(BaselineOverLimit),
+}
+
+/// The first reason the children gave to stop the worker.
+#[derive(Clone, Default)]
+struct ChildrenStopCell(Arc<Mutex<Option<ChildrenStop>>>);
+
+impl ChildrenStopCell {
+    /// Keep `stop` when no reason is kept yet, then stop the worker.
+    fn stop_worker(&self, stop: ChildrenStop, cancel: &CancellationToken) {
+        {
+            let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if kept.is_none() {
+                *kept = Some(stop);
+            }
+        }
+        cancel.cancel();
+    }
+
+    fn take(&self) -> Option<ChildrenStop> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+}
+
+/// End the worker when no replacement child can start (Python
+/// `_slot_failure_loop`). A failed start hook stops it gracefully; any other
+/// failure makes the worker exit non-zero. Returns at the stop.
+async fn watch_pool_failure(
+    board: Arc<PoolBoard>,
+    stops: ChildrenStopCell,
+    cancel: CancellationToken,
+) {
+    tokio::select! {
+        () = cancel.cancelled() => {}
+        failure = board.wait_failed() => {
+            let stop = match failure {
+                PoolFailure::ChildHookFailed => {
+                    tracing::error!("Stopping worker: {CHILD_HOOK_FAILURE_MESSAGE}");
+                    ChildrenStop::HookFailed
+                }
+                failure @ (PoolFailure::BootAttemptsExhausted { .. }
+                | PoolFailure::SlotDefectsRepeated { .. }) => {
+                    tracing::error!(
+                        "Background task 'slot-failure-watch' hit a process-fatal error; \
+                         stopping worker: worker child start failed: {failure}"
+                    );
+                    ChildrenStop::PoolFailed(failure)
+                }
+            };
+            stops.stop_worker(stop, &cancel);
+        }
+    }
+}
+
+/// Run the memory baseline guard on the first child of each kind that was
+/// down at the first start (Python `_new_kind_baseline_loop`). A breach stops
+/// the worker, which exits non-zero after the drain. Returns at the stop.
+async fn watch_new_kind_baselines(
+    board: Arc<PoolBoard>,
+    limits: crate::worker::executor::slots::BaselineLimits,
+    stops: ChildrenStopCell,
+    cancel: CancellationToken,
+) {
+    tokio::select! {
+        () = cancel.cancelled() => {}
+        over = guard_new_kind_baselines(&board, &limits) => {
+            stops.stop_worker(ChildrenStop::BaselineOverLimit(over), &cancel);
+        }
+    }
+}
+
+/// The children of a started worker, the spawner thread that starts them,
+/// and the registry of the tasks that children hold.
+struct RunningChildren {
+    children: WorkerChildren,
+    spawner: Spawner,
+    live: LiveDispatches,
+}
+
+impl RunningChildren {
+    /// Stop the pools with `drain` (Python `SlotPool.stop`), then the
+    /// spawner thread. Logs a drain that had to kill children.
+    async fn stop_pools(children: WorkerChildren, drain: Duration) {
+        let ChildrenStopped { report } = children.stop(drain).await;
+        match report {
+            PoolStopReport::Drained => {}
+            PoolStopReport::KilledAtDrainDeadline | PoolStopReport::AbortedAfterDrain => {
+                tracing::error!(
+                    "Drain exceeded {:.0}s (hung task?); the children that still ran tasks were \
+                     killed",
+                    drain.as_secs_f64()
+                );
+            }
+        }
+        tracing::info!("Worker child processes stopped");
+    }
+
+    /// Stop the spawner thread after the pools stopped. Never raises.
+    async fn stop_spawner(spawner: Spawner) {
+        match tokio::task::spawn_blocking(move || spawner.stop(SPAWNER_STOP_WAIT)).await {
+            Ok(SpawnerStopReport::AllReaped) => {}
+            Ok(SpawnerStopReport::BoundPassed) => tracing::warn!(
+                "the spawner thread did not reap every child within {:.0}s",
+                SPAWNER_STOP_WAIT.as_secs_f64()
+            ),
+            Err(error) => tracing::error!(error = %error, "stopping the spawner thread failed"),
+        }
+    }
+
+    /// Stop a start that did not reach the claim loop: the pools at once,
+    /// then the spawner (Python `_cleanup_after_failed_start`,
+    /// `pool.stop(0)`).
+    async fn stop_after_failed_start(self) {
+        Self::stop_pools(self.children, Duration::ZERO).await;
+        Self::stop_spawner(self.spawner).await;
+    }
+}
+
+/// The service loops of a serving worker, as the stop needs them.
+struct Services {
+    /// The deaths of the service loops that no stop requested.
+    fatal_rx: mpsc::UnboundedReceiver<crate::worker::supervision::ServiceExit>,
+    /// Stops the runner heartbeat writer, after the outcome writes.
+    beats_cancel: CancellationToken,
+    runner_beat_watch: RunnerBeatWatch,
+    fail_closed_stop: FailClosedStop,
+}
+
+/// The service loops after the runner heartbeats stopped.
+struct ServicesStopped {
+    fatal_rx: mpsc::UnboundedReceiver<crate::worker::supervision::ServiceExit>,
+    fail_closed_stop: FailClosedStop,
+}
+
+impl Services {
+    /// Stop the runner heartbeat writer and its watchdog thread (Python
+    /// `_stop_runner_heartbeat`, the last step of the stop). Never raises.
+    async fn stop_runner_beats(self) -> ServicesStopped {
+        self.beats_cancel.cancel();
+        let watch = self.runner_beat_watch;
+        if tokio::task::spawn_blocking(move || watch.stop())
+            .await
+            .is_err()
+        {
+            tracing::error!("stopping the runner heartbeat watchdog failed");
+        }
+        ServicesStopped {
+            fatal_rx: self.fatal_rx,
+            fail_closed_stop: self.fail_closed_stop,
+        }
+    }
+}
+
+/// The claimed task and its input, from a claimed row. The stored options
+/// are read once, here.
+fn claimed_of(row: ClaimedRow) -> Claimed {
+    let kind = match row.is_workflow_task {
+        true => TaskKind::WorkflowTask,
+        false => TaskKind::Plain,
+    };
+    Claimed {
+        task: ClaimedTask {
+            task_id: row.id,
+            task_name: row.task_name,
+            queue_name: row.queue_name,
+            claimed_at: row.claimed_at,
+            execution: row.execution,
+            kind,
+            retry: RetryFacts {
+                retry_count: row.retry_count,
+                max_retries: row.max_retries,
+            },
+            options: read_stored_options(row.task_options.as_deref()),
+        },
+        input: TaskInputText::new(row.input),
+    }
+}
+
 /// What the ping responder needs to answer a ping.
 #[derive(Clone)]
 struct PingResponder {
@@ -380,58 +597,71 @@ fn queue_channel(queue: &str) -> Result<ChannelName, WorkerError> {
 
 /// Task queue worker.
 ///
-/// Claims tasks from PostgreSQL, executes them according to their
-/// registered function (async or blocking), and writes results back.
+/// Claims tasks from PostgreSQL with the budgets of its children, runs each
+/// in a child process of the executor, and writes how each attempt ended.
 pub struct Worker {
     broker: Arc<PostgresBroker>,
-    registry: Arc<TaskRegistry>,
     workflow_registry: Arc<WorkflowSpecRegistry>,
     app_config: AppConfig,
     worker_config: WorkerConfig,
+    /// The profile the worker runs: its children, claim limits, drain
+    /// timeout and CPU placement.
+    profile: SelectedProfile,
+    /// What every child runs.
+    launch: ChildLaunch,
+    /// The class of each task the host registered, for the row class check.
+    registered: RegisteredClasses,
     worker_id: String,
-    semaphore: Arc<Semaphore>,
+    /// Woken when an outcome write ends: a slot or seat is free again.
     capacity_released: Arc<Notify>,
-    tracker: TaskTracker,
     cancel: CancellationToken,
     hostname: String,
-    /// Task ids currently handed to the tracker (dispatched, not yet finished).
-    /// The buffered-dispatch probe skips these so a task still in its
-    /// CLAIMED→RUNNING window is not re-fetched and re-dispatched next pass (P7).
-    in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
-    /// Dispatches whose rows the runner-beat writer beats, with their claim
-    /// generations.
-    live_dispatches: LiveDispatches,
 }
 
 impl Worker {
-    /// Create a new worker.
+    /// Create a worker that runs `profile`, the profile that the worker
+    /// manifest selects ([`crate::worker_manifest::WorkerManifest::selected_profile`],
+    /// [`crate::core::config::worker_profile::select_worker_profile`]).
+    /// `launch` names what every child runs; `registered` the class of each
+    /// task of the app.
+    ///
+    /// Errors: [`WorkerError::Config`] for a worker config that does not
+    /// validate, or a profile that starts no child (AppConfig validation
+    /// refuses such a profile; Python `execution_settings`).
     pub fn new(
         broker: Arc<PostgresBroker>,
-        registry: Arc<TaskRegistry>,
         workflow_registry: Arc<WorkflowSpecRegistry>,
         app_config: AppConfig,
         worker_config: WorkerConfig,
+        profile: SelectedProfile,
+        launch: ChildLaunch,
+        registered: RegisteredClasses,
     ) -> Result<Self, WorkerError> {
         worker_config.validate().map_err(WorkerError::Config)?;
+        if profile.profile.child_count() == 0 {
+            return Err(WorkerError::Config(format!(
+                "{}: the profile starts no children; a worker needs at least one child to run \
+                 a task",
+                crate::core::config::worker_profile::profile_path(&profile.name)
+            )));
+        }
 
         let hostname = gethostname::gethostname()
             .into_string()
             .unwrap_or_else(|_| "unknown".to_owned());
 
         Ok(Self {
-            semaphore: Arc::new(Semaphore::new(worker_config.concurrency as usize)),
             capacity_released: Arc::new(Notify::new()),
             broker,
-            registry,
             workflow_registry,
             app_config,
             worker_config,
+            profile,
+            launch,
+            registered,
             worker_id: Uuid::new_v4().to_string(),
-            tracker: TaskTracker::new(),
             cancel: CancellationToken::new(),
             hostname,
-            in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            live_dispatches: LiveDispatches::default(),
         })
     }
 
@@ -464,6 +694,81 @@ impl Worker {
         }
 
         self.run().await
+    }
+
+    /// The facts that every pool of this worker shares.
+    fn pool_facts(&self, placement: crate::worker::executor::placement::CpuPlacement) -> PoolFacts {
+        PoolFacts {
+            worker_id: self.worker_id.clone(),
+            pending_limit: pending_task_limit(
+                &self.profile.profile,
+                self.app_config.prefetch_buffer,
+            ),
+            exit_not_seen: exit_not_seen(&self.app_config.recovery),
+            placement,
+        }
+    }
+
+    /// Start the children before any database work, so a bad app or hook
+    /// fails at once (Python `start`, `_start_slots`): the CPU plan, the
+    /// spawner thread, one pool per kind, then the wait for the first
+    /// generation, the placement of the worker's threads and the memory
+    /// baseline guard. A stop during the start ends it with `Ok(None)`.
+    ///
+    /// Errors: [`WorkerError::PlacementRefused`], [`WorkerError::SpawnerStart`],
+    /// [`WorkerError::ChildHookFailed`] (never retried),
+    /// [`WorkerError::ChildrenStartFailed`]. The pools and the spawner are
+    /// stopped before an error returns.
+    async fn start_pools(&self) -> Result<Option<RunningChildren>, WorkerError> {
+        let profile = &self.profile.profile;
+        let placement =
+            plan_placement(profile.parent_cpu).map_err(WorkerError::PlacementRefused)?;
+        // The spawner thread starts from a blocking thread, not from a task
+        // of the core runtime (`Spawner::start`).
+        let spawner = match tokio::task::spawn_blocking(Spawner::start).await {
+            Ok(started) => started.map_err(WorkerError::SpawnerStart)?,
+            Err(joined) => std::panic::resume_unwind(joined.into_panic()),
+        };
+        let live = LiveDispatches::default();
+        let children = WorkerChildren::start(
+            profile,
+            &self.launch,
+            &self.pool_facts(placement.clone()),
+            &spawner.handle(),
+            &live,
+        );
+        let running = RunningChildren {
+            children,
+            spawner,
+            live,
+        };
+        let limits = baseline_limits(profile);
+        let threads = WorkerThreads::of_this_process();
+        let board = Arc::clone(running.children.board());
+        let start = start_children(&board, &placement, &threads, &limits);
+        tokio::pin!(start);
+        let started = tokio::select! {
+            started = &mut start => started,
+            () = self.cancel.cancelled() => {
+                board.begin_stop();
+                start.await
+            }
+        };
+        match started {
+            Ok(ChildrenStart::Started { .. }) => Ok(Some(running)),
+            Ok(ChildrenStart::Stopped) => {
+                running.stop_after_failed_start().await;
+                Ok(None)
+            }
+            Err(ChildrenStartFailed::Pool(PoolFailure::ChildHookFailed)) => {
+                running.stop_after_failed_start().await;
+                Err(WorkerError::ChildHookFailed)
+            }
+            Err(failed) => {
+                running.stop_after_failed_start().await;
+                Err(WorkerError::ChildrenStartFailed(failed))
+            }
+        }
     }
 
     /// Authorize the schema, check the client family, and ensure the
@@ -537,48 +842,364 @@ impl Worker {
         }
     }
 
-    /// Run the worker until cancelled or a fatal error occurs.
+    /// The reaper of this worker: the recovery steps and the cluster gate on
+    /// the runtime pool, partition maintenance on the session pool.
+    fn spawn_reaper_loop(&self, health: ReaperHealth) -> tokio::task::JoinHandle<()> {
+        // The reaper's gate and pass run on the worker reserve, which the
+        // runtime pool's users cannot exhaust.
+        spawn_reaper(
+            Arc::clone(&self.broker),
+            self.broker.reserve_pool().clone(),
+            self.broker.reserve_maintenance_pool().clone(),
+            Arc::clone(&self.workflow_registry),
+            self.app_config.recovery.clone(),
+            self.app_config.payload.clone(),
+            self.app_config.retention.clone(),
+            health,
+            self.cancel.clone(),
+        )
+    }
+
+    /// Run the worker until it is stopped or a fatal error occurs (Python
+    /// `run_forever`).
+    ///
+    /// Order: the memory fit of the profile (a log line), the children and
+    /// their first generation, the database start (retried with backoff), the
+    /// connection fit (a log line), then the listener, the service loops and
+    /// the claim loop. The stop runs in Python's order: the claim loop and
+    /// the service loops, the pools with the profile's drain timeout, the
+    /// outcome writes and the finalize batcher, the runner heartbeats last,
+    /// then the spawner thread.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Machine facts of the profile: a warning, never a refusal (Python
+        // `_log_memory_fit`, before the schema step).
+        let _logged = log_memory_fit_at_boot(&self.profile);
+        let Some(running) = self.start_pools().await? else {
+            return Ok(());
+        };
         // Fleet authorization and partition coverage precede every runtime
         // surface: no LISTEN, heartbeat, or claim may race an incomplete
         // install or a missing current-hour heartbeat leaf. A transient
         // failure or a slow attempt is retried with backoff (Python
         // `_start_with_resilience_config`).
-        match self.start_database_with_resilience().await? {
-            StartOutcome::Started => {}
-            StartOutcome::StopRequested => return Ok(()),
+        match self.start_database_with_resilience().await {
+            Ok(StartOutcome::Started) => {}
+            Ok(StartOutcome::StopRequested) => {
+                running.stop_after_failed_start().await;
+                return Ok(());
+            }
+            Err(error) => {
+                running.stop_after_failed_start().await;
+                return Err(error);
+            }
         }
+        // Server facts of the profile, before any claim: a warning, never a
+        // refusal (Python `_log_connection_fit`).
+        let _logged =
+            log_connection_fit_at_boot(&self.profile, &self.app_config.broker, &self.broker).await;
+        let batcher = match self.finalize_batcher() {
+            Ok(batcher) => batcher,
+            Err(error) => {
+                running.stop_after_failed_start().await;
+                return Err(error);
+            }
+        };
+        self.serve(running, batcher).await
+    }
+
+    /// The finalize batcher of the plain successes, on the worker pool of
+    /// the broker: as many flushers as its batch connections leave after the
+    /// claim pass, and a queue bound of the pending limit.
+    ///
+    /// Errors: [`WorkerError::Broker`] when the broker's core pools cannot
+    /// be built; [`WorkerError::Config`] when its main pool keeps no reserve
+    /// (a broker not built with `connect_worker_with`), or leaves no
+    /// connection for a flusher.
+    fn finalize_batcher(&self) -> Result<FinalizeBatcher<WorkerPoolSuccessWrite>, WorkerError> {
+        // The core handle gives its main pool with a write token only; the
+        // token ends with this function and no statement runs under it.
+        let (open, _write) = self.broker.core_pools_for_write()?;
+        let sizing = open.main().sizing();
+        match sizing.reserve() {
+            Reserve::KeepFree(_) => {}
+            Reserve::NoReserve => {
+                return Err(WorkerError::Config(
+                    "the broker of a worker needs the worker pool, which keeps connections free \
+                     for the per-task writes; connect it with PostgresBroker::connect_worker_with"
+                        .to_owned(),
+                ))
+            }
+        }
+        let flushers = FlusherBound::of_worker_pool(&sizing)
+            .map_err(|refused| WorkerError::Config(refused.to_string()))?;
+        Ok(FinalizeBatcher::new(
+            WorkerPoolSuccessWrite::new(Arc::clone(&self.broker), self.worker_id.clone()),
+            pending_task_limit(&self.profile.profile, self.app_config.prefetch_buffer),
+            flushers,
+        ))
+    }
+
+    /// Log the settings of the claim (Python `start`: the concurrency line
+    /// and `_log_claim_plan`).
+    fn log_claim_settings(&self, children: &WorkerChildren) {
+        let profile = &self.profile.profile;
+        let claim = ClaimColumns::of_profile(profile);
+        tracing::info!(
+            "Concurrency config: processes={}, shared_async_children={}, \
+             shared_thread_children={}, seats={}, cluster_wide_cap={}, max_claim_per_worker={}, \
+             max_claim_batch={}",
+            profile.isolated.child_count(),
+            profile.shared_async.child_count(),
+            profile.shared_thread.child_count(),
+            profile.seat_count(),
+            self.app_config
+                .cluster_wide_cap
+                .map_or_else(|| "unlimited".to_owned(), |cap| cap.to_string()),
+            claim.max_claim_per_worker,
+            claim.max_claim_batch,
+        );
+        let plan = children.service().plan();
+        tracing::info!("Claim plan: {}", describe_claim_plan(plan));
+        if let Some(line) = unserved_classes_line(plan) {
+            tracing::info!("{line}");
+        }
+    }
+
+    /// The claim limit of a task count of the profile; no limit is 0, the
+    /// value the claim function reads as none.
+    fn claim_limit(setting: TaskLimitSetting) -> u32 {
+        match setting {
+            TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
+            TaskLimitSetting::NoTaskLimit {} => 0,
+        }
+    }
+
+    /// Whether `max_claim_batch` caps a pass.
+    fn claim_batch_limit(&self) -> ClaimBatchLimit {
+        match self.profile.profile.claim.per_queue_per_pass {
+            TaskLimitSetting::TaskLimit { .. } => ClaimBatchLimit::CapsThePass,
+            TaskLimitSetting::NoTaskLimit {} => ClaimBatchLimit::NoCap,
+        }
+    }
+
+    /// The arguments of one claim pass with `classes`, the budgets and
+    /// routes of the slots now (Python `_claim_params`).
+    fn claim_request(&self, classes: ClaimClasses) -> ClaimPassRequest {
+        let ordered = self.ordered_queues();
+        let queue_priority: std::collections::HashMap<String, i32> = ordered
+            .iter()
+            .map(|queue| {
+                let priority = self
+                    .worker_config
+                    .queue_priorities
+                    .get(queue)
+                    .copied()
+                    .unwrap_or(100);
+                (queue.clone(), priority)
+            })
+            .collect();
+        let queue_max_concurrency: std::collections::HashMap<String, u32> = ordered
+            .iter()
+            .filter_map(|queue| {
+                self.worker_config
+                    .queue_max_concurrency
+                    .get(queue)
+                    .map(|&cap| (queue.clone(), cap))
+            })
+            .collect();
+        let claim = &self.profile.profile.claim;
+        ClaimPassRequest {
+            worker_id: self.worker_id.clone(),
+            lock_keys: self.claim_lock_keys(&ordered),
+            queues: ordered,
+            queue_priority,
+            queue_max_concurrency,
+            hard_cap_mode: self.app_config.prefetch_buffer == 0,
+            classes,
+            prefetch_buffer: self.app_config.prefetch_buffer,
+            max_claim_per_worker: Self::claim_limit(claim.claimed_per_worker),
+            max_claim_batch: Self::claim_limit(claim.per_queue_per_pass),
+            cluster_wide_cap: self.app_config.cluster_wide_cap,
+            claim_lease_ms: claim_lease(&self.app_config),
+        }
+    }
+
+    /// One claim pass (Python `_claim_and_dispatch_all`): the claim with the
+    /// budgets and routes of the slots now, the workflow filter, the row
+    /// class check, then each row to the pool of its kind.
+    ///
+    /// Errors: the error of the claim, the filter or the class return. The
+    /// rows the claim committed before a later step failed go back when
+    /// their lease expires.
+    async fn claim_and_dispatch(
+        &self,
+        steps: &BrokerClaimSteps,
+        children: &WorkerChildren,
+        writer: &Arc<OutcomeWriter>,
+        writes: &mut JoinSet<()>,
+    ) -> Result<ClaimPassCounts, WorkerError> {
+        let request = self.claim_request(children.service().claim_classes());
+        let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
+        for row in claimed.rows {
+            self.dispatch(children, writer, writes, claimed_of(row));
+        }
+        Ok(claimed.counts)
+    }
+
+    /// Submit one claimed task to the pool of its kind, and spawn the write
+    /// of its end (Python `_dispatch_one`, `_finalize_after`). When the write
+    /// ends, the claim loop is woken: a slot or seat is free again (Python
+    /// `_capacity_released`). Never fails for a task: a task that reaches no
+    /// child ends `NotDispatched`, and its claim goes back to the queue.
+    fn dispatch(
+        &self,
+        children: &WorkerChildren,
+        writer: &Arc<OutcomeWriter>,
+        writes: &mut JoinSet<()>,
+        claimed: Claimed,
+    ) {
+        let task = claimed.task.clone();
+        let submitted = children.submit(claimed);
+        let writer = Arc::clone(writer);
+        let released = Arc::clone(&self.capacity_released);
+        writes.spawn(async move {
+            let end = attempt_end(submitted).await;
+            let settled = writer.settle(&task, end).await;
+            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
+            released.notify_one();
+        });
+    }
+
+    /// The claim loop (Python `run_forever`): one pass per wake; a pass that
+    /// may have left work no wake announces runs again at once. A retryable
+    /// error backs off and claims again; any other error, or a retryable one
+    /// after the backoff, is returned and stops the worker.
+    async fn claim_loop(
+        &self,
+        children: &WorkerChildren,
+        writer: &Arc<OutcomeWriter>,
+        writes: &mut JoinSet<()>,
+        claim_wakes: &ClaimWakes,
+    ) -> Option<WorkerError> {
+        let steps = BrokerClaimSteps::new(Arc::clone(&self.broker), self.worker_id.clone());
+        let mut claim_backoff = RetryBackoff::from_config(&self.app_config.resilience);
+        let mut short_passes: u32 = 0;
+        let poll_interval =
+            Duration::from_millis(self.app_config.resilience.notify_poll_interval_ms);
+        loop {
+            if self.cancel.is_cancelled() {
+                return None;
+            }
+            reap_finished(writes);
+            match self
+                .claim_and_dispatch(&steps, children, writer, writes)
+                .await
+            {
+                Ok(counts) => {
+                    claim_backoff.reset();
+                    let repass =
+                        counts.left_unannounced_work(self.claim_batch_limit(), short_passes);
+                    short_passes = counts.short_passes_after(short_passes);
+                    if repass {
+                        continue;
+                    }
+                }
+                Err(error) if error.is_retryable() && claim_backoff.can_retry() => {
+                    let delay = claim_backoff.next_delay_seconds();
+                    tracing::warn!(
+                        error = %error,
+                        attempt = claim_backoff.attempts(),
+                        delay_s = format!("{:.2}", delay),
+                        "retryable claim error, backing off",
+                    );
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => return None,
+                        _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        attempts = claim_backoff.attempts(),
+                        retryable = error.is_retryable(),
+                        "claim error with no retry left; shutting down",
+                    );
+                    return Some(error);
+                }
+            }
+            match wait_for_claim_wake(
+                &self.cancel,
+                &self.capacity_released,
+                claim_wakes,
+                poll_interval,
+            )
+            .await
+            {
+                ClaimWake::Cancelled => return None,
+                ClaimWake::ListenerClosed => {
+                    tracing::info!("the listener stopped, shutting down");
+                    return None;
+                }
+                ClaimWake::DatabaseNotification => {
+                    claim_wakes
+                        .drain_pending(self.worker_config.coalesce_notifies)
+                        .await;
+                }
+                ClaimWake::ListenerGap | ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
+            }
+        }
+    }
+
+    /// Serve: the listener, the service loops and the claim loop on started
+    /// children; then the stop.
+    async fn serve(
+        &self,
+        running: RunningChildren,
+        batcher: FinalizeBatcher<WorkerPoolSuccessWrite>,
+    ) -> Result<(), WorkerError> {
+        let RunningChildren {
+            children,
+            spawner,
+            live,
+        } = running;
 
         // Print the startup banner before any log lines.
         crate::worker::cli::banner::print_banner(&crate::worker::cli::banner::BannerInfo {
             worker_id: &self.worker_id,
             worker_config: &self.worker_config,
             app_config: &self.app_config,
-            task_registry: &self.registry,
+            profile: &self.profile.profile,
+            tasks: &self.registered,
             role: "worker",
         });
-
         tracing::info!(
             worker_id = %self.worker_id,
             queues = ?self.worker_config.queues,
-            concurrency = self.worker_config.concurrency,
+            profile = %self.profile.name,
             cluster_wide_cap = ?self.app_config.cluster_wide_cap,
             prefetch_buffer = self.app_config.prefetch_buffer,
             claim_lease_ms = ?self.app_config.claim_lease_ms,
             "worker starting",
         );
-        if self.app_config.prefetch_buffer > 0 && self.app_config.claim_lease_ms.is_none() {
-            tracing::warn!(
-                prefetch_buffer = self.app_config.prefetch_buffer,
-                claimed_stale_threshold_ms = self.app_config.recovery.claimed_stale_threshold_ms,
-                "prefetch enabled without claim_lease_ms; CLAIMED tasks may be requeued after claimed_stale_threshold_ms even while worker is alive",
-            );
-        }
+        self.log_claim_settings(&children);
 
         // Check the session URL, then subscribe the claim wakes and the pings
         // on the broker's listener, with resilience.
         let WorkerSubscriptions { claim_wakes, pings } =
-            self.connect_listener_with_resilience().await?;
+            match self.connect_listener_with_resilience().await {
+                Ok(subscriptions) => subscriptions,
+                Err(error) => {
+                    RunningChildren {
+                        children,
+                        spawner,
+                        live,
+                    }
+                    .stop_after_failed_start()
+                    .await;
+                    return Err(error);
+                }
+            };
 
         // Liveness pings are answered off the claim path.
         let ping_responder = spawn_ping_responder(
@@ -592,7 +1213,114 @@ impl Worker {
             self.cancel.clone(),
         );
 
-        // Start claimer heartbeat.
+        let writer = Arc::new(OutcomeWriter::new(
+            Arc::clone(&self.broker),
+            Arc::clone(&self.workflow_registry),
+            self.worker_id.clone(),
+            self.app_config.payload.clone(),
+            self.app_config.retention.clone(),
+            batcher.clone(),
+            OrphanSelfHeal::of_recovery_flag(
+                self.app_config
+                    .recovery
+                    .auto_terminate_orphaned_workflow_tasks,
+            ),
+        ));
+        let stops = ChildrenStopCell::default();
+        let services = match self.spawn_services(&children, &live, &stops, ping_responder) {
+            Ok(services) => services,
+            Err(error) => {
+                self.cancel.cancel();
+                RunningChildren {
+                    children,
+                    spawner,
+                    live,
+                }
+                .stop_after_failed_start()
+                .await;
+                return Err(error);
+            }
+        };
+        tracing::info!(worker_id = %self.worker_id, "worker ready");
+
+        let mut writes: JoinSet<()> = JoinSet::new();
+        let fatal_claim_error = self
+            .claim_loop(&children, &writer, &mut writes, &claim_wakes)
+            .await;
+
+        // Stop the claim loop and every service loop on every exit path,
+        // including a fatal claim error that broke the loop without a prior
+        // cancel (C11). Idempotent when a signal already fired the token.
+        self.cancel.cancel();
+        let drain = self.profile.profile.drain_timeout.get();
+        RunningChildren::stop_pools(children, drain).await;
+        // After the pools: every end is known, so the writes have database
+        // work left only. A write that the drain cancels leaves its row in
+        // the batcher, and the close still writes it.
+        let _stopped = drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher).await;
+        // Last: the runner heartbeats covered the drain above, and their
+        // watchdog keeps the exit bound of a fail-closed stop until here.
+        let services = services.stop_runner_beats().await;
+        RunningChildren::stop_spawner(spawner).await;
+        tracing::info!("Worker stopped");
+        Self::stop_result(services, stops, fatal_claim_error)
+    }
+
+    /// The result of a stopped worker, the first cause that holds: the
+    /// runner heartbeats failed closed; the children stopped the worker; a
+    /// fatal claim error; a service loop died. A failed start hook stops the
+    /// worker gracefully.
+    fn stop_result(
+        mut services: ServicesStopped,
+        stops: ChildrenStopCell,
+        fatal_claim_error: Option<WorkerError>,
+    ) -> Result<(), WorkerError> {
+        match services.fail_closed_stop.state() {
+            FailClosedState::Watching => {}
+            FailClosedState::FailedClosed { cause } => {
+                return Err(WorkerError::RunnerHeartbeatLost { cause });
+            }
+        }
+        match stops.take() {
+            None | Some(ChildrenStop::HookFailed) => {}
+            Some(ChildrenStop::PoolFailed(failure)) => {
+                return Err(WorkerError::PoolFailed(failure))
+            }
+            Some(ChildrenStop::BaselineOverLimit(over)) => {
+                return Err(WorkerError::BaselineOverLimit(over))
+            }
+        }
+        if let Some(error) = fatal_claim_error {
+            return Err(error);
+        }
+        // A service-loop death fired the token to get here; surface it so the
+        // process exits non-zero instead of reporting a clean shutdown
+        // (C11-inverse).
+        if let Ok(exit) = services.fatal_rx.try_recv() {
+            return Err(WorkerError::ServiceLoopDied {
+                service: exit.service,
+                reason: exit.reason,
+            });
+        }
+        Ok(())
+    }
+
+    /// Start the service loops: the claimer heartbeat, the reaper, the
+    /// worker snapshot, the runner heartbeats of the tasks that children
+    /// hold, the watch of the pool failure and the new-kind baseline guard.
+    /// Each of them and `ping_responder` runs under a watchdog: one that ends
+    /// with no stop request stops the worker with `ServiceLoopDied`
+    /// (C11-inverse).
+    ///
+    /// Errors: [`WorkerError::Config`] when the runner heartbeat watchdog
+    /// thread does not start.
+    fn spawn_services(
+        &self,
+        children: &WorkerChildren,
+        live: &LiveDispatches,
+        stops: &ChildrenStopCell,
+        ping_responder: JoinHandle<()>,
+    ) -> Result<Services, WorkerError> {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
         let claimer_hb = spawn_claimer_heartbeat(
@@ -605,26 +1333,8 @@ impl Worker {
             self.app_config.max_claim_renew_age_ms,
             self.cancel.clone(),
         );
-
-        // Start the unified reaper (stale recovery, phase 2, retention,
-        // paused expiry, and partition maintenance share one cluster gate).
         let reaper_health = new_reaper_health();
-        // The reaper's gate and pass run on the worker reserve, which the
-        // runtime pool's users cannot exhaust.
-        let reaper = spawn_reaper(
-            Arc::clone(&self.broker),
-            self.broker.reserve_pool().clone(),
-            self.broker.reserve_maintenance_pool().clone(),
-            Arc::clone(&self.workflow_registry),
-            self.app_config.recovery.clone(),
-            self.app_config.payload.clone(),
-            self.app_config.retention.clone(),
-            Arc::clone(&reaper_health),
-            self.cancel.clone(),
-        );
-
-        // Start worker state snapshot loop.
-        let worker_started_at = Utc::now();
+        let reaper = self.spawn_reaper_loop(Arc::clone(&reaper_health));
         let state_loop = crate::worker::worker_state::spawn_worker_state_loop(
             self.broker.pool().clone(),
             self.worker_id.clone(),
@@ -633,16 +1343,17 @@ impl Worker {
             self.worker_config.clone(),
             self.app_config.clone(),
             reaper_health,
-            Arc::clone(&self.semaphore),
-            worker_started_at,
+            children.view(),
+            ClaimColumns::of_profile(&self.profile.profile),
+            Utc::now(),
             self.cancel.clone(),
         );
-
-        // Runner heartbeats: one fenced statement per interval for every held
-        // dispatch, on its own connection, and a fail-closed watchdog thread
-        // (exit 77). They run until the in-flight dispatches have drained, so
-        // they have their own token, cancelled after `shutdown`. A watchdog
-        // that fails closed stops the worker through its own token.
+        // Runner heartbeats: one fenced statement per interval for every
+        // task a child holds, on its own connection, and a fail-closed
+        // watchdog thread (exit 77). They run until the pools drained, so
+        // they have their own token, cancelled after the outcome writes. A
+        // watchdog that fails closed kills the children that hold tasks and
+        // stops the worker through its token.
         let beats_cancel = CancellationToken::new();
         let fail_closed_stop = FailClosedStop::new(self.cancel.clone());
         let (runner_beat_watch, runner_beats) = launch_runner_beats(
@@ -654,7 +1365,7 @@ impl Worker {
             },
             Duration::from_millis(self.app_config.recovery.runner_heartbeat_interval_ms),
             StaleRunningRecovery::from_config(&self.app_config.recovery),
-            self.live_dispatches.clone(),
+            live.clone(),
             beats_cancel.clone(),
             fail_closed_stop.clone(),
         )
@@ -663,25 +1374,35 @@ impl Worker {
                 "the runner heartbeat watchdog thread did not start: {error}"
             ))
         })?;
+        let pool_failure = tokio::spawn(watch_pool_failure(
+            Arc::clone(children.board()),
+            stops.clone(),
+            self.cancel.clone(),
+        ));
+        let new_kind_baselines = tokio::spawn(watch_new_kind_baselines(
+            Arc::clone(children.board()),
+            baseline_limits(&self.profile.profile),
+            stops.clone(),
+            self.cancel.clone(),
+        ));
 
         // Supervise the service loops (C11-inverse): a loop that dies without
-        // a shutdown request — panic or unexpected return; DB errors are
-        // handled inside each loop — must not leave the worker claiming with
-        // lease renewal, stale-task recovery, or liveness advertising dead.
-        // The watchdog fires the cancellation token (claiming stops at once)
-        // and the death surfaces below as `WorkerError::ServiceLoopDied`, so
-        // the process exits non-zero. The claim wakes need no watchdog: the
-        // main loop reads them, and a stopped listener ends it.
-        let (fatal_tx, mut fatal_rx) =
+        // a shutdown request must not leave the worker claiming with lease
+        // renewal, stale-task recovery, or liveness advertising dead. The
+        // claim wakes need no watchdog: the claim loop reads them, and a
+        // stopped listener ends it.
+        let (fatal_tx, fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let services: [(&'static str, tokio::task::JoinHandle<()>); 5] = [
+        let watched: [(&'static str, tokio::task::JoinHandle<()>); 7] = [
             ("claimer-heartbeat", claimer_hb),
             ("runner-heartbeat", runner_beats),
             ("reaper", reaper),
             ("worker-state", state_loop),
             ("ping-responder", ping_responder),
+            ("slot-failure-watch", pool_failure),
+            ("new-kind-baseline-watch", new_kind_baselines),
         ];
-        for (service, handle) in services {
+        for (service, handle) in watched {
             crate::worker::supervision::spawn_service_watchdog(
                 service,
                 handle,
@@ -690,140 +1411,12 @@ impl Worker {
             );
         }
         drop(fatal_tx);
-
-        tracing::info!(worker_id = %self.worker_id, "worker ready");
-
-        // Main-loop claim error backoff.
-        let mut claim_backoff = RetryBackoff::from_config(&self.app_config.resilience);
-
-        // A fatal claim error (non-retryable, or retryable with the backoff
-        // exhausted) breaks the loop and is returned after graceful shutdown so
-        // the process exits non-zero for a supervisor restart — the same
-        // discipline as Python's run_forever re-raise and the ServiceLoopDied
-        // path below.
-        let mut fatal_claim_error: Option<WorkerError> = None;
-
-        // Main loop.
-        loop {
-            if self.cancel.is_cancelled() {
-                break;
-            }
-
-            // Claim and dispatch.
-            match self.claim_and_dispatch_all().await {
-                Ok(true) => {
-                    claim_backoff.reset();
-                    continue; // more work might be available
-                }
-                Ok(false) => {
-                    claim_backoff.reset();
-                }
-                Err(e) => {
-                    if e.is_retryable() && claim_backoff.can_retry() {
-                        let delay = claim_backoff.next_delay_seconds();
-                        tracing::warn!(
-                            error = %e,
-                            attempt = claim_backoff.attempts(),
-                            delay_s = format!("{:.2}", delay),
-                            "retryable claim error, backing off",
-                        );
-                        tokio::select! {
-                            _ = self.cancel.cancelled() => break,
-                            _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
-                        }
-                        continue;
-                    } else if e.is_retryable() {
-                        tracing::error!(
-                            error = %e,
-                            attempts = claim_backoff.attempts(),
-                            "retryable claim error, max retries exhausted — shutting down",
-                        );
-                        fatal_claim_error = Some(e);
-                        break;
-                    } else {
-                        tracing::error!(
-                            error = %e,
-                            "non-retryable claim error — shutting down",
-                        );
-                        fatal_claim_error = Some(e);
-                        break;
-                    }
-                }
-            }
-
-            // A database notification can arrive before the local permit is released.
-            let poll_interval =
-                Duration::from_millis(self.app_config.resilience.notify_poll_interval_ms);
-            match wait_for_claim_wake(
-                &self.cancel,
-                &self.capacity_released,
-                &claim_wakes,
-                poll_interval,
-            )
-            .await
-            {
-                ClaimWake::Cancelled => break,
-                ClaimWake::ListenerClosed => {
-                    tracing::info!("the listener stopped, shutting down");
-                    break;
-                }
-                ClaimWake::DatabaseNotification => {
-                    claim_wakes
-                        .drain_pending(self.worker_config.coalesce_notifies)
-                        .await;
-                }
-                ClaimWake::ListenerGap | ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
-            }
-        }
-
-        // Stop all background loops (listener, claimer heartbeat, reaper,
-        // workflow recovery, worker-state) on every exit path — including a fatal
-        // claim error that `break`s without a prior cancel. Otherwise those loops
-        // keep running on the host runtime: the worker-state loop advertises the
-        // dead worker as alive and the claimer heartbeat keeps renewing leases,
-        // delaying reclamation of its CLAIMED tasks. Idempotent when a signal or
-        // `request_stop` already fired the token (C11).
-        self.cancel.cancel();
-
-        // Graceful shutdown: wait for in-flight tasks.
-        self.shutdown().await;
-
-        // No dispatch is held any more: stop the runner beats and their
-        // watchdog.
-        beats_cancel.cancel();
-        if tokio::task::spawn_blocking(move || runner_beat_watch.stop())
-            .await
-            .is_err()
-        {
-            tracing::error!("stopping the runner heartbeat watchdog failed");
-        }
-
-        // The runner heartbeats failed closed and stopped the worker: exit
-        // non-zero. In-flight tasks were still drained above.
-        match fail_closed_stop.state() {
-            FailClosedState::Watching => {}
-            FailClosedState::FailedClosed { cause } => {
-                return Err(WorkerError::RunnerHeartbeatLost { cause });
-            }
-        }
-
-        // A fatal claim error broke the loop; surface it so the process exits
-        // non-zero for a supervisor restart. In-flight tasks were still
-        // drained above.
-        if let Some(e) = fatal_claim_error {
-            return Err(e);
-        }
-
-        // A service-loop death fired the token to get here; surface it so the
-        // process exits non-zero instead of reporting a clean shutdown
-        // (C11-inverse). In-flight tasks were still drained above.
-        if let Ok(exit) = fatal_rx.try_recv() {
-            return Err(WorkerError::ServiceLoopDied {
-                service: exit.service,
-                reason: exit.reason,
-            });
-        }
-        Ok(())
+        Ok(Services {
+            fatal_rx,
+            beats_cancel,
+            runner_beat_watch,
+            fail_closed_stop,
+        })
     }
 
     /// Request graceful shutdown.
@@ -846,12 +1439,12 @@ impl Worker {
     /// Check the pools and the session URL, then subscribe the claim wakes of
     /// every queue and the ping channel on the broker's listener.
     ///
-    /// The checks run at every worker boot, with or without PgBouncer mode
-    /// (Python `validate_worker_database_paths`): the pool checks
-    /// ([`PostgresBroker::check_worker_session`]), then the session check
-    /// ([`PostgresBroker::check_session_delivery`]). A statement-pooled URL
-    /// or a URL that does not keep session state is refused, not retryable; a
-    /// database that cannot be reached is retryable.
+    /// The check runs at every worker boot, with or without PgBouncer mode
+    /// (Python `validate_worker_database_paths`): one session check on the
+    /// statement layer ([`PostgresBroker::check_worker_session`]). A
+    /// statement-pooled URL or a URL that does not keep session state is
+    /// refused, not retryable; a database that cannot be reached is
+    /// retryable.
     async fn try_connect_listener(&self) -> Result<WorkerSubscriptions, WorkerError> {
         let channels = self
             .worker_config
@@ -861,10 +1454,6 @@ impl Worker {
             .collect::<Result<Vec<ChannelName>, WorkerError>>()?;
         self.broker
             .check_worker_session()
-            .await
-            .map_err(WorkerError::Broker)?;
-        self.broker
-            .check_session_delivery()
             .await
             .map_err(WorkerError::SessionCheck)?;
         let listener = self.broker.listener();
@@ -938,205 +1527,6 @@ impl Worker {
         }
     }
 
-    // ----- shutdown -----
-
-    /// Wait for all in-flight tasks to finish (with a timeout).
-    async fn shutdown(&self) {
-        tracing::info!("shutting down, waiting for in-flight tasks");
-        self.tracker.close();
-        if tokio::time::timeout(Duration::from_secs(30), self.tracker.wait())
-            .await
-            .is_err()
-        {
-            tracing::warn!("worker shutdown timed out with in-flight tasks still running");
-        }
-        tracing::info!("worker stopped");
-    }
-
-    // ----- claim & dispatch -----
-
-    /// Claim tasks from all queues and dispatch them.
-    /// Returns `true` if any tasks were claimed (or buffered tasks dispatched).
-    ///
-    /// Budget semantics, computed server-side by `horsies_claim` under the
-    /// pass's advisory locks (parity with horsies PR #160):
-    /// - **Hard cap** (`prefetch_buffer == 0`): budget =
-    ///   `concurrency - (RUNNING + active CLAIMED)` for this worker.
-    /// - **Soft cap / prefetch** (`prefetch_buffer > 0`): budget =
-    ///   `concurrency + prefetch_buffer - RUNNING - CLAIMED`. Claims extra
-    ///   tasks with a lease; they sit CLAIMED until a permit opens up.
-    ///
-    /// When `cluster_wide_cap` is set (hard cap mode only), the budget is
-    /// further reduced so the total RUNNING + CLAIMED tasks across ALL
-    /// workers does not exceed the cap.
-    async fn claim_and_dispatch_all(&self) -> Result<bool, WorkerError> {
-        let prefetch = self.app_config.prefetch_buffer;
-        let soft_cap_mode = prefetch > 0;
-
-        // ── Dispatch buffered CLAIMED tasks first ──
-        // Only prefetch/soft-cap mode buffers CLAIMED tasks across passes (hard
-        // cap requeues a task on a missing permit), so the buffered-dispatch
-        // probe runs only there. The old per-pass `count_claimed_for_worker`
-        // round trip gated this and the per-worker budget, but `horsies_claim`
-        // recomputes that budget authoritatively under its advisory locks
-        // (including `max_claim_per_worker`) and returns empty when exhausted, so
-        // the client-side count was redundant (P5). `load_buffered_claimed`
-        // itself returns empty when there is nothing buffered.
-        let mut dispatched_buffered = 0u32;
-        if soft_cap_mode && self.semaphore.available_permits() > 0 {
-            // At most `available_permits` rows can be dispatched this pass, so
-            // bound the fetch (which pulls full args/kwargs payloads) to that (P7).
-            let permit_limit = self.semaphore.available_permits() as i64;
-            let buffered = self
-                .broker
-                .load_buffered_claimed(&self.worker_id, permit_limit)
-                .await?;
-
-            // Soft-cap re-check: the claim function counts only RUNNING against a
-            // queue's `max_concurrency`, so successive passes can buffer more
-            // CLAIMED tasks of a capped queue than its cap while none are running.
-            // Dispatching all of them would push queue-level RUNNING past the cap
-            // by up to `prefetch_buffer` (C17). Gate capped-queue dispatch on the
-            // cluster-wide RUNNING count so a buffered task never starts beyond
-            // the cap; the excess stays CLAIMED (leased) until running frees up.
-            let mut running_by_queue = std::collections::HashMap::new();
-            if soft_cap_mode && !self.worker_config.queue_max_concurrency.is_empty() {
-                let capped: Vec<String> = buffered
-                    .iter()
-                    .map(|r| r.queue_name.clone())
-                    .filter(|q| self.worker_config.queue_max_concurrency.contains_key(q))
-                    .collect();
-                running_by_queue = self.broker.count_running_by_queue(&capped).await?;
-            }
-            let mut dispatched_by_queue: std::collections::HashMap<String, u32> =
-                std::collections::HashMap::new();
-
-            for row in buffered {
-                if self.semaphore.available_permits() == 0 {
-                    break;
-                }
-                // Skip a task already handed to the tracker: it is still CLAIMED
-                // in its set_running window and would be re-dispatched here (P7).
-                if self
-                    .in_dispatch
-                    .lock()
-                    .expect("in_dispatch poisoned")
-                    .contains(&row.id)
-                {
-                    continue;
-                }
-                // In soft-cap mode, do not start a capped queue's buffered task
-                // past its cluster-wide RUNNING cap.
-                if soft_cap_mode {
-                    if let Some(&cap) = self
-                        .worker_config
-                        .queue_max_concurrency
-                        .get(&row.queue_name)
-                    {
-                        let running = running_by_queue.get(&row.queue_name).copied().unwrap_or(0);
-                        let pending = *dispatched_by_queue.get(&row.queue_name).unwrap_or(&0);
-                        if running + i64::from(pending) >= i64::from(cap) {
-                            continue; // cap reached; leave this task CLAIMED
-                        }
-                        *dispatched_by_queue
-                            .entry(row.queue_name.clone())
-                            .or_insert(0) += 1;
-                    }
-                }
-                self.dispatch_task(row);
-                dispatched_buffered += 1;
-            }
-        }
-
-        // Hard cap: no local permits means no new claims this pass.
-        if !soft_cap_mode && self.semaphore.available_permits() == 0 {
-            return Ok(dispatched_buffered > 0);
-        }
-
-        // ── Claim new tasks ──
-        // The critical section (advisory-lock acquisition, cap accounting,
-        // budget math, windowed claim) is one server-side statement —
-        // `horsies_claim`, parity with horsies PR #160 — so the xact-scoped
-        // locks are never held across a client round trip and a stalled
-        // worker cannot freeze other claimers mid-pass. The checks above are
-        // cheap local early-exits; the function recomputes the budget
-        // authoritatively under the locks. The queue list drives the lock
-        // keys, so the locks held and the queues claimed are provably the
-        // same set.
-        let ordered = self.ordered_queues();
-        let queue_priority: std::collections::HashMap<String, i32> = ordered
-            .iter()
-            .map(|q| {
-                let priority = self
-                    .worker_config
-                    .queue_priorities
-                    .get(q)
-                    .copied()
-                    .unwrap_or(100);
-                (q.clone(), priority)
-            })
-            .collect();
-        let queue_max_concurrency: std::collections::HashMap<String, u32> = ordered
-            .iter()
-            .filter_map(|q| {
-                self.worker_config
-                    .queue_max_concurrency
-                    .get(q)
-                    .map(|&cap| (q.clone(), cap))
-            })
-            .collect();
-        let params = crate::broker::ClaimPassParams {
-            worker_id: self.worker_id.clone(),
-            lock_keys: self.claim_lock_keys(&ordered),
-            queues: ordered,
-            queue_priority,
-            queue_max_concurrency,
-            hard_cap_mode: !soft_cap_mode,
-            processes: self.worker_config.concurrency,
-            prefetch_buffer: prefetch,
-            max_claim_per_worker: self.worker_config.max_claim_per_worker,
-            max_claim_batch: self.worker_config.max_claim_batch,
-            cluster_wide_cap: self.app_config.cluster_wide_cap,
-            claim_lease_ms: claim_lease(&self.app_config),
-        };
-        let mut claimed_rows = self.broker.claim_batch(&params).await?;
-
-        if claimed_rows.is_empty() {
-            return Ok(dispatched_buffered > 0);
-        }
-
-        // Post-claim non-runnable workflow filter.
-        // PAUSED: cancel task → CANCELLED (terminal), reset workflow_task → READY
-        // CANCELLED: cancel task → CANCELLED, skip workflow_task → SKIPPED
-        //
-        // Only workflow tasks can belong to a PAUSED/CANCELLED workflow, so a
-        // plain-task-only batch cannot be filtered — skip the guaranteed-empty
-        // JOIN query in that case (P5). `is_workflow_task` is carried on each
-        // claimed row.
-        if claimed_rows.iter().any(|r| r.is_workflow_task) {
-            // The claim generations travel with their ids: one batch can span
-            // claim transactions, so each task fences on its own claimed_at.
-            let claims: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
-                claimed_rows.iter().map(|r| (r.id, r.claimed_at)).collect();
-            let filtered_ids = self
-                .broker
-                .filter_non_runnable_workflow_tasks(&claims, &self.worker_id)
-                .await?;
-            if !filtered_ids.is_empty() {
-                let filtered_set: std::collections::HashSet<Uuid> =
-                    filtered_ids.into_iter().collect();
-                claimed_rows.retain(|r| !filtered_set.contains(&r.id));
-            }
-        }
-
-        let dispatched_claimed = claimed_rows.len() as u32;
-        for row in claimed_rows {
-            self.dispatch_task(row);
-        }
-
-        Ok(dispatched_claimed > 0 || dispatched_buffered > 0)
-    }
-
     /// Order queues by priority (if configured) or return as-is.
     ///
     /// See [`compute_ordered_queues`] for the policy.
@@ -1159,211 +1549,17 @@ impl Worker {
             &self.worker_config.queue_max_concurrency,
         )
     }
+}
 
-    /// Release the claim of a task that this worker will not run: its row
-    /// goes back to the queue, unless another actor holds it now.
-    fn release_unrun_claim(
-        &self,
-        task_id: Uuid,
-        claimed_at: chrono::DateTime<chrono::Utc>,
-        reason: &str,
-    ) {
-        let broker = Arc::clone(&self.broker);
-        let worker_id = self.worker_id.clone();
-        let reason = reason.to_owned();
-        self.tracker.spawn(async move {
-            if let Err(e) = execution::unclaim_task_with_retry(
-                &broker, task_id, &worker_id, claimed_at, &reason,
-            )
-            .await
-            {
-                tracing::error!(
-                    task_id = %task_id,
-                    error = %e,
-                    reason,
-                    "failed to release the claim of a task this worker does not run",
-                );
+/// Join the outcome writes that ended, so the set holds only the writes in
+/// flight. A write that panicked is a defect: its panic is raised here.
+fn reap_finished(writes: &mut JoinSet<()>) {
+    while let Some(joined) = writes.try_join_next() {
+        if let Err(error) = joined {
+            if let Ok(panic) = error.try_into_panic() {
+                std::panic::resume_unwind(panic);
             }
-        });
-    }
-
-    /// Dispatch a single claimed task for execution.
-    fn dispatch_task(&self, row: ClaimedTaskRow) {
-        let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
-            if self.app_config.prefetch_buffer > 0 {
-                tracing::debug!(
-                    task_id = %row.id,
-                    "no semaphore permit available, leaving task CLAIMED in prefetch buffer",
-                );
-            } else {
-                tracing::warn!(
-                    task_id = %row.id,
-                    "no semaphore permit available, requeueing task",
-                );
-                let broker = Arc::clone(&self.broker);
-                let task_id = row.id;
-                let worker_id = self.worker_id.clone();
-                let claimed_at = row.claimed_at;
-                self.tracker.spawn(async move {
-                    if let Err(e) = execution::unclaim_task_with_retry(
-                        &broker,
-                        task_id,
-                        &worker_id,
-                        claimed_at,
-                        "no semaphore permit available",
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            task_id = %task_id,
-                            error = %e,
-                            "failed to unclaim task after dispatch backpressure",
-                        );
-                    }
-                });
-            }
-            return;
-        };
-
-        let permit = ExecutionPermit {
-            permit: Some(permit),
-            released: Arc::clone(&self.capacity_released),
-        };
-
-        // Look up the registered task function.
-        let task_fn = match self.registry.get(&row.task_name) {
-            Ok(t) => t.clone(),
-            Err(e) => {
-                tracing::error!(
-                    task_id = %row.id,
-                    task_name = %row.task_name,
-                    error = %e,
-                    "task not registered",
-                );
-                // Fail the task immediately. Task is CLAIMED (not RUNNING),
-                // so use a direct UPDATE that accepts CLAIMED status.
-                let broker = Arc::clone(&self.broker);
-                let workflow_registry = Arc::clone(&self.workflow_registry);
-                let task_id = row.id.clone();
-                let task_name = row.task_name.clone();
-                let worker_id = self.worker_id.clone();
-                let orphan_self_heal = self
-                    .app_config
-                    .recovery
-                    .auto_terminate_orphaned_workflow_tasks;
-                let hostname = self.hostname.clone();
-                let payload_policy = self.app_config.payload.clone();
-                let phase2_policy = self.app_config.payload.clone();
-                let phase2_retention = self.app_config.retention.clone();
-                self.tracker.spawn(async move {
-                    let reason = format!("task '{}' not registered", task_name);
-                    let task_error = TaskError::builtin(
-                        OperationalErrorCode::WorkerResolutionError,
-                        reason.clone(),
-                    );
-                    if let Some(work) = execution::finalize_pre_execution_failure(
-                        Arc::clone(&broker),
-                        row,
-                        worker_id,
-                        hostname,
-                        task_error,
-                        payload_policy,
-                        orphan_self_heal,
-                    )
-                    .await
-                    {
-                        execution::run_phase2(
-                            broker.pool(),
-                            &workflow_registry,
-                            work,
-                            &phase2_policy,
-                            &phase2_retention,
-                        )
-                        .await;
-                    } else {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            reason,
-                            "task resolution failure aborted before terminal state was persisted",
-                        );
-                    }
-                    drop(permit);
-                });
-                return;
-            }
-        };
-
-        let broker = Arc::clone(&self.broker);
-        let workflow_registry = Arc::clone(&self.workflow_registry);
-        let worker_id = self.worker_id.clone();
-        let hostname = self.hostname.clone();
-        let recovery = self.app_config.recovery.clone();
-        let payload_policy = self.app_config.payload.clone();
-        let phase2_policy = self.app_config.payload.clone();
-        let phase2_retention = self.app_config.retention.clone();
-
-        // The runner-beat writer beats this row from here until its outcome
-        // is written; its fence lands a beat only while the row is RUNNING
-        // at this claim generation and has no finalizing marker. A closed
-        // registry means the runner heartbeats failed closed: the task does
-        // not run, and its claim is released.
-        let task_id = row.id;
-        let held_dispatch =
-            match self
-                .live_dispatches
-                .hold(task_id, row.claimed_at, DispatchRunner::WorkerProcess)
-            {
-                Ok(held) => held,
-                Err(RegistryClosed) => {
-                    self.release_unrun_claim(row.id, row.claimed_at, &RegistryClosed.to_string());
-                    drop(permit);
-                    return;
-                }
-            };
-
-        // Mark this task in-dispatch until the spawned execution finishes, so the
-        // buffered probe won't re-fetch it while it is still CLAIMED (P7).
-        self.in_dispatch
-            .lock()
-            .expect("in_dispatch poisoned")
-            .insert(task_id);
-        let in_dispatch = Arc::clone(&self.in_dispatch);
-
-        self.tracker.spawn(async move {
-            let phase2_work = execution::execute_and_finalize(
-                Arc::clone(&broker),
-                task_fn,
-                row,
-                worker_id,
-                hostname,
-                recovery,
-                payload_policy,
-            )
-            .await;
-
-            // The outcome is written: no more runner beats for this row.
-            drop(held_dispatch);
-
-            // Release permit immediately after Phase 1 completes,
-            // before potentially slow Phase 2 workflow callbacks.
-            drop(permit);
-
-            if let Some(work) = phase2_work {
-                execution::run_phase2(
-                    broker.pool(),
-                    &workflow_registry,
-                    work,
-                    &phase2_policy,
-                    &phase2_retention,
-                )
-                .await;
-            }
-
-            in_dispatch
-                .lock()
-                .expect("in_dispatch poisoned")
-                .remove(&task_id);
-        });
+        }
     }
 }
 
@@ -1402,6 +1598,40 @@ mod tests {
         }
     }
 
+    /// A worker on `broker` of one isolated child that boots, then exits at
+    /// the next frame it reads.
+    fn worker_of_one_idle_child(
+        broker: Arc<PostgresBroker>,
+        app_config: AppConfig,
+        worker_config: WorkerConfig,
+    ) -> Worker {
+        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
+        Worker::new(
+            broker,
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
+            app_config,
+            worker_config,
+            SelectedProfile {
+                name: "default".to_owned(),
+                profile: serde_json::from_value(serde_json::json!({
+                    "isolated": {"kind": "isolated_children", "count": 1}
+                }))
+                .expect("a valid test profile"),
+            },
+            ChildLaunch {
+                command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                program: ChildProgram::Rust,
+                log_level: ChildLogLevel::Info,
+                database_url,
+            },
+            RegisteredClasses::default(),
+        )
+        .expect("a valid test worker")
+    }
+
     #[test]
     fn a_claim_wake_follows_the_listener_event() {
         assert_eq!(
@@ -1435,14 +1665,11 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
             .expect("a lazy pool opens no connection");
-        let worker = Worker::new(
+        let worker = worker_of_one_idle_child(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(TaskRegistry::new()),
-            Arc::new(WorkflowSpecRegistry::new()),
             AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig::default(),
-        )
-        .expect("worker");
+        );
 
         let Err(refused) = worker.try_connect_listener().await else {
             panic!("a broker without a listener cannot serve a worker");
@@ -1469,17 +1696,14 @@ mod tests {
             test_pool().await,
             &crate::broker::terminalization_matrix::migrated_database_url().await,
         ));
-        let worker = Worker::new(
+        let worker = worker_of_one_idle_child(
             Arc::clone(&broker),
-            Arc::new(TaskRegistry::new()),
-            Arc::new(WorkflowSpecRegistry::new()),
             AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig {
                 queues: vec!["listener_boot_q".to_owned()],
                 ..WorkerConfig::default()
             },
-        )
-        .expect("worker");
+        );
         let WorkerSubscriptions { claim_wakes, pings } = worker
             .try_connect_listener()
             .await
@@ -1525,37 +1749,30 @@ mod tests {
             .expect("the ping responder ends at the stop request");
     }
 
+    /// The end of an outcome write wakes the claim loop before its poll
+    /// deadline (Python `_capacity_released`, set by each finalizer).
     #[tokio::test]
     async fn released_capacity_wakes_claim_wait_before_poll_deadline() {
-        let semaphore = Arc::new(Semaphore::new(1));
         let released = Arc::new(Notify::new());
-        let permit = ExecutionPermit {
-            permit: Some(semaphore.clone().try_acquire_owned().unwrap()),
-            released: released.clone(),
-        };
         let cancel = CancellationToken::new();
         let claim_wakes = no_claim_wakes();
         let wait = wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60));
         tokio::pin!(wait);
         assert!(wait.as_mut().now_or_never().is_none());
-        assert_eq!(semaphore.available_permits(), 0);
-        drop(permit);
+        released.notify_one();
         let wake = tokio::time::timeout(Duration::from_secs(1), wait)
             .await
             .expect("local capacity must wake the claim loop before polling");
         assert_eq!(wake, ClaimWake::CapacityReleased);
-        assert_eq!(semaphore.available_permits(), 1);
     }
 
+    /// A write that ends during a claim pass leaves the wake set, so the
+    /// next wait returns at once (Python: the loop clears the event before
+    /// each pass).
     #[tokio::test]
     async fn released_capacity_is_retained_before_claim_wait_starts() {
-        let semaphore = Arc::new(Semaphore::new(1));
         let released = Arc::new(Notify::new());
-        let permit = ExecutionPermit {
-            permit: Some(semaphore.clone().try_acquire_owned().unwrap()),
-            released: released.clone(),
-        };
-        drop(permit);
+        released.notify_one();
         let cancel = CancellationToken::new();
         let claim_wakes = no_claim_wakes();
         let wake = tokio::time::timeout(
@@ -1565,39 +1782,12 @@ mod tests {
         .await
         .expect("release before waiting must not lose the wake");
         assert_eq!(wake, ClaimWake::CapacityReleased);
-        assert_eq!(semaphore.available_permits(), 1);
         assert!(
             wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60),)
                 .now_or_never()
                 .is_none(),
             "an idle worker must not keep waking"
         );
-    }
-
-    #[tokio::test]
-    async fn released_capacity_wakes_claim_wait_after_execution_is_aborted() {
-        let semaphore = Arc::new(Semaphore::new(1));
-        let released = Arc::new(Notify::new());
-        let permit = ExecutionPermit {
-            permit: Some(semaphore.clone().try_acquire_owned().unwrap()),
-            released: released.clone(),
-        };
-        let execution = tokio::spawn(async move {
-            let _permit = permit;
-            std::future::pending::<()>().await;
-        });
-        execution.abort();
-        assert!(execution.await.unwrap_err().is_cancelled());
-        let cancel = CancellationToken::new();
-        let claim_wakes = no_claim_wakes();
-        let wake = tokio::time::timeout(
-            Duration::from_secs(1),
-            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60)),
-        )
-        .await
-        .expect("cancelled execution must release capacity and wake claims");
-        assert_eq!(wake, ClaimWake::CapacityReleased);
-        assert_eq!(semaphore.available_permits(), 1);
     }
 
     async fn test_pool() -> PgPool {
@@ -1773,11 +1963,11 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
                 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -1943,6 +2133,315 @@ mod tests {
         let _: fn(&Worker) -> &str = |w| w.worker_id();
     }
 
+    /// Python `horsies/core/cli.py:886` and `:955`: the memory fit of the
+    /// profile is logged before the database start, the connection fit after
+    /// it and before the banner and the claim loop; neither returns an error.
+    #[test]
+    fn the_profile_fit_is_logged_at_boot_before_any_claim() {
+        let source = include_str!("worker.rs");
+        let run = &source[source
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")..];
+        let memory = run
+            .find("log_memory_fit_at_boot(&self.profile)")
+            .expect("memory fit at boot");
+        let children = run
+            .find("self.start_pools().await")
+            .expect("children start");
+        let start = run
+            .find("self.start_database_with_resilience().await")
+            .expect("database start with retry");
+        let connections = run
+            .find(
+                "log_connection_fit_at_boot(&self.profile, &self.app_config.broker, &self.broker)",
+            )
+            .expect("connection fit at boot");
+        let banner = run.find("print_banner(").expect("startup banner");
+        let claims = run.find("claim_for_dispatch(").expect("claim loop");
+        assert!(memory < children);
+        // Python `start`: the children start before any database work, so a
+        // bad app or hook fails at once.
+        assert!(children < start);
+        assert!(memory < start);
+        assert!(start < connections);
+        assert!(connections < banner);
+        assert!(connections < claims);
+    }
+
+    // -- the worker on the executor --
+
+    /// A worker of one isolated child on a broker whose pool reaches no
+    /// server: any database work fails, so a test sees whether some ran.
+    fn worker_of_one_child(command: crate::worker::executor::supervisor::ChildCommand) -> Worker {
+        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        let url = "postgresql://horsies@127.0.0.1:1/horsies";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy(url)
+            .expect("a lazy pool opens no connection");
+        Worker::new(
+            Arc::new(PostgresBroker::from_pool(pool)),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
+            AppConfig::for_database_url(url),
+            WorkerConfig::default(),
+            SelectedProfile {
+                name: "default".to_owned(),
+                profile: serde_json::from_value(serde_json::json!({
+                    "isolated": {"kind": "isolated_children", "count": 1}
+                }))
+                .expect("a valid test profile"),
+            },
+            ChildLaunch {
+                command,
+                program: ChildProgram::Rust,
+                log_level: ChildLogLevel::Info,
+                database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+            },
+            RegisteredClasses::default(),
+        )
+        .expect("a valid test worker")
+    }
+
+    /// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_no_child_is_refused`.
+    #[test]
+    fn a_worker_with_no_child_is_refused() {
+        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        let url = "postgresql://horsies@127.0.0.1:1/horsies";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(url)
+            .expect("a lazy pool opens no connection");
+        let refused = Worker::new(
+            Arc::new(PostgresBroker::from_pool(pool)),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
+            AppConfig::for_database_url(url),
+            WorkerConfig::default(),
+            SelectedProfile {
+                name: "empty".to_owned(),
+                profile: crate::core::config::worker_profile::WorkerProfile::default(),
+            },
+            ChildLaunch {
+                command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                program: ChildProgram::Rust,
+                log_level: ChildLogLevel::Info,
+                database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+            },
+            RegisteredClasses::default(),
+        );
+        match refused {
+            Err(WorkerError::Config(message)) => {
+                assert!(
+                    message.contains("the profile starts no children"),
+                    "{message}"
+                )
+            }
+            Err(other) => panic!("another error: {other}"),
+            Ok(_) => panic!("a worker with no child must be refused"),
+        }
+    }
+
+    /// Python `test_worker_helpers.py::TestSlotPoolSetup::test_hook_failure_raises_the_hook_error`:
+    /// a start hook that fails in the first child ends the start with the
+    /// hook error, which no retry takes.
+    #[tokio::test]
+    async fn a_failed_start_hook_ends_the_start_with_the_hook_error() {
+        let worker = worker_of_one_child(
+            crate::worker::executor::slots::scripted::hook_failing_child_of_any_kind(),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(60), worker.start_pools())
+            .await
+            .expect("the start ends within the bound");
+        match started {
+            Err(error @ WorkerError::ChildHookFailed) => {
+                assert!(!error.is_retryable());
+                assert_eq!(error.to_string(), CHILD_HOOK_FAILURE_MESSAGE);
+            }
+            Err(other) => panic!("another error: {other}"),
+            Ok(_) => panic!("a failed start hook must fail the start"),
+        }
+    }
+
+    /// Python `test_worker_helpers.py::TestSlotPoolSetup::test_a_stop_during_the_start_is_no_failure`
+    /// and `::test_a_stop_during_the_start_opens_no_database_work`: a stop
+    /// before the children are ready ends the run with no error, before any
+    /// database work (the broker reaches no server, so a database step would
+    /// fail).
+    #[tokio::test]
+    async fn a_stop_during_the_start_is_no_failure_and_opens_no_database_work() {
+        let worker =
+            worker_of_one_child(crate::worker::executor::slots::scripted::idle_child_of_any_kind());
+        worker.request_stop();
+        let ended = tokio::time::timeout(Duration::from_secs(60), worker.run())
+            .await
+            .expect("the run ends within the bound");
+        assert!(ended.is_ok(), "{ended:?}");
+    }
+
+    /// Python `test_worker_helpers.py::TestSlotFailureLoop`: a failed start
+    /// hook in a replacement child stops the worker gracefully; a pool that
+    /// cannot start a child stops it with an error.
+    #[tokio::test]
+    async fn a_pool_failure_stops_the_worker_and_names_how() {
+        use crate::worker::executor::slots::ChildLayout;
+        use crate::worker::executor::supervisor::{BootFailure, BootFailureCause};
+
+        let failures = [
+            (PoolFailure::ChildHookFailed, ChildrenStop::HookFailed),
+            (
+                PoolFailure::BootAttemptsExhausted {
+                    attempts: 3,
+                    last: BootFailure::new(BootFailureCause::SpawnFailed, "no such program"),
+                },
+                ChildrenStop::PoolFailed(PoolFailure::BootAttemptsExhausted {
+                    attempts: 3,
+                    last: BootFailure::new(BootFailureCause::SpawnFailed, "no such program"),
+                }),
+            ),
+        ];
+        for (failure, expected) in failures {
+            let board = Arc::new(PoolBoard::new(ChildLayout {
+                isolated: 1,
+                shared_async: 0,
+                shared_thread: 0,
+            }));
+            let stops = ChildrenStopCell::default();
+            let cancel = CancellationToken::new();
+            let watch = tokio::spawn(watch_pool_failure(
+                Arc::clone(&board),
+                stops.clone(),
+                cancel.clone(),
+            ));
+            board.fail(failure);
+            tokio::time::timeout(Duration::from_secs(5), watch)
+                .await
+                .expect("the watch ends at the failure")
+                .expect("the watch joins");
+            assert!(cancel.is_cancelled());
+            assert_eq!(stops.take(), Some(expected));
+        }
+    }
+
+    fn stopped_services() -> ServicesStopped {
+        ServicesStopped {
+            fatal_rx: mpsc::unbounded_channel().1,
+            fail_closed_stop: FailClosedStop::new(CancellationToken::new()),
+        }
+    }
+
+    /// The result of a stopped worker: a failed start hook is a graceful
+    /// stop; a pool failure, a baseline over its limit and a fatal claim
+    /// error each end the worker with their error.
+    #[test]
+    fn the_stop_result_names_the_cause_of_the_stop() {
+        use crate::worker::executor::slots::ExecutionClass;
+
+        let ended = |stop: Option<ChildrenStop>, claim: Option<WorkerError>| {
+            let stops = ChildrenStopCell::default();
+            if let Some(stop) = stop {
+                stops.stop_worker(stop, &CancellationToken::new());
+            }
+            Worker::stop_result(stopped_services(), stops, claim)
+        };
+        assert!(ended(None, None).is_ok());
+        assert!(ended(Some(ChildrenStop::HookFailed), None).is_ok());
+        assert!(matches!(
+            ended(
+                Some(ChildrenStop::PoolFailed(PoolFailure::ChildHookFailed)),
+                None
+            ),
+            Err(WorkerError::PoolFailed(_))
+        ));
+        let over = BaselineOverLimit {
+            class: ExecutionClass::SharedAsync,
+            baseline_mb: 600.0,
+            limit_mb: std::num::NonZeroU64::new(512).expect("512"),
+        };
+        assert!(matches!(
+            ended(Some(ChildrenStop::BaselineOverLimit(over)), None),
+            Err(WorkerError::BaselineOverLimit(_))
+        ));
+        assert!(matches!(
+            ended(None, Some(WorkerError::Config("refused".to_owned()))),
+            Err(WorkerError::Config(_))
+        ));
+    }
+
+    /// Python `test_worker_helpers.py::TestDispatchOne::test_finalizer_gets_the_handle_and_the_claim_fields`:
+    /// the task of a dispatch carries every claim field the outcome write
+    /// fences on, the class, the retry facts and the stored options read
+    /// once; the input travels apart.
+    #[test]
+    fn a_claimed_row_becomes_the_task_of_its_dispatch() {
+        use crate::core::task::Execution;
+        use crate::worker::retry::read_stored_options;
+
+        let claimed_at = Utc::now();
+        let row = ClaimedRow {
+            id: Uuid::from_u128(7),
+            task_name: "app.tasks.work".to_owned(),
+            queue_name: "q".to_owned(),
+            input: r#"{"n": 1}"#.to_owned(),
+            task_options: Some(r#"{"timeout_ms": 2000}"#.to_owned()),
+            execution: Execution::SharedThread,
+            is_workflow_task: true,
+            claimed_at,
+            retry_count: 1,
+            max_retries: 3,
+        };
+
+        let claimed = claimed_of(row);
+
+        assert_eq!(
+            claimed.task,
+            ClaimedTask {
+                task_id: Uuid::from_u128(7),
+                task_name: "app.tasks.work".to_owned(),
+                queue_name: "q".to_owned(),
+                claimed_at,
+                execution: Execution::SharedThread,
+                kind: TaskKind::WorkflowTask,
+                retry: RetryFacts {
+                    retry_count: 1,
+                    max_retries: 3,
+                },
+                options: read_stored_options(Some(r#"{"timeout_ms": 2000}"#)),
+            }
+        );
+        assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
+    }
+
+    /// Python `Worker.stop` and `test_runner_heartbeat.py::test_stop_ends_the_heartbeat_after_the_children`:
+    /// the claim loop ends, then the pools stop with the drain timeout, then
+    /// the outcome writes drain and the batcher closes, then the runner
+    /// heartbeats stop, then the spawner thread.
+    #[test]
+    fn the_stop_runs_in_python_order() {
+        let source = include_str!("worker.rs");
+        let serve = &source[source
+            .find("async fn serve(")
+            .expect("Worker::serve source")..];
+        let at = |text: &str| {
+            serve
+                .find(text)
+                .unwrap_or_else(|| panic!("{text} in serve"))
+        };
+        let claim_loop = at(".claim_loop(&children");
+        let cancel = at("self.cancel.cancel();\n        let drain");
+        let pools = at("RunningChildren::stop_pools(children, drain).await");
+        let writes = at("drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher)");
+        let beats = at("services.stop_runner_beats().await");
+        let spawner = at("RunningChildren::stop_spawner(spawner).await");
+        assert!(claim_loop < cancel);
+        assert!(cancel < pools);
+        assert!(pools < writes);
+        assert!(writes < beats);
+        assert!(beats < spawner);
+    }
+
     /// A start attempt that does not finish in time is retryable, as in
     /// Python, where `asyncio.TimeoutError` takes the retry path.
     #[test]
@@ -1969,50 +2468,6 @@ mod tests {
 
         app_config.claim_lease_ms = Some(90_000);
         assert_eq!(effective_claim_lease_ms(&app_config), 90_000);
-    }
-
-    /// Every claim and every claimer beat use the effective lease: the claim
-    /// pass never sends `None`, and the heartbeat always renews.
-    #[test]
-    fn claims_and_renewals_always_carry_a_lease() {
-        let source = include_str!("worker.rs");
-        // Production code only: the test module quotes the searched text.
-        let production = &source[..source
-            .find(&["#[cfg(test)]", "\nmod tests {"].concat())
-            .expect("test module marker")];
-        let run = &production[production
-            .find("pub async fn run(&self)")
-            .expect("Worker::run source")..];
-        let heartbeat = &run[run
-            .find("spawn_claimer_heartbeat(")
-            .expect("claimer heartbeat startup")..];
-        let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
-        assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
-        assert!(production.contains("claim_lease_ms: claim_lease(&self.app_config),"));
-        assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
-    }
-
-    #[test]
-    fn default_worker_config_is_valid() {
-        let config = WorkerConfig::default();
-        assert!(config.validate().is_ok());
-        assert!(!config.queues.is_empty());
-        assert!(config.concurrency >= 1);
-        assert_eq!(config.max_claim_batch, 0, "default is auto-fill");
-    }
-
-    #[test]
-    fn worker_config_custom_queues() {
-        let config = WorkerConfig {
-            queues: vec!["high".to_owned(), "low".to_owned()],
-            concurrency: 4,
-            max_claim_batch: 5,
-            ..Default::default()
-        };
-        assert!(config.validate().is_ok());
-        assert_eq!(config.queues.len(), 2);
-        assert_eq!(config.concurrency, 4);
-        assert_eq!(config.max_claim_batch, 5);
     }
 
     #[test]
@@ -2218,13 +2673,12 @@ mod tests {
         .await;
 
         if let Some(work) = phase2_work {
-            let registry = WorkflowSpecRegistry::new();
-            let policy = crate::core::config::payload::PayloadPolicy::default();
+            let registry =
+                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
             run_phase2(
-                broker.pool(),
+                &broker,
                 &registry,
                 work,
-                &policy,
                 &crate::core::RetentionConfig::default(),
             )
             .await;
@@ -2448,7 +2902,8 @@ mod tests {
         .await
         .unwrap();
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         crate::workflow_engine::engine::check_workflow_completion(
             &pool,
             workflow_id,
@@ -2501,6 +2956,182 @@ mod tests {
         );
     }
 
+    /// A node at index 1 of `workflow_id` that depends on node 0.
+    async fn add_dependent_node(pool: &PgPool, workflow_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                'NONE', $1, $2, 1, 'node_1', 'finalize_dependent', '{}', 'default', 100, '{0}',
+                FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Makes `child_id` the child of a new RUNNING parent workflow, linked
+    /// from the parent's sub-workflow node at index 0. Returns the parent id.
+    async fn adopt_as_child_workflow(pool: &PgPool, child_id: Uuid) -> Uuid {
+        let parent_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'finalize_parent', 'RUNNING', 'fail', NULL,
+                'test.finalize.parent.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(parent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE horsies_workflows
+             SET parent_workflow_id = $1, parent_task_index = 0, depth = 1, root_workflow_id = $1
+             WHERE id = $2",
+        )
+        .bind(parent_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
+                sub_workflow_params, created_at, started_at
+            ) VALUES (
+                'NONE', $1, $2, 0, 'child_node', '__sub_workflow:finalize_wf', '{}', 'default',
+                100, '{}', FALSE, 'all', 'RUNNING', TRUE, $3, 'finalize_wf',
+                'test.finalize.v1', 'NOT_GIVEN', NOW(), NOW()
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(parent_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        parent_id
+    }
+
+    /// Phase 1 of a node with a dependent and no sub-workflow node below it
+    /// names the one-statement form, and phase 2 promotes the dependent: the
+    /// dependent node is ENQUEUED with a minted PENDING task row.
+    #[tokio::test]
+    #[serial]
+    async fn phase_two_of_a_node_with_dependents_promotes_them_in_one_statement() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let workflow_id = link_task_to_workflow(&pool, &task_id, None).await;
+        add_dependent_node(&pool, workflow_id).await;
+
+        let phase2_work = execute_and_finalize(
+            Arc::clone(&broker),
+            async_task_fn!(callback_success_task, ()),
+            claimed_workflow_task_row(&task_id, "default", None),
+            "worker-1".to_owned(),
+            "localhost".to_owned(),
+            RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .expect("terminal success should produce phase 2 work");
+        assert_eq!(
+            phase2_work.phase_two,
+            crate::worker::execution::PhaseTwoForm::Step(
+                crate::core::lifecycle::PhaseTwoStep::DependentsWithoutSubworkflow
+            )
+        );
+
+        run_phase2(
+            &broker,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            phase2_work,
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
+
+        let (dependent_status, dependent_task): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, task_id FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dependent_status, "ENQUEUED");
+        let minted_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(dependent_task.expect("the promoted node links its task row"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(minted_status, "PENDING");
+        let (workflow_status, _) = fetch_workflow_state(&pool, &workflow_id).await;
+        assert_eq!(workflow_status, "RUNNING");
+    }
+
+    /// The phase 2 that ends a child workflow advances the parent node after
+    /// its commit (`horsies_workflow_child_finish`): the sub-workflow node is
+    /// COMPLETED and the parent workflow completes.
+    #[tokio::test]
+    #[serial]
+    async fn phase_two_that_ends_a_child_workflow_advances_the_parent_node() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let child_id = link_task_to_workflow(&pool, &task_id, None).await;
+        let parent_id = adopt_as_child_workflow(&pool, child_id).await;
+
+        let phase2_work = execute_and_finalize(
+            Arc::clone(&broker),
+            async_task_fn!(callback_success_task, ()),
+            claimed_workflow_task_row(&task_id, "default", None),
+            "worker-1".to_owned(),
+            "localhost".to_owned(),
+            RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .expect("terminal success should produce phase 2 work");
+        run_phase2(
+            &broker,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            phase2_work,
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
+
+        let (child_status, _) = fetch_workflow_state(&pool, &child_id).await;
+        assert_eq!(child_status, "COMPLETED");
+        let parent_node_status: String = sqlx::query_scalar(
+            "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+        )
+        .bind(parent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent_node_status, "COMPLETED");
+        let (parent_status, _) = fetch_workflow_state(&pool, &parent_id).await;
+        assert_eq!(parent_status, "COMPLETED");
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_phase1_commit_is_durable_before_phase2_runs() {
@@ -2537,13 +3168,12 @@ mod tests {
         assert_eq!(workflow_status, "RUNNING");
         assert_eq!(workflow_result, None);
 
-        let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
-            broker.pool(),
+            &broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -2584,16 +3214,21 @@ mod tests {
         .await
         .expect("terminal success should produce phase 2 work");
 
-        let failed_phase2_pool = test_pool().await;
-        failed_phase2_pool.close().await;
+        // A broker on a database that does not exist: every checkout fails
+        // with a server refusal (3D000), which is not retryable.
+        let missing_database = (*pool.connect_options())
+            .clone()
+            .database(&format!("horsies_missing_{}", Uuid::new_v4().simple()));
+        let failed_phase2_broker = PostgresBroker::from_pool(
+            sqlx::postgres::PgPoolOptions::new().connect_lazy_with(missing_database),
+        );
 
-        let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
-            &failed_phase2_pool,
+            &failed_phase2_broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -2615,9 +3250,13 @@ mod tests {
         assert_eq!(workflow_result, None);
     }
 
+    /// Python's start of a workflow task: a database error in the start
+    /// gives no run (`core/worker/child_runner.py`, OWNERSHIP_UNCONFIRMED),
+    /// and the claim is released at once with the fenced release. Before, a
+    /// failed node statement was treated as informational and user code ran.
     #[tokio::test]
     #[serial]
-    async fn finalize_prestart_workflow_update_failure_is_nonfatal_and_runs_user_code() {
+    async fn a_failed_workflow_node_check_runs_no_user_code_and_releases_the_claim() {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
@@ -2636,30 +3275,16 @@ mod tests {
             )
             .await;
 
-            // C4: the workflow_task RUNNING update is purely informational
-            // (set_running already committed the CLAIMED->RUNNING flip durably,
-            // and completion tolerates an ENQUEUED workflow_task). A transient
-            // failure of it must NOT fail the task closed — user code runs and
-            // the task completes normally.
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
-                1,
-                "user code must still run when the informational workflow_task RUNNING update fails",
+                0,
+                "user code must not run when the workflow node check fails",
             );
-
             let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
-            assert_eq!(status, "COMPLETED");
+            assert_eq!(status, "PENDING", "the claim is released at once");
+            assert_eq!(result, None);
             assert_eq!(error_code, None);
-
-            let persisted: TaskResult<serde_json::Value> =
-                serde_json::from_str(result.as_deref().unwrap()).unwrap();
-            assert_eq!(
-                persisted.unwrap(),
-                serde_json::Value::String("counted".to_owned()),
-            );
-
-            let attempts = broker.get_task_attempts(task_id).await.unwrap();
-            assert_eq!(attempts.len(), 1);
+            assert!(broker.get_task_attempts(task_id).await.unwrap().is_empty());
         })
         .catch_unwind()
         .await;
@@ -2669,6 +3294,46 @@ mod tests {
         if let Err(panic) = result {
             resume_unwind(panic);
         }
+    }
+
+    /// Python `test_orphaned_workflow_task_repro.py::test_workflow_check_failed_disabled_leaves_orphan_claimed`:
+    /// a workflow task with no runnable node does not run; with orphan
+    /// self-heal off nothing is written and the row stays CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn an_unlinked_workflow_task_with_self_heal_off_runs_nothing_and_stays_claimed() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        let outcome = crate::worker::execution::confirm_ownership_and_set_running(
+            &broker,
+            task_id,
+            "worker-1",
+            1,
+            "localhost",
+            true,
+            test_claim_generation(),
+            false,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            crate::worker::execution::OwnershipOutcome::Aborted
+        ));
+        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        let (status, _, _) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "CLAIMED");
     }
 
     #[tokio::test]
@@ -3199,9 +3864,19 @@ mod tests {
 
     /// A worker on `broker` that retries a failed start at most once.
     fn start_test_worker(broker: PostgresBroker, config_url: String) -> Worker {
+        worker_with_config(broker, test_app_config(config_url))
+    }
+
+    fn worker_with_config(broker: PostgresBroker, app_config: AppConfig) -> Worker {
+        worker_of_one_idle_child(Arc::new(broker), app_config, WorkerConfig::default())
+    }
+
+    /// The app config of the start tests: no `claim_lease_ms`, one start
+    /// attempt.
+    fn test_app_config(config_url: String) -> AppConfig {
         use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
 
-        let app_config = AppConfig {
+        AppConfig {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
@@ -3210,12 +3885,15 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -3231,15 +3909,7 @@ mod tests {
             },
             schedule: None,
             resend_on_transient_err: false,
-        };
-        Worker::new(
-            Arc::new(broker),
-            Arc::new(TaskRegistry::new()),
-            Arc::new(WorkflowSpecRegistry::new()),
-            app_config,
-            WorkerConfig::default(),
-        )
-        .expect("worker")
+        }
     }
 
     /// One PENDING task on the default queue; a claim loop would take it.
@@ -3454,12 +4124,15 @@ mod tests {
             session_database_url: Some(session_url),
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
         })
         .await
         .expect("connect broker with a separate session pool");
@@ -3472,43 +4145,170 @@ mod tests {
             .expect("the database start uses only the session pool");
     }
 
-    /// C11: `run()` must fire the cancellation token on a fatal exit path, not
-    /// only via signals / `request_stop`. Otherwise the listener, claimer
-    /// heartbeat, reaper, workflow-recovery and worker-state loops keep running
-    /// after the worker gives up — advertising a dead worker as alive and holding
-    /// claim leases. The broker is built with a distinct session URL; the
-    /// listener has its own connection on it: closing only the main pool lets
-    /// the loop start (background loops spawn), then makes every claim fail
-    /// with `PoolClosed`, which is not retryable, so the loop breaks fatally at
-    /// the first claim.
+    /// The URL of database `database` on the server of `url`.
+    fn database_url_for(url: &str, database: &str) -> String {
+        let (address, query) = match url.split_once('?') {
+            Some((address, query)) => (address, Some(query)),
+            None => (url, None),
+        };
+        let (server, _) = address
+            .rsplit_once('/')
+            .expect("a test database URL names its database after the last slash");
+        match query {
+            Some(query) => format!("{server}/{database}?{query}"),
+            None => format!("{server}/{database}"),
+        }
+    }
+
+    /// `url` with `application_name` set, so a trigger can tell its sessions.
+    fn with_application_name(url: &str, name: &str) -> String {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{separator}application_name={name}")
+    }
+
+    /// A CLAIMED task of `worker_id` on the default queue, claimed now, whose
+    /// lease ends in ten seconds.
+    async fn insert_task_claimed_by(pool: &PgPool, worker_id: &str) -> Uuid {
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'start_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'CLAIMED', NOW(), NOW(), $2, NOW() + interval '10 seconds',
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NULL, FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(pool)
+        .await
+        .expect("insert a claimed task");
+        task_id
+    }
+
+    /// With `claim_lease_ms` not set, the claim of a PENDING task and the
+    /// claimer's renewal of a held claim both write the default lease. A
+    /// trigger logs every lease written on a CLAIMED row.
     #[tokio::test]
     #[serial]
-    async fn run_fires_cancel_on_fatal_claim_exit() {
-        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
-
-        let observer = test_pool().await;
-        clean(&observer).await;
-        let probe_task_id = Uuid::new_v4();
-        insert_claimed_task(&observer, &probe_task_id, "default", 0, 0, None).await;
-        sqlx::query(
-            "UPDATE horsies_tasks
-             SET status = 'PENDING', claimed = FALSE,
-                 claimed_by_worker_id = NULL, claimed_at = NULL
-             WHERE id = $1",
+    async fn claims_and_renewals_write_the_default_lease() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        sqlx::raw_sql(
+            "CREATE TABLE test_claim_lease_log (task_id uuid NOT NULL, lease interval NOT NULL);
+             CREATE FUNCTION test_log_claim_lease() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF NEW.status = 'CLAIMED' AND NEW.claim_expires_at IS NOT NULL THEN
+                     INSERT INTO test_claim_lease_log
+                     VALUES (NEW.id, NEW.claim_expires_at - now());
+                 END IF;
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_log_claim_lease AFTER UPDATE ON horsies_tasks
+                 FOR EACH ROW EXECUTE FUNCTION test_log_claim_lease();",
         )
-        .bind(probe_task_id)
-        .execute(&observer)
+        .execute(&database.pool)
         .await
-        .unwrap();
+        .expect("install the lease log");
+        // The worker writes its plain successes on the worker pool and
+        // claims on the wakes of its listener: a broker of a worker.
+        let worker_url = database_url_for(&database.config_url, &database.name);
+        let broker =
+            PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
+                .await
+                .expect("connect the broker of a worker");
+        let worker = start_test_worker(broker, worker_url);
+        let pending = insert_pending_task(&database.pool).await;
+        let held = insert_task_claimed_by(&database.pool, worker.worker_id()).await;
+        let cancel = worker.cancel_token();
+        let run = tokio::spawn(async move { worker.run().await });
 
-        // Distinct session URL (same DB, extra query param) so the session pool
-        // is separate from the main pool.
-        let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let sep = if main_url.contains('?') { '&' } else { '?' };
-        let session_url = format!("{main_url}{sep}application_name=c11_session");
-        let pg_config = PostgresConfig {
-            database_url: main_url,
-            session_database_url: Some(session_url),
+        let lease_seconds = |task_id: Uuid| {
+            let pool = database.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, f64>(
+                    "SELECT EXTRACT(EPOCH FROM lease)::float8 FROM test_claim_lease_log
+                     WHERE task_id = $1",
+                )
+                .bind(task_id)
+                .fetch_all(&pool)
+                .await
+                .expect("read the lease log")
+            }
+        };
+        let (claimed, renewed) = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let claimed = lease_seconds(pending).await;
+                let renewed = lease_seconds(held).await;
+                if !claimed.is_empty() && !renewed.is_empty() {
+                    break (claimed, renewed);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the worker claims the pending task and renews the held claim");
+        cancel.cancel();
+        let _stopped = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the worker stops after cancel")
+            .expect("run task join");
+
+        let default_seconds = f64::from(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS) / 1000.0;
+        for lease in claimed.iter().chain(renewed.iter()) {
+            assert!(
+                (default_seconds - 5.0..=default_seconds + 1.0).contains(lease),
+                "lease {lease}s is not the default {default_seconds}s"
+            );
+        }
+        database.drop().await;
+    }
+
+    /// The reaper's recovery statements run on the runtime pool and its
+    /// partition maintenance on the session pool. Each pool has its own
+    /// `application_name`; statement triggers log which session wrote.
+    #[tokio::test]
+    #[serial]
+    async fn the_reaper_recovers_on_the_runtime_pool_and_maintains_on_the_session_pool() {
+        use crate::core::config::PostgresConfig;
+        use crate::core::history::names::LEAF_CATALOG;
+
+        let database = FreshDatabase::create().await;
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE test_pool_writes (relation_name text NOT NULL, application_name text NOT NULL);
+             CREATE FUNCTION test_record_pool_write() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 INSERT INTO test_pool_writes
+                 VALUES (TG_TABLE_NAME, current_setting('application_name'));
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_task_writes AFTER UPDATE ON horsies_tasks
+                 FOR EACH STATEMENT EXECUTE FUNCTION test_record_pool_write();
+             CREATE TRIGGER test_catalog_writes AFTER INSERT ON {LEAF_CATALOG}
+                 FOR EACH STATEMENT EXECUTE FUNCTION test_record_pool_write();"
+        ))
+        .execute(&database.pool)
+        .await
+        .expect("install the pool write log");
+        let database_url = database_url_for(&database.config_url, &database.name);
+        let broker = PostgresBroker::connect_with(&PostgresConfig {
+            database_url: with_application_name(&database_url, "reaper_runtime"),
+            session_database_url: Some(with_application_name(&database_url, "reaper_session")),
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
@@ -3518,315 +4318,67 @@ mod tests {
             pool_timeout: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
-        };
-        let broker = Arc::new(
-            PostgresBroker::connect_with(&pg_config)
-                .await
-                .expect("connect broker with separate session pool"),
-        );
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
+        })
+        .await
+        .expect("connect a broker with two pools");
+        let mut app_config = test_app_config(database.config_url.clone());
+        app_config.recovery.auto_requeue_stale_claimed = true;
+        let worker = worker_with_config(broker, app_config);
+        let health = new_reaper_health();
 
-        let app_config = AppConfig {
-            payload: crate::core::config::payload::PayloadPolicy::default(),
-            queue_mode: QueueMode::Default,
-            custom_queues: None,
-            broker: pg_config,
-            cluster_wide_cap: None,
-            prefetch_buffer: 0,
-            claim_lease_ms: None,
-            max_claim_renew_age_ms: 180_000,
-            recovery: RecoveryConfig::default(),
-            retention: crate::core::RetentionConfig::default(),
-            // Exhaust the claim retry budget quickly so the fatal break fires fast.
-            resilience: WorkerResilienceConfig {
-                db_retry_initial_ms: 100,
-                db_retry_max_ms: 100,
-                db_retry_max_attempts: 1,
-                notify_poll_interval_ms: 100,
-            },
-            worker_profiles: std::collections::BTreeMap::new(),
-            schedule: None,
-            resend_on_transient_err: false,
-        };
-
-        let worker = Worker::new(
-            Arc::clone(&broker),
-            Arc::new(TaskRegistry::new()),
-            Arc::new(WorkflowSpecRegistry::new()),
-            app_config,
-            WorkerConfig::default(),
-        )
-        .expect("worker");
-        let cancel = worker.cancel_token();
-        assert!(!cancel.is_cancelled(), "token must start uncancelled");
-
-        let handle = tokio::spawn(async move { worker.run().await });
-
-        // Let exact-schema authorization, startup coverage, and the background
-        // loops complete before injecting the fatal claim failure. Closing the
-        // pool earlier would now exercise P7's startup refusal path instead.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let processed: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (
-                         SELECT 1 FROM horsies_task_history WHERE task_id = $1
-                     )",
-                )
-                .bind(probe_task_id)
-                .fetch_one(&observer)
-                .await
-                .unwrap();
-                if processed {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        let reaper = worker.spawn_reaper_loop(Arc::clone(&health));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while health.read().await.partition_coverage.is_none() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .expect("worker must reach its runtime loops");
-
-        // Close only the main pool; the listener has its own connection.
-        broker.pool().close().await;
-
-        let result = tokio::time::timeout(Duration::from_secs(20), handle)
+        .expect("the reaper completes a pass with partition maintenance");
+        worker.cancel_token().cancel();
+        tokio::time::timeout(Duration::from_secs(30), reaper)
             .await
-            .expect("run() must exit after the fatal claim error, not hang")
-            .expect("run task join");
-        assert!(
-            result.is_err(),
-            "run() must return the fatal claim error so the process exits \
-             non-zero for a supervisor restart: {result:?}",
-        );
+            .expect("the reaper stops after cancel")
+            .expect("reaper join");
 
-        assert!(
-            cancel.is_cancelled(),
-            "run() must cancel the token on a fatal exit so background loops stop (C11)",
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn released_capacity_from_dispatch_wakes_claims_for_success_and_resolution_failure() {
-        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
-
-        let broker = test_broker().await;
-        let pool = broker.pool().clone();
-        clean(&pool).await;
-        let app_config = AppConfig {
-            payload: crate::core::config::payload::PayloadPolicy::default(),
-            queue_mode: QueueMode::Default,
-            custom_queues: None,
-            broker: PostgresConfig {
-                database_url: crate::broker::terminalization_matrix::migrated_database_url().await,
-                session_database_url: None,
-                pgbouncer_transaction_mode: false,
-                pool_pre_ping: true,
-                worker_pool_pre_ping: false,
-                pool_size: 30,
-                max_overflow: 30,
-                retain_rerun_input_default: false,
-                pool_timeout: 30,
-                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
-                echo: false,
-            },
-            cluster_wide_cap: None,
-            prefetch_buffer: 0,
-            claim_lease_ms: Some(60_000),
-            max_claim_renew_age_ms: 180_000,
-            recovery: RecoveryConfig::default(),
-            retention: crate::core::RetentionConfig::default(),
-            resilience: WorkerResilienceConfig {
-                notify_poll_interval_ms: 60_000,
-                ..WorkerResilienceConfig::default()
-            },
-            worker_profiles: std::collections::BTreeMap::new(),
-            schedule: None,
-            resend_on_transient_err: false,
-        };
-        for registered in [true, false] {
-            let mut registry = TaskRegistry::new();
-            if registered {
-                registry
-                    .register("finalize_test", async_task_fn!(succeed, ()))
-                    .unwrap();
-            }
-            let worker = Worker::new(
-                broker.clone(),
-                Arc::new(registry),
-                Arc::new(WorkflowSpecRegistry::new()),
-                app_config.clone(),
-                WorkerConfig {
-                    concurrency: 1,
-                    ..WorkerConfig::default()
-                },
-            )
-            .unwrap();
-            let id = Uuid::new_v4();
-            insert_claimed_task(&pool, &id, "default", 0, 0, None).await;
-            sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
-                .bind(id)
-                .bind(worker.worker_id())
-                .execute(&pool)
+        let writes: Vec<(String, String)> =
+            sqlx::query_as("SELECT relation_name, application_name FROM test_pool_writes")
+                .fetch_all(&database.pool)
                 .await
-                .unwrap();
-            let claim_wakes = no_claim_wakes();
-            worker.dispatch_task(claimed_task_row(&id, "default", None));
-            assert_eq!(worker.semaphore.available_permits(), 0);
-            let wake = tokio::time::timeout(
-                Duration::from_secs(5),
-                wait_for_claim_wake(
-                    &worker.cancel,
-                    &worker.capacity_released,
-                    &claim_wakes,
-                    Duration::from_secs(60),
-                ),
-            )
-            .await
-            .expect("dispatch must wake claims without a database notification or poll");
-            assert_eq!(wake, ClaimWake::CapacityReleased);
-            assert_eq!(worker.semaphore.available_permits(), 1);
-            worker.tracker.close();
-            worker.tracker.wait().await;
-            let status: String =
-                sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
-                    .bind(id)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(
-                status,
-                match registered {
-                    true => "COMPLETED",
-                    false => "FAILED",
-                }
-            );
-        }
-    }
-
-    /// C17: in soft-cap mode, buffered-dispatch must not start more of a capped
-    /// queue's tasks than its `max_concurrency`. The claim function counts only
-    /// RUNNING against the cap, so a worker can accumulate more CLAIMED tasks of
-    /// a capped queue than its cap while none run; dispatching all of them would
-    /// push queue RUNNING past the cap by up to `prefetch_buffer`.
-    #[tokio::test]
-    #[serial]
-    async fn buffered_dispatch_respects_queue_cap_in_soft_mode() {
-        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
-
-        let _initialized = test_pool().await;
-        let broker = test_broker().await;
-        let pool = broker.pool().clone();
-        clean(&pool).await;
-
-        let mut registry = TaskRegistry::new();
-        registry
-            .register("block_a_while", async_task_fn!(block_a_while, ()))
-            .expect("register");
-
-        let app_config = AppConfig {
-            payload: crate::core::config::payload::PayloadPolicy::default(),
-            queue_mode: QueueMode::Default,
-            custom_queues: None,
-            broker: PostgresConfig {
-                database_url: crate::broker::terminalization_matrix::migrated_database_url().await,
-                session_database_url: None,
-                pgbouncer_transaction_mode: false,
-                pool_pre_ping: true,
-                worker_pool_pre_ping: false,
-                pool_size: 30,
-                max_overflow: 30,
-                retain_rerun_input_default: false,
-                pool_timeout: 30,
-                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
-                echo: false,
-            },
-            cluster_wide_cap: None,
-            prefetch_buffer: 4, // soft-cap mode
-            claim_lease_ms: Some(60_000),
-            max_claim_renew_age_ms: 180_000,
-            recovery: RecoveryConfig::default(),
-            retention: crate::core::RetentionConfig::default(),
-            resilience: WorkerResilienceConfig::default(),
-            worker_profiles: std::collections::BTreeMap::new(),
-            schedule: None,
-            resend_on_transient_err: false,
+                .expect("read the pool write log");
+        let sessions_of = |relation: &str| -> Vec<&str> {
+            writes
+                .iter()
+                .filter(|(name, _)| name == relation)
+                .map(|(_, application)| application.as_str())
+                .collect()
         };
-
-        let mut queue_max_concurrency = std::collections::HashMap::new();
-        queue_max_concurrency.insert("c17q".to_owned(), 2u32);
-        let worker_config = WorkerConfig {
-            queues: vec!["c17q".to_owned()],
-            concurrency: 10, // ample permits — the cap, not permits, must bind
-            queue_max_concurrency,
-            ..WorkerConfig::default()
-        };
-
-        let worker = Worker::new(
-            Arc::clone(&broker),
-            Arc::new(registry),
-            Arc::new(WorkflowSpecRegistry::new()),
-            app_config,
-            worker_config,
-        )
-        .expect("worker");
-
-        // Seed 6 buffered CLAIMED tasks of the capped queue owned by this worker,
-        // none RUNNING — the pathological state the claim function permits.
-        for _ in 0..6 {
-            let id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO horsies_tasks (
-                        id, task_name, queue_name, priority, input, task_options, execution,
-                        retention_class_key, sent_at, created_at,
-                        command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-                        status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
-                        started_at, finalizing_at, finalizing_by_worker_id,
-                        worker_pid, worker_hostname, worker_process_name,
-                        retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
-                        updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-                    ) VALUES (
-                        $1, 'block_a_while', 'c17q', 100, 'null', NULL, 'ISOLATED',
-                        'standard_30d', NOW(), NOW(),
-                        1, decode(repeat('00', 32), 'hex'), NULL,
-                        'CLAIMED', NOW(), NOW(), $2, NOW() + INTERVAL '60 seconds',
-                        NULL, NULL, NULL,
-                        NULL, NULL, NULL,
-                        0, 3, NULL, NULL, FALSE,
-                        NOW(), FALSE, NULL, NULL
-                    )",
-            )
-            .bind(id)
-            .bind(&worker.worker_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
-        worker
-            .claim_and_dispatch_all()
-            .await
-            .expect("claim_and_dispatch_all");
-
-        // Let the dispatched tasks transition CLAIMED -> RUNNING.
-        tokio::time::sleep(Duration::from_millis(800)).await;
-
-        let running: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_tasks WHERE queue_name = 'c17q' AND status = 'RUNNING'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let task_writers = sessions_of("horsies_tasks");
+        let catalog_writers = sessions_of(LEAF_CATALOG);
         assert!(
-            running <= 2,
-            "queue RUNNING ({running}) must not exceed max_concurrency (2) via buffered dispatch",
+            !task_writers.is_empty(),
+            "the requeue step updates horsies_tasks"
         );
-        assert_eq!(
-            running, 2,
-            "the cap's worth of buffered tasks must dispatch"
+        assert!(
+            task_writers.iter().all(|name| *name == "reaper_runtime"),
+            "{writes:?}"
         );
-
-        clean(&pool).await;
+        assert!(
+            !catalog_writers.is_empty(),
+            "partition maintenance creates leaves"
+        );
+        assert!(
+            catalog_writers.iter().all(|name| *name == "reaper_session"),
+            "{writes:?}"
+        );
+        drop(worker);
+        database.drop().await;
     }
 }
 
 #[cfg(test)]
 mod live_worker_tests;
+
+#[cfg(test)]
+mod start_tests;
