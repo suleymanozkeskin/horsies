@@ -117,7 +117,7 @@ async def test_resume_injects_real_dependency_results(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'CLAIMED', claimed = TRUE,
+            SET status = 'CLAIMED',
                 claimed_at = NOW(),
                 claimed_by_worker_id = 'w-resume-test',
                 claim_expires_at = NOW() + INTERVAL '60 seconds',
