@@ -9,7 +9,7 @@ write. Touches no database.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pytest
@@ -89,25 +89,26 @@ def test_the_command_holds_the_values_that_an_enqueue_stores() -> None:
         retention_class_key='standard_7d',
         retain_rerun_input=False,
         idempotency_key=None,
+        key_window=timedelta(days=1),
     ):
         case Ok(prepared):
             pass
         case Err(refused):
             raise AssertionError(f'the enqueue was refused: {refused}')
 
-    params = prepared.insert_params
+    row = prepared.row
     assert command == SendCommand(
-        task_name=params['task_name'],
-        queue_name=params['queue_name'],
-        priority=params['priority'],
-        stored_input=params['input'],
-        task_options=params['task_options'],
-        execution=Execution(params['execution']),
-        max_retries=params['max_retries'],
-        retention_class_key=params['retention_class_key'],
-        retain_rerun_input=params['retain_rerun_input'],
-        fingerprint_version=params['command_fingerprint_version'],
-        fingerprint=prepared.command_fingerprint,
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        priority=row.priority,
+        stored_input=row.stored_input,
+        task_options=row.task_options,
+        execution=row.execution,
+        max_retries=row.max_retries,
+        retention_class_key=row.retention_class_key,
+        retain_rerun_input=row.retain_rerun_input,
+        fingerprint_version=COMMAND_FINGERPRINT_VERSION,
+        fingerprint=row.command_fingerprint,
     )
     assert (command.execution, command.max_retries) == (Execution.SHARED_ASYNC, 4)
     assert command.fingerprint_version == COMMAND_FINGERPRINT_VERSION

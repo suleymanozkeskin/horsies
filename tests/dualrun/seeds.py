@@ -176,13 +176,13 @@ _INSERT_WORKFLOW_SQL: Final[LiteralString] = """
 
 _INSERT_NODE_SQL: Final[LiteralString] = """
     INSERT INTO horsies_workflow_tasks (
-        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+        downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
         dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type, min_success,
         task_options, max_retries, execution, good_until, retention_class_key, status, task_id,
         is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
         sub_workflow_summary, result, error, created_at, started_at, completed_at
     )
-    SELECT horsies_uuidv7(), %(workflow_id)s, 0, %(task_name)s, %(task_name)s, '{}', %(queue_name)s, 50,
+    SELECT 'NONE', horsies_uuidv7(), %(workflow_id)s, 0, %(task_name)s, %(task_name)s, '{}', %(queue_name)s, 50,
         ARRAY[]::integer[], NULL, NULL, FALSE, 'all', NULL,
         NULL, 0, %(execution)s, NULL, 'standard_30d', %(status)s::text, %(task_id)s,
         FALSE, NULL, NULL, NULL,

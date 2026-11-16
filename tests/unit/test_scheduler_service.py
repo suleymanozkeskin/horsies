@@ -2416,7 +2416,7 @@ class TestScheduleCommand:
             scheduler.app.config.payload,
             task_name='my_task',
             kind='kwargs',
-            encoded_len=len(_json_text({'value': 5})),
+            payload_text=_json_text({'value': 5}),
         )
 
     async def test_a_fire_sends_the_command_of_the_schedule(self) -> None:

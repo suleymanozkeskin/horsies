@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
@@ -29,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.dispatch_claim import DispatchClaim
+from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.utils.db import PooledStatements
 from tests.broker_resources_support import current_resources
 
@@ -114,13 +117,19 @@ def _probe(broker: PostgresBroker, **cfg_kwargs: Any) -> ClaimMixin:
             self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
             # No task is registered: every claimed row is dispatched.
             self._registered_classes = {}
+            self._queue_cap_hold = QueueCapHold(
+                start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
+            )
 
         def _claim_slot_count(self) -> int:
             # No slot pool: every configured slot counts.
             return cfg.processes
 
-        async def _dispatch_one(self, *args: Any, **kwargs: Any) -> None:
-            return None
+        async def _dispatch_one(
+            self, *args: Any, **kwargs: Any,
+        ) -> asyncio.Future[None]:
+            # A finalizer that does not end while the test runs.
+            return asyncio.get_running_loop().create_future()
 
     return _P()
 
@@ -309,3 +318,40 @@ async def test_cap_without_priorities_never_over_claims(
     got = {r[0]: r[1] for r in rows}
     assert got.get('a', 0) <= 3, got
     assert got.get('b', 0) <= 5, got
+
+
+@pytest.mark.asyncio
+async def test_each_dispatch_gets_the_claim_with_the_retry_facts_of_its_row(
+    clean_workflow_tables: None, broker: PostgresBroker, session: AsyncSession
+) -> None:
+    """The failed-attempt write decides its retry from these facts, with no read."""
+    task_id = await _seed(session, queue='q1', priority=100, age_secs=0)
+    options = '{"retry_policy": {"max_retries": 3}}'
+    await session.execute(
+        text(
+            'UPDATE horsies_tasks SET retry_count = 2, max_retries = 3, '
+            'task_options = :options WHERE id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id, 'options': options},
+    )
+    await session.commit()
+    probe = _probe(broker, queues=['q1'], processes=1, prefetch_buffer=0)
+    dispatch = AsyncMock()
+    probe._dispatch_one = dispatch  # type: ignore[method-assign]
+
+    await probe._claim_and_dispatch_all()
+
+    claimed_at = (
+        await session.execute(
+            text('SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+            {'id': task_id},
+        )
+    ).scalar_one()
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args is not None
+    assert dispatch.await_args.kwargs['claim'] == DispatchClaim(
+        claimed_at=claimed_at,
+        retry_count=2,
+        max_retries=3,
+        task_options=options,
+    )

@@ -7,7 +7,8 @@
 //!
 //! The Python tests reach the writes through the worker's finalize. The
 //! core's phase-1 retry is private to the worker; these ports call the
-//! writer and repeat the same command, as the retry does.
+//! writer and repeat the same command, as the retry does. The completion
+//! runs on a core pool; the claim pass still runs on sqlx.
 //! `test_a_second_statement_is_refused_by_the_server` tests a Python helper
 //! and is not ported (test map: NOT CORE).
 
@@ -17,16 +18,19 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
+use crate::broker::core_rows::StatementLog;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::terminalization::terminalize;
-use crate::core::config::payload::PayloadPolicy;
+use crate::broker::terminalization;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::worker::execution::{finalize_workflow_phase, FinalizeStage};
+use crate::db::StatementFailure;
+use crate::worker::execution::{finalize_workflow_phase, FinalizeStage, PhaseTwoForm};
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
@@ -37,8 +41,6 @@ fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
         task_id,
         fence,
         result_json: r#"{"ok": 1}"#.to_owned(),
-        notify_channel: CHANNEL.to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -59,10 +61,10 @@ async fn history_rows(pool: &PgPool, task_id: Uuid) -> i64 {
 
 fn assert_retryable(result: Result<Vec<TerminalizationOutcome>, BrokerError>) {
     match result {
-        Err(BrokerError::Database(error)) => {
-            assert!(is_retryable_sqlx_error(&error), "not retryable: {error}");
+        Err(error @ BrokerError::Statement(_)) => {
+            assert!(error.is_retryable(), "not retryable: {error}");
         }
-        other => panic!("expected a retryable database error, got {other:?}"),
+        other => panic!("expected a retryable statement failure, got {other:?}"),
     }
 }
 
@@ -80,10 +82,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
         matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
         "{first:?}"
     );
-    assert_eq!(
-        wakes.payloads(&pool).await,
-        vec![format!("capacity:{task_id}")]
-    );
+    assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
     let replay = terminalize(&pool, &command).await.expect("replay");
 
@@ -140,20 +139,25 @@ async fn a_lost_claim_generation_writes_nothing() {
 }
 
 /// Python `test_a_lost_reply_is_retried_and_classified_on_the_replay`: the
-/// completion commits and its reply never reaches the caller. The error is
-/// retryable, and the retry is `AlreadyApplied`.
+/// completion commits and its reply never reaches the caller. The failure is
+/// `OutcomeUnknown` and retryable, and the retry is `AlreadyApplied`.
 #[tokio::test]
 #[serial]
 async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
     let pool = pool().await;
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    // Prepare the statement on the proxied connection, so the completion is
-    // one request with one reply.
-    let warm_up = terminalize(&proxied, &complete(Uuid::new_v4(), owned_claim()))
-        .await
-        .expect("warm up");
+    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    // Open the connection, run the pool's first-use check and prepare the
+    // statement on it, so the completion is one request with one reply. The
+    // connection is back in the pool when the call returns.
+    let warm_up = terminalization::terminalize(
+        &proxied,
+        StatementLog::Off,
+        &complete(Uuid::new_v4(), owned_claim()),
+    )
+    .await
+    .expect("warm up");
     assert!(
         matches!(
             warm_up.as_slice(),
@@ -161,14 +165,22 @@ async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
         ),
         "{warm_up:?}"
     );
-    wait_until_idle(&proxied).await;
     let task_id = seed_task(&pool, &running_in_queue()).await;
     let command = complete(task_id, owned_claim());
 
     proxy.drop_next_reply();
-    let first = terminalize(&proxied, &command).await;
+    let first = terminalization::terminalize(&proxied, StatementLog::Off, &command).await;
 
     assert!(proxy.reply_was_dropped(), "the proxy relayed the reply");
+    assert!(
+        matches!(
+            first,
+            Err(BrokerError::Statement(
+                StatementFailure::OutcomeUnknown { .. }
+            ))
+        ),
+        "{first:?}"
+    );
     assert_retryable(first);
     // The premise of the replay: the statement committed.
     assert_eq!(live_row(&pool, task_id).await, None);
@@ -186,44 +198,53 @@ async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
     );
     assert_eq!(history_rows(&pool, task_id).await, 1);
     assert_eq!(archived_attempts(&pool, task_id).await.len(), 1);
-    proxied.close().await;
+    proxied.close();
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
-/// Python `test_a_dead_connection_fails_the_completion_and_the_retry_applies`:
-/// with no ping at checkout, the dead connection shows at the completion,
-/// which never reached the server; the retry runs on a new connection.
+/// Python `test_a_dead_connection_fails_the_completion_and_the_retry_applies`,
+/// on a core pool with no idle ping. The pool replaces a pooled connection
+/// that its driver already saw closed, at checkout; a connection that it
+/// sees closed only at the send fails the completion before the server got
+/// it. Either way the completion applies once: the first call applies, or it
+/// fails as retryable with nothing written and the retry applies.
 #[tokio::test]
 #[serial]
 async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
     let pool = pool().await;
-    let unpinged = unpinged_single_connection_pool(database_options(&pool)).await;
-    let pid = pooled_backend_pid(&unpinged).await;
+    let unpinged = unpinged_single_connection_core_pool(&database_options(&pool));
+    let pid = core_pool_backend_pid(&unpinged).await;
     let task_id = seed_task(&pool, &running_in_queue()).await;
     let before = live_row(&pool, task_id).await;
     let command = complete(task_id, owned_claim());
     terminate_backend(&pool, pid).await;
 
-    let first = terminalize(&unpinged, &command).await;
+    let first = terminalization::terminalize(&unpinged, StatementLog::Off, &command).await;
 
-    assert_retryable(first);
-    assert_eq!(live_row(&pool, task_id).await, before);
-    let retry = terminalize(&unpinged, &command)
-        .await
-        .expect("retry on a new connection");
+    let applied = match first {
+        Ok(outcomes) => outcomes,
+        failed @ Err(_) => {
+            assert_retryable(failed);
+            assert_eq!(live_row(&pool, task_id).await, before);
+            terminalization::terminalize(&unpinged, StatementLog::Off, &command)
+                .await
+                .expect("retry on a new connection")
+        }
+    };
     assert!(
         matches!(
-            retry.as_slice(),
+            applied.as_slice(),
             [TerminalizationOutcome::Applied {
                 kind: TerminalizationKind::CompleteFused,
                 ..
             }]
         ),
-        "{retry:?}"
+        "{applied:?}"
     );
+    assert_ne!(core_pool_backend_pid(&unpinged).await, pid);
     assert_eq!(live_row(&pool, task_id).await, None);
     assert_eq!(history_rows(&pool, task_id).await, 1);
-    unpinged.close().await;
+    unpinged.close();
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -238,15 +259,17 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pid = pooled_backend_pid(&unpinged).await;
     terminate_backend(&pool, pid).await;
 
+    // The wake of a plain task runs on the broker's sqlx pool, the unpinged
+    // pool with the dead connection.
+    let broker = PostgresBroker::from_pool(unpinged.clone());
     let result = finalize_workflow_phase(
-        &unpinged,
+        &broker,
         &WorkflowSpecRegistry::new(),
         Uuid::new_v4(),
-        true,
         QUEUE,
         false,
         false,
-        &PayloadPolicy::default(),
+        PhaseTwoForm::NotKnown,
         &RetentionConfig::default(),
     )
     .await;
@@ -256,7 +279,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
             assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
             assert!(error.retryable, "{error}");
         }
-        Ok(()) => panic!("the wake succeeded on a dead connection"),
+        Ok(_) => panic!("the wake succeeded on a dead connection"),
     }
     unpinged.close().await;
 }

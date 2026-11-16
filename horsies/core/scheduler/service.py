@@ -929,7 +929,7 @@ class Scheduler:
                 self.app.config.payload,
                 task_name=schedule.task_name,
                 kind='kwargs',
-                encoded_len=len(prepared.kwargs_json),
+                payload_text=prepared.kwargs_json,
             )
         return prepared
 

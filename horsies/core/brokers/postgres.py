@@ -14,8 +14,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
 )
-from sqlalchemy import create_engine, text, select
-from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
@@ -37,6 +36,23 @@ from horsies.core.brokers.resources import (
     decide_for_loop,
     split_closed_loops,
 )
+from horsies.core.brokers.enqueue_task import (
+    ENQUEUE_TASK_DRIVER_SQL,
+    ENQUEUE_TASK_SQL,
+    EnqueueKey,
+    EnqueueOutcome,
+    EnqueueRow,
+    EnqueueStart,
+    Keyed,
+    SendKind,
+    StartAfterDelay,
+    StartAt,
+    StartNow,
+    Unkeyed,
+    enqueue_result,
+    enqueue_task_params,
+    read_enqueue_outcome,
+)
 from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.class_coverage_reads import (
     read_class_coverage,
@@ -48,7 +64,6 @@ from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerEventLoopLimit,
-    BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
@@ -56,7 +71,6 @@ from horsies.core.brokers.result_types import (
     BrokerLoopRunnerFailed,
     BrokerOperationFailed,
     BrokerOperationFailedCode,
-    BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
     BrokerWaitInsideTask,
@@ -65,7 +79,6 @@ from horsies.core.brokers.result_types import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
@@ -122,7 +135,6 @@ from horsies.core.models.health import (
     parse_class_capacity,
     parse_slot_health,
 )
-from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.identity.fingerprint import (
     COMMAND_FINGERPRINT_VERSION,
     EnqueueCommandV1,
@@ -224,12 +236,6 @@ def _enqueue_failed(message: str, exc: BaseException) -> Err[BrokerEnqueueFailed
 _DRIVER_ERRORS: Final = (SQLAlchemyError, psycopg.Error, OSError)
 """What a statement can raise when the database or the network fails."""
 
-_ENQUEUE_WRITE_ERRORS: Final = (*_DRIVER_ERRORS, HistoryContractError)
-"""The enqueue write catches these, and a code defect crashes loud.
-
-``HistoryContractError`` is the reservation outcome that did not decode.
-"""
-
 
 @dataclass(frozen=True, slots=True)
 class SendCommand:
@@ -312,43 +318,10 @@ def _send_command(
 class _PreparedEnqueue:
     """The checked input of one enqueue. Only the database can refuse it now.
 
-    ``sent_at`` is the caller's call-site instant, which the row stores.
+    ``row.sent_at`` is the caller's call-site instant, which the row stores.
     """
 
-    insert_params: dict[str, Any]
-    command_fingerprint: bytes
-    sent_at: datetime
-    scoped_key_digest: bytes | None
-
-
-@dataclass(frozen=True, slots=True)
-class _StoredSend:
-    """The facts of an existing task row that the exact-id resend check reads."""
-
-    fingerprint_version: int | None
-    fingerprint: bytes | None
-    sent_at: datetime
-
-
-def _repeats_stored_send(
-    stored: _StoredSend,
-    *,
-    command_fingerprint: bytes,
-    sent_at: datetime,
-) -> bool:
-    """Whether a send with this fingerprint and ``sent_at`` repeats the send
-    that wrote ``stored``. Pure.
-
-    The version-1 command fingerprint and ``sent_at`` together cover every
-    field of ``enqueue_sha``. A row with no fingerprint is a task that the
-    workflow engine wrote, and no send repeats it.
-    """
-    return (
-        stored.fingerprint_version == COMMAND_FINGERPRINT_VERSION
-        and stored.fingerprint is not None
-        and bytes(stored.fingerprint) == command_fingerprint
-        and stored.sent_at == sent_at
-    )
+    row: EnqueueRow
 
 
 def _command_fingerprint(
@@ -562,6 +535,57 @@ def _parse_enqueue_input(
                 ),
                 exception=NoCause(),
             ))
+
+
+def _enqueue_start(
+    enqueued_at: datetime | None,
+    enqueue_delay_seconds: int | None,
+) -> EnqueueStart:
+    """When the row is due: at ``enqueued_at``, after the delay, or now.
+
+    ``_check_enqueue_timing`` refuses both together first; both here is a
+    caller defect (``AssertionError``). Pure.
+    """
+    match (enqueued_at, enqueue_delay_seconds):
+        case (None, None):
+            return StartNow()
+        case (datetime() as at, None):
+            return StartAt(at=at)
+        case (None, int() as delay_s):
+            return StartAfterDelay(delay_s=delay_s)
+        case _:
+            raise AssertionError(
+                'the timing check refuses enqueued_at with enqueue_delay_seconds',
+            )
+
+
+def _enqueue_key(
+    task_name: str,
+    idempotency_key: str | None,
+    key_window: timedelta,
+) -> Result[EnqueueKey, BrokerInvalidInput]:
+    """The key of a send: none, or the digest of the key scoped to the task
+    name with its reservation window in whole seconds. A key that the scope
+    refuses is ``INVALID_INPUT``. Pure."""
+    if idempotency_key is None:
+        return Ok(Unkeyed())
+    from horsies.core.history.identity.keys import (
+        IDEMPOTENCY_SCOPE_VERSION,
+        ScopedIdempotencyKey,
+    )
+
+    try:
+        digest = ScopedIdempotencyKey(task_name=task_name, key=idempotency_key).digest
+    except ValueError as exc:
+        return Err(BrokerInvalidInput(
+            message=f'idempotency key refused for {task_name}: {exc}',
+            exception=exc,
+        ))
+    return Ok(Keyed(
+        digest=digest,
+        scope_version=IDEMPOTENCY_SCOPE_VERSION,
+        window_s=int(key_window.total_seconds()),
+    ))
 
 
 def _loop_limit_err(
@@ -914,46 +938,6 @@ REQUEUE_STALE_CLAIMS_BATCH_SIZE: Final = 500
 REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS: Final = 200
 """Backstop against an unbounded pass; the remainder is requeued next pass."""
 
-# One constant statement for every fresh enqueue. The PostgreSQL dialect
-# Insert construct carries `inherit_cache = False` (SQLAlchemy 2.0.51), so
-# a per-call `pg_insert(...).values(...)` is rebuilt AND recompiled on
-# every send; a constant text statement compiles as a passthrough and its
-# constant query string lets the driver reuse its server-side prepared
-# statement. enqueued_at resolves in SQL: explicit value, else NOW() plus
-# the optional delay interval. The unit suite pins bind-name parity with
-# `_enqueue_insert_params`.
-ENQUEUE_INSERT_SQL = text("""
-    INSERT INTO horsies_tasks (
-        idempotency_key_digest, id, task_name, queue_name, priority,
-        input, status, sent_at, enqueued_at, good_until,
-        retry_count, max_retries, task_options, execution,
-        is_workflow_task, created_at, updated_at,
-        command_fingerprint_version, command_fingerprint,
-        retention_class_key, retain_rerun_input
-    ) VALUES (
-        :idempotency_key_digest, :id, :task_name, :queue_name, :priority,
-        :input, 'PENDING', :sent_at,
-        COALESCE(
-            :enqueued_at,
-            NOW() + COALESCE(:enqueue_delay, INTERVAL '0 seconds')
-        ),
-        :good_until,
-        0, :max_retries, :task_options, :execution,
-        FALSE, NOW(), NOW(),
-        :command_fingerprint_version, :command_fingerprint,
-        :retention_class_key, :retain_rerun_input
-    )
-    ON CONFLICT (id) DO NOTHING
-    RETURNING id
-""")
-
-ENQUEUE_INSERT_DRIVER_SQL: Final[str] = ENQUEUE_INSERT_SQL.compile(
-    dialect=PGDialect_psycopg(),
-).string
-"""``ENQUEUE_INSERT_SQL`` as the psycopg dialect sends it (``%(name)s``
-binds): the statement of a sync send on the caller's thread."""
-
-
 class SyncSendRoute(Enum):
     """Where a sync ``enqueue`` writes its row."""
 
@@ -961,14 +945,6 @@ class SyncSendRoute(Enum):
     """On the calling thread, through the broker's sync send engine."""
     LOOP_RUNNER = 'loop_runner'
     """On the sync runner's event loop, through ``enqueue_async``."""
-
-
-class _InsertOutcome(Enum):
-    """What the INSERT of an unkeyed send did."""
-
-    INSERTED = 'inserted'
-    ID_TAKEN = 'id_taken'
-    """A row with the task id exists: the payload is compared next."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1740,6 +1716,7 @@ class PostgresBroker:
         retention_class_key: str,
         retain_rerun_input: bool,
         idempotency_key: Optional[str],
+        key_window: timedelta,
     ) -> Result[_PreparedEnqueue, BrokerInvalidInput | BrokerInvalidTaskOptions]:
         """Check one enqueue's input and build its row. Touches no database.
 
@@ -1747,6 +1724,8 @@ class PostgresBroker:
         looks like a write that may have happened. A lone surrogate in
         ``task_name`` or ``queue_name`` raises ``UnicodeEncodeError`` from the
         fingerprint: those are programmer constants, so it crashes loud.
+        ``key_window`` is how long a key stays reserved after its task
+        finishes; only a keyed send uses it.
         """
         timing_r = _check_enqueue_timing(
             sent_at=sent_at,
@@ -1773,92 +1752,28 @@ class PostgresBroker:
             return command_r
         command = command_r.ok_value
 
-        scoped_key_digest: bytes | None = None
-        if idempotency_key is not None:
-            from horsies.core.history.identity.keys import ScopedIdempotencyKey
-
-            try:
-                scoped_key_digest = ScopedIdempotencyKey(
-                    task_name=task_name, key=idempotency_key
-                ).digest
-            except ValueError as exc:
-                return Err(BrokerInvalidInput(
-                    message=f'idempotency key refused for {task_name}: {exc}',
-                    exception=exc,
-                ))
+        key_r = _enqueue_key(task_name, idempotency_key, key_window)
+        if is_err(key_r):
+            return key_r
         return Ok(_PreparedEnqueue(
-            insert_params=PostgresBroker._enqueue_insert_params(
+            row=EnqueueRow(
                 task_id=task_id,
                 task_name=task_name,
                 queue_name=queue_name,
                 priority=priority,
                 stored_input=command.stored_input,
-                call_site_sent_at=sent_at,
-                enqueued_at=enqueued_at,
-                enqueue_delay_seconds=enqueue_delay_seconds,
-                good_until=good_until,
-                max_retries=command.max_retries,
                 task_options=task_options,
                 execution=command.execution,
-                scoped_key_digest=scoped_key_digest,
-                command_fingerprint=command.fingerprint,
                 retention_class_key=retention_class_key,
                 retain_rerun_input=retain_rerun_input,
+                max_retries=command.max_retries,
+                good_until=good_until,
+                sent_at=sent_at,
+                start=_enqueue_start(enqueued_at, enqueue_delay_seconds),
+                command_fingerprint=command.fingerprint,
+                key=key_r.ok_value,
             ),
-            command_fingerprint=command.fingerprint,
-            sent_at=sent_at,
-            scoped_key_digest=scoped_key_digest,
         ))
-
-    @staticmethod
-    def _enqueue_insert_params(
-        *,
-        task_id: str,
-        task_name: str,
-        queue_name: str,
-        priority: int,
-        stored_input: str,
-        call_site_sent_at: datetime,
-        enqueued_at: Optional[datetime],
-        enqueue_delay_seconds: Optional[int],
-        good_until: Optional[datetime],
-        max_retries: int,
-        task_options: Optional[str],
-        execution: Execution,
-        scoped_key_digest: Optional[bytes],
-        command_fingerprint: bytes,
-        retention_class_key: str,
-        retain_rerun_input: bool,
-    ) -> dict[str, Any]:
-        """Bind parameters for ``ENQUEUE_INSERT_SQL``, one entry per bind.
-
-        ``enqueued_at`` and ``enqueue_delay`` drive the statement's
-        COALESCE — explicit timestamp wins, else NOW() plus the delay, else
-        NOW().
-        """
-        return {
-            'idempotency_key_digest': scoped_key_digest,
-            'id': task_id,
-            'task_name': task_name,
-            'queue_name': queue_name,
-            'priority': priority,
-            'input': stored_input,
-            'sent_at': call_site_sent_at,
-            'enqueued_at': enqueued_at,
-            'enqueue_delay': (
-                timedelta(seconds=enqueue_delay_seconds)
-                if enqueue_delay_seconds is not None
-                else None
-            ),
-            'good_until': good_until,
-            'max_retries': max_retries,
-            'task_options': task_options,
-            'execution': execution.value,
-            'command_fingerprint_version': COMMAND_FINGERPRINT_VERSION,
-            'command_fingerprint': command_fingerprint,
-            'retention_class_key': retention_class_key,
-            'retain_rerun_input': retain_rerun_input,
-        }
 
     def prepare_send_command(
         self,
@@ -1897,6 +1812,7 @@ class PostgresBroker:
         *,
         task_id: str,
         enqueue_sha: str,
+        send_kind: SendKind,
         args_json: str | None = None,
         kwargs_json: str | None = None,
         priority: int = 100,
@@ -1911,12 +1827,15 @@ class PostgresBroker:
     ) -> Result[str, BrokerEnqueueError]:
         """Write one PENDING task row, or answer the send that wrote it.
 
-        The row stores ``kwargs_json`` as its ``input`` (``{}`` when there
-        are none), the version-1 command fingerprint of the send and
-        ``sent_at``, the call time of the send. A send that repeats a task id
-        is the same send only when the stored fingerprint and ``sent_at``
-        are equal; a resend passes the ``sent_at`` of the first send.
-        ``enqueue_sha`` is not stored and not compared.
+        One ``horsies_enqueue_task`` statement in autocommit. The row stores
+        ``kwargs_json`` as its ``input`` (``{}`` when there are none), the
+        version-1 command fingerprint of the send and ``sent_at``, the call
+        time of the send. A send that repeats a task id is the same send only
+        when the stored fingerprint and ``sent_at`` are equal; a resend
+        passes the ``sent_at`` of the first send. ``send_kind`` is
+        ``SendKind.REPEAT`` for a send retry: a task that finished then
+        answers with its id and does not run again. ``enqueue_sha`` is not
+        stored and not compared.
         """
         match await self.select_resources():
             case Err(loop_limit):
@@ -1948,6 +1867,7 @@ class PostgresBroker:
             retention_class_key=resolved_retention_class_key,
             retain_rerun_input=retain_rerun_input,
             idempotency_key=idempotency_key,
+            key_window=self.idempotency_reservation_window,
         )
         if is_err(prepared_r):
             return prepared_r
@@ -1965,294 +1885,25 @@ class PostgresBroker:
             )
 
         try:
-            if prepared.scoped_key_digest is not None:
-                return await self._insert_keyed_enqueue(
-                    resources,
-                    task_id=task_id,
-                    task_name=task_name,
-                    key_digest=prepared.scoped_key_digest,
-                    command_fingerprint=prepared.command_fingerprint,
-                    sent_at=prepared.sent_at,
-                    insert_params=prepared.insert_params,
+            async with resources.engine.connect() as conn:
+                autocommit_conn = await conn.execution_options(
+                    isolation_level='AUTOCOMMIT',
                 )
-            return await self._insert_unkeyed_enqueue(
-                resources,
-                task_id=task_id,
-                task_name=task_name,
-                command_fingerprint=prepared.command_fingerprint,
-                sent_at=prepared.sent_at,
-                insert_params=prepared.insert_params,
-            )
-        except _ENQUEUE_WRITE_ERRORS as exc:
+                result = await autocommit_conn.execute(
+                    ENQUEUE_TASK_SQL,
+                    enqueue_task_params(prepared.row, send_kind),
+                )
+                rows = result.fetchall()
+        except _DRIVER_ERRORS as exc:
             return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
                 exc,
             )
-
-    async def _insert_unkeyed_enqueue(
-        self,
-        resources: BrokerResources,
-        *,
-        task_id: str,
-        task_name: str,
-        command_fingerprint: bytes,
-        sent_at: datetime,
-        insert_params: dict[str, Any],
-    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
-        """Insert one row, then verify the payload on a task id conflict.
-
-        Unkeyed enqueue is one atomic INSERT; autocommit skips the
-        BEGIN/COMMIT round trips a session transaction pays. The
-        connection-level isolation override is reset when the connection
-        returns to the pool.
-        """
-        async with resources.engine.connect() as conn:
-            autocommit_conn = await conn.execution_options(
-                isolation_level='AUTOCOMMIT',
-            )
-            result = await autocommit_conn.execute(
-                ENQUEUE_INSERT_SQL, insert_params
-            )
-            row = result.fetchone()
-
-        if row is not None:
-            # Row inserted — fresh enqueue succeeded.
-            return Ok(task_id)
-
-        # Conflict: task_id already exists. Compare the stored send.
-        return await self._verify_enqueue_conflict(
-            resources,
+        return enqueue_result(
+            read_enqueue_outcome(rows),
             task_id=task_id,
             task_name=task_name,
-            command_fingerprint=command_fingerprint,
-            sent_at=sent_at,
         )
-
-    async def _insert_keyed_enqueue(
-        self,
-        resources: BrokerResources,
-        *,
-        task_id: str,
-        task_name: str,
-        key_digest: bytes,
-        command_fingerprint: bytes,
-        sent_at: datetime,
-        insert_params: dict[str, Any],
-    ) -> Result[str, BrokerEnqueueError]:
-        """Claim the key and insert in ONE transaction.
-
-        The claim uses the command fingerprint that the row stores, and a
-        replayed key returns the committed request's id: the same result
-        shape as a fresh enqueue, no distinguishability flag.
-        """
-        from horsies.core.history.identity.keys import IDEMPOTENCY_SCOPE_VERSION
-        from horsies.core.history.identity.reservations import (
-            ReservationApplied,
-            ReservationConflict,
-            ReservationReplay,
-            claim_key_reservation,
-        )
-
-        async with resources.session_factory() as session:
-            claim = await claim_key_reservation(
-                await session.connection(),
-                key_digest=key_digest,
-                key_scope_version=IDEMPOTENCY_SCOPE_VERSION,
-                reservation_window_seconds=int(
-                    self.idempotency_reservation_window.total_seconds()
-                ),
-                fingerprint_version=1,
-                fingerprint=command_fingerprint,
-                task_id=task_id,
-            )
-            match claim:
-                case ReservationReplay(task_id=existing):
-                    await session.rollback()
-                    return Ok(existing)
-                case ReservationConflict(task_id=owner):
-                    await session.rollback()
-                    return Err(
-                        BrokerIdempotencyKeyConflict(
-                            message=(
-                                f'idempotency key for {task_name} '
-                                f'is reserved by task {owner} '
-                                'with a different command'
-                            ),
-                            owner_task_id=owner,
-                        )
-                    )
-                case ReservationApplied():
-                    pass
-            result = await session.execute(ENQUEUE_INSERT_SQL, insert_params)
-            row = result.fetchone()
-            if row is None:
-                return await self._bind_key_after_task_id_conflict(
-                    session,
-                    task_id=task_id,
-                    task_name=task_name,
-                    key_digest=key_digest,
-                    command_fingerprint=command_fingerprint,
-                    sent_at=sent_at,
-                )
-            await session.commit()
-        return Ok(task_id)
-
-    async def _bind_key_after_task_id_conflict(
-        self,
-        session: AsyncSession,
-        *,
-        task_id: str,
-        task_name: str,
-        key_digest: bytes,
-        command_fingerprint: bytes,
-        sent_at: datetime,
-    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
-        """Bind a claimed key to an exact existing live task atomically.
-
-        The reservation claim already ran in ``session``. Locking the task row
-        orders adoption against terminalization, which deletes that row while
-        holding the same row lock. A successful commit therefore cannot leave
-        a live reservation whose task lacks the matching digest.
-        """
-        existing = (
-            await session.execute(
-                select(
-                    TaskModel.idempotency_key_digest,
-                    TaskModel.command_fingerprint_version,
-                    TaskModel.command_fingerprint,
-                    TaskModel.sent_at,
-                )
-                .where(TaskModel.id == task_id)
-                .with_for_update()
-            )
-        ).one_or_none()
-        if existing is None:
-            await session.rollback()
-            return Err(
-                BrokerEnqueueFailed(
-                    message=(
-                        f'task_id {task_id} conflict detected but row disappeared '
-                        f'before key binding for {task_name}'
-                    ),
-                    retryable=False,
-                    exception=NoCause(),
-                )
-            )
-        stored = _StoredSend(
-            fingerprint_version=existing.command_fingerprint_version,
-            fingerprint=existing.command_fingerprint,
-            sent_at=existing.sent_at,
-        )
-        if not _repeats_stored_send(
-            stored, command_fingerprint=command_fingerprint, sent_at=sent_at,
-        ):
-            await session.rollback()
-            return Err(
-                BrokerPayloadMismatch(
-                    message=(
-                        f'task_id {task_id} already exists with different payload '
-                        f'for task {task_name}'
-                    ),
-                )
-            )
-
-        bound_digest = existing.idempotency_key_digest
-        if bound_digest is not None and bytes(bound_digest) != key_digest:
-            await session.rollback()
-            return Err(
-                BrokerPayloadMismatch(
-                    message=(
-                        f'task_id {task_id} for {task_name} is already bound '
-                        'to a different idempotency key'
-                    ),
-                )
-            )
-        if bound_digest is None:
-            await session.execute(
-                text(
-                    'UPDATE horsies_tasks '
-                    'SET idempotency_key_digest = :key_digest '
-                    'WHERE id = CAST(:task_id AS uuid)'
-                ),
-                {'key_digest': key_digest, 'task_id': task_id},
-            )
-        await session.commit()
-        return Ok(task_id)
-
-    async def _verify_enqueue_conflict(
-        self,
-        resources: BrokerResources,
-        *,
-        task_id: str,
-        task_name: str,
-        command_fingerprint: bytes,
-        sent_at: datetime,
-    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
-        """Verify that the row with a conflicting task_id holds this send.
-
-        Called when INSERT ... ON CONFLICT DO NOTHING returns no row. The
-        exact-id resend check compares the stored command fingerprint and
-        ``sent_at`` (``_repeats_stored_send``).
-        """
-        try:
-            async with resources.session_factory() as session:
-                row = (
-                    await session.execute(
-                        select(
-                            TaskModel.command_fingerprint_version,
-                            TaskModel.command_fingerprint,
-                            TaskModel.sent_at,
-                        ).where(TaskModel.id == task_id),
-                    )
-                ).fetchone()
-        except _DRIVER_ERRORS as exc:
-            # SELECT failed — task exists (conflict proves it) but we cannot
-            # confirm payload identity. The driver classification of the
-            # cause decides retryable, as at every other driver site; a
-            # retry is safe because the broker returns the existing task for
-            # a duplicate.
-            return _enqueue_failed(
-                f'task_id {task_id} conflict detected but verification '
-                f'query failed for {task_name}: {exc}',
-                exc,
-            )
-
-        if row is None:
-            # The insert observed a conflict, but the row disappeared before
-            # the compare. Without the stored send, this cannot be proven
-            # idempotent.
-            return Err(
-                BrokerEnqueueFailed(
-                    message=(
-                        f'task_id {task_id} conflict detected but row disappeared '
-                        f'before verification for {task_name}; cannot verify payload identity'
-                    ),
-                    retryable=False,
-                    exception=NoCause(),
-                )
-            )
-
-        stored = _StoredSend(
-            fingerprint_version=row.command_fingerprint_version,
-            fingerprint=row.command_fingerprint,
-            sent_at=row.sent_at,
-        )
-        if _repeats_stored_send(
-            stored, command_fingerprint=command_fingerprint, sent_at=sent_at,
-        ):
-            # Idempotent success — the same send is already enqueued.
-            return Ok(task_id)
-
-        # Another command or another sent_at with the same task_id.
-        return Err(
-            BrokerPayloadMismatch(
-                message=(
-                    f'task_id {task_id} already exists with different payload '
-                    f'for {task_name} (command fingerprint or sent_at differs)'
-                ),
-            )
-        )
-
 
     def _build_raw_result_record(
         self,
@@ -3626,8 +3277,8 @@ class PostgresBroker:
 
         ``CALLER_THREAD`` for an unkeyed send of a process that runs no task
         bodies, once this broker's schema is initialized. A send with an
-        idempotency key takes a key reservation in a transaction, and the
-        first send may run the schema setup: both stay on the loop runner.
+        idempotency key, and a send before the schema setup (which the first
+        send may run), stay on the loop runner.
         Task code in a worker child sends through the child's
         ``task_send_pool``, which the worker profile counts exactly, so it
         stays on the loop runner too.
@@ -3661,20 +3312,20 @@ class PostgresBroker:
             self._sync_send_engine = _SyncSendEngineOpen(engine)
             return engine
 
-    def _insert_on_caller_thread(self, insert_params: dict[str, Any]) -> _InsertOutcome:
-        """Run the unkeyed enqueue INSERT on this thread, one statement in
+    def _enqueue_task_on_caller_thread(
+        self,
+        row: EnqueueRow,
+        send_kind: SendKind,
+    ) -> EnqueueOutcome:
+        """Run ``horsies_enqueue_task`` on this thread, one statement in
         autocommit. Raises what the driver and SQLAlchemy raise: the caller
         classifies it, as on the async path."""
         engine = self._sync_send_engine_open()
         with engine.connect() as connection:
-            row = connection.exec_driver_sql(
-                ENQUEUE_INSERT_DRIVER_SQL, insert_params,
-            ).fetchone()
-        match row:
-            case None:
-                return _InsertOutcome.ID_TAKEN
-            case _:
-                return _InsertOutcome.INSERTED
+            rows = connection.exec_driver_sql(
+                ENQUEUE_TASK_DRIVER_SQL, enqueue_task_params(row, send_kind),
+            ).fetchall()
+        return read_enqueue_outcome(rows)
 
     def _enqueue_on_caller_thread(
         self,
@@ -3682,6 +3333,7 @@ class PostgresBroker:
         queue_name: str,
         *,
         task_id: str,
+        send_kind: SendKind,
         args_json: str | None,
         kwargs_json: str | None,
         priority: int,
@@ -3694,9 +3346,7 @@ class PostgresBroker:
         retain_rerun_input: Optional[bool],
     ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
         """The unkeyed path of ``enqueue_async``, on the calling thread: the
-        same row, the same statement and the same error classification. A
-        task id that is taken is compared on the loop runner
-        (``_verify_enqueue_conflict``)."""
+        same row, the same statement and the same error classification."""
         resolved_retention_class_key = resolve_retention_class_key(
             retention_class_key
         )
@@ -3717,61 +3367,20 @@ class PostgresBroker:
             retention_class_key=resolved_retention_class_key,
             retain_rerun_input=retain_rerun_input,
             idempotency_key=None,
+            key_window=self.idempotency_reservation_window,
         )
         if is_err(prepared_r):
             return prepared_r
         prepared = prepared_r.ok_value
-        assert prepared.scoped_key_digest is None, 'an unkeyed send has no key'
+        assert isinstance(prepared.row.key, Unkeyed), 'an unkeyed send has no key'
         try:
-            outcome = self._insert_on_caller_thread(prepared.insert_params)
-        except _ENQUEUE_WRITE_ERRORS as exc:
+            outcome = self._enqueue_task_on_caller_thread(prepared.row, send_kind)
+        except _DRIVER_ERRORS as exc:
             return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
                 exc,
             )
-        match outcome:
-            case _InsertOutcome.INSERTED:
-                return Ok(task_id)
-            case _InsertOutcome.ID_TAKEN:
-                pass
-        try:
-            return self.run_sync(
-                self._verify_taken_task_id,
-                task_id,
-                task_name,
-                prepared.command_fingerprint,
-                prepared.sent_at,
-            )
-        except LoopRunnerError as exc:
-            return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
-
-    async def _verify_taken_task_id(
-        self,
-        task_id: str,
-        task_name: str,
-        command_fingerprint: bytes,
-        sent_at: datetime,
-    ) -> Result[str, BrokerEnqueueError]:
-        """``_verify_enqueue_conflict`` on this loop's resource set, for a
-        sync send whose INSERT found the task id taken."""
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('enqueue', loop_limit)
-            case Ok(resources):
-                pass
-        try:
-            return await self._verify_enqueue_conflict(
-                resources,
-                task_id=task_id,
-                task_name=task_name,
-                command_fingerprint=command_fingerprint,
-                sent_at=sent_at,
-            )
-        except _ENQUEUE_WRITE_ERRORS as exc:
-            return _enqueue_failed(
-                f'Failed to enqueue task {task_name}: {exc}',
-                exc,
-            )
+        return enqueue_result(outcome, task_id=task_id, task_name=task_name)
 
     def enqueue(
         self,
@@ -3780,6 +3389,7 @@ class PostgresBroker:
         *,
         task_id: str,
         enqueue_sha: str,
+        send_kind: SendKind,
         args_json: str | None = None,
         kwargs_json: str | None = None,
         priority: int = 100,
@@ -3809,6 +3419,7 @@ class PostgresBroker:
                     task_name,
                     queue_name,
                     task_id=task_id,
+                    send_kind=send_kind,
                     args_json=args_json,
                     kwargs_json=kwargs_json,
                     priority=priority,
@@ -3829,6 +3440,7 @@ class PostgresBroker:
                 queue_name,
                 task_id=task_id,
                 enqueue_sha=enqueue_sha,
+                send_kind=send_kind,
                 args_json=args_json,
                 kwargs_json=kwargs_json,
                 priority=priority,

@@ -19,7 +19,7 @@ use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::pages::HistoryWindow;
@@ -316,6 +316,18 @@ async fn seed_running(pool: &PgPool, task: &LiveTask) -> String {
 /// task with no worker runs under [`MOVING_WORKER`], and its history row
 /// then names no worker. A cancelled task is cancelled from PENDING.
 pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending) {
+    seed_terminal_with_attempts(pool, task, ending, &[]).await;
+}
+
+/// [`seed_terminal`], with attempt rows written between the live seed and
+/// the move, so the move folds them into the attempt snapshot. Each entry
+/// is `(attempt, will_retry, text)`.
+pub(super) async fn seed_terminal_with_attempts(
+    pool: &PgPool,
+    task: &LiveTask,
+    ending: Ending,
+    attempts: &[(i32, bool, AttemptText)],
+) {
     let command = match &ending {
         Ending::Cancelled => {
             let mut pending = task.clone();
@@ -345,6 +357,9 @@ pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending
             failed_reason: Some("seeded failure".to_owned()),
         },
     };
+    for (attempt, will_retry, text) in attempts {
+        seed_attempt(pool, task.id, *attempt, *will_retry, text).await;
+    }
     let outcome = terminalize(pool, &command)
         .await
         .expect("run the terminal write");
@@ -392,4 +407,207 @@ pub(super) async fn seed_failures(pool: &PgPool, prefix: &str, error_codes: &[St
         let task = LiveTask::pending(&format!("{prefix}{index}"));
         seed_terminal(pool, &task, Ending::failed(error_code)).await;
     }
+}
+
+/// Date the history row of `task_id`: enqueued, started (or never started)
+/// and ended the given number of seconds ago.
+pub(super) async fn set_history_times(
+    pool: &PgPool,
+    task_id: Uuid,
+    enqueued_seconds_ago: i64,
+    started_seconds_ago: Option<i64>,
+    terminal_seconds_ago: i64,
+) {
+    sqlx::query(
+        "UPDATE horsies_task_history
+         SET enqueued_at = NOW() - make_interval(secs => $2),
+             started_at = CASE WHEN $3::bigint IS NULL THEN NULL
+                               ELSE NOW() - make_interval(secs => $3) END,
+             terminal_at = NOW() - make_interval(secs => $4)
+         WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .bind(enqueued_seconds_ago)
+    .bind(started_seconds_ago)
+    .bind(terminal_seconds_ago)
+    .execute(pool)
+    .await
+    .expect("date the history row");
+}
+
+/// The text columns of one attempt row.
+#[derive(Debug, Clone)]
+pub(super) struct AttemptText {
+    pub(super) error_code: Option<String>,
+    pub(super) error_message: Option<String>,
+    pub(super) failed_reason: Option<String>,
+}
+
+/// Insert attempt `attempt` of a live task: FAILED, started 50 s and
+/// finished 40 s ago. A later move folds it into the attempt snapshot.
+pub(super) async fn seed_attempt(
+    pool: &PgPool,
+    task_id: Uuid,
+    attempt: i32,
+    will_retry: bool,
+    text: &AttemptText,
+) {
+    sqlx::query(
+        "INSERT INTO horsies_task_attempts (
+            task_id, attempt, outcome, will_retry, started_at, finished_at,
+            error_code, error_message, failed_reason, worker_id,
+            worker_hostname, worker_pid, worker_process_name
+        ) VALUES (
+            $1, $2, 'FAILED', $3, NOW() - interval '50 seconds', NOW() - interval '40 seconds',
+            $4, $5, $6, 'worker-1',
+            'host-1', 4242, 'monitoring-spec-process'
+        )",
+    )
+    .bind(task_id)
+    .bind(attempt)
+    .bind(will_retry)
+    .bind(&text.error_code)
+    .bind(&text.error_message)
+    .bind(&text.failed_reason)
+    .execute(pool)
+    .await
+    .expect("seed an attempt row");
+}
+
+/// One workflow run row. A child run hangs off node 0 of its parent.
+#[derive(Debug, Clone)]
+pub(super) struct RunSeed {
+    pub(super) id: Uuid,
+    pub(super) name: String,
+    pub(super) status: String,
+    pub(super) parent: Option<Uuid>,
+    pub(super) created_seconds_ago: i64,
+    pub(super) completed_seconds_ago: Option<i64>,
+}
+
+impl RunSeed {
+    /// A RUNNING root run created 120 s ago (Python `make_workflow`).
+    pub(super) fn running(name: &str) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            status: "RUNNING".to_owned(),
+            parent: None,
+            created_seconds_ago: 120,
+            completed_seconds_ago: None,
+        }
+    }
+}
+
+/// Insert one workflow run. Every baseline column is named.
+pub(super) async fn seed_run(pool: &PgPool, run: &RunSeed) {
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+            id, name, definition_key, status, on_error, output_task_index, success_policy,
+            result, error, parent_workflow_id, parent_task_index, root_workflow_id, depth,
+            sent_at, created_at, started_at, completed_at, updated_at
+        ) VALUES (
+            $1, $2, 'tests.alpha.v1', $3, 'fail', NULL, NULL,
+            NULL, NULL, $4, CASE WHEN $4::uuid IS NULL THEN NULL ELSE 0 END,
+            COALESCE($4, $1), CASE WHEN $4::uuid IS NULL THEN 0 ELSE 1 END,
+            NOW() - make_interval(secs => $5), NOW() - make_interval(secs => $5),
+            NOW() - make_interval(secs => $5),
+            CASE WHEN $6::bigint IS NULL THEN NULL ELSE NOW() - make_interval(secs => $6) END,
+            NOW()
+        )",
+    )
+    .bind(run.id)
+    .bind(&run.name)
+    .bind(&run.status)
+    .bind(run.parent)
+    .bind(run.created_seconds_ago)
+    .bind(run.completed_seconds_ago)
+    .execute(pool)
+    .await
+    .expect("seed a workflow run");
+}
+
+/// What a workflow node runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeKind {
+    /// A task node, backed by this task row once it is enqueued.
+    Task { task_id: Option<Uuid> },
+    /// A sub-workflow node, linked to this child run once it is started.
+    SubWorkflow { child: Option<Uuid> },
+}
+
+/// One workflow node row.
+#[derive(Debug, Clone)]
+pub(super) struct NodeSeed {
+    pub(super) workflow_id: Uuid,
+    pub(super) task_index: i32,
+    pub(super) node_id: Option<String>,
+    pub(super) status: String,
+    pub(super) dependencies: Vec<i32>,
+    pub(super) kind: NodeKind,
+    pub(super) result: Option<String>,
+    pub(super) started_seconds_ago: Option<i64>,
+    pub(super) completed_seconds_ago: Option<i64>,
+}
+
+impl NodeSeed {
+    /// A PENDING task node with no backing task and no dependency.
+    pub(super) fn task(workflow_id: Uuid, task_index: i32) -> Self {
+        Self {
+            workflow_id,
+            task_index,
+            node_id: None,
+            status: "PENDING".to_owned(),
+            dependencies: Vec::new(),
+            kind: NodeKind::Task { task_id: None },
+            result: None,
+            started_seconds_ago: None,
+            completed_seconds_ago: None,
+        }
+    }
+}
+
+/// Insert one workflow node of task `alpha_task`. Every baseline column is
+/// named.
+pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
+    let (is_subworkflow, task_id, child) = match node.kind {
+        NodeKind::Task { task_id } => (false, task_id, None),
+        NodeKind::SubWorkflow { child } => (true, None, child),
+    };
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+            downstream_subworkflow,
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
+            min_success, task_options, max_retries, execution, good_until,
+            retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
+            sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
+            created_at, started_at, completed_at
+        ) VALUES (
+            'NONE', $1, $2, $3, $4, 'alpha_task', '{}', 'default', 100,
+            $5, NULL, NULL, FALSE, 'all',
+            NULL, NULL, CASE WHEN $8 THEN NULL ELSE 0 END,
+            CASE WHEN $8 THEN NULL ELSE 'ISOLATED' END, NULL,
+            CASE WHEN $8 THEN NULL ELSE 'forever' END, $6, $7, $8, $9,
+            NULL, NULL, NULL, $10, NULL,
+            NOW() - interval '120 seconds',
+            CASE WHEN $11::bigint IS NULL THEN NULL ELSE NOW() - make_interval(secs => $11) END,
+            CASE WHEN $12::bigint IS NULL THEN NULL ELSE NOW() - make_interval(secs => $12) END
+        )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(node.workflow_id)
+    .bind(node.task_index)
+    .bind(&node.node_id)
+    .bind(&node.dependencies)
+    .bind(&node.status)
+    .bind(task_id)
+    .bind(is_subworkflow)
+    .bind(child)
+    .bind(&node.result)
+    .bind(node.started_seconds_ago)
+    .bind(node.completed_seconds_ago)
+    .execute(pool)
+    .await
+    .expect("seed a workflow node");
 }

@@ -9,7 +9,7 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::partitions::catalog::read_attached_leaf_rows;
 use crate::core::history::reads::publisher::rendered_reader_signatures;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
@@ -318,7 +318,6 @@ async fn one_republish_heals_a_stale_detail_body() {
 /// unanalyzed leaf keeps an index plan.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #845"]
 async fn every_rendered_reader_runs_without_sequential_scans() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;

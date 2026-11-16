@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
@@ -183,6 +184,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
             task_name=task_name,
             queue_name='default',
             task_id=slot_task_id,
+            send_kind=SendKind.FIRST,
             enqueue_sha=enqueue_fingerprint(
                 task_name=task_name,
                 queue_name='default',

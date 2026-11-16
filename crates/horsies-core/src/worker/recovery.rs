@@ -8,7 +8,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::broker::core_rows::StatementLog;
 use crate::broker::listener::notify_task_queue;
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -23,6 +25,7 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
+use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
@@ -142,7 +145,7 @@ struct StaleTaskId {
 #[cfg(test)]
 mod p7_maintenance_tests {
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
     use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -201,11 +204,11 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -346,6 +349,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -445,6 +449,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -507,6 +512,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -633,10 +639,10 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, task_name, input, queue_name, priority,
+                 downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type, max_retries, execution,
                  retention_class_key, status, is_subworkflow, created_at
-             ) VALUES ($1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
                        '{}', FALSE, 'all', 0, 'ISOLATED',
                        $3, 'RUNNING', FALSE, NOW())",
         )
@@ -697,6 +703,7 @@ mod p7_maintenance_tests {
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -1013,6 +1020,7 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
+    broker: Arc<PostgresBroker>,
     runtime_pool: PgPool,
     maintenance_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
@@ -1029,6 +1037,10 @@ pub fn spawn_reaper(
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
+        // The fleet check runs after each pass, from one check interval after
+        // the start on (Python `reaper.py:622-628, 747-750`).
+        let mut coverage_log =
+            ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -1050,6 +1062,7 @@ pub fn spawn_reaper(
                 }
                 GatePass::Ungated => {
                     run_reaper_pass(
+                        &broker,
                         &runtime_pool,
                         &maintenance_pool,
                         &registry,
@@ -1062,9 +1075,11 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                 }
                 GatePass::Held(tx) => {
                     run_reaper_pass(
+                        &broker,
                         &runtime_pool,
                         &maintenance_pool,
                         &registry,
@@ -1077,6 +1092,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                     release_gate(tx).await;
                 }
             }
@@ -1169,6 +1185,7 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 /// audit, stale-RUNNING recovery, PENDING expiry, workflow recovery, then
 /// periodic retention cleanup and partition maintenance.
 async fn run_reaper_pass(
+    broker: &PostgresBroker,
     runtime_pool: &PgPool,
     maintenance_pool: &PgPool,
     registry: &WorkflowSpecRegistry,
@@ -1282,8 +1299,13 @@ async fn run_reaper_pass(
         }
     }
 
-    // Expire unclaimed PENDING tasks whose good_until has passed.
-    match expire_pending_tasks(runtime_pool).await {
+    // Expire unclaimed PENDING tasks whose good_until has passed, on the
+    // main core pool with the reserve.
+    let expired = match broker.core_pools_for_write() {
+        Ok((open, _write)) => expire_pending_tasks(open.main(), broker.statement_log()).await,
+        Err(error) => Err(error),
+    };
+    match expired {
         Ok(count) if count > 0 => {
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
@@ -1314,13 +1336,15 @@ async fn run_reaper_pass(
         }
     });
 
+    // Discovery reads the reserve pool; each record runs on the main core
+    // pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
         runtime_pool,
+        broker,
         registry,
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
         config.phase2_quarantine_after_attempts,
-        payload,
         retention,
     )
     .await;
@@ -1909,15 +1933,28 @@ async fn terminate_orphaned_workflow_tasks(
     })
 }
 
-/// Expire unclaimed PENDING tasks whose `good_until` has passed.
+/// Expire unclaimed PENDING tasks whose `good_until` has passed (Python
+/// `expire_pending_tasks`, `core/brokers/postgres.py:3425-3503`).
 ///
 /// Runs `horsies_expire_pending_tasks` in bounded batches (earliest
 /// deadlines first, SKIP LOCKED) so a mass expiry is spread across several
 /// committed statements instead of one transaction that row-locks every
 /// match and flushes two trigger NOTIFYs per row in a single commit (which
-/// can overflow listener queues). No attempt rows are written (the task was
-/// never executed). Returns the number of expired tasks.
-pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::BrokerError> {
+/// can overflow listener queues). Each batch is one statement alone on
+/// `pool`, checked out as reserved work, and commits alone. At most
+/// [`EXPIRE_MAX_BATCHES_PER_PASS`] batches run; the rest waits for the next
+/// pass. No attempt rows are written (the task was never executed). Returns
+/// the number of expired tasks.
+///
+/// Errors: [`crate::broker::BrokerError::Statement`];
+/// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
+/// the wire contract or an outcome other than `APPLIED` (a discovery batch
+/// reports transitioned rows only). The batches before the failed one, and
+/// the failed batch when its statement returned, stay committed.
+pub async fn expire_pending_tasks(
+    pool: &crate::db::CorePool,
+    log: StatementLog,
+) -> Result<u64, crate::broker::BrokerError> {
     let task_error = TaskError::builtin(
         crate::core::OutcomeCode::TaskExpired,
         "task expired before being claimed (good_until passed)",
@@ -1931,17 +1968,49 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
         result_json,
         error_code: "TASK_EXPIRED".to_owned(),
     };
+    let full_batch = u64::from(EXPIRE_BATCH_SIZE.unsigned_abs());
 
     let mut total: u64 = 0;
     for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
-        let expired = crate::broker::terminalization::terminalize(pool, &command).await?;
-        let affected = expired.len() as u64;
+        let expired = crate::broker::terminalization::terminalize(pool, log, &command).await?;
+        let affected = transitioned_count(&expired)?;
         total += affected;
-        if affected < EXPIRE_BATCH_SIZE as u64 {
-            break;
+        if affected < full_batch {
+            return Ok(total);
         }
     }
+    tracing::warn!(
+        expired = total,
+        batches = EXPIRE_MAX_BATCHES_PER_PASS,
+        "pending expiry reached its per-pass bound; the next pass goes on",
+    );
     Ok(total)
+}
+
+/// The number of rows a pending expiry batch moved. The batch reports only
+/// the rows it moved (Python `expire_pending_tasks`), so any outcome other
+/// than `APPLIED` breaks the wire contract.
+fn transitioned_count(
+    outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
+) -> Result<u64, crate::broker::BrokerError> {
+    for outcome in outcomes {
+        match outcome {
+            crate::core::lifecycle::TerminalizationOutcome::Applied { .. } => {}
+            crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
+            | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. } => {
+                return Err(crate::broker::BrokerError::TerminalizationContract(
+                    format!(
+                        "horsies_expire_pending_tasks: task {} reported {outcome:?}; \
+                     a discovery batch reports moved rows only",
+                        outcome.task_id(),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(outcomes.len() as u64)
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING, in batches of
@@ -2170,6 +2239,7 @@ mod tests {
         let pass = tokio::time::timeout(
             Duration::from_secs(30),
             run_reaper_pass(
+                &broker,
                 broker.reserve_pool(),
                 broker.reserve_maintenance_pool(),
                 &WorkflowSpecRegistry::new(),
@@ -2479,11 +2549,11 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'ENQUEUED', FALSE, $3, NOW() - INTERVAL '2 hours', 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2539,7 +2609,7 @@ mod tests {
 
         // Canonical workflow cancellation moves the backing task to history;
         // workflow and linkage then sweep together in one statement.
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
                 workflow_ids: vec![wf_id],
@@ -2623,12 +2693,12 @@ mod tests {
             for i in 0..nodes {
                 sqlx::query(
                     "INSERT INTO horsies_workflow_tasks (
-                        id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                        downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                         priority, dependencies, allow_failed_deps, join_type, status,
                         is_subworkflow, created_at, max_retries, execution,
                         retention_class_key
                     ) VALUES (
-                        $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
+                        'NONE', $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
                         '{}', FALSE, 'all', 'COMPLETED', FALSE, NOW() - INTERVAL '2 hours', 0,
                         'ISOLATED', 'standard_30d'
                     )",
@@ -2998,6 +3068,9 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod class_coverage_loop_tests;
 
 #[cfg(test)]
 mod retention_ports;

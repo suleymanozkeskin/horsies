@@ -22,8 +22,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import assert_never
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from horsies import (
     BrokerAsyncContext,
     BrokerEnqueueError,
@@ -44,6 +42,7 @@ from horsies import (
     TaskSendPayload,
     broker_error_cause,
 )
+from horsies.core.brokers.enqueue_task import Inserted, SendKind, enqueue_result
 from horsies.core.brokers.postgres import (
     PostgresBroker,
     SendCommand,
@@ -52,7 +51,6 @@ from horsies.core.brokers.postgres import (
     _loop_runner_err,  # pyright: ignore[reportPrivateUsage]
     _parse_enqueue_input,  # pyright: ignore[reportPrivateUsage]
 )
-from horsies.core.brokers.resources import BrokerResources
 from horsies.core.task_decorator import (
     _map_broker_err,  # pyright: ignore[reportPrivateUsage]
 )
@@ -112,10 +110,10 @@ def owner_only_on_the_conflict(
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
     declared: Result[str, BrokerEnqueueError] = await broker.enqueue_async(
-        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
+        'report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
+    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -128,10 +126,10 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
     declared: Result[str, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
-        'report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
+        'report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha', sent_at=datetime.now(timezone.utc)):
+    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -184,12 +182,7 @@ def every_enqueue_variant_is_matched(
             assert_never(unreachable)
 
 
-async def enqueue_helpers_return_their_subsets(
-    broker: PostgresBroker,
-    resources: BrokerResources,
-    session: AsyncSession,
-    good_until: datetime,
-) -> None:
+def enqueue_helpers_return_their_subsets(good_until: datetime) -> None:
     stored_input: Result[str, BrokerInvalidInput] = _parse_enqueue_input(
         'report', None,
     )
@@ -204,30 +197,16 @@ async def enqueue_helpers_return_their_subsets(
         retention_class_key='default',
         retain_rerun_input=True,
     )
-    bind_key = broker._bind_key_after_task_id_conflict  # pyright: ignore[reportPrivateUsage]
-    bound: Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch] = await bind_key(
-        session,
-        task_id='task-1',
-        task_name='report',
-        key_digest=b'key',
-        command_fingerprint=b'fingerprint',
-        sent_at=good_until,
-    )
-    verify = broker._verify_enqueue_conflict  # pyright: ignore[reportPrivateUsage]
-    verified: Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch] = await verify(
-        resources,
-        task_id='task-1',
-        task_name='report',
-        command_fingerprint=b'fingerprint',
-        sent_at=good_until,
-    )
+    answered: Result[
+        str, BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict
+    ] = enqueue_result(Inserted(), task_id='task-1', task_name='report')
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
     loop_runner: Err[BrokerLoopRunnerFailed] = _loop_runner_err(
         'PostgresBroker.enqueue()', LoopRunnerError('stopped'),
     )
-    _ = (stored_input, fingerprint, bound, verified, async_context, loop_runner)
+    _ = (stored_input, fingerprint, answered, async_context, loop_runner)
 
 
 def send_command_returns_only_the_input_refusals(broker: PostgresBroker) -> None:

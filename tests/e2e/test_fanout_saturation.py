@@ -26,6 +26,7 @@ from psycopg import Notify
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.listener import PostgresListener
 from tests.broker_resources_support import listener_of
@@ -108,6 +109,7 @@ class TestTaskDoneFanout:
             kwargs_json='{"x": 0}',
             queue_name='default',
             task_id=str(uuid4()),
+            send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
         )).unwrap()
@@ -164,6 +166,7 @@ class TestTaskDoneFanout:
             kwargs_json='{"x": 0}',
             queue_name='default',
             task_id=str(uuid4()),
+            send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
         )).unwrap()
@@ -249,6 +252,7 @@ class TestTaskDoneFanout:
                 kwargs_json=f'{{"x": {i}}}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -338,6 +342,7 @@ class TestTaskDoneFanout:
                     kwargs_json=f'{{"x": {i}}}',
                     queue_name='default',
                     task_id=str(uuid4()),
+                    send_kind=SendKind.FIRST,
                     enqueue_sha='test-sha',
                     sent_at=datetime.now(timezone.utc),
                 )).unwrap()
@@ -416,6 +421,7 @@ class TestFanoutBoundary:
             kwargs_json='{"x": 0}',
             queue_name='default',
             task_id=str(uuid4()),
+            send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
         )).unwrap()
@@ -436,6 +442,7 @@ class TestFanoutBoundary:
                 kwargs_json='{"x": 1}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -463,6 +470,7 @@ class TestFanoutBoundary:
                 kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -510,6 +518,7 @@ class TestFanoutBoundary:
                 kwargs_json=f'{{"x": {i}}}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -520,6 +529,7 @@ class TestFanoutBoundary:
             kwargs_json='{"x": 99}',
             queue_name='default',
             task_id=str(uuid4()),
+            send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
         )).unwrap()
@@ -671,6 +681,7 @@ class TestFanoutErrorPaths:
                     kwargs_json=f'{{"x": {i}}}',
                     queue_name='default',
                     task_id=str(uuid4()),
+                    send_kind=SendKind.FIRST,
                     enqueue_sha='test-sha',
                     sent_at=datetime.now(timezone.utc),
                 )).unwrap()
@@ -719,6 +730,7 @@ class TestFanoutContracts:
                 kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -757,6 +769,7 @@ class TestFanoutContracts:
                 kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
@@ -807,6 +820,7 @@ class TestFanoutContracts:
                 kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
+                send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()

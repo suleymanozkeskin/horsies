@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerIdempotencyKeyConflict,
@@ -83,6 +84,7 @@ async def enqueue(
     return await broker.enqueue_async(
         TASK_NAME,
         task_id=send.task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=enqueue_fingerprint(
             task_name=TASK_NAME,
             queue_name='default',

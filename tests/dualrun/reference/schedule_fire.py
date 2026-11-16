@@ -5,8 +5,9 @@
 per due schedule, on a private one-connection engine: BEGIN, the advisory
 lock of the schedule name, the read of the state row. A missing row was
 created in that transaction; a row that was no longer due ended it. Then
-each slot was enqueued on the runtime pool by ``enqueue_async`` (its own
-autocommit INSERT, and on a task id conflict a read of the stored command),
+each slot was enqueued on the runtime pool by ``enqueue_async`` (a
+``SendKind.FIRST`` send in its own statement, which answers the stored
+command on a task id conflict),
 and the state row was updated in the lock transaction: the run recorded, or
 only ``next_run_at`` moved past a slot that the broker refused for good.
 A transient enqueue error rolled the lock transaction back.
@@ -26,6 +27,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.result_types import BrokerEnqueueError, BrokerPayloadMismatch
 from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import TaskSchedule
@@ -137,6 +139,7 @@ async def enqueue_slot(
         queue_name=queue_name,
         task_id=task_id,
         enqueue_sha=enqueue_sha,
+        send_kind=SendKind.FIRST,
         args_json=None,
         kwargs_json=kwargs_json,
         priority=priority,

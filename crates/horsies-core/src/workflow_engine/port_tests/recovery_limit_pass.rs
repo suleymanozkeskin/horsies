@@ -20,7 +20,7 @@ use super::support::{
     workflow_error_code, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
     WorkflowSeed, POISON_TASK_OPTIONS, WORKER,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
@@ -69,11 +69,11 @@ async fn passes(pool: &PgPool, registry: &WorkflowSpecRegistry, count: u32) -> V
 async fn phase2_pass(pool: &PgPool) -> Phase2RecoverySummary {
     drive_phase2_recovery(
         pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         &WorkflowSpecRegistry::new(),
         0,
         GLOBAL_SCAN_ROW_CAP,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
