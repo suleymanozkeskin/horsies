@@ -1,0 +1,730 @@
+diff --git a/crates/horsies-codegen/src/surface.rs b/crates/horsies-codegen/src/surface.rs
+index 272798e0..e21925a9 100644
+--- a/crates/horsies-codegen/src/surface.rs
++++ b/crates/horsies-codegen/src/surface.rs
+@@ -525,6 +525,12 @@ const CLASSES: [StubClass; 24] = {
+ };
+ 
+ const FUNCTIONS: &[StubFunction] = &[
++    StubFunction {
++        name: "baseline_sql_files",
++        parameters: &[],
++        returns: TypeText::Plain("list[tuple[str, str]]"),
++        doc: "The baseline SQL files as (file name, text) pairs, in run order. Starts nothing.",
++    },
+     StubFunction {
+         name: "core_state",
+         parameters: &[],
+diff --git a/crates/horsies-core/src/broker/migrations.rs b/crates/horsies-core/src/broker/migrations.rs
+index 955d130d..3b5d97cd 100644
+--- a/crates/horsies-core/src/broker/migrations.rs
++++ b/crates/horsies-core/src/broker/migrations.rs
+@@ -8,13 +8,13 @@
+ //! leaving `_sqlx_migrations` untouched for the host application.
+ //!
+ //! The embedded chain:
+-//! - Version 1000 is the baseline schema: every package file of
+-//!   `horsies/core/baseline/sql/`, in the order of Python's
+-//!   `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), concatenated
+-//!   with no separator, with one SHA-384 checksum over the UTF-8 bytes of the
+-//!   result. It creates [`MIGRATIONS_TABLE`] itself. The Python package
+-//!   installs the same files as its migration 1000 with the same checksum
+-//!   rule, so both write the same bookkeeping row.
++//! - Version 1000 is the baseline schema: every file of
++//!   `crates/horsies-core/baseline/`, in the order of `baseline_sql_files!`
++//!   below, concatenated with no separator, with one SHA-384 checksum over the
++//!   UTF-8 bytes of the result. It creates [`MIGRATIONS_TABLE`] itself. The
++//!   Python package reads the same files through `horsies._core`
++//!   ([`BASELINE_SQL_FILE_TEXTS`]) and installs them as its migration 1000
++//!   with the same checksum rule, so both write the same bookkeeping row.
+ //! - Version 1001 holds the claim functions of the copied Rust worker, which
+ //!   have no counterpart in migration 1000. It goes when the worker claims
+ //!   through the functions of migration 1000.
+@@ -43,28 +43,35 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
+ pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
+ 
+ /// Declares the baseline file list once. From one list of file names it
+-/// builds `BASELINE_SQL_FILES` (the names) and `BASELINE_SQL` (the texts,
+-/// concatenated with no separator), so the names and the migration text
+-/// cannot differ. The files of `horsies/core/baseline/sql/` are the single
+-/// source; the core includes them by relative path and keeps no copy.
++/// builds `BASELINE_SQL_FILES` (the names), `BASELINE_SQL_FILE_TEXTS` (each
++/// name with its text) and `BASELINE_SQL` (the texts, concatenated with no
++/// separator), so the names and the migration text cannot differ. The files
++/// of `crates/horsies-core/baseline/` are the single source; the core includes
++/// them by relative path and keeps no copy.
+ macro_rules! baseline_sql_files {
+     ($($file:literal),+ $(,)?) => {
+         /// The file names of migration 1000, in the order they run.
+         #[cfg(test)]
+         pub(crate) const BASELINE_SQL_FILES: &[&str] = &[$($file),+];
+ 
++        /// The files of migration 1000 as `(file name, text)` pairs, in the
++        /// order they run. The Python package reads its migration 1000
++        /// through these (`horsies._core.baseline_sql_files`).
++        pub const BASELINE_SQL_FILE_TEXTS: &[(&str, &str)] = &[
++            $(($file, include_str!(concat!("../../baseline/", $file)))),+
++        ];
++
+         /// Migration 1000: the files of `BASELINE_SQL_FILES`, in that
+         /// order, concatenated with no separator.
+         const BASELINE_SQL: &str = concat!(
+-            $(include_str!(concat!("../../../../horsies/core/baseline/sql/", $file))),+
++            $(include_str!(concat!("../../baseline/", $file))),+
+         );
+     };
+ }
+ 
+-// Python's `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), in
+-// the same order. A file added to the folder or to Python's list without a
+-// line here fails `baseline_file_list_is_python_s_list_and_the_whole_folder`
+-// and Python's `tests/unit/test_baseline_migration.py`.
++// The files of `crates/horsies-core/baseline/`, in the order they run. A file
++// added to the folder without a line here fails
++// `baseline_file_list_is_the_whole_folder`.
+ baseline_sql_files!(
+     "0001_tables.sql",
+     "0002_indexes.sql",
+@@ -76,11 +83,11 @@ baseline_sql_files!(
+ /// The tables file of the baseline.
+ #[cfg(test)]
+ pub(crate) const BASELINE_TABLES_SQL: &str =
+-    include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql");
++    include_str!("../../baseline/0001_tables.sql");
+ /// The interim functions file of the baseline.
+ #[cfg(test)]
+ pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
+-    include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql");
++    include_str!("../../baseline/0003_interim_functions.sql");
+ 
+ /// Version, description and SQL of each embedded migration, in apply order.
+ const MIGRATION_SOURCES: [(i64, &str, &str); 2] = [
+@@ -139,7 +146,7 @@ pub(crate) async fn successful_schema_version(pool: &PgPool) -> Result<Option<i6
+ }
+ 
+ /// The name whose digest is the install lock key (Python
+-/// `horsies/core/brokers/postgres.py:1346-1348`).
++/// `python/horsies/core/brokers/postgres.py:1346-1348`).
+ const INSTALL_LOCK_NAME: &str = "horsies:schema:v1";
+ 
+ /// The longest an installer waits for another installer's lock, then
+@@ -508,7 +515,7 @@ mod tests {
+     }
+ 
+     /// Python's key: the first 8 bytes of SHA-256 of `horsies:schema:v1`,
+-    /// big-endian, signed (`horsies/core/brokers/postgres.py:1346-1348`).
++    /// big-endian, signed (`python/horsies/core/brokers/postgres.py:1346-1348`).
+     #[test]
+     fn the_install_lock_key_is_python_s() {
+         assert_eq!(install_lock_key(), 6_194_151_126_714_960_738);
+@@ -558,46 +565,17 @@ mod tests {
+         sqlx::Connection::close(waiter).await.unwrap();
+     }
+ 
+-    /// The package folder of the baseline SQL files.
++    /// The folder of the baseline SQL files.
+     fn baseline_sql_folder() -> std::path::PathBuf {
+-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../horsies/core/baseline/sql")
+-    }
+-
+-    /// Python's `BASELINE_SQL_FILES`, read from
+-    /// `horsies/core/baseline/migration.py`: one quoted name per line between
+-    /// the line that opens the tuple and the line that closes it.
+-    fn python_baseline_sql_files() -> Vec<String> {
+-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+-            .join("../../horsies/core/baseline/migration.py");
+-        let source = std::fs::read_to_string(&path)
+-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+-        let mut lines = source
+-            .lines()
+-            .skip_while(|line| !line.starts_with("BASELINE_SQL_FILES: Final = ("));
+-        assert!(
+-            lines.next().is_some(),
+-            "no BASELINE_SQL_FILES tuple in {}",
+-            path.display()
+-        );
+-        lines
+-            .take_while(|line| line.trim() != ")")
+-            .map(|line| {
+-                line.trim()
+-                    .trim_end_matches(',')
+-                    .trim_matches('\'')
+-                    .to_owned()
+-            })
+-            .collect()
++        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("baseline")
+     }
+ 
+-    /// The core's list is Python's list in Python's order, and it holds every
+-    /// SQL file of the package folder. A file that one side adds fails here
+-    /// and in Python's `tests/unit/test_baseline_migration.py`.
++    /// The list holds every SQL file of the baseline folder, in name order.
++    /// A file added to the folder without a line in `baseline_sql_files!`
++    /// fails here.
+     #[test]
+-    fn baseline_file_list_is_python_s_list_and_the_whole_folder() {
+-        let python = python_baseline_sql_files();
+-        assert!(!python.is_empty(), "Python's list is empty");
+-        assert_eq!(BASELINE_SQL_FILES, python.as_slice());
++    fn baseline_file_list_is_the_whole_folder() {
++        assert!(!BASELINE_SQL_FILES.is_empty(), "the baseline list is empty");
+ 
+         let mut folder: Vec<String> = std::fs::read_dir(baseline_sql_folder())
+             .expect("read the baseline SQL folder")
+@@ -616,8 +594,9 @@ mod tests {
+ 
+     /// Migration 1000 is the listed files as they are on disk, concatenated
+     /// in list order, and its checksum is Python's rule
+-    /// (`horsies/core/baseline/migration.py`, `baseline_checksum`): SHA-384
+-    /// of the UTF-8 bytes of that text.
++    /// (`python/horsies/core/baseline/migration.py`, `baseline_checksum`):
++    /// SHA-384 of the UTF-8 bytes of that text. `BASELINE_SQL_FILE_TEXTS`,
++    /// which Python reads, holds the same names and texts in the same order.
+     #[test]
+     fn baseline_is_one_migration_built_from_every_listed_file() {
+         use sha2::Sha384;
+@@ -634,6 +613,16 @@ mod tests {
+             })
+             .collect();
+         assert_eq!(baseline.sql.as_ref(), on_disk);
++        let names: Vec<&str> = BASELINE_SQL_FILE_TEXTS
++            .iter()
++            .map(|(name, _)| *name)
++            .collect();
++        assert_eq!(names, BASELINE_SQL_FILES);
++        let texts: String = BASELINE_SQL_FILE_TEXTS
++            .iter()
++            .map(|(_, text)| *text)
++            .collect();
++        assert_eq!(texts, on_disk);
+         assert_eq!(
+             baseline.checksum.as_ref(),
+             Sha384::digest(on_disk.as_bytes()).as_slice()
+diff --git a/crates/horsies-core/src/lib.rs b/crates/horsies-core/src/lib.rs
+index 7d1ce321..00075573 100644
+--- a/crates/horsies-core/src/lib.rs
++++ b/crates/horsies-core/src/lib.rs
+@@ -68,6 +68,9 @@ pub use crate::broker::{
+ };
+ pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+ 
++// The baseline SQL files, which horsies._core hands to the Python install.
++pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
++
+ // Child mode of a Rust worker binary: the entry checks `child_mode` first
+ // and, in child mode, exits with the code of `run_child_host`. Task bodies
+ // start work that belongs to their run with `spawn_in_run`.
+diff --git a/crates/horsies-python/src/lib.rs b/crates/horsies-python/src/lib.rs
+index f952636e..4b59d3e4 100644
+--- a/crates/horsies-python/src/lib.rs
++++ b/crates/horsies-python/src/lib.rs
+@@ -92,6 +92,14 @@ fn mint_task_id() -> PyResult<MintOutcome> {
+     })
+ }
+ 
++/// The files of the baseline migration (version 1000) as `(file name, text)`
++/// pairs, in the order they run. The texts are compiled into this module from
++/// `crates/horsies-core/baseline/`. Pure: no I/O, and it starts no runtime.
++#[pyfunction]
++fn baseline_sql_files() -> Vec<(&'static str, &'static str)> {
++    horsies_core::BASELINE_SQL_FILE_TEXTS.to_vec()
++}
++
+ /// Set what a panic in a core background task does in this process:
+ /// `'STOP_CORE'` (the default: the core stops, every later call raises
+ /// `CoreStopped`) or `'ABORT_PROCESS'` (a worker process: the panic is logged
+@@ -149,6 +157,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+     module.add_class::<operations::task_info::TaskInfoRecord>()?;
+     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
+     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
++    module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
+     module.add_function(wrap_pyfunction!(core_state, module)?)?;
+     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
+     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
+diff --git a/python/horsies/core/baseline/__init__.py b/python/horsies/core/baseline/__init__.py
+index 8d584369..c1dd84f6 100644
+--- a/python/horsies/core/baseline/__init__.py
++++ b/python/horsies/core/baseline/__init__.py
+@@ -1 +1 @@
+-"""The baseline schema: migration 1000, shipped as SQL files in this package."""
++"""The baseline schema, migration 1000. Its SQL files are compiled into ``horsies._core``."""
+diff --git a/python/horsies/core/baseline/migration.py b/python/horsies/core/baseline/migration.py
+index 06523c5e..31441837 100644
+--- a/python/horsies/core/baseline/migration.py
++++ b/python/horsies/core/baseline/migration.py
+@@ -1,22 +1,23 @@
+-"""Read the baseline SQL files of this package as one migration.
++"""Read the baseline migration from ``horsies._core``.
+ 
+-The migration text is the files of ``BASELINE_SQL_FILES``, read as UTF-8 and
+-concatenated in that order with no separator. Its checksum is SHA-384 of the
+-UTF-8 bytes of that text, the form that the ``horsies_migrations`` bookkeeping
+-row stores.
++The baseline SQL files are in the core crate (``crates/horsies-core/baseline/``)
++and are compiled into ``horsies._core``. The migration text is those files,
++concatenated in their run order with no separator. Its checksum is SHA-384 of
++the UTF-8 bytes of that text, the form that the ``horsies_migrations``
++bookkeeping row stores.
+ 
+-``load_baseline_migration`` reads package data and does nothing else: it
+-opens no database connection and changes no state.
++``load_baseline_migration`` reads the texts from ``horsies._core`` and does
++nothing else: it opens no database connection, starts no core runtime, and
++changes no state.
+ """
+ 
+ from __future__ import annotations
+ 
+ import hashlib
+ from dataclasses import dataclass
+-from importlib import resources
+ from typing import Final
+ 
+-from horsies.core.types.result import Err, Ok, Result
++import horsies._core as _core
+ 
+ BASELINE_VERSION: Final = 1000
+ """Version of the baseline migration in ``horsies_migrations``."""
+@@ -24,18 +25,6 @@ BASELINE_VERSION: Final = 1000
+ BASELINE_DESCRIPTION: Final = 'baseline'
+ """Description of the baseline migration in ``horsies_migrations``."""
+ 
+-BASELINE_SQL_FILES: Final = (
+-    '0001_tables.sql',
+-    '0002_indexes.sql',
+-    '0003_interim_functions.sql',
+-    '0005_workflow_functions.sql',
+-    '0007_scheduler_monitoring_functions.sql',
+-)
+-"""The SQL files of the migration, in the order they run."""
+-
+-_SQL_PACKAGE: Final = 'horsies.core.baseline'
+-_SQL_FOLDER: Final = 'sql'
+-
+ 
+ @dataclass(frozen=True, slots=True)
+ class BaselineMigration:
+@@ -47,55 +36,17 @@ class BaselineMigration:
+     checksum: bytes
+ 
+ 
+-@dataclass(frozen=True, slots=True)
+-class BaselineSqlUnreadable:
+-    """A SQL file of the package could not be read as UTF-8 text.
+-
+-    This means a broken installation of the package. Reading again does not
+-    help.
+-    """
+-
+-    file_name: str
+-    cause: str
+-
+-
+ def baseline_checksum(sql: str) -> bytes:
+     """SHA-384 of the UTF-8 bytes of a migration text."""
+     return hashlib.sha384(sql.encode('utf-8')).digest()
+ 
+ 
+-def _read_sql_file(file_name: str) -> Result[str, BaselineSqlUnreadable]:
+-    resource = resources.files(_SQL_PACKAGE).joinpath(_SQL_FOLDER, file_name)
+-    try:
+-        return Ok(resource.read_text(encoding='utf-8'))
+-    except (OSError, UnicodeDecodeError) as exc:
+-        return Err(
+-            BaselineSqlUnreadable(
+-                file_name=file_name,
+-                cause=f'{type(exc).__name__}: {exc}',
+-            ),
+-        )
+-
+-
+-def load_baseline_migration() -> Result[BaselineMigration, BaselineSqlUnreadable]:
+-    """Read the baseline SQL files and return them as one migration.
+-
+-    Returns ``Err(BaselineSqlUnreadable)`` for the first file that cannot be
+-    read; no partial text is returned.
+-    """
+-    parts: list[str] = []
+-    for file_name in BASELINE_SQL_FILES:
+-        match _read_sql_file(file_name):
+-            case Err(unreadable):
+-                return Err(unreadable)
+-            case Ok(text):
+-                parts.append(text)
+-    sql = ''.join(parts)
+-    return Ok(
+-        BaselineMigration(
+-            version=BASELINE_VERSION,
+-            description=BASELINE_DESCRIPTION,
+-            sql=sql,
+-            checksum=baseline_checksum(sql),
+-        ),
++def load_baseline_migration() -> BaselineMigration:
++    """The baseline SQL files of ``horsies._core`` as one migration."""
++    sql = ''.join(text for _, text in _core.baseline_sql_files())
++    return BaselineMigration(
++        version=BASELINE_VERSION,
++        description=BASELINE_DESCRIPTION,
++        sql=sql,
++        checksum=baseline_checksum(sql),
+     )
+diff --git a/python/horsies/core/brokers/postgres.py b/python/horsies/core/brokers/postgres.py
+index f2b44808..643b8ead 100644
+--- a/python/horsies/core/brokers/postgres.py
++++ b/python/horsies/core/brokers/postgres.py
+@@ -1445,14 +1445,7 @@ class PostgresBroker:
+                 Nothing was changed.
+             psycopg.Error: a statement failed (after the deadlock retries).
+         """
+-        match load_baseline_migration():
+-            case Err(unreadable):
+-                raise RuntimeError(
+-                    f'baseline schema file {unreadable.file_name} is unreadable: '
+-                    f'{unreadable.cause}'
+-                )
+-            case Ok(migration):
+-                pass
++        migration = load_baseline_migration()
+         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
+             match await self._install_once(migration):
+                 case Ok():
+diff --git a/tests/baseline_sql.py b/tests/baseline_sql.py
+index 03b1471f..ed9e57e8 100644
+--- a/tests/baseline_sql.py
++++ b/tests/baseline_sql.py
+@@ -2,16 +2,9 @@
+ 
+ from __future__ import annotations
+ 
+-import pytest
+-
+ from horsies.core.baseline.migration import load_baseline_migration
+-from horsies.core.types.result import Err, Ok
+ 
+ 
+ def baseline_sql() -> str:
+-    """The SQL text that the install runs; fails the test if it is unreadable."""
+-    match load_baseline_migration():
+-        case Ok(migration):
+-            return migration.sql
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    """The SQL text that the install runs."""
++    return load_baseline_migration().sql
+diff --git a/tests/dualrun/databases.py b/tests/dualrun/databases.py
+index f7741e85..eec570de 100644
+--- a/tests/dualrun/databases.py
++++ b/tests/dualrun/databases.py
+@@ -85,13 +85,7 @@ def create_database(base_url: str) -> Result[DualRunDatabase, DatabaseSetupFaile
+ 
+ 
+ async def _install(url: str) -> Result[None, str]:
+-    match load_baseline_migration():
+-        case Err(unreadable):
+-            return Err(
+-                f'baseline SQL file {unreadable.file_name} is unreadable: {unreadable.cause}'
+-            )
+-        case Ok(migration):
+-            pass
++    migration = load_baseline_migration()
+     async with await psycopg.AsyncConnection.connect(
+         url, autocommit=True
+     ) as connection:
+diff --git a/tests/integration/task_history_harness.py b/tests/integration/task_history_harness.py
+index b8602119..f9d40b7b 100644
+--- a/tests/integration/task_history_harness.py
++++ b/tests/integration/task_history_harness.py
+@@ -30,7 +30,6 @@ from horsies.core.history.ddl.classes import (
+     register_finite_retention_class,
+ )
+ from horsies.core.history.names import FOREVER_LEAF
+-from horsies.core.types.result import Err, Ok
+ from tests.attempt_snapshot_support import encode_attempt_snapshot
+ 
+ 
+@@ -58,11 +57,7 @@ async def install_baseline_schema(connection: AsyncConnection) -> None:
+     psycopg sends it with the simple query protocol and reads no
+     placeholders in it. It joins the caller's transaction.
+     """
+-    match load_baseline_migration():
+-        case Ok(migration):
+-            pass
+-        case Err(unreadable):
+-            raise AssertionError(f'baseline SQL unreadable: {unreadable}')
++    migration = load_baseline_migration()
+     raw = await connection.get_raw_connection()
+     driver = raw.driver_connection
+     assert driver is not None, 'the engine has a driver connection'
+diff --git a/tests/integration/test_baseline_install.py b/tests/integration/test_baseline_install.py
+index f03d5467..e3083cef 100644
+--- a/tests/integration/test_baseline_install.py
++++ b/tests/integration/test_baseline_install.py
+@@ -38,11 +38,7 @@ _OBJECT_COUNT_SQL: Final[LiteralString] = """
+ 
+ 
+ def _migration() -> BaselineMigration:
+-    match load_baseline_migration():
+-        case Ok(loaded):
+-            return loaded
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    return load_baseline_migration()
+ 
+ 
+ @pytest_asyncio.fixture
+diff --git a/tests/integration/test_baseline_scheduler_monitoring_sql.py b/tests/integration/test_baseline_scheduler_monitoring_sql.py
+index fb287d9b..77661bc7 100644
+--- a/tests/integration/test_baseline_scheduler_monitoring_sql.py
++++ b/tests/integration/test_baseline_scheduler_monitoring_sql.py
+@@ -25,7 +25,6 @@ from horsies.core.history.reads.lookup_generation import (
+     render_staged_detail_function,
+     render_staged_provenance_function,
+ )
+-from horsies.core.types.result import Err, Ok
+ from horsies.core.utils.url import to_psycopg_url
+ from tests.integration.conftest import DB_URL
+ from tests.integration.isolated_database import isolated_test_database
+@@ -45,11 +44,7 @@ _FOREVER_LEAF: Final = LookupLeaf(
+ 
+ 
+ def _migration() -> BaselineMigration:
+-    match load_baseline_migration():
+-        case Ok(loaded):
+-            return loaded
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    return load_baseline_migration()
+ 
+ 
+ @pytest_asyncio.fixture
+diff --git a/tests/integration/test_baseline_sql.py b/tests/integration/test_baseline_sql.py
+index da033711..779a1be4 100644
+--- a/tests/integration/test_baseline_sql.py
++++ b/tests/integration/test_baseline_sql.py
+@@ -15,7 +15,6 @@ import pytest
+ import pytest_asyncio
+ 
+ from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
+-from horsies.core.types.result import Err, Ok
+ from horsies.core.utils.url import to_psycopg_url
+ from tests.integration.conftest import DB_URL
+ from tests.integration.isolated_database import isolated_test_database
+@@ -167,11 +166,7 @@ _FUNCTIONS_SQL: Final = """
+ 
+ 
+ def _migration() -> BaselineMigration:
+-    match load_baseline_migration():
+-        case Ok(loaded):
+-            return loaded
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    return load_baseline_migration()
+ 
+ 
+ @pytest_asyncio.fixture
+diff --git a/tests/integration/test_baseline_workflow_functions.py b/tests/integration/test_baseline_workflow_functions.py
+index 6157985f..29242282 100644
+--- a/tests/integration/test_baseline_workflow_functions.py
++++ b/tests/integration/test_baseline_workflow_functions.py
+@@ -21,7 +21,6 @@ import pytest
+ import pytest_asyncio
+ 
+ from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
+-from horsies.core.types.result import Err, Ok
+ from horsies.core.utils.url import to_psycopg_url
+ from tests.integration.conftest import DB_URL
+ from tests.integration.isolated_database import isolated_test_database
+@@ -43,11 +42,7 @@ _WAIT_EVENT_SQL: Final = 'SELECT wait_event_type FROM pg_stat_activity WHERE pid
+ 
+ 
+ def _migration() -> BaselineMigration:
+-    match load_baseline_migration():
+-        case Ok(loaded):
+-            return loaded
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    return load_baseline_migration()
+ 
+ 
+ @pytest_asyncio.fixture
+diff --git a/tests/unit/test_baseline_migration.py b/tests/unit/test_baseline_migration.py
+index cd0e914e..575b0a78 100644
+--- a/tests/unit/test_baseline_migration.py
++++ b/tests/unit/test_baseline_migration.py
+@@ -1,26 +1,19 @@
+-"""The baseline SQL files read as one migration."""
++"""The baseline SQL files of horsies._core read as one migration."""
+ 
+ from __future__ import annotations
+ 
+ import hashlib
+ import re
+-from importlib import resources
+ from pathlib import Path
+ from typing import Final
+ 
+-import pytest
+-
+-from horsies.core.baseline import migration
++import horsies._core as _core
+ from horsies.core.baseline.migration import (
+     BASELINE_DESCRIPTION,
+-    BASELINE_SQL_FILES,
+     BASELINE_VERSION,
+-    BaselineMigration,
+-    BaselineSqlUnreadable,
+     baseline_checksum,
+     load_baseline_migration,
+ )
+-from horsies.core.types.result import Err, Ok
+ 
+ PINNED_CHECKSUM_HEX = (
+     '72c2761d95db86836edea2e9f8124a2cc6851694b42345fc'
+@@ -30,10 +23,6 @@ PINNED_CHECKSUM_HEX = (
+ the edit then shows in this file's diff as well."""
+ 
+ _REPOSITORY: Final = Path(__file__).resolve().parents[2]
+-_CORE_MIGRATIONS: Final = (
+-    _REPOSITORY / 'crates' / 'horsies-core' / 'src' / 'broker' / 'migrations.rs'
+-)
+-"""The core's migration runner: its ``baseline_sql_files!`` list includes the same files."""
+ _SCHEMA_PAGE: Final = (
+     _REPOSITORY
+     / 'website'
+@@ -46,34 +35,32 @@ _SCHEMA_PAGE: Final = (
+ """The docs page whose table lists each file of the migration."""
+ 
+ 
+-def _loaded() -> BaselineMigration:
+-    match load_baseline_migration():
+-        case Ok(loaded):
+-            return loaded
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++def _file_names() -> tuple[str, ...]:
++    """The file names of the migration, in the order they run."""
++    return tuple(name for name, _ in _core.baseline_sql_files())
+ 
+ 
+ def test_migration_is_version_1000_with_its_description() -> None:
+-    loaded = _loaded()
++    loaded = load_baseline_migration()
+     assert loaded.version == BASELINE_VERSION == 1000
+     assert loaded.description == BASELINE_DESCRIPTION == 'baseline'
+ 
+ 
+ def test_checksum_is_sha384_of_the_text() -> None:
+-    loaded = _loaded()
++    loaded = load_baseline_migration()
+     assert loaded.checksum == hashlib.sha384(loaded.sql.encode('utf-8')).digest()
+     assert loaded.checksum == baseline_checksum(loaded.sql)
+     assert len(loaded.checksum) == 48
+ 
+ 
+ def test_checksum_is_pinned() -> None:
+-    assert _loaded().checksum.hex() == PINNED_CHECKSUM_HEX
++    assert load_baseline_migration().checksum.hex() == PINNED_CHECKSUM_HEX
+ 
+ 
+ def test_text_is_the_files_in_name_order() -> None:
+-    loaded = _loaded()
+-    assert BASELINE_SQL_FILES == tuple(sorted(BASELINE_SQL_FILES))
++    loaded = load_baseline_migration()
++    names = _file_names()
++    assert names == tuple(sorted(names))
+     tables = loaded.sql.index('-- horsies baseline schema, part 1:')
+     indexes = loaded.sql.index('-- horsies baseline schema, part 2:')
+     functions = loaded.sql.index('-- horsies baseline schema, part 3:')
+@@ -81,64 +68,24 @@ def test_text_is_the_files_in_name_order() -> None:
+     assert tables == 0 < indexes < functions < workflow_functions
+ 
+ 
+-def _package_sql_files() -> tuple[str, ...]:
+-    folder = resources.files('horsies.core.baseline').joinpath('sql')
+-    return tuple(
+-        sorted(entry.name for entry in folder.iterdir() if entry.name.endswith('.sql'))
+-    )
+-
+-
+-def _core_sql_files() -> tuple[str, ...]:
+-    """The quoted names of the ``baseline_sql_files!`` invocation in the core."""
+-    source = _CORE_MIGRATIONS.read_text(encoding='utf-8')
+-    start = source.index('\nbaseline_sql_files!(\n')
+-    end = source.index('\n);\n', start)
+-    return tuple(re.findall(r'"([^"]+)"', source[start:end]))
+-
+-
+-def test_the_list_holds_every_sql_file_of_the_package_folder() -> None:
+-    assert BASELINE_SQL_FILES == _package_sql_files()
+-
+-
+-def test_the_core_includes_the_same_files_in_the_same_order() -> None:
+-    # Both clients install the same migration 1000 text and checksum. The
+-    # core's test `baseline_file_list_is_python_s_list_and_the_whole_folder`
+-    # checks the same pair from its side.
+-    assert _core_sql_files() == BASELINE_SQL_FILES
+-
+-
+ def test_the_schema_page_lists_every_file() -> None:
+     page = _SCHEMA_PAGE.read_text(encoding='utf-8')
+     listed = tuple(
+         re.findall(r'^\| `(\d{4}_[a-z_]+\.sql)` \|', page, flags=re.MULTILINE)
+     )
+-    assert listed == BASELINE_SQL_FILES
++    assert listed == _file_names()
+ 
+ 
+ def test_text_names_no_schema() -> None:
+     # The install and the scratch-schema fixtures create the objects in the
+     # current schema; a qualifier would put them elsewhere.
+-    assert 'public.' not in _loaded().sql
++    assert 'public.' not in load_baseline_migration().sql
+ 
+ 
+ def test_text_has_no_transaction_control() -> None:
+     # The install runs the text inside its own transaction with the
+     # bookkeeping row; a COMMIT in the text would split the two.
+-    statements = {line.strip().upper() for line in _loaded().sql.splitlines()}
++    statements = {line.strip().upper() for line in load_baseline_migration().sql.splitlines()}
+     assert statements.isdisjoint(
+         {'BEGIN;', 'COMMIT;', 'ROLLBACK;', 'START TRANSACTION;'}
+     )
+-
+-
+-def test_unreadable_file_is_a_named_error(monkeypatch: pytest.MonkeyPatch) -> None:
+-    monkeypatch.setattr(
+-        migration,
+-        'BASELINE_SQL_FILES',
+-        ('0001_tables.sql', '9999_missing.sql'),
+-    )
+-    match load_baseline_migration():
+-        case Err(BaselineSqlUnreadable(file_name=file_name, cause=cause)):
+-            assert file_name == '9999_missing.sql'
+-            assert cause.startswith('FileNotFoundError')
+-        case Ok(loaded):
+-            pytest.fail(f'expected an unreadable file, got {loaded.version}')
+diff --git a/tests/unit/test_task_history_rerun_provenance.py b/tests/unit/test_task_history_rerun_provenance.py
+index 84671437..9949c1eb 100644
+--- a/tests/unit/test_task_history_rerun_provenance.py
++++ b/tests/unit/test_task_history_rerun_provenance.py
+@@ -16,7 +16,6 @@ from horsies.core.history.rerun.provenance import (
+     RERUN_FIELD_PROVENANCE,
+     FieldProvenance,
+ )
+-from horsies.core.types.result import Err, Ok
+ 
+ pytestmark = [pytest.mark.unit]
+ 
+@@ -26,11 +25,7 @@ _COLUMN_LINE = re.compile(r'^ {4}([a-z][a-z0-9_]*) [a-z]', re.MULTILINE)
+ 
+ def enqueue_visible_columns() -> set[str]:
+     """The column names of ``horsies_tasks`` in the baseline SQL."""
+-    match load_baseline_migration():
+-        case Ok(ok_value=migration):
+-            sql = migration.sql
+-        case Err(err_value=unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    sql = load_baseline_migration().sql
+     body = sql.split(_LIVE_TABLE_OPENING, 1)[1].split('\n);\n', 1)[0]
+     columns = {match.group(1) for match in _COLUMN_LINE.finditer(body)}
+     # A pattern that matches nothing would make every closure check pass.
