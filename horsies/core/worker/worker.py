@@ -184,7 +184,7 @@ _HOOK_FAILURE_MESSAGE = (
 from horsies.core.worker.claiming import ClaimMixin as ClaimMixin  # noqa: E402
 from horsies.core.worker.dispatch import DispatchMixin as DispatchMixin  # noqa: E402
 from horsies.core.worker.finalize import (  # noqa: E402
-    GET_TASK_STATUS_RESULT_SQL as GET_TASK_STATUS_RESULT_SQL,
+    GET_TASK_STATUS_SQL as GET_TASK_STATUS_SQL,
     FinalizeMixin as FinalizeMixin,
 )
 from horsies.core.worker.health import HealthMixin as HealthMixin  # noqa: E402
