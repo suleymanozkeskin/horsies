@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    launch_runner_beats, runner_beat_pool, write_beats, BeatSender, LiveDispatches,
-    StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
+    launch_runner_beats, runner_beat_pool, write_beats, BeatSender, DispatchRunner, FailClosedStop,
+    LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
 };
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -454,7 +454,9 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
         .await;
     }
     let live = LiveDispatches::default();
-    let dispatch = live.hold(held, held_claim);
+    let dispatch = live
+        .hold(held, held_claim, DispatchRunner::WorkerProcess)
+        .expect("an open registry holds the dispatch");
     let cancel = CancellationToken::new();
     let (watch, writer) = launch_runner_beats(
         runner_beat_pool(&pool),
@@ -463,6 +465,7 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
         StaleRunningRecovery::Off,
         live.clone(),
         cancel.clone(),
+        FailClosedStop::new(CancellationToken::new()),
     )
     .expect("start the beat loop");
 
