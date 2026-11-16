@@ -67,6 +67,7 @@ from horsies.monitoring import (
     list_workflow_names,
     list_workflow_runs,
     TaskSummary,
+    categorize_error_code,
     task_breakdown,
     task_facets,
     task_stats,
@@ -439,7 +440,7 @@ class TestTaskStats:
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
         assert isinstance(error.exception, HistoryContractError)
-        assert "'NOT_KNOWN'" in error.message
+        assert 'NOT_KNOWN' in error.message
 
 
 # --------------------------------------------------------------------------- #
@@ -495,7 +496,6 @@ class TestTaskFacets:
             event.remove(engine, 'before_cursor_execute', _record)
 
         assert is_ok(result)
-        assert len([s for s in statements if 'GROUPING SETS' in s]) == 1
         assert len(statements) == 1
 
     async def test_ties_follow_the_database_collation(
@@ -553,13 +553,24 @@ class TestTaskFacets:
                 for index in range(distinct_codes)
             ],
         )
-        sql, params = queries_module.facets_statement(
-            window=_test_window().history,
-            statuses=[],
-            retried_only=False,
-        )
-
-        rows = (await session.execute(text(sql), params)).all()
+        window = _test_window()
+        builtin = sorted(BUILTIN_CODE_REGISTRY)
+        rows = (
+            await session.execute(
+                text(
+                    'SELECT facet FROM horsies_monitoring_task_facets('
+                    'CAST(:lower AS timestamptz), CAST(:upper AS timestamptz), '
+                    "CAST('{}' AS text[]), FALSE, "
+                    'CAST(:codes AS text[]), CAST(:categories AS text[]))'
+                ),
+                {
+                    'lower': window.lower,
+                    'upper': window.upper,
+                    'codes': builtin,
+                    'categories': [_builtin_category(code) for code in builtin],
+                },
+            )
+        ).all()
         result = await task_facets(
             broker,
             window=_test_window(),
@@ -1049,6 +1060,15 @@ class TestTaskBreakdown:
             BreakdownValueGroup(value='w1'),
         ]
         assert result.ok_value.total.total == 1
+
+
+def _builtin_category(code: str) -> str:
+    """The category of a built-in error code, as the facet function takes it."""
+    match categorize_error_code(code):
+        case ErrorCategory() as category:
+            return category.value
+        case None:
+            raise AssertionError(f'built-in code {code!r} has no category')
 
 
 async def _worker_breakdown(broker: PostgresBroker) -> MonitoringResult[Breakdown]:
