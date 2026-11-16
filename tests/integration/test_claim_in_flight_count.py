@@ -10,10 +10,15 @@ them. A bitmap scan marks none. Each test runs the worker's claim statement
   index, where the default settings give a sequential scan;
 - after a drain that leaves only dead RUNNING entries, one claim marks all of
   them.
+
+An entry is dead to all, and a scan can mark it, only when no transaction on
+the server still runs from before the delete. The drain test waits for that,
+with a bound, before its claim.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from typing import Any, Final
@@ -62,6 +67,32 @@ CLAIM_PARAMS: Final[dict[str, object]] = {
     'p_lock_keys': '[]',
 }
 RUNNING_ROWS_SQL: Final = "SELECT task_name FROM horsies_tasks WHERE status = 'RUNNING'"
+OLDER_HOLDER_POLLS: Final = 300
+"""The polls of the wait for older transactions: at most 60 s with the interval below."""
+OLDER_HOLDER_POLL_INTERVAL_S: Final = 0.2
+OLDER_HOLDERS_SQL: Final = text("""
+    SELECT format(
+        'backend pid %s (database %s, state %s, transaction start %s, query %L)',
+        pid, datname, state, xact_start, left(query, 200)
+    )
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+      AND (
+          age(backend_xid) >= age(CAST(:delete_xid AS xid))
+          OR age(backend_xmin) >= age(CAST(:delete_xid AS xid))
+      )
+    UNION ALL
+    SELECT format('prepared transaction %L (database %s, prepared %s)', gid, database, prepared)
+    FROM pg_prepared_xacts
+    WHERE age(transaction) >= age(CAST(:delete_xid AS xid))
+    UNION ALL
+    SELECT format('replication slot %L (database %s)', slot_name, database)
+    FROM pg_replication_slots
+    WHERE age(xmin) >= age(CAST(:delete_xid AS xid))
+""")
+"""Each holder of an xid or a snapshot xmin at or before the delete's xid,
+in any database of the server. ``age`` compares the two xids: the older one
+has the larger age."""
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -186,6 +217,30 @@ async def _bitmap_running_entries(session: AsyncSession) -> float:
     raise AssertionError(f'no bitmap index scan in {plan}')
 
 
+async def _wait_for_older_transactions(session: AsyncSession, delete_xid: str) -> None:
+    """Wait until no transaction on the server is as old as the delete.
+
+    Polls ``OLDER_HOLDERS_SQL`` ``OLDER_HOLDER_POLLS`` times, each poll rolled
+    back. Fails the test with the names of the holders when they remain:
+    then the test cannot show what the claim marks.
+    """
+    holders: list[str] = []
+    for _ in range(OLDER_HOLDER_POLLS):
+        try:
+            result = await session.execute(OLDER_HOLDERS_SQL, {'delete_xid': delete_xid})
+            holders = [str(holder) for holder in result.scalars().all()]
+        finally:
+            await session.rollback()
+        if not holders:
+            return
+        await asyncio.sleep(OLDER_HOLDER_POLL_INTERVAL_S)
+    pytest.fail(
+        f'transactions from before the delete (xid {delete_xid}) still run after '
+        f'{OLDER_HOLDER_POLLS * OLDER_HOLDER_POLL_INTERVAL_S:.0f} s, so no scan can '
+        f'mark the deleted entries: {"; ".join(holders)}'
+    )
+
+
 async def test_the_count_reads_the_status_index_when_most_rows_are_in_flight(
     session: AsyncSession,
     tasks_without_autovacuum: None,  # noqa: ARG001
@@ -218,8 +273,12 @@ async def test_a_claim_marks_the_dead_running_entries(
     await _insert_pending(session)
     await _start(session, ROWS)
     _ = await session.execute(text('DELETE FROM horsies_tasks'))
+    delete_xid = str(
+        (await session.execute(text('SELECT CAST(pg_current_xact_id() AS xid)'))).scalar_one()
+    )
     await session.commit()
     before = await _bitmap_running_entries(session)
+    await _wait_for_older_transactions(session, delete_xid)
 
     await _claim_once(session)
 
