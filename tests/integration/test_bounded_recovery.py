@@ -617,7 +617,8 @@ async def test_orphan_task_scan_has_a_strict_plan_and_reaches_cycle_end(
                 last_id = task.id,
                 cycle_upper_created_at = upper_task.created_at,
                 cycle_upper_id = upper_task.id,
-                completed_cycles = 0
+                completed_cycles = 0,
+                last_scan_at = statement_timestamp()
             FROM horsies_tasks task, horsies_tasks upper_task
             WHERE cursor.scan_name = 'orphan_workflow_tasks'
               AND task.id = md5('orphan-plan-task-49500')::uuid
