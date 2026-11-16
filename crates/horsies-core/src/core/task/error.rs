@@ -39,10 +39,12 @@ pub enum OperationalErrorCode {
     WorkflowRecoveryLimitReached,
     /// A child workflow would pass the depth limit (32), so it did not start and its sub-workflow node failed.
     SubworkflowDepthLimitReached,
+    /// A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code.
+    WorkflowStartIncomplete,
 }
 
 impl OperationalErrorCode {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::UnhandledError,
         Self::TaskError,
         Self::WorkerCrashed,
@@ -54,6 +56,7 @@ impl OperationalErrorCode {
         Self::SubworkflowLoadFailed,
         Self::WorkflowRecoveryLimitReached,
         Self::SubworkflowDepthLimitReached,
+        Self::WorkflowStartIncomplete,
     ];
 }
 
@@ -567,6 +570,7 @@ mod tests {
             OperationalErrorCode::SubworkflowLoadFailed,
             OperationalErrorCode::WorkflowRecoveryLimitReached,
             OperationalErrorCode::SubworkflowDepthLimitReached,
+            OperationalErrorCode::WorkflowStartIncomplete,
         ];
         for code in codes {
             let builtin = BuiltInTaskCode::Operational(code.clone());
