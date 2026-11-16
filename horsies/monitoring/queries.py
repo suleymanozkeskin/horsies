@@ -1599,8 +1599,10 @@ async def list_workflow_runs(
 ) -> MonitoringResult[list[WorkflowRunSummary]]:
     """Recent root workflow runs, newest first.
 
-    ``name`` and ``status`` are independent exact-match filters combined with
-    AND; a status no run carries yields an empty list.
+    Runs created at one time come by id, highest first, so a page does not
+    reorder between polls. ``name`` and ``status`` are independent
+    exact-match filters combined with AND; a status no run carries yields an
+    empty list.
     """
     conditions: list[ColumnElement[bool]] = [WorkflowModel.parent_workflow_id.is_(None)]
     if name is not None:
@@ -1610,7 +1612,7 @@ async def list_workflow_runs(
     stmt = (
         select(WorkflowModel)
         .where(*conditions)
-        .order_by(WorkflowModel.created_at.desc())
+        .order_by(WorkflowModel.created_at.desc(), WorkflowModel.id.desc())
         .limit(limit.value)
     )
 
@@ -1840,9 +1842,13 @@ async def get_workflow_node(
 async def list_schedules(
     broker: PostgresBroker,
 ) -> MonitoringResult[list[ScheduleStateInfo]]:
-    """Recurring schedule states, soonest next-run first."""
+    """Recurring schedule states, soonest next-run first, then by name.
+
+    Schedules due at one time come by name, so the list does not reorder
+    between polls.
+    """
     stmt = select(ScheduleStateModel).order_by(
-        nulls_last(ScheduleStateModel.next_run_at.asc())
+        ScheduleStateModel.next_run_at.asc(), ScheduleStateModel.schedule_name.asc()
     )
 
     match await broker.select_resources():

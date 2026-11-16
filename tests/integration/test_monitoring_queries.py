@@ -2251,6 +2251,22 @@ class TestListWorkflowRuns:
         assert is_ok(result)
         assert [run.name for run in result.ok_value] == ['beta_flow', 'alpha_flow']
 
+    async def test_runs_created_at_one_time_come_by_id_highest_first(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        created = ago(60)
+        runs = [make_workflow(name=f'flow_{index}', created_at=created) for index in range(4)]
+        await insert_rows(session, *runs)
+
+        result = await list_workflow_runs(
+            broker, name=None, status=None, limit=WorkflowRunsLimit(value=30)
+        )
+
+        assert is_ok(result)
+        assert [run.id for run in result.ok_value] == sorted(
+            (run.id for run in runs), key=uuid.UUID, reverse=True
+        )
+
     async def test_name_and_status_filters_combine(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
@@ -2711,6 +2727,28 @@ class TestListSchedules:
             'later',
         ]
         assert result.ok_value[0].run_count == 4
+
+    async def test_schedules_due_at_one_time_come_by_name(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        due = datetime.now(UTC) + timedelta(minutes=5)
+        await insert_rows(
+            session,
+            *[
+                make_schedule(schedule_name=name, next_run_at=due)
+                for name in ('gamma', 'alpha', 'delta', 'beta')
+            ],
+        )
+
+        result = await list_schedules(broker)
+
+        assert is_ok(result)
+        assert [row.schedule_name for row in result.ok_value] == [
+            'alpha',
+            'beta',
+            'delta',
+            'gamma',
+        ]
 
 
 # --------------------------------------------------------------------------- #
