@@ -1243,6 +1243,19 @@ impl PostgresBroker {
         &self.session_pool
     }
 
+    /// The core pool on `database_url`, for the lifecycle writers that run
+    /// on the statement layer ([`crate::broker::attempt_writes`]). In a
+    /// worker it is the worker profile pool.
+    pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
+        self.core.main()
+    }
+
+    /// Whether this broker logs each core statement it runs, for the
+    /// lifecycle writers that run on [`PostgresBroker::core_main_pool`].
+    pub(crate) fn statement_log(&self) -> StatementLog {
+        self.statement_log
+    }
+
     /// Runs one statement on the main core pool and reads every row.
     ///
     /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the

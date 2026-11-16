@@ -19,6 +19,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
+use crate::broker::attempt_writes::{
+    finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, FinishFailedAttempt,
+    FinishWorkflowSuccess,
+};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
@@ -28,7 +35,8 @@ use crate::core::history::heartbeats::partitioning::{
 };
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::lifecycle::{
-    BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    BatchSize, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 
 /// The worker that holds the seeded claims.
@@ -899,6 +907,33 @@ const BACKEND_EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// Bound of the wait for a released connection to be idle in its pool.
 const IDLE_POLLS: u32 = 100;
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The failed-attempt write of a task whose child reported a result
+/// (claimed-row rule `REFUSE`), on a core pool on the test database.
+pub(super) async fn write_failed_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<FailedAttemptOutcome, BrokerError> {
+    finish_failed_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The failed-attempt write of a task whose child ended without a report
+/// (claimed-row rule `RELEASE`), on a core pool on the test database.
+pub(super) async fn write_unreported_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<UnreportedAttemptOutcome, BrokerError> {
+    finish_unreported_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The success write of a workflow task, on a core pool on the test
+/// database.
+pub(super) async fn write_workflow_success(
+    pool: &PgPool,
+    command: &FinishWorkflowSuccess,
+) -> Result<WorkflowSuccessOutcome, BrokerError> {
+    finish_workflow_success(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
 
 /// A pool of one connection that does not ping a connection at checkout, so
 /// a dead pooled connection shows at its first statement (Python's worker
