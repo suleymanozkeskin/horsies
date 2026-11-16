@@ -664,7 +664,7 @@ SET_READY_WORKFLOW_TASK_TERMINAL_SQL = text("""
 # -- SQL constants for get_dependency_results --
 
 GET_DEPENDENCY_RESULTS_SQL = text("""
-    SELECT task_index, task_name, status, result, sub_definition_key
+    SELECT task_index, task_name, node_id, status, result, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND task_index = ANY(:indices)

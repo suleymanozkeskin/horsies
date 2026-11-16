@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ConfigurationError
@@ -69,6 +70,7 @@ async def _enqueue_probe(broker: PostgresBroker, task_name: str = "pgbouncer_pro
     return await broker.enqueue_async(
         task_name,
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=enqueue_sha,
         args_json="[]",
         kwargs_json="{}",

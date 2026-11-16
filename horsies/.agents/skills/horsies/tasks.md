@@ -186,6 +186,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `SUBWORKFLOW_DEPTH_LIMIT_REACHED` — the engine did not start a child workflow, because its depth would pass 32
 - `TASK_BLOCKED_LOOP` — the task held the event loop of its shared async child past the block limit (5 s), before its `timeout_ms`; the worker killed the child, and a retry runs in an isolated child
 - `NEIGHBOUR_BLOCKED_LOOP` — another task held the event loop of this task's shared async child past the block limit, before this task's `timeout_ms`; the worker killed the child
+- `WORKFLOW_START_INCOMPLETE` — a RUNNING workflow has no node rows: its start did not finish, and recovery failed it
 
 ### `ContractCode`
 
@@ -397,7 +398,7 @@ Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_id: str  # UUID, stable across retries of the same send
+task_id: UUID  # stable across retries of the same send
 
 def get(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
 async def get_async(timeout_ms: int | None = None) -> TaskResult[T, TaskError]
@@ -415,7 +416,7 @@ async def info_async(*, include_result: bool = False, include_failed_reason: boo
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_id: str, task_name: str, status: TaskStatus
+task_id: UUID, task_name: str, status: TaskStatus
 queue_name: str, priority: int
 retry_count: int, max_retries: int, next_retry_at: datetime | None
 sent_at: datetime | None, enqueued_at: datetime
@@ -432,7 +433,7 @@ attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (No
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_id: str, attempt: int
+task_id: UUID, attempt: int
 outcome: TaskAttemptOutcome  # COMPLETED, FAILED, WORKER_FAILURE
 will_retry: bool
 started_at: datetime, finished_at: datetime

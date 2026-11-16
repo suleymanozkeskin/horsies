@@ -19,6 +19,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
@@ -193,7 +194,7 @@ async def test_a_shared_task_sends_with_send_async(
             result = unwrap_get_result(
                 await asyncio.to_thread(
                     app.get_result,
-                    sent_id,
+                    UUID(sent_id),
                     timeout_ms=RESULT_TIMEOUT_MS,
                 ),
             )

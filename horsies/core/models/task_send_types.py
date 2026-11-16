@@ -14,68 +14,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import ClassVar
+from uuid import UUID
 
+from horsies._catalog.task_send import TaskSendErrorCode as TaskSendErrorCode
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
-
-
-class TaskSendErrorCode(str, Enum):
-    """Categorized task send failure codes.
-
-    Follows the same pattern as BrokerErrorCode and WorkflowStartErrorCode.
-    """
-
-    SEND_SUPPRESSED = 'SEND_SUPPRESSED'
-    """Send called while suppression is active (worker/scheduler import phase,
-    ``check()``, or ``HORSIES_SUPPRESS_SENDS=1``). The retry methods refuse
-    it."""
-
-    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    """Sync ``send()``/``schedule()`` (or their sync retry variants) called
-    from inside a running event loop; the blocking enqueue round trip would
-    stall the loop. The error carries ``task_id`` and payload — complete the
-    dispatch with ``retry_send_async`` / ``retry_schedule_async``, or call
-    the matching ``*_async`` entry point with the original args. A sync
-    retry from the same loop returns this code again."""
-
-    VALIDATION_FAILED = 'VALIDATION_FAILED'
-    ENQUEUE_FAILED = 'ENQUEUE_FAILED'
-
-    PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
-    """The task id already exists, and the command or the idempotency key
-    differs from the original send; nothing was written. The message names
-    which one differs. The retry methods refuse it."""
-
-    IDEMPOTENCY_KEY_CONFLICT = 'IDEMPOTENCY_KEY_CONFLICT'
-    """The idempotency key is reserved by another task with a different
-    command; nothing was written. ``owner_task_id`` names the owner task.
-    The retry methods accept this error: a retry after the reservation ends
-    is accepted, and a retry before that returns the same error. Do not
-    retry in a tight loop."""
-
-    PAYLOAD_TOO_LARGE = 'PAYLOAD_TOO_LARGE'
-    """Serialized kwargs exceeded ``payload.reject_bytes``; nothing was
-    written. The retry methods refuse it — shrink the payload (pass a
-    reference to external storage) or raise the configured limit."""
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this send ran on a new one; nothing was written. Repeating the
-    send on this loop returns the same error until one of those loops closes.
-    The retry methods refuse it."""
-
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    """Sync ``send()``/``schedule()`` (or their sync retry variants) could
-    not run the enqueue on the broker's sync runner: the runner is stopped,
-    its thread did not start, or scheduling failed. Nothing ran and nothing
-    was written. A stopped runner does not start again (``broker.close()``
-    and ``close_async()`` stop it). The error carries ``task_id`` and
-    payload — complete the dispatch with ``retry_send_async`` /
-    ``retry_schedule_async``."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -130,7 +76,7 @@ class TaskSendAsyncContext:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ASYNC_CONTEXT
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
@@ -159,7 +105,7 @@ class TaskSendEnqueueFailed:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ENQUEUE_FAILED
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     retryable: bool
@@ -174,7 +120,7 @@ class TaskSendPayloadMismatch:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.PAYLOAD_MISMATCH
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
 
@@ -203,10 +149,10 @@ class TaskSendIdempotencyKeyConflict:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
-    owner_task_id: str
+    owner_task_id: UUID
 
 
 @dataclass(slots=True, frozen=True)
@@ -233,7 +179,7 @@ class TaskSendLoopRunnerFailed:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.LOOP_RUNNER_FAILED
-    task_id: str
+    task_id: UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)
     exception: BaseException = field(repr=False)

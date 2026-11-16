@@ -16,36 +16,7 @@ use super::values::{
 };
 use super::PROTOCOL_VERSION;
 
-/// An errno that names an OS resource limit. A boot that fails with one can
-/// succeed later, when the resource is free again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ShortageErrno {
-    Emfile,
-    Enfile,
-    Enomem,
-    Eagain,
-}
-
-impl ShortageErrno {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Emfile => "EMFILE",
-            Self::Enfile => "ENFILE",
-            Self::Enomem => "ENOMEM",
-            Self::Eagain => "EAGAIN",
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "EMFILE" => Some(Self::Emfile),
-            "ENFILE" => Some(Self::Enfile),
-            "ENOMEM" => Some(Self::Enomem),
-            "EAGAIN" => Some(Self::Eagain),
-            _ => None,
-        }
-    }
-}
+pub use crate::core::boot_failure::ShortageErrno;
 
 /// A boot failure cause that a child can report (Python
 /// `core/models/boot_failure.py`). A spawn failure is the parent's to see,
@@ -64,13 +35,17 @@ pub enum ReportedBootCause {
     ThreadStartRefused,
 }
 
-/// Why a child stopped before it set its row RUNNING. Nothing is left to
-/// write for the run: the start's miss path wrote what the case needs.
+/// Why a child stopped before it set its row RUNNING. No task code ran. The
+/// start's miss path wrote what each case needs, except for
+/// `OwnershipUnconfirmed`, whose claim the parent releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     /// The row is not CLAIMED by this worker at this claim generation.
     ClaimLost,
-    /// A resume raced the start twice; the claim lease returns the task.
+    /// The start was not confirmed: the start statement raised (a database
+    /// error, or its bound cancelled it), or a resume raced the start on
+    /// each attempt. The parent releases the claim at once with the fenced
+    /// release.
     OwnershipUnconfirmed,
     /// The workflow of the task is PAUSED or CANCELLED.
     WorkflowStopped,
@@ -708,7 +683,7 @@ fn decode_boot_cause(cause: &Fields<'_>) -> Result<ReportedBootCause, MalformedF
         }
         "resource_shortage" => {
             cause.only(&["kind", "errno"])?;
-            ShortageErrno::parse(cause.text("errno")?)
+            ShortageErrno::from_name(cause.text("errno")?)
                 .map(ReportedBootCause::ResourceShortage)
                 .ok_or_else(|| {
                     cause.broken_rule("errno", "is not one of EMFILE, ENFILE, ENOMEM, EAGAIN")
