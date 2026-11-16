@@ -409,7 +409,7 @@ fn an_args_from_key_that_names_a_static_member_fails_the_node() {
 fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     let workflow_id = Uuid::new_v4();
     let builder: crate::core::SpecBuilderFn = Arc::new(
-        |input: &str| -> Result<WorkflowSpec, crate::core::HorsiesError> {
+        |input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
             let parsed: serde_json::Value =
                 serde_json::from_str(input).expect("the merged input is JSON");
             match parsed["value"]["ok"] == serde_json::json!(7) {
@@ -422,9 +422,13 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
                             .priority(100),
                     );
                     spec_builder.output(node);
-                    spec_builder.build()
+                    spec_builder
+                        .build()
+                        .map_err(crate::core::SpecBuildError::Failed)
                 }
-                false => Err(crate::core::HorsiesError::new("no merged value")),
+                false => Err(crate::core::SpecBuildError::Failed(
+                    crate::core::HorsiesError::new("no merged value"),
+                )),
             }
         },
     );
@@ -474,6 +478,145 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
             "Subworkflow build failed: HorsiesError: error: no merged value \
              (workflow child_start_parent:1)"
         )
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
+    );
+}
+
+/// A registry whose child under [`CHILD_KEY`] has `builder`, for the client
+/// whose builder hook is `hook`.
+fn registry_with_builder(
+    hook: crate::core::registry::BuilderHookName,
+    builder: crate::core::SpecBuilderFn,
+) -> WorkflowSpecRegistry {
+    let mut child = WorkflowSpecBuilder::new(CHILD_NAME);
+    child.definition_key(CHILD_KEY);
+    let node = child.task(
+        TaskNode::<String>::raw("child_start_task", "{}")
+            .queue("default")
+            .priority(100),
+    );
+    child.output(node);
+    let mut registry = WorkflowSpecRegistry::new(hook);
+    registry
+        .register(RegisteredWorkflowSpec {
+            spec: child.build().expect("child spec"),
+            spec_builder: Some(builder),
+        })
+        .expect("register the child");
+    registry
+}
+
+/// A static input member that the builder's decode refuses fails the node
+/// with `WORKER_SERIALIZATION_ERROR` and Python's text, not as a build
+/// failure (Python `core/workflows/engine.py:1063-1080`).
+#[test]
+fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_error() {
+    let workflow_id = Uuid::new_v4();
+    let builder: crate::core::SpecBuilderFn = Arc::new(
+        |_input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
+            Err(crate::core::SpecBuildError::MemberRefused {
+                key: "count".to_owned(),
+                cause: "count: invalid type: string \"x\", expected i64".to_owned(),
+            })
+        },
+    );
+    let registry = registry_with_builder(
+        crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        builder,
+    );
+    let retention = RetentionConfig::default();
+    let mut refused = owed(workflow_id, 0, CHILD_KEY);
+    refused.node_input = r#"{"count": "x"}"#.to_owned();
+    refused.sub_workflow_params = SubWorkflowParams::Given;
+
+    let error = failure_error(
+        child_start_kind(
+            &refused,
+            ChildBuild {
+                registry: &registry,
+                retention: &retention,
+            },
+        )
+        .expect("host build"),
+    );
+
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Typed decode of subworkflow kwargs failed for task 1: \
+             count: invalid type: string \"x\", expected i64"
+        )
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
+    );
+}
+
+/// An `args_from` value that the builder's decode refuses fails the node with
+/// `WORKER_SERIALIZATION_ERROR`; the text names the client's builder hook and
+/// keeps 200 characters of the refusal (Python
+/// `core/workflows/engine.py:1134-1157`). The builder gets the static
+/// members before the `args_from` members, so it meets a static member first,
+/// as Python's decode does.
+#[test]
+fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization_error() {
+    let workflow_id = Uuid::new_v4();
+    let builder: crate::core::SpecBuilderFn = Arc::new(
+        |input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
+            match input.starts_with(r#"{"zeta":"#) {
+                true => Err(crate::core::SpecBuildError::MemberRefused {
+                    key: "alpha".to_owned(),
+                    cause: "x".repeat(250),
+                }),
+                false => Err(crate::core::SpecBuildError::Failed(
+                    crate::core::HorsiesError::new(format!(
+                        "the static members are not first: {input}"
+                    )),
+                )),
+            }
+        },
+    );
+    let registry = registry_with_builder(
+        crate::core::registry::BuilderHookName::new("build_with()"),
+        builder,
+    );
+    let retention = RetentionConfig::default();
+    let mut refused = owed(workflow_id, 0, CHILD_KEY);
+    refused.node_input = r#"{"zeta": 1}"#.to_owned();
+    refused.sub_workflow_params = SubWorkflowParams::Given;
+    refused.args_from = Some(r#"{"alpha": 0}"#.to_owned());
+    refused.sources = vec![ChildStartSource {
+        task_index: 0,
+        status: "COMPLETED".to_owned(),
+        task_name: "source_task".to_owned(),
+        definition_key: None,
+        result: Some(r#"{"__h_task_result__":true,"ok":"seven","err":null}"#.to_owned()),
+    }];
+
+    let error = failure_error(
+        child_start_kind(
+            &refused,
+            ChildBuild {
+                registry: &registry,
+                retention: &retention,
+            },
+        )
+        .expect("host build"),
+    );
+
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message,
+        Some(format!(
+            "args_from value for 'alpha' does not fit the type that build_with() declares \
+             (subworkflow task 1): {}",
+            "x".repeat(200)
+        ))
     );
     assert_eq!(
         error.data,

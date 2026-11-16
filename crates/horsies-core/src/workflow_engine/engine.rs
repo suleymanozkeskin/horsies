@@ -13,11 +13,14 @@ use crate::core::{
     WorkflowTaskStatus,
 };
 
+use crate::workflow_engine::args_merge::child_build_input;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
-    stored_sub_workflow_params,
+    stored_sub_workflow_params, ChildSpecError, ChildSpecFailure,
 };
-use crate::workflow_engine::start_statement::child_spec_failure_text;
+use crate::workflow_engine::start_statement::{
+    child_spec_failure_text, params_refused_error, RefusedMember,
+};
 
 use crate::broker::PostgresBroker;
 use crate::db::CheckoutClass;
@@ -707,6 +710,11 @@ pub(crate) enum NodeRefusal {
     /// An `args_from` key names a member of the node's static input (Python
     /// `horsies/core/workflows/engine.py:834-839`, `:1151-1163`).
     StaticMemberConflict(ArgsFromConflict),
+    /// A member of the child's params does not decode to its builder parameter; the builder did not run.
+    /// The node error is Python's for that member, as [`params_refused_error`] builds it:
+    /// `WORKER_SERIALIZATION_ERROR` with the static-member or the `args_from` text, and the workflow id and
+    /// the node index in `data` (`horsies/core/workflows/engine.py:1063-1080`, `:1134-1157`).
+    ParamsRefused(TaskError),
 }
 
 impl NodeRefusal {
@@ -724,6 +732,7 @@ impl NodeRefusal {
             NodeRefusal::StaticMemberConflict(conflict) => {
                 conflict.node_error(workflow_id, task_index, MergedNodeKind::Task)
             }
+            NodeRefusal::ParamsRefused(error) => error,
         }
     }
 
@@ -748,6 +757,7 @@ impl NodeRefusal {
             NodeRefusal::StaticMemberConflict(conflict) => {
                 conflict.node_error(workflow_id, task_index, MergedNodeKind::SubWorkflow)
             }
+            NodeRefusal::ParamsRefused(error) => error,
         }
     }
 }
@@ -807,19 +817,48 @@ pub(crate) fn preparation<T, E: Into<PreparationStop>>(
     }
 }
 
-/// The child spec of a promoted sub-workflow node: its input after the `args_from` merge, its stored params,
-/// then the build (Python checks the merge and its conflict, `horsies/core/workflows/engine.py:1048-1163`,
-/// before the build, `:1165-1215`). Pure.
+/// The child spec of the promoted sub-workflow node `task_index` of `workflow_id`: its input after the
+/// `args_from` merge, made into the builder input by [`child_build_input`] with the node's stored
+/// `args_from`, its stored params, then the build (Python checks the merge and its conflict,
+/// `horsies/core/workflows/engine.py:1048-1163`, before the build, `:1165-1215`).
+///
+/// Every refusal fails the node alone: a stored input from which the builder input cannot be made and a
+/// failed build are [`NodeRefusal::NotPrepared`] with the label and the text of the [`ChildSpecError`]; a
+/// params member that does not decode is [`NodeRefusal::ParamsRefused`]. Pure.
 pub(crate) fn prepare_child_spec(
     registered: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
+    workflow_id: Uuid,
+    task_index: i32,
     merge: Result<ArgsFromMerge, WorkflowError>,
+    args_from: Option<&serde_json::Value>,
     sub_workflow_params: Option<&str>,
     registry: &WorkflowSpecRegistry,
 ) -> Result<crate::core::WorkflowSpec, PreparationStop> {
     let merged_input = merged_input_or_refusal(merge?)?;
+    let input = child_build_input(merged_input, args_from).map_err(|refused| {
+        PreparationStop::Refused(NodeRefusal::NotPrepared(child_spec_failure_text(
+            &ChildSpecError::of_stored_input(refused),
+        )))
+    })?;
     let params = stored_sub_workflow_params(sub_workflow_params)?;
-    materialize_child_spec(registered, params, &merged_input, registry).map_err(|error| {
-        PreparationStop::Refused(NodeRefusal::NotPrepared(child_spec_failure_text(&error)))
+    materialize_child_spec(registered, params, &input.text, registry).map_err(|failure| {
+        match failure {
+            ChildSpecFailure::BuildFailed(error) => {
+                PreparationStop::Refused(NodeRefusal::NotPrepared(child_spec_failure_text(&error)))
+            }
+            ChildSpecFailure::MemberRefused { key, cause } => {
+                PreparationStop::Refused(NodeRefusal::ParamsRefused(params_refused_error(
+                    workflow_id,
+                    task_index,
+                    RefusedMember {
+                        key: &key,
+                        cause: &cause,
+                    },
+                    &input,
+                    registry.builder_hook(),
+                )))
+            }
+        }
     })
 }
 
@@ -1230,7 +1269,10 @@ async fn enqueue_phase2_subworkflow_in_tx(
     };
     let built = preparation(prepare_child_spec(
         registered,
+        workflow_id,
+        node.task_index,
         merge_args_from(&node.input, &node.args_from, dep_results),
+        node.args_from.as_ref(),
         node.sub_workflow_params.as_deref(),
         registry,
     ))?;
@@ -2547,7 +2589,10 @@ async fn enqueue_subworkflow_task(
     // with WORKFLOW_ENQUEUE_FAILED (Python `horsies/core/workflows/engine.py:1151-1215`).
     let built = preparation(prepare_child_spec(
         registered,
+        workflow_id,
+        task.task_index,
         merge_args_from(&task.input, &task.args_from, dep_results),
+        task.args_from.as_ref(),
         task.sub_workflow_params.as_deref(),
         registry,
     ))?;

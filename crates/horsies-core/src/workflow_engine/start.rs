@@ -13,8 +13,9 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{
-    AnyNode, ErrorCategory, HorsiesError, OnError, OperationalErrorCode, TaskError, WorkflowSpec,
-    WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
+    AnyNode, ErrorCategory, HorsiesError, OnError, OperationalErrorCode, SpecBuildError, TaskError,
+    WorkflowSpec, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult,
 };
 
 use crate::db::CheckoutClass;
@@ -1086,10 +1087,14 @@ pub(crate) fn build_child_spec(
             ))
         })?;
 
+    // A start node has no dependencies, so it has no `args_from`.
+    let input =
+        crate::workflow_engine::args_merge::child_build_input(parent_task.input_json.clone(), None)
+            .map_err(|refused| WorkflowError::from(ChildSpecError::of_stored_input(refused)))?;
     Ok(materialize_child_spec(
         resolved,
         parent_task.sub_workflow_params,
-        &parent_task.input_json,
+        &input.text,
         registry,
     )?)
 }
@@ -1136,7 +1141,7 @@ pub(crate) enum ChildSpecErrorType {
     /// `RuntimeError` for the same node (`core/workflows/engine.py:1185-1189`).
     RuntimeError,
     /// A stored node input from which the core cannot make the builder input
-    /// ([`child_builder_input`](crate::workflow_engine::args_merge::child_builder_input)): the text
+    /// ([`child_build_input`](crate::workflow_engine::args_merge::child_build_input)): the text
     /// does not read, or an `args_from` entry is malformed. Python has no such case: its builder
     /// gets typed values, and the stored input is corrupt data, not a user error.
     StoredInputRefused,
@@ -1190,7 +1195,9 @@ impl ChildSpecError {
     }
 
     /// A stored node input from which the builder input cannot be made. Pure.
-    fn of_stored_input(refused: crate::workflow_engine::args_merge::StoredInputRefused) -> Self {
+    pub(crate) fn of_stored_input(
+        refused: crate::workflow_engine::args_merge::StoredInputRefused,
+    ) -> Self {
         Self {
             error_type: ChildSpecErrorType::StoredInputRefused,
             text: refused.refusal,
@@ -1206,6 +1213,30 @@ impl From<ChildSpecError> for WorkflowError {
     }
 }
 
+/// Why a registered child gave no spec for a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChildSpecFailure {
+    /// The value of the node input member `key` does not decode to the builder parameter of that name;
+    /// the builder did not run. `cause` is the decode's text. Python fails the node with
+    /// `WORKER_SERIALIZATION_ERROR` (`core/workflows/engine.py:1063-1080`, `:1134-1157`).
+    MemberRefused { key: String, cause: String },
+    /// The build failed: the builder, the check of its spec, or params given to a child without a
+    /// builder. Python fails the node with `WORKFLOW_ENQUEUE_FAILED` (`:1196-1211`).
+    BuildFailed(ChildSpecError),
+}
+
+/// A child build that fails on a path that refuses the step instead of failing the node.
+impl From<ChildSpecFailure> for WorkflowError {
+    fn from(failure: ChildSpecFailure) -> Self {
+        match failure {
+            ChildSpecFailure::MemberRefused { key, cause } => WorkflowError::Validation(format!(
+                "the child's params member '{key}' does not decode: {cause}"
+            )),
+            ChildSpecFailure::BuildFailed(error) => error.into(),
+        }
+    }
+}
+
 /// Build the child spec from the parent node's encoded input (`input_json`,
 /// as the client encoded it). A child registered without a builder refuses a
 /// node that gives params (`SubWorkflowParams::Given`); the refusal text names
@@ -1213,24 +1244,23 @@ impl From<ChildSpecError> for WorkflowError {
 /// `build_with()`, Rust `spec_builder`; Python's text,
 /// `core/workflows/engine.py:1185-1189`).
 ///
-/// The builder takes the input with each `args_from` entry replaced by its
-/// `inner` result envelope.
+/// `input_json` is the text of a [`ChildBuildInput`](crate::workflow_engine::args_merge::ChildBuildInput)
+/// ([`child_build_input`](crate::workflow_engine::args_merge::child_build_input)): each `args_from`
+/// wrap is already replaced by its `inner` result envelope. This function does
+/// not unwrap.
 ///
-/// Errors: [`ChildSpecError`] when the builder fails, when the built spec does
-/// not pass the registry's check, for params given to a child without a
-/// builder ([`ChildSpecErrorType::RuntimeError`]), or for a stored input from
-/// which the builder input cannot be made
-/// ([`ChildSpecErrorType::StoredInputRefused`]). Does no I/O; it runs the
+/// Errors: [`ChildSpecFailure::MemberRefused`] when the builder's decode
+/// refuses the value of one input member; [`ChildSpecFailure::BuildFailed`]
+/// when the builder fails, when the built spec does not pass the registry's
+/// check, or for params given to a child without a builder
+/// ([`ChildSpecErrorType::RuntimeError`]). Does no I/O; it runs the
 /// registered builder.
 pub(crate) fn materialize_child_spec(
     resolved: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
     params: SubWorkflowParams,
     input_json: &str,
     registry: &WorkflowSpecRegistry,
-) -> Result<WorkflowSpec, ChildSpecError> {
-    let builder_input = crate::workflow_engine::args_merge::child_builder_input(input_json)
-        .map_err(ChildSpecError::of_stored_input)?;
-    let input_json = builder_input.as_str();
+) -> Result<WorkflowSpec, ChildSpecFailure> {
     match resolved {
         crate::core::registry::workflow::ResolvedChildWorkflow::Dynamic(registered) => {
             built_child_spec(&registered.spec_builder, input_json, registry)
@@ -1238,14 +1268,16 @@ pub(crate) fn materialize_child_spec(
         crate::core::registry::workflow::ResolvedChildWorkflow::Static(registered) => {
             match (&registered.spec_builder, params) {
                 (Some(builder), _) => built_child_spec(builder, input_json, registry),
-                (None, SubWorkflowParams::Given) => Err(ChildSpecError {
-                    error_type: ChildSpecErrorType::RuntimeError,
-                    text: format!(
-                        "subworkflow '{}' received runtime parameters but has no {} that accepts them",
-                        registered.spec.name,
-                        registry.builder_hook().as_str(),
-                    ),
-                }),
+                (None, SubWorkflowParams::Given) => {
+                    Err(ChildSpecFailure::BuildFailed(ChildSpecError {
+                        error_type: ChildSpecErrorType::RuntimeError,
+                        text: format!(
+                            "subworkflow '{}' received runtime parameters but has no {} that accepts them",
+                            registered.spec.name,
+                            registry.builder_hook().as_str(),
+                        ),
+                    }))
+                }
                 (None, SubWorkflowParams::NotGiven) => Ok(registered.spec.clone()),
             }
         }
@@ -1255,17 +1287,26 @@ pub(crate) fn materialize_child_spec(
 /// Runs a registered builder on `input_json`, then resolves the task options
 /// of the built spec and checks it against the registry.
 ///
-/// Errors: [`ChildSpecError`] with the builder's error or the check's error.
+/// Errors: [`ChildSpecFailure::MemberRefused`] for the builder's member
+/// refusal; [`ChildSpecFailure::BuildFailed`] with the builder's error or the
+/// check's error.
 fn built_child_spec(
     builder: &crate::core::SpecBuilderFn,
     input_json: &str,
     registry: &WorkflowSpecRegistry,
-) -> Result<WorkflowSpec, ChildSpecError> {
-    let mut spec = builder(input_json).map_err(|error| ChildSpecError::of_builder(&error))?;
+) -> Result<WorkflowSpec, ChildSpecFailure> {
+    let mut spec = builder(input_json).map_err(|error| match error {
+        SpecBuildError::MemberRefused { key, cause } => {
+            ChildSpecFailure::MemberRefused { key, cause }
+        }
+        SpecBuildError::Failed(error) => {
+            ChildSpecFailure::BuildFailed(ChildSpecError::of_builder(&error))
+        }
+    })?;
     registry.resolve_spec_task_options(&mut spec);
     registry
         .resolve_and_validate_spec(&mut spec)
-        .map_err(|error| ChildSpecError::of_builder(&error))?;
+        .map_err(|error| ChildSpecFailure::BuildFailed(ChildSpecError::of_builder(&error)))?;
     Ok(spec)
 }
 
@@ -1541,9 +1582,54 @@ mod tests {
     #[test]
     fn a_failing_builder_is_a_child_spec_error() {
         let builder: crate::core::SpecBuilderFn =
-            Arc::new(|_input: &str| -> Result<WorkflowSpec, HorsiesError> {
-                Err(HorsiesError::new("the builder refuses")
-                    .with_code(crate::core::ErrorCode::WorkflowCycleDetected))
+            Arc::new(|_input: &str| -> Result<WorkflowSpec, SpecBuildError> {
+                Err(SpecBuildError::Failed(
+                    HorsiesError::new("the builder refuses")
+                        .with_code(crate::core::ErrorCode::WorkflowCycleDetected),
+                ))
+            });
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let mut registered = child_registered_static();
+        registered.spec_builder = Some(builder);
+        registry.register(registered).unwrap();
+        let resolved = registry
+            .resolve_child_registration("tests.child_static.v1")
+            .expect("the child is registered");
+
+        let ChildSpecFailure::BuildFailed(failure) =
+            materialize_child_spec(resolved, SubWorkflowParams::Given, "{}", &registry)
+                .unwrap_err()
+        else {
+            panic!("a failing builder is a build failure");
+        };
+
+        assert_eq!(
+            failure.error_type,
+            ChildSpecErrorType::WorkflowValidationError
+        );
+        let expected_text = HorsiesError::new("the builder refuses")
+            .with_code(crate::core::ErrorCode::WorkflowCycleDetected)
+            .to_string();
+        assert_eq!(failure.text, expected_text);
+        match WorkflowError::from(failure) {
+            WorkflowError::Validation(message) => {
+                assert_eq!(message, format!("WorkflowValidationError: {expected_text}"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    /// A builder whose decode refuses one input member is a member refusal, not a build failure; a
+    /// path that refuses the step reads it as one validation message.
+    #[test]
+    fn a_builder_s_member_refusal_is_not_a_build_failure() {
+        let builder: crate::core::SpecBuilderFn =
+            Arc::new(|_input: &str| -> Result<WorkflowSpec, SpecBuildError> {
+                Err(SpecBuildError::MemberRefused {
+                    key: "count".to_owned(),
+                    cause: "count: invalid type".to_owned(),
+                })
             });
         let mut registry =
             WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
@@ -1558,17 +1644,17 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(
-            failure.error_type,
-            ChildSpecErrorType::WorkflowValidationError
-        );
-        let expected_text = HorsiesError::new("the builder refuses")
-            .with_code(crate::core::ErrorCode::WorkflowCycleDetected)
-            .to_string();
-        assert_eq!(failure.text, expected_text);
-        match WorkflowError::from(failure) {
-            WorkflowError::Validation(message) => {
-                assert_eq!(message, format!("WorkflowValidationError: {expected_text}"));
+            failure,
+            ChildSpecFailure::MemberRefused {
+                key: "count".to_owned(),
+                cause: "count: invalid type".to_owned(),
             }
+        );
+        match WorkflowError::from(failure) {
+            WorkflowError::Validation(message) => assert_eq!(
+                message,
+                "the child's params member 'count' does not decode: count: invalid type"
+            ),
             other => panic!("unexpected error: {other}"),
         }
     }
@@ -1594,38 +1680,31 @@ mod tests {
 
             assert_eq!(
                 failure,
-                ChildSpecError {
+                ChildSpecFailure::BuildFailed(ChildSpecError {
                     error_type: ChildSpecErrorType::RuntimeError,
                     text: format!(
                         "subworkflow 'child_static' received runtime parameters but has no {} \
                          that accepts them",
                         hook.as_str(),
                     ),
-                }
+                })
             );
         }
     }
 
-    /// A stored input with an `args_from` entry that has no `inner` is a refused stored input: the
-    /// builder does not run, and the node fails with `WORKFLOW_ENQUEUE_FAILED` and the refusal.
+    /// A merged input with an `args_from` entry that has no `inner` is a refused stored input: the
+    /// builder input is not made, and the node fails with `WORKFLOW_ENQUEUE_FAILED` and the refusal.
     #[test]
     fn a_stored_input_with_a_malformed_entry_is_a_refused_stored_input() {
-        let builder: crate::core::SpecBuilderFn =
-            Arc::new(|_input: &str| -> Result<WorkflowSpec, HorsiesError> {
-                panic!("the builder does not run for a refused stored input")
-            });
-        let mut registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        let mut registered = child_registered_static();
-        registered.spec_builder = Some(builder);
-        registry.register(registered).unwrap();
-        let resolved = registry
-            .resolve_child_registration("tests.child_static.v1")
-            .expect("the child is registered");
         let input = r#"{"value": {"__h_taskresult_envelope__": true, "source_task_name": "t"}}"#;
+        let args_from = serde_json::json!({"value": 0});
 
-        let failure = materialize_child_spec(resolved, SubWorkflowParams::Given, input, &registry)
-            .unwrap_err();
+        let refused = crate::workflow_engine::args_merge::child_build_input(
+            input.to_owned(),
+            Some(&args_from),
+        )
+        .expect_err("a wrap without inner is refused");
+        let failure = ChildSpecError::of_stored_input(refused);
 
         assert_eq!(failure.error_type, ChildSpecErrorType::StoredInputRefused);
         assert_eq!(
@@ -2243,7 +2322,7 @@ mod tests {
             declared_children: vec![],
             spec_builder: Arc::new(|input_json| {
                 let params = serde_json::from_str::<serde_json::Value>(input_json)
-                    .map_err(|e| crate::HorsiesError::new(e.to_string()))?;
+                    .map_err(|e| SpecBuildError::Failed(crate::HorsiesError::new(e.to_string())))?;
                 let region = params["region"].as_str().unwrap().to_owned();
 
                 let mut builder = WorkflowSpecBuilder::new("child_dynamic");
@@ -2253,7 +2332,7 @@ mod tests {
                         .input_json(serde_json::to_string(&region).unwrap()),
                 );
                 builder.output(node);
-                builder.build()
+                builder.build().map_err(SpecBuildError::Failed)
             }),
         };
 
