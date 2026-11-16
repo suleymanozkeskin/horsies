@@ -35,6 +35,7 @@ from horsies.core.worker.worker import (
     _RequeueOutcome,
 )
 from horsies.core.workflows.lifecycle import pause_workflow
+from tests.dispatch_claim_support import claim_at, row_claim
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
@@ -286,7 +287,7 @@ async def test_future_failure_on_non_retryable_running_task_is_terminal_failed(
     outcome = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert outcome is _RequeueOutcome.REQUEUED
@@ -323,13 +324,13 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
     first = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
     worker._finalize_workflow_phase.reset_mock()  # type: ignore[attr-defined]
     replay = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert first is _RequeueOutcome.REQUEUED
@@ -363,12 +364,12 @@ async def test_future_failure_replay_of_a_plain_task_sends_no_second_wake(
     first = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
     replay = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert first is _RequeueOutcome.REQUEUED
@@ -407,7 +408,7 @@ async def test_future_failure_on_retryable_running_task_respects_retry_policy(
     outcome = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        await row_claim(session, task_id),
     )
 
     assert outcome is _RequeueOutcome.REQUEUED
@@ -446,7 +447,7 @@ async def test_future_failure_terminal_phase2_error_schedules_finalize_retry(
     outcome = await worker._recover_worker_future_failure(
         task_id,
         'process died',
-        CLAIMED_AT,
+        claim_at(CLAIMED_AT),
     )
 
     assert outcome is _RequeueOutcome.REQUEUED
@@ -489,7 +490,7 @@ async def test_finalize_worker_failure_runs_phase2(
         queue_name='default',
         is_workflow_task=True,
         task_name='lifecycle_regression_test',
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -529,7 +530,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
             queue_name='default',
             is_workflow_task=False,
             task_name='lifecycle_regression_test',
-            claimed_at=CLAIMED_AT,
+            claim=claim_at(CLAIMED_AT),
         )
 
         payloads = [notify.payload async for notify in listener.notifies(timeout=0.5)]
