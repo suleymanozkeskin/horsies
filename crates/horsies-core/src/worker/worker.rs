@@ -2821,8 +2821,8 @@ mod tests {
     /// after the worker gives up — advertising a dead worker as alive and holding
     /// claim leases. The broker is built with a distinct session URL so the
     /// listener has its own pool: closing only the main pool lets the loop start
-    /// (background loops spawn), then makes every claim fail with a retryable
-    /// `PoolClosed`; a 1-retry budget exhausts and breaks the loop fatally.
+    /// (background loops spawn), then makes every claim fail with `PoolClosed`,
+    /// which is not retryable, so the loop breaks fatally at the first claim.
     #[tokio::test]
     #[serial]
     async fn run_fires_cancel_on_fatal_claim_exit() {
