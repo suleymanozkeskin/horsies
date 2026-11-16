@@ -327,11 +327,9 @@ $$;
 --   terminalization_kind, is_workflow_task): one row when history holds the id, no row otherwise. No live probe.
 -- - DETAIL: horsies_task_detail_staged(uuid) RETURNS TABLE(location, task_row horsies_task_history): LIVE with a
 --   NULL row when the live table holds the id, HISTORY with the full row, no row when absent.
--- - RESULT: horsies_task_result_staged(uuid) RETURNS TABLE(location, status, live_result, failed_reason,
---   result_envelope_version, result_payload, result_digest, task_name): LIVE with the status and task name (the live
---   row has no result), HISTORY with the stored result columns, no row when absent. live_result is NULL in both
---   locations; the columns are those that the Python publisher renders, so either renderer can replace the other's
---   reader (CREATE OR REPLACE keeps a function's return type) and the core's result read needs no change.
+-- - RESULT: horsies_task_result_staged(uuid) RETURNS TABLE(location, status, failed_reason, result_envelope_version,
+--   result_payload, result_digest, task_name): LIVE with the status and task name (the live row has no result),
+--   HISTORY with the stored result columns, no row when absent.
 -- A change of any rendered text needs a new renderer version in horsies_history_reader_stamp.
 -- Refusals: 22023 invalid_parameter_value for another p_reader. Reads: the manifest table. Changes nothing.
 -- Returns: the statement text.
@@ -397,17 +395,17 @@ BEGIN
             v_with_fallback := TRUE;
         WHEN 'RESULT' THEN
             v_header := 'horsies_task_result_staged(p_task_id uuid) RETURNS TABLE(location text, status text, '
-                || 'live_result text, failed_reason text, result_envelope_version smallint, result_payload bytea, '
+                || 'failed_reason text, result_envelope_version smallint, result_payload bytea, '
                 || 'result_digest bytea, task_name text)';
             v_live_probe := $probe$
-    RETURN QUERY SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::text, NULL::smallint, NULL::bytea,
-        NULL::bytea, t.task_name::text
+    RETURN QUERY SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea,
+        t.task_name::text
     FROM horsies_tasks AS t WHERE t.id = p_task_id;
     IF FOUND THEN
         RETURN;
     END IF;$probe$;
             v_probe := $probe$
-            RETURN QUERY SELECT 'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason,
+            RETURN QUERY SELECT 'HISTORY'::text, h.status::text, h.final_failed_reason,
                 h.result_envelope_version, h.result_payload, h.result_digest, h.task_name::text
             FROM %1$I AS h WHERE h.task_id = p_task_id;
             IF FOUND THEN

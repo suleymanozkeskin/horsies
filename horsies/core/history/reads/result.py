@@ -1,7 +1,7 @@
 """Task-result read primitive over the staged result function.
 
-One statement resolves a task to its live result columns, its history
-result columns, or absence. All probes of the function run in one
+One statement resolves a task to its live status, its history result
+columns, or absence. All probes of the function run in one
 snapshot, so a task that moves to history between two probes cannot be
 missed.
 
@@ -24,19 +24,17 @@ from ..errors import HistoryContractError
 from ..names import TASK_RESULT_FUNCTION
 
 _READ_TASK_RESULT_SQL = text(
-    'SELECT location, task_name, status, live_result, '
-    'result_payload, result_digest '
+    'SELECT location, task_name, status, result_payload, result_digest '
     f'FROM {TASK_RESULT_FUNCTION}(CAST(:task_id AS uuid))'
 )
 
 
 @dataclass(frozen=True, slots=True)
 class LiveTaskResult:
-    """The task is in the live table."""
+    """The task is in the live table. A live row stores no result."""
 
     task_name: str
     status: str
-    result: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +91,7 @@ async def read_task_result(
     status = _required_text(row.status, 'status', task_id)
     match row.location:
         case 'LIVE':
-            return LiveTaskResult(
-                task_name=task_name,
-                status=status,
-                result=row.live_result,
-            )
+            return LiveTaskResult(task_name=task_name, status=status)
         case 'HISTORY':
             return HistoryTaskResult(
                 task_name=task_name,

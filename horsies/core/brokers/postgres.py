@@ -2322,7 +2322,7 @@ class PostgresBroker:
                 self._staged_result_reader_published = False
             raise
         match read:
-            case LiveTaskResult(task_name=task_name, result=result):
+            case LiveTaskResult(task_name=task_name):
                 status = TaskStatus(read.status)
                 match status:
                     case (
@@ -2330,8 +2330,9 @@ class PostgresBroker:
                         | TaskStatus.FAILED
                         | TaskStatus.EXPIRED
                     ):
+                        # A live row stores no result.
                         return self._build_raw_result_record(
-                            task_id, task_name, status, result,
+                            task_id, task_name, status, None,
                         )
                     case _ if (
                         status is TaskStatus.CANCELLED or non_terminal_snapshot

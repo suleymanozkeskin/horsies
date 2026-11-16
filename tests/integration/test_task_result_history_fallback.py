@@ -51,10 +51,10 @@ __all__ = ['make_database']
 
 _STALE_RESULT_READER_SQL = f"""
 CREATE OR REPLACE FUNCTION {TASK_RESULT_FUNCTION}(p_task_id uuid)
-RETURNS TABLE(location text, status text, live_result text, failed_reason text,
-              result_envelope_version smallint, result_payload bytea, result_digest bytea, task_name text)
+RETURNS TABLE(location text, status text, failed_reason text, result_envelope_version smallint,
+              result_payload bytea, result_digest bytea, task_name text)
 LANGUAGE sql STABLE STRICT AS $$
-    SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea,
+    SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea,
         t.task_name::text
     FROM horsies_tasks AS t WHERE t.id = p_task_id
 $$
