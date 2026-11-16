@@ -57,6 +57,16 @@ pub struct Horsies {
     suppress_sends: Arc<AtomicBool>,
 }
 
+/// The environment variable that suppresses sends in this process when it
+/// is `1` (Python `HORSIES_SUPPRESS_SENDS`).
+pub const SUPPRESS_SENDS_ENV: &str = "HORSIES_SUPPRESS_SENDS";
+
+/// Whether a value of [`SUPPRESS_SENDS_ENV`] asks for suppression: `1`,
+/// with surrounding whitespace ignored. Unset and any other value do not.
+fn suppression_requested(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("1")
+}
+
 impl Horsies {
     /// Create a new Horsies instance with the given configuration.
     ///
@@ -442,11 +452,17 @@ impl Horsies {
         self.suppress_sends.store(value, Ordering::Relaxed);
     }
 
-    /// Whether sends are currently suppressed.
+    /// Whether sends are currently suppressed: [`Self::suppress_sends`] was
+    /// called with `true` (import phase, `check()`, builder execution), or the
+    /// environment variable [`SUPPRESS_SENDS_ENV`] is `1` (surrounding
+    /// whitespace ignored). The variable is read at each call, so a change
+    /// takes effect at the next send. Process-local.
     ///
-    /// Mirrors Python's `Horsies.are_sends_suppressed()`.
+    /// Mirrors Python's `Horsies.are_sends_suppressed()`
+    /// (`horsies/core/app.py:2269-2280`).
     pub fn are_sends_suppressed(&self) -> bool {
         self.suppress_sends.load(Ordering::Relaxed)
+            || suppression_requested(std::env::var(SUPPRESS_SENDS_ENV).ok().as_deref())
     }
 
     /// Shared suppression flag used by producer-side task facades.
@@ -968,7 +984,9 @@ impl Horsies {
     }
 
     fn check_workflow_builders(&self) -> Vec<HorsiesError> {
-        let previous = self.are_sends_suppressed();
+        // Restore the flag itself, not the environment's verdict, so a set
+        // environment variable never leaves the flag on after the check.
+        let previous = self.suppress_sends.load(Ordering::Relaxed);
         self.suppress_sends(true);
 
         let mut errors = Vec::new();
@@ -2182,6 +2200,25 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("HRS-203"));
         assert!(rendered.contains("bad config"));
+    }
+
+    /// Python `test_suppress_sends_env.py`: only `1` suppresses, with
+    /// surrounding whitespace ignored.
+    #[test]
+    fn only_the_value_one_suppresses_sends() {
+        for value in ["1", " 1 ", "1\n"] {
+            assert!(suppression_requested(Some(value)), "{value:?}");
+        }
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some("11"),
+        ] {
+            assert!(!suppression_requested(value), "{value:?}");
+        }
     }
 
     #[test]

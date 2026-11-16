@@ -22,6 +22,12 @@ pub enum HandleErrorCode {
     WorkflowNotFound,
     /// Database query or commit failed.
     DbOperationFailed,
+    /// A stored value of the workflow does not parse (an unknown status, a stored JSON value). Nothing
+    /// changed, and the same call returns the same error. Not retryable.
+    StoredDataInvalid,
+    /// `resume` resumed the workflow, and the recovery pass for its tree, which runs after that, failed.
+    /// The workflow is RUNNING. Not retryable.
+    ResumeRecoveryFailed,
     /// Internal polling/event-loop runner failed.
     LoopRunnerFailed,
     /// Internal / unexpected error.
@@ -33,6 +39,8 @@ impl std::fmt::Display for HandleErrorCode {
         match self {
             Self::WorkflowNotFound => write!(f, "WORKFLOW_NOT_FOUND"),
             Self::DbOperationFailed => write!(f, "DB_OPERATION_FAILED"),
+            Self::StoredDataInvalid => write!(f, "STORED_DATA_INVALID"),
+            Self::ResumeRecoveryFailed => write!(f, "RESUME_RECOVERY_FAILED"),
             Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
             Self::InternalFailed => write!(f, "INTERNAL_FAILED"),
         }
@@ -91,6 +99,14 @@ mod tests {
         assert_eq!(
             HandleErrorCode::InternalFailed.to_string(),
             "INTERNAL_FAILED"
+        );
+        assert_eq!(
+            HandleErrorCode::StoredDataInvalid.to_string(),
+            "STORED_DATA_INVALID"
+        );
+        assert_eq!(
+            HandleErrorCode::ResumeRecoveryFailed.to_string(),
+            "RESUME_RECOVERY_FAILED"
         );
     }
 

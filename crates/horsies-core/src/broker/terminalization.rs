@@ -690,9 +690,9 @@ mod catalog_tests {
 
 #[cfg(test)]
 mod anchor_tests {
-    //! The count pin: fifteen lifecycle commands, sixteen kinds including
-    //! relocation-only `LEGACY_TERMINAL`, and eighteen installed functions
-    //! across nineteen DDL fragments.
+    //! The count pin: fifteen lifecycle commands, fifteen kinds (one per
+    //! command), and eighteen installed functions across nineteen DDL
+    //! fragments.
     //! `catalog_tests` ties EXPECTED_SIGNATURES to the installed database
     //! program; the vocabulary unit tests tie `function_name_of` to the
     //! variant names; this anchor ties the two ends together so a command,
@@ -721,9 +721,9 @@ mod anchor_tests {
     #[test]
     fn commands_functions_and_kinds_agree() {
         assert_eq!(
-            COMMAND_FUNCTIONS.len() + 1,
+            COMMAND_FUNCTIONS.len(),
             TerminalizationKind::ALL.len(),
-            "LEGACY_TERMINAL is relocation-only and has no wire command"
+            "every kind is written by exactly one wire command"
         );
 
         let mut expected: Vec<&str> = EXPECTED_SIGNATURES
