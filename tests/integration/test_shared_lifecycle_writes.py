@@ -35,7 +35,7 @@ from horsies.core.worker.shared_lifecycle import (
     mark_task_finalizing,
 )
 from tests.broker_resources_support import listener_of
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
     WORKER_ID as PAUSE_WORKER_ID,
     _node_and_task,
@@ -74,28 +74,25 @@ async def _seed_claimed_task(
     good_until: datetime | None = None,
 ) -> str:
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='shared_lifecycle',
         good_until=good_until,
     )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, claimed_at,
-                 claimed_by_worker_id, claim_expires_at, good_until,
-                 enqueue_sha, is_workflow_task, retention_class_key,
-                 command_fingerprint_version, command_fingerprint,
-                 retain_rerun_input, prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'shared_lifecycle', 'default', 100, '[]', '{}',
-                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
-                 TRUE, 0, 0, :claimed_at,
-                 :worker_id, NOW() + interval '1 minute', :good_until,
-                 :sha, FALSE, 'standard_30d',
-                 1, sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    claimed_at, claimed_by_worker_id, claim_expires_at, good_until,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                ) VALUES (
+                    :id, 'shared_lifecycle', 'default', 100, '{}', 'CLAIMED', :sent_at,
+                    NOW(), NOW(), NOW(), 0, 0, :claimed_at, :worker_id,
+                    NOW() + interval '1 minute', :good_until, FALSE, 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED'
+                )
         """),
         {
             'id': task_id,
@@ -103,7 +100,7 @@ async def _seed_claimed_task(
             'claimed_at': claimed_at,
             'worker_id': WORKER_ID,
             'good_until': good_until,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     await session.commit()
