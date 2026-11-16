@@ -912,7 +912,7 @@ pub(super) async fn finish_node(
 
 /// A failure outcome with a user error code.
 pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Value> {
-    TaskResult::Err(TaskError::new(error_code, message))
+    TaskResult::Err(TaskError::new(error_code, message).expect("a user error code"))
 }
 
 /// A success outcome with `value`.
@@ -1034,7 +1034,7 @@ pub(super) fn error_of(result: &TaskResult<serde_json::Value>) -> &TaskError {
 
 /// The error code of a task error, as text.
 pub(super) fn code(error: &TaskError) -> Option<String> {
-    error.error_code.as_ref().map(ToString::to_string)
+    Some(error.error_code.to_string())
 }
 
 /// A stored workflow error (`horsies_workflows.error`).
