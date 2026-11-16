@@ -26,14 +26,15 @@ use crate::core::{
 };
 
 use crate::broker::core_rows::{
-    checkout_batch, column, execute_in, expired_list_row, one_row, query_in, query_on, read_rows,
-    roll_back, scalar, stale_list_row, stored_worker_state, task_attempt_row, task_info_row,
-    task_result_row, RowDecodeError, StatementLog,
+    checkout_batch, column, execute_in, expired_list_row, listed_worker_state_row, one_row,
+    query_in, query_on, read_rows, roll_back, scalar, stale_list_row, stored_worker_state,
+    task_attempt_row, task_info_row, task_result_row, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
-    read_worker_snapshot, read_worker_snapshots, DatabasePing, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
+    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result};
 use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
@@ -330,6 +331,16 @@ hb AS (
 )
 SELECT id, started_at, retry_count, max_retries, good_until FROM upd";
 
+/// What the pre-start expiry of a claimed task found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrestartExpiry {
+    /// The task is EXPIRED: this call moved it, or an earlier call did.
+    Expired,
+    /// The deadline has not passed, or the row is not this worker's claim;
+    /// nothing is written.
+    NotExpired,
+}
+
 // Terminal transitions (COMPLETED/FAILED/CANCELLED/EXPIRED) run through the
 // terminalization operations — broker/terminalization.rs and the functions
 // installed by migration 0032.
@@ -515,11 +526,16 @@ WHERE t.id = target.id \
   AND target.releasable \
 RETURNING t.id";
 
-/// Reset workflow_tasks for unclaimed tasks back to READY.
+/// Reset the nodes of abandoned tasks of PAUSED workflows to READY, so a
+/// resume enqueues a fresh task. Only an ENQUEUED or RUNNING node is reset;
+/// a node in another state keeps its state and its task link (Python
+/// `RESET_PAUSED_WORKFLOW_TASKS_SQL`, `horsies/core/worker/sql.py:291-296`,
+/// and `RESET_PAUSED_NODE_SQL`, `horsies/core/worker/child_runner.py:684-691`).
 const RESET_WORKFLOW_TASKS_SQL: &str = "\
 UPDATE horsies_workflow_tasks \
 SET status = 'READY', task_id = NULL, started_at = NULL \
-WHERE task_id = ANY($1)";
+WHERE task_id = ANY($1) \
+  AND status IN ('ENQUEUED', 'RUNNING')";
 
 /// Count active CLAIMED tasks for a specific worker (excludes expired leases).
 const COUNT_CLAIMED_FOR_WORKER_SQL: &str = "\
@@ -622,6 +638,11 @@ static GET_TASK_INFO_REASON_ONLY: TypedStatement = TypedStatement::new(
 /// index scan, so the previous `DISTINCT ON (worker_id)` form read every
 /// retained snapshot in the timeseries to return one row per worker.
 /// Parity with horsies PR #170.
+///
+/// Each row also has `read_at`, the `statement_timestamp()` of this
+/// statement: the database clock, one value for every row. The web worker
+/// list measures ages from it (Python measures them with the web host clock,
+/// `horsies/web/routes/workers.py:108-119`).
 const LIST_WORKER_STATES_SQL: &str = "\
 WITH RECURSIVE latest AS (
     (
@@ -650,7 +671,7 @@ WITH RECURSIVE latest AS (
         LIMIT 1
     ) nxt
 )
-SELECT * FROM latest";
+SELECT latest.*, statement_timestamp() AS read_at FROM latest";
 
 /// Latest snapshot for a single worker.
 const GET_WORKER_STATE_LATEST_SQL: &str = "\
@@ -739,6 +760,14 @@ static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH
 
 /// `SELECT 1` on the session pool in the worker boot check.
 static SESSION_CHECK: TypedStatement = TypedStatement::new("session_check", HEALTH_CHECK_SQL, &[]);
+
+/// The NOTIFY of the worker boot's session check, on the main core pool:
+/// `$1` the check channel.
+static SESSION_CHECK_NOTIFY: TypedStatement = TypedStatement::new(
+    "session_check_notify",
+    "SELECT pg_notify($1, 'ok')",
+    &[ParameterType::Text],
+);
 
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
@@ -1832,22 +1861,28 @@ impl PostgresBroker {
     /// Runs through `horsies_expire_owned_claim`, which fences on worker
     /// ownership but deliberately not on the claim generation: once the
     /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. Returns the persisted `TaskResult::Err`
-    /// JSON when the transition was applied. Returns `None` if the deadline
-    /// guard refused or another actor already moved the task (the outcome is
-    /// logged with its evidence at the adapter boundary).
+    /// generation holds the row. `Applied` and `AlreadyApplied` both mean the
+    /// task is expired, as Python's `_expire_claimed_task_before_start`
+    /// (`core/worker/child_runner.py`) reads them; any other outcome is
+    /// logged with its evidence at the adapter boundary. The stored error is
+    /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
+    /// as `data`.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
         worker_id: &str,
-    ) -> Result<Option<String>, BrokerError> {
-        let task_error = crate::core::TaskError::builtin(
+    ) -> Result<PrestartExpiry, BrokerError> {
+        let mut task_error = crate::core::TaskError::builtin(
             crate::core::OutcomeCode::TaskExpired,
-            "task expired before execution started (good_until passed)",
+            "Task expired: good_until deadline passed before execution started",
         );
+        task_error.data = Some(serde_json::json!({
+            "task_id": task_id.to_string(),
+            "worker_id": worker_id,
+        }));
         let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
-        let result_json = serde_json::to_string(&task_result)
-            .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
+        let result_json =
+            serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
 
         let outcomes = crate::broker::terminalization::terminalize(
             &self.pool,
@@ -1856,17 +1891,23 @@ impl PostgresBroker {
                 fence: crate::core::lifecycle::WorkerOwned {
                     worker_id: worker_id.to_owned(),
                 },
-                result_json: result_json.clone(),
+                result_json,
                 error_code: "TASK_EXPIRED".to_owned(),
             },
         )
         .await?;
 
         Ok(match outcomes.first() {
-            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. }) => {
-                Some(result_json)
-            }
-            _ => None,
+            Some(
+                crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
+                | crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. },
+            ) => PrestartExpiry::Expired,
+            Some(
+                crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
+                | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
+                | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. },
+            )
+            | None => PrestartExpiry::NotExpired,
         })
     }
 
@@ -2679,8 +2720,7 @@ impl PostgresBroker {
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
     ///
     /// This does not check LISTEN/NOTIFY. Workers run
-    /// [`check_session_delivery`](Self::check_session_delivery) at every
-    /// boot.
+    /// [`check_worker_session`](Self::check_worker_session) at every boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
         let _row = one_row(rows, &HEALTH_CHECK)?;
@@ -2827,53 +2867,37 @@ impl PostgresBroker {
         Ok(pongs)
     }
 
-    /// The pool checks of a worker boot, before the session check
-    /// ([`PostgresBroker::check_session_delivery`]):
+    /// The session check of a worker boot, on the statement layer: both core
+    /// pools keep a transaction, and the session URL keeps session state (a
+    /// LISTEN on it receives a NOTIFY). Runs at every worker boot, with or
+    /// without PgBouncer mode (Python `validate_worker_database_paths`,
+    /// `horsies/core/brokers/postgres.py:1383-1412`).
     ///
-    /// 1. `SELECT 1` on the main core pool. Its first checkout runs the
-    ///    statement-pooling check: a URL that does not keep a transaction is
-    ///    `StatementPooledUrl`, not retryable.
-    /// 2. `SELECT 1` on the session core pool when the session URL differs
-    ///    (its first checkout runs the statement-pooling check too).
+    /// Steps:
+    /// 1. `SELECT 1` on the session core pool when the session URL differs
+    ///    from the main URL. Its first checkout runs the statement-pooling
+    ///    check of that pool.
+    /// 2. Subscribe a wake on `horsies_check_<32 hex>` on the broker's
+    ///    listener, the connection that carries the claim wakes and the pings.
+    /// 3. One autocommit `SELECT pg_notify($1, 'ok')` on the main core pool.
+    ///    Its first checkout runs the statement-pooling check of the main
+    ///    pool.
+    /// 4. Wait at most [`SESSION_CAPABILITY_TIMEOUT`] for the NOTIFY.
     ///
-    /// A database that cannot be reached fails with its retryable error, so
-    /// the worker's start resilience retries it.
-    pub async fn check_worker_session(&self) -> Result<(), BrokerError> {
-        self.health_check().await?;
-        let open = self.core.pools()?;
-        match open.pools().session() {
-            SessionPool::SameAsMain => {}
-            SessionPool::Separate { pool, .. } => {
-                self.log_statement(&SESSION_CHECK);
-                let rows = pool
-                    .query(
-                        CheckoutClass::Batch,
-                        &SESSION_CHECK.bind().finish(),
-                        StatementBound::ConnectionTimeouts,
-                    )
-                    .await?;
-                let _row = one_row(rows, &SESSION_CHECK)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The session check of a worker boot: the session URL keeps session
-    /// state when a LISTEN on it receives a NOTIFY. Runs at every worker boot,
-    /// with or without PgBouncer mode (Python `validate_worker_database_paths`,
-    /// `horsies/core/brokers/postgres.py:1436-1460`).
+    /// The subscription is dropped at the end, and the listener UNLISTENs the
+    /// channel. Nothing is written.
     ///
-    /// Steps: subscribe a wake on `horsies_check_<32 hex>` on the broker's
-    /// listener, the connection that carries the claim wakes and the pings;
-    /// one autocommit `SELECT pg_notify($1, 'ok')` on the main pool; wait at
-    /// most [`SESSION_CAPABILITY_TIMEOUT`]. The subscription is dropped at the
-    /// end, and the listener UNLISTENs the channel.
-    ///
-    /// Outcomes: `Ok` when the NOTIFY arrives; `NotCapable` (not retryable)
-    /// when it does not arrive in time; `Subscribe`, `Notify` and
-    /// `Interrupted` carry their retry rule (a database that cannot be
-    /// reached is retryable).
-    pub async fn check_session_delivery(&self) -> Result<(), SessionCheckFailure> {
+    /// Outcomes: `Ok` when the NOTIFY arrives. Not retryable: `NotCapable`
+    /// (no NOTIFY in time), `PoolSettings`, and `SessionPool` or `Notify`
+    /// with a permanent failure (a statement-pooled URL). `Subscribe`,
+    /// `SessionPool`, `Notify` and `Interrupted` otherwise carry their retry
+    /// rule (a database that cannot be reached is retryable).
+    pub async fn check_worker_session(&self) -> Result<(), SessionCheckFailure> {
+        let open = self
+            .core
+            .pools()
+            .map_err(SessionCheckFailure::PoolSettings)?;
+        self.check_session_pool(open.pools().session()).await?;
         let listener = self
             .listener
             .start()
@@ -2887,9 +2911,15 @@ impl PostgresBroker {
             .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
             .await
             .map_err(SessionCheckFailure::Subscribe)?;
-        sqlx::query("SELECT pg_notify($1, 'ok')")
-            .bind(channel.as_str())
-            .execute(&self.pool)
+        let channel_name: &str = channel.as_str();
+        self.log_statement(&SESSION_CHECK_NOTIFY);
+        let _notified = open
+            .main()
+            .execute(
+                CheckoutClass::Batch,
+                &SESSION_CHECK_NOTIFY.bind().value(&channel_name).finish(),
+                StatementBound::ConnectionTimeouts,
+            )
             .await
             .map_err(SessionCheckFailure::Notify)?;
         match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
@@ -2904,6 +2934,27 @@ impl PostgresBroker {
                 session_url: listener.masked_url().clone(),
                 waited: SESSION_CAPABILITY_TIMEOUT,
             }),
+        }
+    }
+
+    /// Step 1 of [`PostgresBroker::check_worker_session`]: `SELECT 1` on the
+    /// session core pool when the session URL differs from the main URL;
+    /// nothing when it does not (the main pool's check runs at the NOTIFY).
+    async fn check_session_pool(&self, session: &SessionPool) -> Result<(), SessionCheckFailure> {
+        match session {
+            SessionPool::SameAsMain => Ok(()),
+            SessionPool::Separate { pool, .. } => {
+                self.log_statement(&SESSION_CHECK);
+                let _selected = pool
+                    .execute(
+                        CheckoutClass::Batch,
+                        &SESSION_CHECK.bind().finish(),
+                        StatementBound::ConnectionTimeouts,
+                    )
+                    .await
+                    .map_err(SessionCheckFailure::SessionPool)?;
+                Ok(())
+            }
         }
     }
 
@@ -2948,11 +2999,23 @@ impl PostgresBroker {
     /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
     /// worker and the column (Python `postgres.py:2961-3034`).
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+        let listed = self.list_worker_states_with_read_time().await?;
+        Ok(listed.into_iter().map(|state| state.snapshot).collect())
+    }
+
+    /// [`list_worker_states`](Self::list_worker_states), with the database
+    /// clock of the list statement on each entry (`read_at`,
+    /// `statement_timestamp()`). The web worker list measures the snapshot
+    /// age, the staleness and the uptime from it. Same statement, same
+    /// errors; reads only.
+    pub(crate) async fn list_worker_states_with_read_time(
+        &self,
+    ) -> BrokerResult<Vec<ListedWorkerState>> {
         let rows = self
-            .read_main(&LIST_WORKER_STATES.bind().finish(), stored_worker_state)
+            .read_main(&LIST_WORKER_STATES.bind().finish(), listed_worker_state_row)
             .await
             .map_err(|error| monitoring_query_error("list_worker_states", error))?;
-        read_worker_snapshots("list_worker_states", rows)
+        read_listed_worker_states("list_worker_states", rows)
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.
@@ -4947,8 +5010,6 @@ mod fused_finalize_tests {
                     claimed_at,
                 },
                 result_json: result_json.to_owned(),
-                notify_channel: "task_queue_default".to_owned(),
-                notify_payload: format!("capacity:{task_id}"),
             },
         )
         .await
@@ -5441,7 +5502,11 @@ mod set_running_heartbeat_tests {
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
             .expect("expire");
-        assert!(not_due.is_none(), "unexpired deadline must refuse");
+        assert_eq!(
+            not_due,
+            PrestartExpiry::NotExpired,
+            "unexpired deadline must refuse"
+        );
         sqlx::query(
             "UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 second' WHERE id = $1",
         )
@@ -5453,10 +5518,17 @@ mod set_running_heartbeat_tests {
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
             .expect("expire");
-        assert!(
-            expired.is_some(),
+        assert_eq!(
+            expired,
+            PrestartExpiry::Expired,
             "expired deadline must expire for any generation of this worker's claim"
         );
+        // Python counts a replay as expired too.
+        let replayed = broker
+            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .await
+            .expect("expire replay");
+        assert_eq!(replayed, PrestartExpiry::Expired);
         let _ = live_generation;
 
         cleanup(&pool, &id).await;
@@ -5989,8 +6061,6 @@ mod terminal_at_stamp_tests {
                     claimed_at: generation,
                 },
                 result_json: "{\"Ok\":1}".to_owned(),
-                notify_channel: "task_queue_default".to_owned(),
-                notify_payload: format!("capacity:{id}"),
             },
         )
         .await
@@ -6083,7 +6153,7 @@ mod terminal_at_stamp_tests {
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
             .expect("expire");
-        assert!(expired.is_some());
+        assert_eq!(expired, PrestartExpiry::Expired);
 
         let (status, terminal_at) = terminal_at_of(&pool, &id).await;
         assert_eq!(status, "EXPIRED");

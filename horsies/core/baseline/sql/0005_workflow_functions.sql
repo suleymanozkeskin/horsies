@@ -955,21 +955,107 @@ BEGIN
 END;
 $$;
 
+-- Why an array of node indexes of a stored success policy does not read, or NULL when it reads. It reads when it is
+-- a JSON array whose items are integers from 0. jsonb keeps the written form of a number: 1.0 is not an index, and
+-- 1e2 is stored as 100, which is one. Python's reader decodes the same jsonb text, so it sees the same numbers.
+-- The cause text is the one of Python's read_stored_success_policy (core/workflows/stored_success_policy.py).
+-- Precondition: p_indices is not SQL NULL (the caller checks that the key is present).
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_policy_indices_cause(p_indices jsonb) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_cause text;
+BEGIN
+    IF jsonb_typeof(p_indices) <> 'array' THEN
+        RETURN format('a JSON %s, not an array', jsonb_typeof(p_indices));
+    END IF;
+    SELECT format('item %s %s', i.position - 1, CASE
+               WHEN jsonb_typeof(i.item) = 'number' AND (i.item #>> '{}') ~ '^-[0-9]+$' THEN 'is below 0'
+               ELSE format('is a JSON %s, not an index', jsonb_typeof(i.item))
+           END)
+    INTO v_cause
+    FROM jsonb_array_elements(p_indices) WITH ORDINALITY AS i(item, position)
+    WHERE jsonb_typeof(i.item) <> 'number' OR (i.item #>> '{}') !~ '^[0-9]+$'
+    ORDER BY i.position
+    LIMIT 1;
+    RETURN v_cause;
+END;
+$$;
+
+-- The success cases of a workflow's stored success policy (horsies_workflows.success_policy), read by the rule of
+-- Python's read_stored_success_policy (core/workflows/stored_success_policy.py). Returns:
+-- - NULL for no policy: SQL NULL or JSON null;
+-- - the "cases" array for the form the workflow start stores: an object whose "cases" is an array of objects, each
+--   with "required_indices", an array of integers from 0; "optional_indices", when present and not null, is the
+--   same kind of array. Other keys are ignored.
+-- Any other value raises SQLSTATE XX001 (data_corrupted) with the text
+-- 'stored success_policy of workflow <id> does not parse: <cause>'. The step that reads it fails and its
+-- transaction rolls back; the raise is persistent, so the workflow recovery limit counts it
+-- (horsies_workflow_phase2_record_raise) and fails the workflow closed. No reader falls back to the default rule.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_success_cases(p_workflow_id uuid, p_success_policy jsonb) RETURNS jsonb
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_cause text;
+BEGIN
+    CASE
+        WHEN p_success_policy IS NULL OR jsonb_typeof(p_success_policy) = 'null' THEN
+            RETURN NULL;
+        WHEN jsonb_typeof(p_success_policy) <> 'object' THEN
+            v_cause := format('the policy is a JSON %s, not an object', jsonb_typeof(p_success_policy));
+        WHEN NOT p_success_policy ? 'cases' THEN
+            v_cause := 'the policy has no cases';
+        WHEN jsonb_typeof(p_success_policy -> 'cases') <> 'array' THEN
+            v_cause := format('cases is a JSON %s, not an array', jsonb_typeof(p_success_policy -> 'cases'));
+        ELSE
+            SELECT format('cases[%s]: %s', c.position - 1, CASE
+                       WHEN jsonb_typeof(c.success_case) <> 'object'
+                           THEN format('the case is a JSON %s, not an object', jsonb_typeof(c.success_case))
+                       WHEN NOT c.success_case ? 'required_indices' THEN 'the case has no required_indices'
+                       ELSE 'required_indices: '
+                           || horsies_workflow_policy_indices_cause(c.success_case -> 'required_indices')
+                   END)
+            INTO v_cause
+            FROM jsonb_array_elements(p_success_policy -> 'cases') WITH ORDINALITY AS c(success_case, position)
+            WHERE jsonb_typeof(c.success_case) <> 'object'
+               OR NOT c.success_case ? 'required_indices'
+               OR horsies_workflow_policy_indices_cause(c.success_case -> 'required_indices') IS NOT NULL
+            ORDER BY c.position
+            LIMIT 1;
+            IF v_cause IS NULL
+               AND coalesce(jsonb_typeof(p_success_policy -> 'optional_indices'), 'null') <> 'null' THEN
+                v_cause := 'optional_indices: '
+                    || horsies_workflow_policy_indices_cause(p_success_policy -> 'optional_indices');
+            END IF;
+    END CASE;
+    IF v_cause IS NOT NULL THEN
+        RAISE EXCEPTION 'stored success_policy of workflow % does not parse: %', p_workflow_id, v_cause
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+    RETURN p_success_policy -> 'cases';
+END;
+$$;
+
 -- The error of a workflow that completion fails, as the bare error object text, or NULL to keep the stored error.
--- Python: get_workflow_failure_error (core/workflows/engine.py:3530-3627).
+-- Python: get_workflow_failure_error (core/workflows/engine.py). The stored policy is read with
+-- horsies_workflow_success_cases; one that does not parse raises XX001.
 -- - No success policy: the err slot of the first FAILED node by index (NULL when it has no readable error).
--- - A policy that is not an object: NULL.
--- - A policy: the err slot of the first FAILED required node by index, else WORKFLOW_SUCCESS_CASE_NOT_MET.
+-- - A policy: the err slot of the first FAILED node by index that a case requires; WORKFLOW_SUCCESS_CASE_NOT_MET when
+--   there is none or it has no readable error. Indexes are compared as jsonb numbers, so an index above the integer
+--   range names no node.
 -- Locks: none. Returns the error object text or NULL.
 CREATE FUNCTION horsies_workflow_failure_error(p_workflow_id uuid, p_success_policy jsonb) RETURNS text
     LANGUAGE plpgsql STABLE
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 DECLARE
-    v_required integer[];
+    v_cases jsonb := horsies_workflow_success_cases(p_workflow_id, p_success_policy);
+    v_required jsonb;
     v_error text;
 BEGIN
-    IF p_success_policy IS NULL THEN
+    IF v_cases IS NULL THEN
         SELECT horsies_workflow_err_slot(n.result) INTO v_error
         FROM horsies_workflow_tasks n
         WHERE n.workflow_id = p_workflow_id AND n.status = 'FAILED'
@@ -977,43 +1063,33 @@ BEGIN
         LIMIT 1;
         RETURN v_error;
     END IF;
-    IF jsonb_typeof(p_success_policy) <> 'object' THEN
-        RETURN NULL;
-    END IF;
-    v_required := ARRAY(
-        SELECT DISTINCT r.value::integer
-        FROM jsonb_array_elements(
-                 CASE WHEN jsonb_typeof(p_success_policy -> 'cases') = 'array'
-                      THEN p_success_policy -> 'cases' ELSE '[]'::jsonb END
-             ) AS c(success_case)
-        CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(c.success_case -> 'required_indices') = 'array'
-                 THEN c.success_case -> 'required_indices' ELSE '[]'::jsonb END
-        ) AS r(value)
+    SELECT coalesce(jsonb_agg(r.value), '[]'::jsonb) INTO v_required
+    FROM jsonb_array_elements(v_cases) AS c(success_case)
+    CROSS JOIN LATERAL jsonb_array_elements(c.success_case -> 'required_indices') AS r(value);
+    SELECT horsies_workflow_err_slot(n.result) INTO v_error
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = p_workflow_id AND n.status = 'FAILED' AND v_required @> to_jsonb(n.task_index)
+    ORDER BY n.task_index
+    LIMIT 1;
+    RETURN coalesce(
+        v_error,
+        horsies_task_error_object('WORKFLOW_SUCCESS_CASE_NOT_MET', 'No success case was satisfied', NULL)
     );
-    IF cardinality(v_required) > 0 THEN
-        SELECT horsies_workflow_err_slot(n.result) INTO v_error
-        FROM horsies_workflow_tasks n
-        WHERE n.workflow_id = p_workflow_id AND n.status = 'FAILED' AND n.task_index = ANY(v_required)
-        ORDER BY n.task_index
-        LIMIT 1;
-        IF v_error IS NOT NULL THEN
-            RETURN v_error;
-        END IF;
-    END IF;
-    RETURN horsies_task_error_object('WORKFLOW_SUCCESS_CASE_NOT_MET', 'No success case was satisfied', NULL);
 END;
 $$;
 
 -- Finalizes a RUNNING workflow with no live node, once. Returns the status it wrote (COMPLETED or FAILED), or NULL
 -- when the workflow is not RUNNING or has a live node (PENDING, READY, ENQUEUED, RUNNING).
+-- The stored policy is read with horsies_workflow_success_cases, once no node is live; one that does not parse raises
+-- XX001 and nothing is written.
 -- - No success policy: COMPLETED when no node FAILED and no error is stored; else FAILED.
 -- - A policy: COMPLETED when every required node of some case with required nodes is COMPLETED; else FAILED.
+--   Indexes are compared as jsonb numbers, so an index above the integer range names no node and its case is not met.
 -- COMPLETED stores the output (horsies_workflow_explicit_output or horsies_workflow_outputless_result); FAILED
 -- stores no result and the error of horsies_workflow_failure_error, or keeps the stored error. Both set
 -- completed_at. The status trigger sends workflow_done at commit.
 -- Precondition: the caller holds the workflow row FOR UPDATE.
--- Python: check_workflow_completion and evaluate_workflow_success (core/workflows/engine.py:2946-3080, 3467-3528).
+-- Python: check_workflow_completion and evaluate_workflow_success (core/workflows/engine.py).
 -- Locks: the workflow row (held by the caller); reads the nodes.
 CREATE FUNCTION horsies_workflow_try_complete(p_workflow_id uuid) RETURNS text
     LANGUAGE plpgsql
@@ -1023,6 +1099,8 @@ DECLARE
     v_wf record;
     v_live bigint;
     v_failed bigint;
+    v_cases jsonb;
+    v_completed jsonb;
     v_succeeded boolean;
 BEGIN
     SELECT w.status, w.success_policy, w.output_task_index, w.error INTO v_wf
@@ -1040,27 +1118,19 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    IF jsonb_typeof(v_wf.success_policy) IS DISTINCT FROM 'object' THEN
+    v_cases := horsies_workflow_success_cases(p_workflow_id, v_wf.success_policy);
+    IF v_cases IS NULL THEN
         v_succeeded := v_wf.error IS NULL AND v_failed = 0;
     ELSE
+        -- The COMPLETED node indexes as one jsonb array; a case is met when it contains the case's indexes.
+        SELECT coalesce(jsonb_agg(n.task_index), '[]'::jsonb) INTO v_completed
+        FROM horsies_workflow_tasks n
+        WHERE n.workflow_id = p_workflow_id AND n.status = 'COMPLETED';
         v_succeeded := EXISTS (
             SELECT 1
-            FROM jsonb_array_elements(
-                     CASE WHEN jsonb_typeof(v_wf.success_policy -> 'cases') = 'array'
-                          THEN v_wf.success_policy -> 'cases' ELSE '[]'::jsonb END
-                 ) AS c(success_case)
-            WHERE jsonb_typeof(c.success_case -> 'required_indices') = 'array'
-              AND jsonb_array_length(c.success_case -> 'required_indices') > 0
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM jsonb_array_elements_text(c.success_case -> 'required_indices') AS r(value)
-                  WHERE NOT EXISTS (
-                      SELECT 1 FROM horsies_workflow_tasks n
-                      WHERE n.workflow_id = p_workflow_id
-                        AND n.task_index = r.value::integer
-                        AND n.status = 'COMPLETED'
-                  )
-              )
+            FROM jsonb_array_elements(v_cases) AS c(success_case)
+            WHERE jsonb_array_length(c.success_case -> 'required_indices') > 0
+              AND (c.success_case -> 'required_indices') <@ v_completed
         );
     END IF;
 

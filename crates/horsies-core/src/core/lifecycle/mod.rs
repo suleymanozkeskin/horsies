@@ -102,8 +102,6 @@ mod tests {
                     task_id: Uuid::nil(),
                     fence: owned.clone(),
                     result_json: "{}".into(),
-                    notify_channel: "c".into(),
-                    notify_payload: "p".into(),
                 },
             ),
             (
