@@ -4,9 +4,11 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use horsies_core::catalog::CODE_CATALOGS;
+use horsies_core::manifest_schema::PRODUCER_MANIFEST;
 
 use crate::catalogs::{group_by_module, render_module, render_package_init, CATALOG_FOLDER};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
+use crate::manifest::{render_manifest_module, MANIFEST_MODULE_FILE};
 use crate::python_text::GENERATED_HEADER;
 use crate::surface::CORE_MODULE;
 
@@ -102,6 +104,10 @@ pub fn render_all() -> Vec<GeneratedFile> {
             text: render_module(module, catalogs),
         });
     }
+    files.push(GeneratedFile {
+        relative_path: catalog_folder.join(MANIFEST_MODULE_FILE),
+        text: render_manifest_module(&PRODUCER_MANIFEST),
+    });
     files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),
         text: render_core_stub(&CORE_MODULE),
@@ -243,8 +249,8 @@ mod tests {
     fn every_catalog_module_and_the_stub_are_rendered() {
         let files = render_all();
         let modules = group_by_module(CODE_CATALOGS);
-        // __init__.py, one file per module, _core.pyi
-        assert_eq!(files.len(), modules.len() + 2);
+        // __init__.py, one file per catalog module, manifest.py, _core.pyi
+        assert_eq!(files.len(), modules.len() + 3);
         for file in &files {
             assert!(file.text.starts_with(GENERATED_HEADER));
         }

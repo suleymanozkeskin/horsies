@@ -4,6 +4,7 @@ pub mod backoff;
 mod class_coverage_log;
 pub mod cli;
 pub mod config;
+pub mod connection_fit;
 pub mod error;
 pub mod execution;
 pub mod executor;
