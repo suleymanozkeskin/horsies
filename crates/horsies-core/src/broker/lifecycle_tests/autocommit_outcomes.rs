@@ -26,7 +26,7 @@ use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::worker::execution::{finalize_workflow_phase, FinalizeStage};
+use crate::worker::execution::{finalize_workflow_phase, FinalizeStage, PhaseTwoForm};
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
@@ -233,14 +233,18 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pid = pooled_backend_pid(&unpinged).await;
     terminate_backend(&pool, pid).await;
 
+    // The wake of a plain task runs on the broker's sqlx pool, the unpinged
+    // pool with the dead connection.
+    let broker = PostgresBroker::from_pool(unpinged.clone());
     let result = finalize_workflow_phase(
-        &unpinged,
+        &broker,
         &WorkflowSpecRegistry::new(),
         Uuid::new_v4(),
         true,
         QUEUE,
         false,
         false,
+        PhaseTwoForm::NotKnown,
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -251,7 +255,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
             assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
             assert!(error.retryable, "{error}");
         }
-        Ok(()) => panic!("the wake succeeded on a dead connection"),
+        Ok(_) => panic!("the wake succeeded on a dead connection"),
     }
     unpinged.close().await;
 }

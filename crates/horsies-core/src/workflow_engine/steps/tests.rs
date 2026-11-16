@@ -384,3 +384,204 @@ async fn cancel_answers_terminal_and_missing_workflows() {
         .expect_err("cancel of a missing workflow");
     assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
 }
+
+// ---------------------------------------------------------------------------
+// Step rows
+// ---------------------------------------------------------------------------
+
+/// A step whose `OUTCOME` row comes last, after a `CHILD_START` row and its
+/// `SOURCE` row, as `horsies_workflow_node_finish` returns them.
+static STEP_ROWS_WITH_CHILD_START: TypedStatement = TypedStatement::new(
+    "test_step_rows_with_child_start",
+    "SELECT * FROM (VALUES
+         ('CHILD_START'::text, NULL::text, $1::uuid, NULL::uuid, NULL::text, 3::integer),
+         ('SOURCE', NULL, $1, NULL, NULL, 3),
+         ('OUTCOME', 'APPLIED', $1, $2::uuid, NULL, NULL)
+     ) AS r(row_kind, disposition, workflow_id, advance_child_workflow_id, detail, task_index)",
+    &[ParameterType::Uuid, ParameterType::Uuid],
+);
+
+/// Two `OUTCOME` rows.
+static STEP_ROWS_TWO_OUTCOMES: TypedStatement = TypedStatement::new(
+    "test_step_rows_two_outcomes",
+    "SELECT * FROM (VALUES
+         ('OUTCOME'::text, 'APPLIED'::text, NULL::uuid, NULL::uuid, NULL::text, NULL::integer),
+         ('OUTCOME', 'ALREADY_APPLIED', NULL, NULL, NULL, NULL)
+     ) AS r(row_kind, disposition, workflow_id, advance_child_workflow_id, detail, task_index)",
+    &[],
+);
+
+/// One row of the given kind and disposition, with a detail.
+static STEP_ROW_OF_KIND: TypedStatement = TypedStatement::new(
+    "test_step_row_of_kind",
+    "SELECT $1::text AS row_kind, $2::text AS disposition, NULL::uuid AS workflow_id,
+            NULL::uuid AS advance_child_workflow_id, 'observed'::text AS detail,
+            NULL::integer AS task_index",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+async fn step_row_of_kind(broker: &PostgresBroker, row_kind: &str, disposition: &str) -> Vec<Row> {
+    let row_kind = row_kind.to_owned();
+    let disposition = disposition.to_owned();
+    rows_of(
+        broker,
+        &STEP_ROW_OF_KIND
+            .bind()
+            .value(&row_kind)
+            .value(&disposition)
+            .finish(),
+    )
+    .await
+}
+
+#[tokio::test]
+#[serial]
+async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
+    let broker = test_broker().await;
+    let workflow_id = Uuid::new_v4();
+    let ended_child = Uuid::new_v4();
+    let rows = rows_of(
+        &broker,
+        &STEP_ROWS_WITH_CHILD_START
+            .bind()
+            .value(&workflow_id)
+            .value(&ended_child)
+            .finish(),
+    )
+    .await;
+
+    let step =
+        step_rows::<NodeFinishDisposition>(&rows, &STEP_ROWS_WITH_CHILD_START).expect("step rows");
+    assert_eq!(
+        step,
+        StepRows {
+            outcome: StepOutcome {
+                disposition: NodeFinishDisposition::Applied,
+                parent_advance: ParentAdvance::Owed {
+                    child_workflow_id: ended_child,
+                },
+                detail: None,
+            },
+            owed_child_starts: vec![OwedChildStart {
+                workflow_id,
+                task_index: 3,
+            }],
+        }
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn an_outcome_row_alone_owes_no_child_start_and_keeps_its_detail() {
+    let broker = test_broker().await;
+    let rows = step_row_of_kind(&broker, "OUTCOME", "NOT_PAUSED").await;
+
+    let step = step_rows::<ChildFinishDisposition>(&rows, &STEP_ROW_OF_KIND);
+    assert!(
+        matches!(step, Err(StepContractError::UnknownOutcome { .. })),
+        "NOT_PAUSED is not a child-finish disposition: {step:?}"
+    );
+    let rows = step_row_of_kind(&broker, "OUTCOME", "CHILD_NOT_TERMINAL").await;
+    let step = step_rows::<ChildFinishDisposition>(&rows, &STEP_ROW_OF_KIND).expect("step rows");
+    assert_eq!(
+        step.outcome,
+        StepOutcome {
+            disposition: ChildFinishDisposition::ChildNotTerminal,
+            parent_advance: ParentAdvance::NotOwed,
+            detail: Some("observed".to_owned()),
+        }
+    );
+    assert!(step.owed_child_starts.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn step_rows_outside_the_contract_are_refused() {
+    let broker = test_broker().await;
+
+    let two = rows_of(&broker, &STEP_ROWS_TWO_OUTCOMES.bind().finish()).await;
+    assert!(matches!(
+        step_rows::<NodeFinishDisposition>(&two, &STEP_ROWS_TWO_OUTCOMES),
+        Err(StepContractError::OutcomeRows { count: 2, .. })
+    ));
+    assert!(matches!(
+        step_rows::<NodeFinishDisposition>(&[], &NODE_FINISH),
+        Err(StepContractError::OutcomeRows { count: 0, .. })
+    ));
+    let unknown_kind = step_row_of_kind(&broker, "NOTE", "APPLIED").await;
+    assert!(matches!(
+        step_rows::<NodeFinishDisposition>(&unknown_kind, &STEP_ROW_OF_KIND),
+        Err(StepContractError::UnknownRowKind { .. })
+    ));
+}
+
+#[test]
+fn every_node_finish_disposition_text_reads_and_others_do_not() {
+    let cases = [
+        ("APPLIED", NodeFinishDisposition::Applied),
+        (
+            "APPLIED_WORKFLOW_ENDED",
+            NodeFinishDisposition::AppliedWorkflowEnded,
+        ),
+        ("ALREADY_APPLIED", NodeFinishDisposition::AlreadyApplied),
+        ("PENDING_ABSENT", NodeFinishDisposition::PendingAbsent),
+        (
+            "SOURCE_ABSENT",
+            NodeFinishDisposition::Retained(SourceFailure::Absent),
+        ),
+        (
+            "SOURCE_STATE_CONFLICT",
+            NodeFinishDisposition::Retained(SourceFailure::StateConflict),
+        ),
+        (
+            "SOURCE_VERSION_CONFLICT",
+            NodeFinishDisposition::Retained(SourceFailure::VersionConflict),
+        ),
+        (
+            "SOURCE_DIGEST_MISMATCH",
+            NodeFinishDisposition::Retained(SourceFailure::DigestMismatch),
+        ),
+    ];
+    for (text, disposition) in cases {
+        assert_eq!(NodeFinishDisposition::from_text(text), Some(disposition));
+        if let NodeFinishDisposition::Retained(failure) = disposition {
+            assert_eq!(failure.as_str(), text);
+        }
+    }
+    assert_eq!(NodeFinishDisposition::from_text("applied"), None);
+    assert_eq!(NodeFinishDisposition::from_text("SUPERSEDED"), None);
+}
+
+#[test]
+fn every_child_finish_disposition_text_reads_and_others_do_not() {
+    let cases = [
+        ("APPLIED", ChildFinishDisposition::Applied),
+        ("ALREADY_APPLIED", ChildFinishDisposition::AlreadyApplied),
+        ("CHILD_ABSENT", ChildFinishDisposition::ChildAbsent),
+        ("NOT_A_CHILD", ChildFinishDisposition::NotAChild),
+        (
+            "CHILD_NOT_TERMINAL",
+            ChildFinishDisposition::ChildNotTerminal,
+        ),
+        ("PARENT_ABSENT", ChildFinishDisposition::ParentAbsent),
+    ];
+    for (text, disposition) in cases {
+        assert_eq!(ChildFinishDisposition::from_text(text), Some(disposition));
+    }
+    assert_eq!(ChildFinishDisposition::from_text("PENDING_ABSENT"), None);
+}
+
+#[test]
+fn the_dependents_choice_names_the_function_values() {
+    assert_eq!(Dependents::NoneToRead.as_sql(), "NONE");
+    assert_eq!(Dependents::Read.as_sql(), "READ");
+}
+
+#[test]
+fn a_chain_of_parent_advances_is_bounded_by_the_tree_depth() {
+    // Depth 0 to 32: a chain from the deepest child advances 32 parents.
+    assert_eq!(
+        MAX_PARENT_ADVANCES,
+        (crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH + 1) as usize
+    );
+}
