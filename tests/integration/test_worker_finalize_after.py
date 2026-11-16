@@ -58,7 +58,7 @@ from horsies.core.worker.worker import (
     _run_task_entry,
 )
 from tests.integration.conftest import (
-    compute_test_enqueue_sha,
+    compute_test_command_fingerprint,
     get_task_status as get_workflow_task_status,
     get_workflow_status,
     make_simple_task,
@@ -139,7 +139,8 @@ async def _link_workflow_node(
         text("""
             UPDATE horsies_tasks
             SET is_workflow_task = TRUE,
-                prepared_rerun_input_disposition = 'NEVER_ELIGIBLE'
+                command_fingerprint_version = NULL,
+                command_fingerprint = NULL
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -185,30 +186,28 @@ async def _insert_running_task(
     ``_finalize_after`` takes a workflow task unless told otherwise.
     """
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='finalize_after_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'finalize_after_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha, :claimed_by_worker_id,
-                 :claimed_at,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task,
+                    worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'finalize_after_test', 'default', 100, '{}', 'RUNNING',
+                    :sent_at, NOW(), NOW(), 0, 0, NOW(), :claimed_by_worker_id,
+                    :claimed_at, 'standard_30d', 1, :command_fingerprint, FALSE,
+                    'ISOLATED', NOW(), FALSE, 4242, 'host-1', 'child-1'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'claimed_by_worker_id': TEST_WORKER_ID,
             'claimed_at': HANDLE_CLAIMED_AT,
         },
@@ -225,30 +224,28 @@ async def _insert_owned_running_task(
     """Insert a RUNNING task owned by a specific worker; a workflow task, with
     its node, unless ``is_workflow_task`` is False."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_owned_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='finalize_after_owned_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at, worker_hostname, worker_pid, worker_process_name,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'finalize_after_owned_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha, :worker_id,
-                 :claimed_at, 'stale-host', 1234, 'stale-process',
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
+                    worker_process_name, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, 'finalize_after_owned_test', 'default', 100, '{}', 'RUNNING',
+                    :sent_at, NOW(), NOW(), 0, 0, NOW(), :worker_id, :claimed_at,
+                    'stale-host', 1234, 'stale-process', 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
             'worker_id': worker_id,
             'claimed_at': HANDLE_CLAIMED_AT,
         },
@@ -601,7 +598,7 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'CLAIMED', claimed = TRUE, started_at = NULL
+            SET status = 'CLAIMED', started_at = NULL
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -702,7 +699,6 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         text("""
             UPDATE horsies_tasks
             SET status = 'CLAIMED',
-                claimed = TRUE,
                 claimed_at = NOW(),
                 claimed_by_worker_id = :wid,
                 claim_expires_at = NULL,

@@ -96,6 +96,17 @@ END $$;
 
 DO $$
 DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000104';
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"sub":true,"params":"GIVEN"},{"idx":2,"sub":true}]');
+    PERFORM wft_check((wft_node(v_wf, 1)).sub_workflow_params = 'GIVEN'
+                      AND (wft_node(v_wf, 2)).sub_workflow_params = 'NOT_GIVEN'
+                      AND (wft_node(v_wf, 0)).sub_workflow_params IS NULL,
+                      'start: sub_workflow_params is stored as passed on sub-workflow nodes, NULL on task nodes');
+END $$;
+
+DO $$
+DECLARE
     v_wf uuid := '00000000-0000-7000-8000-000000000111';
     v_child uuid := '00000000-0000-7000-8000-000000000112';
     v_row horsies_workflow_step_row;

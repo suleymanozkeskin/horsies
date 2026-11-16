@@ -21,7 +21,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from horsies.core.workflows.engine import QueueWake
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
 
@@ -47,25 +47,23 @@ def _make_worker(engine: AsyncEngine) -> Worker:
 async def _insert_task(session: AsyncSession) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='handle_wf_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='handle_wf_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'handle_wf_test', 'default', 100, '[]', '{}',
-                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    is_workflow_task, worker_pid, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'handle_wf_test', 'default', 100, '{}', 'RUNNING', :sent_at,
+                    NOW(), NOW(), 0, 0, NOW(), 'standard_30d', 1, :command_fingerprint,
+                    FALSE, 'ISOLATED', NOW(), FALSE, 4242, 'host-1', 'child-1'
+                )
         """),
-        {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {'id': task_id, 'sent_at': sent_at, 'command_fingerprint': fingerprint},
     )
     await session.commit()
     return task_id

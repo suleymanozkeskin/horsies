@@ -27,7 +27,7 @@ from horsies.core.worker.worker import (
     Worker,
     _FINALIZE_STAGE_PHASE2,
 )
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
@@ -61,7 +61,7 @@ async def _insert_task(
     born running, then forced terminal into history.
     """
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='wf_phase_test',
         queue_name=queue_name,
     )
@@ -69,26 +69,29 @@ async def _insert_task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'wf_phase_test', :queue, 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    is_workflow_task, claim_expires_at, worker_pid, worker_hostname,
+                    worker_process_name
+                ) VALUES (
+                    :id, 'wf_phase_test', :queue, 100, '{}', :status, :sent_at, NOW(),
+                    NOW(), 0, 0, NOW(), 'standard_30d', 1, :command_fingerprint, FALSE,
+                    'ISOLATED', NOW(), FALSE,
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
             'queue': queue_name,
             'status': 'RUNNING' if is_terminal else status,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     if is_terminal:

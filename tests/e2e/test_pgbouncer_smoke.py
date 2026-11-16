@@ -57,7 +57,7 @@ def _reload_pgbouncer_modules() -> tuple[Any, Any, Any]:
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_worker_processes_task_and_workflow_through_pgbouncer_split_urls() -> None:
-    with isolated_pgbouncer_database("horsies_pgbouncer_e2e") as urls:
+    with isolated_pgbouncer_database("pgbouncer_e2e") as urls:
         with _pgbouncer_env(urls.direct, urls.transaction):
             instance_pgbouncer, pgbouncer_tasks, pgbouncer_workflows = (
                 _reload_pgbouncer_modules()
