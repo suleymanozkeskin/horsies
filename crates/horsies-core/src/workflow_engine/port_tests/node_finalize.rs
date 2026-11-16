@@ -198,12 +198,10 @@ async fn finalize(
 fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match result {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
-             phase_two: {phase_two:?} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -212,15 +210,10 @@ fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
     }
 }
 
-/// Whether phase 1 applied the success and phase 2 ran.
+/// Whether phase 1 applied a terminal write that owes phase 2, and phase 2
+/// ran. The outcome carries no status: the callers drive a success.
 fn is_a_finalized_success(result: &Result<FinalizeOutcome, FinalizeError>) -> bool {
-    matches!(
-        result,
-        Ok(FinalizeOutcome::Terminal {
-            is_success: true,
-            ..
-        })
-    )
+    matches!(result, Ok(FinalizeOutcome::Terminal { .. }))
 }
 
 /// (task_index, status, linked to a task) of each node (Python's `_nodes`).

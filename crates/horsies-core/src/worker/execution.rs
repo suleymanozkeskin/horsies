@@ -40,13 +40,10 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
-use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 use crate::db::CheckoutClass;
 use crate::workflow_engine::args_merge::unwrap_args_from_entries;
-use crate::workflow_engine::phase2_recovery::{
-    send_phase2_wake, terminal_status_of_pending_kind, Phase2Wake,
-};
+use crate::workflow_engine::phase2_recovery::{send_phase2_wake, Phase2Wake};
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
     NodeFinishDisposition, OwedParentAdvances,
@@ -95,8 +92,9 @@ pub(crate) enum PhaseTwoForm {
 /// Outcome of Phase 1 finalize: persisting the terminal task state.
 pub(crate) enum FinalizeOutcome {
     /// Task completed or failed terminally. Needs Phase 2 (workflow callback).
+    /// The node status comes from the kind of the phase-2 record, which the
+    /// node finish reads; phase 2 does not take the task's status.
     Terminal {
-        is_success: bool,
         /// Phase 1 already fired the capacity wake (the fused success path
         /// notifies in-statement); Phase 2 must not wake capacity twice.
         capacity_notified: bool,
@@ -122,7 +120,6 @@ pub(crate) enum FinalizeOutcome {
 /// before running potentially slow workflow callbacks + retries.
 pub(crate) struct Phase2Work {
     pub task_id: Uuid,
-    pub is_success: bool,
     pub queue_name: String,
     pub is_workflow_task: bool,
     /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
@@ -393,7 +390,6 @@ fn phase2_after_prestart_expiry(
     match is_workflow_task {
         true => Some(Phase2Work {
             task_id,
-            is_success: false,
             queue_name,
             is_workflow_task,
             capacity_notified: false,
@@ -886,7 +882,6 @@ async fn persist_workflow_success(
         .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
-            is_success: true,
             capacity_notified: false,
             phase_two: PhaseTwoForm::Step(phase_two.step),
         }),
@@ -1009,7 +1004,6 @@ async fn after_failed_attempt(
             after: AfterFailure::PhaseTwoOwed(owed),
             ..
         } => Ok(FinalizeOutcome::Terminal {
-            is_success: false,
             capacity_notified: false,
             phase_two: PhaseTwoForm::Step(owed.step),
         }),
@@ -1066,8 +1060,8 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 }
 
 /// A replay of a committed write (`AlreadyApplied`). A workflow task owes
-/// phase 2 while its durable phase-2 record exists, with the outcome of the
-/// status that the record's kind stands for; a plain task owes nothing.
+/// phase 2 while its durable phase-2 record exists; a plain task owes
+/// nothing.
 async fn replay_of_committed_write(
     pool: &sqlx::PgPool,
     task_id: Uuid,
@@ -1075,8 +1069,7 @@ async fn replay_of_committed_write(
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
         true => match load_pending_phase_two(pool, task_id).await? {
-            PendingPhaseTwo::Owed(status) => Ok(FinalizeOutcome::Terminal {
-                is_success: status == TaskStatus::Completed,
+            PendingPhaseTwo::Owed => Ok(FinalizeOutcome::Terminal {
                 capacity_notified: false,
                 phase_two: PhaseTwoForm::NotKnown,
             }),
@@ -1293,37 +1286,34 @@ fn node_finish_outcome(
     }
 }
 
-/// The kind of a task's phase-2 record. The record has no status column: the
-/// status follows from the kind (`terminal_status_of_pending_kind`).
-const LOAD_PENDING_KIND_SQL: &str =
-    "SELECT terminalization_kind FROM horsies_workflow_phase2_pending WHERE task_id = $1";
+/// Whether a task has a phase-2 record. Its status is not read: the node
+/// finish takes the node status from the record's kind.
+const PENDING_PHASE_TWO_EXISTS_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)";
 
 /// What the phase-2 record of a committed workflow write owes, as a replay
 /// reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingPhaseTwo {
-    /// The record exists: phase 2 is owed for a task that ended with this
-    /// status (COMPLETED, FAILED or EXPIRED).
-    Owed(TaskStatus),
+    /// The record exists: phase 2 is owed.
+    Owed,
     /// No record: phase 2 consumed it, so the replay owes nothing.
     Consumed,
 }
 
-/// Read the phase-2 record of a workflow task after a phase-1 replay.
+/// Read whether a workflow task's phase-2 record exists after a phase-1
+/// replay. One statement; writes nothing. The moved history row is not read:
+/// the record is the evidence that phase 2 is still owed.
 ///
-/// One statement; writes nothing. The moved history row is not read: the
-/// record is the evidence that phase 2 is still owed.
-///
-/// Errors:
-/// - the read fails: retryable;
-/// - the record names a kind that writes no phase-2 record: not retryable.
+/// Errors: the read fails: [`FinalizeError`] at
+/// [`FinalizeStage::Phase2Workflow`], retryable.
 async fn load_pending_phase_two(
     pool: &sqlx::PgPool,
     task_id: Uuid,
 ) -> Result<PendingPhaseTwo, FinalizeError> {
-    let kind: Option<String> = sqlx::query_scalar(LOAD_PENDING_KIND_SQL)
+    let owed: bool = sqlx::query_scalar(PENDING_PHASE_TWO_EXISTS_SQL)
         .bind(task_id)
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| FinalizeError {
             stage: FinalizeStage::Phase2Workflow,
@@ -1331,17 +1321,10 @@ async fn load_pending_phase_two(
             message: format!("failed to load the phase-2 record: {error}"),
             retryable: true,
         })?;
-    match kind {
-        None => Ok(PendingPhaseTwo::Consumed),
-        Some(kind) => terminal_status_of_pending_kind(&kind)
-            .map(PendingPhaseTwo::Owed)
-            .map_err(|refusal| FinalizeError {
-                stage: FinalizeStage::Phase2Workflow,
-                task_id,
-                message: refusal.to_string(),
-                retryable: false,
-            }),
-    }
+    Ok(match owed {
+        true => PendingPhaseTwo::Owed,
+        false => PendingPhaseTwo::Consumed,
+    })
 }
 
 #[cfg(test)]
@@ -1394,12 +1377,10 @@ pub(crate) async fn finalize_pre_execution_failure(
     .await
     {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
@@ -1580,12 +1561,10 @@ pub(crate) async fn execute_and_finalize(
 
     match phase1_outcome {
         Some(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => Some(Phase2Work {
             task_id,
-            is_success,
             queue_name,
             is_workflow_task,
             capacity_notified,
@@ -2596,7 +2575,6 @@ mod prestart_expiry_tests {
     fn a_workflow_task_expired_before_start_owes_its_phase_two() {
         let work = phase2_after_prestart_expiry(Uuid::nil(), "q".to_owned(), true)
             .expect("phase 2 is owed");
-        assert!(!work.is_success);
         assert!(work.is_workflow_task);
     }
 }

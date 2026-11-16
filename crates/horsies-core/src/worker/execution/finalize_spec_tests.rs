@@ -264,12 +264,10 @@ fn ok_result(text: &str) -> TaskResult<Vec<u8>> {
 fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match outcome {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
             phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
-             phase_two: {phase_two:?} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -575,17 +573,12 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: false,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
     }
+    assert_eq!(committed["status"], "FAILED");
     assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
     cleanup(&pool, &seeded).await;
 }
@@ -631,13 +624,7 @@ async fn a_workflow_success_replay_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: true,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
@@ -922,7 +909,6 @@ async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
         matches!(
             phase_one,
             Ok(FinalizeOutcome::Terminal {
-                is_success: true,
                 capacity_notified: false,
                 ..
             })
