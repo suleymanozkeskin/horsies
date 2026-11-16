@@ -77,7 +77,7 @@ async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
     start(
         pool,
         &spec(name, vec![task_node(0, &format!("{name}_task")), dependent]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
 }
@@ -181,7 +181,7 @@ async fn finalize(
     if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
             &broker,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             claimed.id,
             &claimed.queue_name,
             claimed.is_workflow_task,
@@ -592,7 +592,7 @@ async fn phase_two(
     let broker = PostgresBroker::from_pool(pool.clone());
     finalize_workflow_phase(
         &broker,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         task_id,
         queue_name,
         is_workflow_task,
@@ -687,7 +687,9 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
                 let workflow_id = start(
                     &pool,
                     &spec("finalize_wake", vec![task_node(0, "finalize_wake_task")]),
-                    &WorkflowSpecRegistry::new(),
+                    &WorkflowSpecRegistry::new(
+                        crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                    ),
                 )
                 .await;
                 let task_id = node(&pool, workflow_id, 0)

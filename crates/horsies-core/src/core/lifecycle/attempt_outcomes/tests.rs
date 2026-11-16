@@ -556,6 +556,155 @@ fn a_column_against_its_outcome_fails_closed() {
     }
 }
 
+// --- stale attempt ------------------------------------------------------------
+
+/// The shared columns of an APPLIED row of a stale attempt.
+fn stale_applied_raw() -> RawOutcomeRow {
+    RawOutcomeRow {
+        terminalization_kind: Some("FAIL_STALE".to_owned()),
+        ..applied_raw()
+    }
+}
+
+#[test]
+fn a_stale_plain_failure_owes_nothing() {
+    assert_eq!(
+        decode_stale_attempt(stale_applied_raw(), applied_extra()).expect("a stale failure"),
+        StaleAttemptOutcome::FailureApplied {
+            task_id: task_id(),
+            terminal_at: now(),
+            observed: observed(),
+            retry: RetryRefusal::NotRequested,
+            after: AfterStaleFailure::NothingOwed,
+        }
+    );
+}
+
+#[test]
+fn a_stale_workflow_failure_owes_phase_two() {
+    let extra = FailedAttemptColumns {
+        is_workflow_task: Some(true),
+        facts: facts(false, Some("NONE")),
+        ..applied_extra()
+    };
+    match decode_stale_attempt(stale_applied_raw(), extra).expect("a stale failure") {
+        StaleAttemptOutcome::FailureApplied { after, .. } => assert_eq!(
+            after,
+            AfterStaleFailure::PhaseTwoOwed(PhaseTwoOwed {
+                task_name: "task_a".to_owned(),
+                queue_name: "q1".to_owned(),
+                step: PhaseTwoStep::NoDependents,
+            })
+        ),
+        other => panic!("expected FailureApplied, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_retry_past_its_deadline_is_a_failure() {
+    let extra = FailedAttemptColumns {
+        retry_disposition: Some("PAST_DEADLINE".to_owned()),
+        next_retry_at: Some(later()),
+        good_until: Some(now()),
+        ..applied_extra()
+    };
+    match decode_stale_attempt(stale_applied_raw(), extra).expect("a stale failure") {
+        StaleAttemptOutcome::FailureApplied { retry, .. } => assert_eq!(
+            retry,
+            RetryRefusal::PastDeadline {
+                next_retry_at: later(),
+                good_until: now(),
+            }
+        ),
+        other => panic!("expected FailureApplied, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_retry_is_scheduled() {
+    assert_eq!(
+        decode_stale_attempt(retry_raw(), retry_extra()).expect("a stale retry"),
+        StaleAttemptOutcome::RetryScheduled {
+            task_id: task_id(),
+            retry_count: 2,
+            next_retry_at: later(),
+            queue_name: "q1".to_owned(),
+            observed: observed(),
+        }
+    );
+}
+
+#[test]
+fn a_stale_retry_count_conflict_is_refused() {
+    let raw = RawOutcomeRow {
+        guard_kind: Some("RETRY_COUNT".to_owned()),
+        observed_guard: Some(serde_json::json!({
+            "expected_retry_count": 0,
+            "retry_count": 1
+        })),
+        ..miss_raw("SOURCE_STATE_CONFLICT")
+    };
+    match decode_stale_attempt(raw, miss_extra()).expect("a refusal") {
+        StaleAttemptOutcome::Refused(AttemptWriteRefusal::SourceStateConflict {
+            evidence: GuardEvidence::RetryCount(counts),
+            ..
+        }) => {
+            assert_eq!((counts.expected_retry_count, counts.retry_count), (0, 1));
+        }
+        other => panic!("expected a retry-count conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_row_against_its_outcome_fails_closed() {
+    let cases: Vec<(&str, RawOutcomeRow, FailedAttemptColumns)> = vec![
+        (
+            "applied_of_the_running_kind",
+            applied_raw(),
+            applied_extra(),
+        ),
+        (
+            "applied_with_a_retry_count",
+            stale_applied_raw(),
+            FailedAttemptColumns {
+                retry_count: Some(1),
+                ..applied_extra()
+            },
+        ),
+        (
+            "workflow_failure_without_dependents_fact",
+            stale_applied_raw(),
+            FailedAttemptColumns {
+                is_workflow_task: Some(true),
+                ..applied_extra()
+            },
+        ),
+        (
+            "retry_with_a_disposition",
+            retry_raw(),
+            FailedAttemptColumns {
+                retry_disposition: Some("NOT_REQUESTED".to_owned()),
+                ..retry_extra()
+            },
+        ),
+        ("released", released_raw(), released_extra()),
+        (
+            "refusal_with_a_queue",
+            miss_raw("LOST_CLAIM"),
+            FailedAttemptColumns {
+                queue_name: Some("q1".to_owned()),
+                ..miss_extra()
+            },
+        ),
+    ];
+    for (name, raw, extra) in cases {
+        assert!(
+            decode_stale_attempt(raw, extra).is_err(),
+            "{name} must fail closed"
+        );
+    }
+}
+
 // --- workflow success ---------------------------------------------------------
 
 fn success_raw() -> RawOutcomeRow {
