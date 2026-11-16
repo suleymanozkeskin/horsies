@@ -324,6 +324,8 @@ fn database_url() -> String {
     format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
+mod read_round_trips;
+
 #[derive(Clone)]
 struct StatementPause {
     pattern: Arc<str>,

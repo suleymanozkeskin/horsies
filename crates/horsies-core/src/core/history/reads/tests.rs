@@ -57,6 +57,8 @@ use super::result::{
 };
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
+mod ports;
+
 const PYTHON_STAGED_FIXTURE: &str =
     include_str!("../../../../tests/fixtures/task_history/python-v052-staged-readers.json");
 
