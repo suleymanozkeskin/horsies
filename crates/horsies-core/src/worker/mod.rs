@@ -2,6 +2,7 @@
 
 pub mod backoff;
 pub mod claim_pass;
+mod class_coverage_log;
 pub mod cli;
 pub mod config;
 pub mod connection_fit;

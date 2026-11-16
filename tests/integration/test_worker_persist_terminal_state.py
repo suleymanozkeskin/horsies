@@ -29,6 +29,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at, row_claim
 from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import (
@@ -347,7 +348,7 @@ async def test_claim_lost_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -375,7 +376,7 @@ async def test_ownership_unconfirmed_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -403,7 +404,7 @@ async def test_workflow_check_failed_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -431,7 +432,7 @@ async def test_workflow_stopped_reason_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -465,7 +466,7 @@ async def test_worker_failure_marks_failed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -496,7 +497,7 @@ async def test_worker_failure_reaper_already_reclaimed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -530,7 +531,7 @@ async def test_corrupt_json_marks_serialization_error(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -561,7 +562,7 @@ async def test_invalid_task_result_structure_marks_error(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -599,7 +600,7 @@ async def test_err_workflow_stopped_code_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -634,7 +635,7 @@ async def test_err_no_retry_marks_failed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -673,7 +674,7 @@ async def test_err_retry_scheduled_to_pending(
         task_name='persist_retry_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=await row_claim(session, task_id),
     )
 
     assert is_ok(result)
@@ -712,7 +713,7 @@ async def test_err_retry_expired_falls_through_to_failed(
         task_name='persist_retry_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -754,7 +755,7 @@ async def test_success_marks_completed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -785,7 +786,7 @@ async def test_success_reaper_reclaimed_no_mutation(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -819,7 +820,7 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=generation,
+        claim=claim_at(generation),
     )
     replay = await worker._persist_task_terminal_state(
         task_id=task_id,
@@ -830,7 +831,7 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=generation,
+        claim=claim_at(generation),
     )
 
     assert is_ok(first) and first.ok_value is not None
@@ -881,7 +882,7 @@ async def test_failure_phase1_replay_after_a_lost_reply(
             task_name='persist_terminal_test',
             queue_name='default',
             is_workflow_task=is_workflow_task,
-            claimed_at=generation,
+            claim=claim_at(generation),
         )
 
     first = await phase1()
@@ -932,7 +933,7 @@ async def test_locked_completion_miss_does_not_touch_a_newer_generation(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=stale_generation,
+        claim=claim_at(stale_generation),
     )
 
     assert is_ok(result)

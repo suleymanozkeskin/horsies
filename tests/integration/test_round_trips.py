@@ -51,6 +51,7 @@ from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
 )
+from tests.dispatch_claim_support import claim_at
 from tests.integration.autocommit_support import (
     QUEUE,
     TASK_NAME,
@@ -222,7 +223,7 @@ async def test_a_plain_success_finalize_is_one_statement(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
         assert result == Ok(None)
 
@@ -258,7 +259,7 @@ async def test_an_orphan_cancel_is_one_statement(
             queue_name=QUEUE,
             is_workflow_task=True,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
         assert result == Ok(None)
 

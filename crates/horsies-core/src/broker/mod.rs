@@ -60,7 +60,8 @@ pub use health::{
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
+    ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode,
+    UPSERT_TASK_ATTEMPT_SQL,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
@@ -71,7 +72,6 @@ pub use row::task::{
     ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow,
     TaskResultRow, TaskRunningContextRow,
 };
-pub use row::worker_state::WorkerStateRow;
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,

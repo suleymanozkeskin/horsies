@@ -60,6 +60,7 @@ from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.claiming import ClaimPass
 from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at
 from tests.integration.autocommit_support import (
     QUEUE,
     TASK_NAME,
@@ -216,7 +217,7 @@ async def _finalize_success(
         queue_name=QUEUE,
         is_workflow_task=False,
         task_name=TASK_NAME,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 

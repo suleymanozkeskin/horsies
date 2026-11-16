@@ -727,7 +727,6 @@ class TestEveryInsertPathWritesTheColumn:
                     'execution' if 'execution' in columns else 'MISSING',
                 )
         assert found == {
-            'core/brokers/postgres.py': ['execution'],
             'core/history/rerun/operations.py': ['execution'],
             'core/workflows/sql.py': ['execution'],
         }

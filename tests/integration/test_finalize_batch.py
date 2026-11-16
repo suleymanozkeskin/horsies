@@ -67,6 +67,7 @@ from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.slots import Assigned, TaskFinished
 from horsies.core.worker.worker import Worker
 from horsies.core.utils.db import PooledStatements, StatementRunner
+from tests.dispatch_claim_support import claim_at
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.autocommit_support import (
     QUEUE,
@@ -247,7 +248,7 @@ async def _finalize(
         queue_name=QUEUE,
         is_workflow_task=False,
         task_name=TASK_NAME,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 
@@ -815,7 +816,7 @@ async def test_the_row_is_written_only_after_its_attempt_ended(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
     )
     for _ in range(10):
@@ -1024,7 +1025,7 @@ async def test_two_flushers_and_workflow_node_finalizes_do_not_deadlock(
             queue_name=QUEUE,
             is_workflow_task=True,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
 
     first = asyncio.create_task(_finalize_together(worker, plain_first))

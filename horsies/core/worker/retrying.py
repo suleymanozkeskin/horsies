@@ -1,7 +1,7 @@
 """The wake-up of a scheduled retry.
 
-The retry decision is made from the unlocked read of the retry facts and the
-policy of the task (``failed_attempt.retry_request_for``), and the retry is
+The retry decision is made from the retry facts of the claim and the policy
+of the task (``failed_attempt.retry_request_for``), and the retry is
 written by ``horsies_finish_failed_attempt``. RetryMixin wakes the queue of
 a scheduled retry when it is due. Worker-internal mixin: the
 ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies on.
