@@ -558,7 +558,6 @@ impl OutcomeWriter {
                         value,
                         fence(task, &self.worker_id),
                         workflow,
-                        &task.queue_name,
                     )
                     .await
                 }
