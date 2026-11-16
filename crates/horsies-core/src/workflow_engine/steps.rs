@@ -203,9 +203,10 @@ impl Dependents {
 }
 
 /// Why `horsies_workflow_node_apply` kept a phase-2 record and wrote nothing:
-/// the stored result did not pass its check.
+/// the stored result did not pass its check. Public through
+/// `WorkflowTaskCompletionError::RecordKept`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceFailure {
+pub enum SourceFailure {
     /// No history row at the locator and no quarantine copy (`SOURCE_ABSENT`).
     Absent,
     /// The source row belongs to another task (`SOURCE_STATE_CONFLICT`).
