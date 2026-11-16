@@ -1,6 +1,5 @@
 //! Monitoring query implementations over live and retained task data.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
@@ -8,20 +7,24 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
-use crate::broker::PostgresBroker;
+use crate::broker::core_rows::{column, one_row, RowDecodeError};
+use crate::broker::{BrokerError, PostgresBroker};
+use crate::db::{Row as CoreRow, StatementFailure, TypedStatement};
+
+use super::function_rows::{
+    builtin_taxonomy, detail_publication, page_from_rows, task_detail_row, task_list_row,
+    DetailPublication, DetailRead, DetailRowError, DETAIL_FUNCTIONS_PUBLISHED,
+    MONITORING_TASK_DETAIL, MONITORING_TASK_FACETS, MONITORING_TASK_LIST,
+};
 use crate::core::history::archive::attempts::AttemptRecord;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::reads::aggregates::{
-    history_breakdown_statement, history_count_statement, history_estimate_statement,
-    history_scoped_status_counts_statement, plan_rows_from_explain, HistoryBreakdownGroup,
-    HISTORY_NONEMPTY_PROBE_SQL,
+    history_breakdown_statement, history_scoped_status_counts_statement, HistoryBreakdownGroup,
 };
 use crate::core::history::reads::detail::{
     read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
 };
-use crate::core::history::reads::pages::{
-    HistoryPageQuery, HistoryScope, HistorySortField, HistoryStatement, HistoryWindow,
-};
+use crate::core::history::reads::pages::{HistoryScope, HistoryStatement, HistoryWindow};
 use crate::core::task::error::{
     BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
 };
@@ -30,17 +33,12 @@ use crate::core::types::status::TaskStatus;
 use super::errors::{MonitoringQueryError, MonitoringResult};
 use super::models::{
     Breakdown, ErrorCategory, ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo,
-    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskListPage, TaskSummary,
-    WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskListPage, WorkflowEdge,
+    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
 };
 
 pub const MAX_TASK_PAGE_REACH: i64 = 500;
-const FACET_VALUE_CAP: i64 = 50;
 const ERROR_FACET_CAP: i64 = 30;
-pub(super) const LIVE_SUMMARY_COLUMNS: &str =
-    "id, task_name, queue_name, status, priority, retry_count, max_retries, \
-     is_workflow_task, error_code, worker_hostname, claimed_by_worker_id, \
-     enqueued_at, started_at, completed_at, failed_at";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskSortField {
@@ -85,38 +83,6 @@ impl TaskSortField {
             Self::RetryCount => "retry_count",
             Self::QueueSeconds => "queue_s",
             Self::ExecutionSeconds => "exec_s",
-        }
-    }
-
-    const fn live_expression(self) -> (&'static str, bool) {
-        match self {
-            Self::EnqueuedAt => ("enqueued_at", false),
-            Self::StartedAt => ("started_at", true),
-            Self::CompletedAt => ("completed_at", true),
-            Self::FailedAt => ("failed_at", true),
-            Self::Status => ("status", false),
-            Self::TaskName => ("task_name", false),
-            Self::QueueName => ("queue_name", false),
-            Self::Priority => ("priority", false),
-            Self::RetryCount => ("retry_count", false),
-            Self::QueueSeconds => ("(started_at - enqueued_at)", true),
-            Self::ExecutionSeconds => ("(COALESCE(completed_at, failed_at) - started_at)", true),
-        }
-    }
-
-    const fn history_field(self) -> HistorySortField {
-        match self {
-            Self::EnqueuedAt => HistorySortField::EnqueuedAt,
-            Self::StartedAt => HistorySortField::StartedAt,
-            Self::CompletedAt => HistorySortField::CompletedAt,
-            Self::FailedAt => HistorySortField::FailedAt,
-            Self::Status => HistorySortField::Status,
-            Self::TaskName => HistorySortField::TaskName,
-            Self::QueueName => HistorySortField::QueueName,
-            Self::Priority => HistorySortField::Priority,
-            Self::RetryCount => HistorySortField::RetryCount,
-            Self::QueueSeconds => HistorySortField::QueueSeconds,
-            Self::ExecutionSeconds => HistorySortField::ExecutionSeconds,
         }
     }
 }
@@ -546,168 +512,6 @@ fn push_live_scope(builder: &mut QueryBuilder<'_, Postgres>, filters: &TaskFilte
     }
 }
 
-fn category_value(code: Option<&str>) -> Option<String> {
-    categorize_error_code(code).map(|category| category.as_str().to_owned())
-}
-
-#[derive(Debug, FromRow)]
-struct LiveTaskSummaryRow {
-    id: Uuid,
-    task_name: String,
-    queue_name: String,
-    status: String,
-    priority: i32,
-    retry_count: i32,
-    max_retries: i32,
-    is_workflow_task: bool,
-    error_code: Option<String>,
-    worker_hostname: Option<String>,
-    claimed_by_worker_id: Option<String>,
-    enqueued_at: DateTime<Utc>,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
-    failed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, FromRow)]
-struct HistoryTaskSummaryRow {
-    task_id: Uuid,
-    task_name: String,
-    queue_name: String,
-    priority: i32,
-    status: String,
-    terminal_at: DateTime<Utc>,
-    enqueued_at: DateTime<Utc>,
-    started_at: Option<DateTime<Utc>>,
-    retry_count: i32,
-    max_retries: i32,
-    error_code: Option<String>,
-    last_claimed_worker_id: Option<String>,
-    last_worker_hostname: Option<String>,
-    is_workflow_task: bool,
-}
-
-impl From<LiveTaskSummaryRow> for TaskSummary {
-    fn from(row: LiveTaskSummaryRow) -> Self {
-        let terminal = row.completed_at.or(row.failed_at);
-        let queue_s = span_s(
-            Some(row.enqueued_at),
-            row.started_at.or(terminal),
-            matches!(row.status.as_str(), "PENDING" | "CLAIMED"),
-        );
-        let exec_s = span_s(row.started_at, terminal, row.status.as_str() == "RUNNING");
-        Self {
-            id: row.id,
-            task_name: row.task_name,
-            queue_name: row.queue_name,
-            status: row.status,
-            priority: row.priority,
-            retry_count: row.retry_count,
-            max_retries: row.max_retries,
-            is_workflow_task: row.is_workflow_task,
-            error_category: category_value(row.error_code.as_deref()),
-            error_code: normalize_optional_text(row.error_code.as_deref()),
-            worker_hostname: row.worker_hostname,
-            worker_id: row.claimed_by_worker_id,
-            enqueued_at: Some(row.enqueued_at),
-            started_at: row.started_at,
-            completed_at: row.completed_at,
-            failed_at: row.failed_at,
-            queue_s,
-            exec_s,
-        }
-    }
-}
-
-impl From<HistoryTaskSummaryRow> for TaskSummary {
-    fn from(row: HistoryTaskSummaryRow) -> Self {
-        let completed_at = (row.status == "COMPLETED").then_some(row.terminal_at);
-        let failed_at = (row.status != "COMPLETED").then_some(row.terminal_at);
-        Self {
-            id: row.task_id,
-            task_name: row.task_name,
-            queue_name: row.queue_name,
-            status: row.status,
-            priority: row.priority,
-            retry_count: row.retry_count,
-            max_retries: row.max_retries,
-            is_workflow_task: row.is_workflow_task,
-            error_category: category_value(row.error_code.as_deref()),
-            error_code: normalize_optional_text(row.error_code.as_deref()),
-            worker_hostname: row.last_worker_hostname,
-            worker_id: row.last_claimed_worker_id,
-            enqueued_at: Some(row.enqueued_at),
-            started_at: row.started_at,
-            completed_at,
-            failed_at,
-            queue_s: span_s(
-                Some(row.enqueued_at),
-                row.started_at.or(Some(row.terminal_at)),
-                false,
-            ),
-            exec_s: span_s(row.started_at, Some(row.terminal_at), false),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum SummarySortKey {
-    Timestamp(DateTime<Utc>),
-    Text(String),
-    Integer(i64),
-}
-
-fn summary_sort_key(summary: &TaskSummary, field: TaskSortField) -> Option<SummarySortKey> {
-    match field {
-        TaskSortField::EnqueuedAt => summary.enqueued_at.map(SummarySortKey::Timestamp),
-        TaskSortField::StartedAt => summary.started_at.map(SummarySortKey::Timestamp),
-        TaskSortField::CompletedAt => summary.completed_at.map(SummarySortKey::Timestamp),
-        TaskSortField::FailedAt => summary.failed_at.map(SummarySortKey::Timestamp),
-        TaskSortField::Status => Some(SummarySortKey::Text(summary.status.clone())),
-        TaskSortField::TaskName => Some(SummarySortKey::Text(summary.task_name.clone())),
-        TaskSortField::QueueName => Some(SummarySortKey::Text(summary.queue_name.clone())),
-        TaskSortField::Priority => Some(SummarySortKey::Integer(i64::from(summary.priority))),
-        TaskSortField::RetryCount => Some(SummarySortKey::Integer(i64::from(summary.retry_count))),
-        TaskSortField::QueueSeconds => match (summary.enqueued_at, summary.started_at) {
-            (Some(enqueued), Some(started)) => {
-                Some(SummarySortKey::Integer((started - enqueued).num_seconds()))
-            }
-            _ => None,
-        },
-        TaskSortField::ExecutionSeconds => {
-            match (
-                summary.started_at,
-                summary.completed_at.or(summary.failed_at),
-            ) {
-                (Some(started), Some(terminal)) => {
-                    Some(SummarySortKey::Integer((terminal - started).num_seconds()))
-                }
-                _ => None,
-            }
-        }
-    }
-}
-
-fn compare_summaries(
-    left: &TaskSummary,
-    right: &TaskSummary,
-    field: TaskSortField,
-    direction: SortDirection,
-) -> Ordering {
-    match (
-        summary_sort_key(left, field),
-        summary_sort_key(right, field),
-    ) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(left), Some(right)) => match direction {
-            SortDirection::Ascending => left.cmp(&right),
-            SortDirection::Descending => right.cmp(&left),
-        },
-    }
-}
-
 fn history_attempt(record: &AttemptRecord) -> TaskAttemptInfo {
     TaskAttemptInfo {
         attempt: record.attempt(),
@@ -802,7 +606,7 @@ pub async fn task_stats(
         .collect())
 }
 
-/// One facet row of [`facets_statement`].
+/// One row of the facets function (`horsies_monitoring_task_facets`).
 #[derive(Debug, FromRow)]
 struct FacetRow {
     facet: String,
@@ -815,157 +619,7 @@ struct FacetRow {
     category_total: Option<i64>,
 }
 
-/// The facet filters: only status and `retried_only` scope the facets, so
-/// a selection of one facet never empties the option lists of the others.
-fn push_facet_filters(builder: &mut QueryBuilder<'_, Postgres>, filters: &TaskFilters) {
-    if !filters.statuses.is_empty() {
-        builder
-            .push(" AND status = ANY(")
-            .push_bind(
-                filters
-                    .statuses
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-            )
-            .push("::text[])");
-    }
-    if filters.retried_only {
-        builder.push(" AND retry_count > 0");
-    }
-}
-
-/// Every facet of [`task_facets`] in one statement, as Python's
-/// `facets_statement` (`horsies/monitoring/queries.py:725-849`).
-///
-/// One `GROUPING SETS` per side counts the columns in one pass over the
-/// small result of an inner `GROUP BY`; the sides sum per facet before the
-/// rank, so ties follow the database collation. The live side has no
-/// `error_code` column, so it has no error-code set. Each code carries its
-/// category, and each category carries the total of all its codes; only the
-/// top [`ERROR_FACET_CAP`] codes of each category and the top
-/// [`FACET_VALUE_CAP`] values of the other facets come back, so the result
-/// stays bounded for any number of distinct codes. NULL and empty values are
-/// not facet values.
-fn facets_statement(query: &TaskFacetsQuery) -> QueryBuilder<'_, Postgres> {
-    let mut builder = QueryBuilder::new(
-        "WITH lifecycle_facets AS (
-            SELECT CASE GROUPING(claimed_by_worker_id, task_name, queue_name)
-                       WHEN 3 THEN 'worker'
-                       WHEN 5 THEN 'task_name'
-                       WHEN 6 THEN 'queue_name'
-                   END AS facet,
-                   CASE GROUPING(claimed_by_worker_id, task_name, queue_name)
-                       WHEN 3 THEN claimed_by_worker_id::text
-                       WHEN 5 THEN task_name::text
-                       WHEN 6 THEN queue_name::text
-                   END AS facet_value,
-                   sum(group_count)::bigint AS facet_count
-            FROM (
-                SELECT claimed_by_worker_id, task_name, queue_name, count(*) AS group_count
-                FROM horsies_tasks
-                WHERE TRUE",
-    );
-    push_facet_filters(&mut builder, &query.filters);
-    builder.push(
-        "
-                GROUP BY claimed_by_worker_id, task_name, queue_name
-            ) AS live_groups
-            GROUP BY GROUPING SETS ((claimed_by_worker_id), (task_name), (queue_name))
-            UNION ALL
-            SELECT CASE GROUPING(last_claimed_worker_id, task_name, queue_name, error_code)
-                       WHEN 7 THEN 'worker'
-                       WHEN 11 THEN 'task_name'
-                       WHEN 13 THEN 'queue_name'
-                       WHEN 14 THEN 'error_code'
-                   END AS facet,
-                   CASE GROUPING(last_claimed_worker_id, task_name, queue_name, error_code)
-                       WHEN 7 THEN last_claimed_worker_id::text
-                       WHEN 11 THEN task_name::text
-                       WHEN 13 THEN queue_name::text
-                       WHEN 14 THEN error_code::text
-                   END AS facet_value,
-                   sum(group_count)::bigint AS facet_count
-            FROM (
-                SELECT last_claimed_worker_id, task_name, queue_name, error_code,
-                       count(*) AS group_count
-                FROM horsies_task_history
-                WHERE terminal_at >= ",
-    );
-    builder
-        .push_bind(query.window.lower())
-        .push(" AND terminal_at < ")
-        .push_bind(query.window.upper());
-    push_facet_filters(&mut builder, &query.filters);
-    builder.push(
-        "
-                GROUP BY last_claimed_worker_id, task_name, queue_name, error_code
-            ) AS history_groups
-            GROUP BY GROUPING SETS (
-                (last_claimed_worker_id), (task_name), (queue_name), (error_code)
-            )
-        ), combined AS (
-            SELECT facet, facet_value, sum(facet_count)::bigint AS facet_count
-            FROM lifecycle_facets
-            WHERE facet_value IS NOT NULL
-              AND (facet <> 'error_code' OR facet_value <> '')
-            GROUP BY facet, facet_value
-        ), ranked AS (
-            SELECT facet, facet_value, facet_count,
-                   row_number() OVER (
-                       PARTITION BY facet
-                       ORDER BY facet_count DESC, facet_value
-                   ) AS facet_rank,
-                   CASE WHEN facet = 'error_code' THEN
-                       CASE",
-    );
-    for category in [
-        ErrorCategory::Operational,
-        ErrorCategory::Contract,
-        ErrorCategory::Retrieval,
-        ErrorCategory::Outcome,
-    ] {
-        builder
-            .push(" WHEN facet_value = ANY(")
-            .push_bind(codes_for_category(category))
-            .push("::text[]) THEN '")
-            .push(category.as_str())
-            .push("'");
-    }
-    builder
-        .push(" ELSE '")
-        .push(ErrorCategory::Domain.as_str())
-        .push(
-            "'
-                       END
-                   END AS category
-            FROM combined
-        ), scoped AS (
-            SELECT facet, facet_value, facet_count, facet_rank, category,
-                   row_number() OVER (
-                       PARTITION BY facet, category ORDER BY facet_rank
-                   ) AS category_rank,
-                   (sum(facet_count) OVER (PARTITION BY facet, category))::bigint
-                       AS category_total
-            FROM ranked
-        )
-        SELECT facet, facet_value, facet_count, category,
-               CASE WHEN facet = 'error_code' THEN category_total END AS category_total
-        FROM scoped
-        WHERE CASE facet
-                  WHEN 'error_code' THEN category_rank <= ",
-        )
-        .push_bind(ERROR_FACET_CAP)
-        .push(" ELSE facet_rank <= ")
-        .push_bind(FACET_VALUE_CAP)
-        .push(
-            " END
-        ORDER BY facet, facet_rank",
-        );
-    builder
-}
-
-/// Build [`Facets`] from the rows of [`facets_statement`], as Python's
+/// Build [`Facets`] from the rows of the facets function, as Python's
 /// `task_facets` (`horsies/monitoring/queries.py:942-1007`): the code list
 /// follows the selected categories and holds at most [`ERROR_FACET_CAP`]
 /// codes; the category totals cover every category, selected or not.
@@ -1025,13 +679,48 @@ pub async fn task_facets(
     query: &TaskFacetsQuery,
 ) -> MonitoringResult<Facets> {
     let operation = "task facets query";
-    let rows: Vec<FacetRow> = facets_statement(query)
-        .build_query_as()
-        .fetch_all(broker.pool())
+    let statement = &MONITORING_TASK_FACETS;
+    let lower = query.window.lower();
+    let upper = query.window.upper();
+    let statuses = status_texts(&query.filters.statuses);
+    let taxonomy = builtin_taxonomy();
+    let rows = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&lower)
+                .value(&upper)
+                .value(&statuses)
+                .value(&query.filters.retried_only)
+                .value(&taxonomy.codes)
+                .value(&taxonomy.categories)
+                .finish(),
+        )
         .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
+        .map_err(|error| MonitoringQueryError::broker(operation, error))?;
+    let rows = rows
+        .iter()
+        .map(|row| facet_row(row, statement))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| MonitoringQueryError::broker(operation, BrokerError::RowDecode(error)))?;
     facets_from_rows(rows, &query.filters.error_categories)
         .map_err(|error| MonitoringQueryError::history(operation, error))
+}
+
+/// Reads one row of the facets function.
+fn facet_row(row: &CoreRow, statement: &TypedStatement) -> Result<FacetRow, RowDecodeError> {
+    Ok(FacetRow {
+        facet: column(row, statement, "facet")?,
+        facet_value: column(row, statement, "facet_value")?,
+        facet_count: column(row, statement, "facet_count")?,
+        category: column(row, statement, "category")?,
+        category_total: column(row, statement, "category_total")?,
+    })
+}
+
+/// The stored text of each status filter value.
+fn status_texts(statuses: &[TaskStatus]) -> Vec<String> {
+    statuses.iter().map(ToString::to_string).collect()
 }
 
 fn apply_group_count(
@@ -1157,154 +846,72 @@ pub async fn task_breakdown(
     })
 }
 
-async fn estimated_live_total(
-    connection: &mut PgConnection,
-    operation: &str,
-) -> MonitoringResult<i64> {
-    let estimate: i64 = sqlx::query_scalar(
-        "SELECT reltuples::bigint FROM pg_class WHERE oid = 'horsies_tasks'::regclass",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    if estimate >= 0 {
-        return Ok(estimate);
-    }
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
-        .fetch_one(connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))
-}
-
-async fn estimated_history_total(
-    connection: &mut PgConnection,
-    operation: &str,
-    window: HistoryWindow,
-    scope: &HistoryScope,
-) -> MonitoringResult<i64> {
-    let nonempty: bool = sqlx::query_scalar(HISTORY_NONEMPTY_PROBE_SQL.as_str())
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    if !nonempty {
-        return Ok(0);
-    }
-    let statement = history_estimate_statement(window, scope);
-    let row = statement
-        .query()
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let payload: serde_json::Value = row
-        .try_get(0)
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    plan_rows_from_explain(&payload)
-        .map_err(|error| MonitoringQueryError::history("task list estimate decode", error))
-}
-
-async fn exact_live_total(
-    connection: &mut PgConnection,
-    operation: &str,
-    filters: &TaskFilters,
-) -> MonitoringResult<i64> {
-    let mut builder = QueryBuilder::<Postgres>::new("SELECT count(*) FROM horsies_tasks");
-    push_live_scope(&mut builder, filters);
-    builder
-        .build_query_scalar()
-        .fetch_one(connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))
-}
-
-async fn exact_history_total(
-    connection: &mut PgConnection,
-    operation: &str,
-    window: HistoryWindow,
-    scope: &HistoryScope,
-) -> MonitoringResult<i64> {
-    let statement = history_count_statement(window, scope);
-    let row = statement
-        .query()
-        .fetch_one(connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    row.try_get(0)
-        .map_err(|error| MonitoringQueryError::database(operation, error))
-}
-
+/// One page of the task list over the live table and the history window,
+/// read by `horsies_monitoring_task_list` in one statement (one snapshot):
+/// the page and its total. With any filter the total is exact; with none it
+/// is the live estimate plus the planner's estimate of the history window.
 pub async fn list_tasks(
     broker: &PostgresBroker,
     query: &TaskListQuery,
 ) -> MonitoringResult<TaskListPage> {
     let operation = "task list query";
-    let reach = query.offset + query.limit;
-    let scope = history_scope(&query.filters);
-    let mut connection = broker
-        .pool()
-        .acquire()
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let (live_total, history_total) = if query.filters.is_empty() {
-        (
-            estimated_live_total(&mut connection, operation).await?,
-            estimated_history_total(&mut connection, operation, query.window, &scope).await?,
-        )
-    } else {
-        (
-            exact_live_total(&mut connection, operation, &query.filters).await?,
-            exact_history_total(&mut connection, operation, query.window, &scope).await?,
-        )
-    };
-
-    let mut live = QueryBuilder::<Postgres>::new("SELECT ");
-    live.push(LIVE_SUMMARY_COLUMNS).push(" FROM horsies_tasks");
-    push_live_scope(&mut live, &query.filters);
-    let (sort_expression, nullable) = query.sort_by.live_expression();
-    live.push(" ORDER BY ")
-        .push(sort_expression)
-        .push(" ")
-        .push(query.sort_direction.sql());
-    if nullable {
-        live.push(" NULLS LAST");
-    }
-    live.push(" LIMIT ").push_bind(reach);
-    let live_rows: Vec<LiveTaskSummaryRow> = live
-        .build_query_as()
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let page_query = HistoryPageQuery::new(query.window, reach)
-        .map_err(|error| MonitoringQueryError::history(operation, error))?
-        .with_scope(scope)
-        .with_sort_field(
-            query.sort_by.history_field(),
-            query.sort_direction == SortDirection::Descending,
-        );
-    let history_statement = crate::core::history::reads::pages::history_page_statement(&page_query);
-    let history_rows = fetch_history_rows(&mut connection, &history_statement)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let history_rows = history_rows
+    let statement = &MONITORING_TASK_LIST;
+    let lower = query.window.lower();
+    let upper = query.window.upper();
+    let statuses = status_texts(&query.filters.statuses);
+    let categories: Vec<String> = query
+        .filters
+        .error_categories
         .iter()
-        .map(HistoryTaskSummaryRow::from_row)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let mut summaries: Vec<TaskSummary> = live_rows.into_iter().map(Into::into).collect();
-    summaries.extend(history_rows.into_iter().map(Into::into));
-    summaries
-        .sort_by(|left, right| compare_summaries(left, right, query.sort_by, query.sort_direction));
-    let rows = summaries
-        .into_iter()
-        .skip(query.offset as usize)
-        .take(query.limit as usize)
+        .map(|category| category.as_str().to_owned())
         .collect();
-    Ok(TaskListPage {
-        rows,
-        total: live_total + history_total,
-    })
+    let taxonomy = builtin_taxonomy();
+    let sort_key = query.sort_by.as_str();
+    let sort_direction = query.sort_direction.sql();
+    // `with_pagination` bounds both to the page reach (500).
+    let offset = i32::try_from(query.offset).expect("the page offset is at most 500");
+    let limit = i32::try_from(query.limit).expect("the page limit is at most 200");
+    let rows = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&lower)
+                .value(&upper)
+                .value(&statuses)
+                .value(&query.filters.task_names)
+                .value(&query.filters.queues)
+                .value(&query.filters.workers)
+                .value(&query.filters.error_codes)
+                .value(&categories)
+                .value(&query.filters.retried_only)
+                .value(&taxonomy.codes)
+                .value(&taxonomy.categories)
+                .value(&sort_key)
+                .value(&sort_direction)
+                .value(&offset)
+                .value(&limit)
+                .finish(),
+        )
+        .await
+        .map_err(|error| MonitoringQueryError::broker(operation, error))?;
+    let rows = rows
+        .iter()
+        .map(|row| task_list_row(row, statement))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| MonitoringQueryError::broker(operation, BrokerError::RowDecode(error)))?;
+    let (totals, rows) = page_from_rows(rows).map_err(|reason| {
+        MonitoringQueryError::broker(
+            operation,
+            BrokerError::RowDecode(RowDecodeError::Shape {
+                statement: statement.name(),
+                reason,
+            }),
+        )
+    })?;
+    let total = totals.total().map_err(|reason| {
+        MonitoringQueryError::history("task list estimate decode", HistoryError::contract(reason))
+    })?;
+    Ok(TaskListPage { rows, total })
 }
 
 #[derive(Debug, FromRow)]
@@ -1399,21 +1006,6 @@ async fn live_attempts(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
-async fn workflow_link(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-) -> Result<Option<(Uuid, i32)>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT workflow_id, task_index
-         FROM horsies_workflow_tasks
-         WHERE task_id = $1
-         LIMIT 1",
-    )
-    .bind(task_id)
-    .fetch_optional(connection)
-    .await
-}
-
 /// The history row of a task, or `None`. A history status that is not a
 /// task status is a contract violation, as Python's detail decode
 /// (`horsies/monitoring/queries.py:1404-1499`).
@@ -1435,63 +1027,93 @@ async fn history_detail_or_none(
     }
 }
 
+/// One task, live or in history, with its attempts and workflow link, read
+/// by `horsies_monitoring_task_detail` in one statement (one snapshot).
+/// `None` for a task that neither place holds, and for a history task while
+/// the published history reader does not exist yet (before the first
+/// coverage pass).
 pub async fn get_task_detail(
     broker: &PostgresBroker,
     task_id: Uuid,
 ) -> MonitoringResult<Option<TaskDetail>> {
     let operation = "task detail query";
-    let mut connection = broker
-        .pool()
-        .acquire()
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let live: Option<LiveTaskDetailRow> = sqlx::query_as(
-        "SELECT id, task_name, queue_name, status, priority, retry_count,
-                max_retries, is_workflow_task, error_code, failed_reason,
-                worker_hostname, enqueued_at, started_at, completed_at,
-                failed_at, good_until
-         FROM horsies_tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let link = workflow_link(&mut connection, task_id)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let (workflow_id, workflow_task_index) = link
-        .map(|(workflow_id, index)| (Some(workflow_id), Some(index)))
-        .unwrap_or((None, None));
-    if let Some(live) = live {
-        let attempts = live_attempts(&mut connection, task_id)
-            .await
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        return Ok(Some(TaskDetail {
-            leaf: live.leaf(),
-            task_name: live.task_name,
-            queue_name: live.queue_name,
-            priority: live.priority,
-            is_workflow_task: live.is_workflow_task,
-            error_category: category_value(live.error_code.as_deref()),
-            attempts,
-            workflow_id,
-            workflow_task_index,
-        }));
+    let statement = &MONITORING_TASK_DETAIL;
+    let with_result = false;
+    let with_attempts = true;
+    let read = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&task_id)
+                .value(&with_result)
+                .value(&with_attempts)
+                .finish(),
+        )
+        .await;
+    let rows = match read {
+        Ok(rows) => rows,
+        Err(error) => return detail_failure(broker, operation, error).await,
+    };
+    let row = one_row(rows, statement)
+        .map_err(|error| MonitoringQueryError::broker(operation, BrokerError::RowDecode(error)))?;
+    match task_detail_row(&row, statement) {
+        Ok(DetailRead::Found(detail)) => Ok(Some(detail)),
+        Ok(DetailRead::Absent) => Ok(None),
+        Err(DetailRowError::Row(error)) => Err(MonitoringQueryError::broker(
+            operation,
+            BrokerError::RowDecode(error),
+        )),
+        Err(DetailRowError::StoredData(reason)) => Err(MonitoringQueryError::history(
+            operation,
+            HistoryError::contract(reason),
+        )),
     }
-    let history = history_detail_or_none(&mut connection, task_id)
-        .await
-        .map_err(|error| MonitoringQueryError::history(operation, error))?;
-    Ok(history.map(|history| TaskDetail {
-        leaf: history_leaf(&history),
-        task_name: history.task_name.clone(),
-        queue_name: history.queue_name.clone(),
-        priority: history.priority,
-        is_workflow_task: history.is_workflow_task,
-        error_category: category_value(history.error_code.as_deref()),
-        attempts: history.attempts.iter().map(history_attempt).collect(),
-        workflow_id,
-        workflow_task_index,
-    }))
+}
+
+/// A failed detail call. `42883` (undefined function) with the detail
+/// function present and the published reader absent answers "not found", as
+/// the read did before the first coverage pass. `XX001` (the published
+/// reader broke the snapshot contract) is a history contract violation.
+/// Anything else is the database failure.
+async fn detail_failure(
+    broker: &PostgresBroker,
+    operation: &str,
+    error: BrokerError,
+) -> MonitoringResult<Option<TaskDetail>> {
+    let code = match &error {
+        BrokerError::Statement(StatementFailure::StatementRefused { cause, .. }) => {
+            Some(cause.server_error().code().code().to_owned())
+        }
+        _ => None,
+    };
+    match code.as_deref() {
+        Some("42883") => {
+            let probe = &DETAIL_FUNCTIONS_PUBLISHED;
+            let rows = broker
+                .query_main(&probe.bind().finish())
+                .await
+                .map_err(|probe_error| MonitoringQueryError::broker(operation, probe_error))?;
+            let row = one_row(rows, probe).map_err(|row_error| {
+                MonitoringQueryError::broker(operation, BrokerError::RowDecode(row_error))
+            })?;
+            let read = |name: &'static str| -> MonitoringResult<bool> {
+                column(&row, probe, name).map_err(|row_error| {
+                    MonitoringQueryError::broker(operation, BrokerError::RowDecode(row_error))
+                })
+            };
+            match detail_publication(read("detail_function")?, read("staged_reader")?) {
+                DetailPublication::ReaderNotPublished => Ok(None),
+                DetailPublication::RefusalStands => {
+                    Err(MonitoringQueryError::broker(operation, error))
+                }
+            }
+        }
+        Some("XX001") => Err(MonitoringQueryError::broker(
+            operation,
+            BrokerError::HistoryReadContract(error.to_string()),
+        )),
+        Some(_) | None => Err(MonitoringQueryError::broker(operation, error)),
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -1861,24 +1483,12 @@ mod facet_tests {
         }
     }
 
-    fn window() -> HistoryWindow {
-        let upper = Utc::now();
-        HistoryWindow::new(upper - chrono::Duration::hours(1), upper).expect("window")
-    }
-
-    /// Python `test_a_poll_runs_one_statement_for_both_sides`: one statement
-    /// reads the live table and the history window once each, and the live
-    /// side has no error-code set.
+    /// The facets come from the baseline function in one statement.
     #[test]
-    fn one_statement_reads_each_side_once() {
-        let query = TaskFacetsQuery::new(window());
-        let builder = facets_statement(&query);
-        let sql = builder.sql();
-
-        assert_eq!(sql.matches("FROM horsies_tasks").count(), 1);
-        assert_eq!(sql.matches("FROM horsies_task_history").count(), 1);
-        assert_eq!(sql.matches("GROUPING SETS").count(), 2);
-        assert!(sql.contains("GROUPING(claimed_by_worker_id, task_name, queue_name)"));
+    fn the_facets_call_the_baseline_function() {
+        assert!(super::super::function_rows::MONITORING_TASK_FACETS
+            .sql()
+            .contains("FROM horsies_monitoring_task_facets($1, $2, $3, $4, $5, $6)"));
     }
 
     #[test]

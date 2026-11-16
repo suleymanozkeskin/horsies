@@ -8,6 +8,7 @@ use crate::broker::health::WorkerStateSnapshot;
 use crate::broker::row::task::{
     ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
 };
+use crate::broker::task_lists::{ListEnd, ListRow};
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, DiscardReason, FromSql, NotSentCause,
     PooledConnection, RollbackOutcome, Row, StatementBound, StatementFailure, Transaction,
@@ -138,6 +139,13 @@ pub enum RowDecodeError {
         column: &'static str,
         cause: tokio_postgres::Error,
     },
+    /// The rows break the result contract of the SQL function the statement
+    /// calls (an unknown row kind, a missing end row).
+    #[error("statement `{statement}` returned rows outside its contract: {reason}")]
+    Shape {
+        statement: &'static str,
+        reason: String,
+    },
 }
 
 /// Decodes one column of a row of `statement`.
@@ -187,13 +195,57 @@ pub(crate) fn one_row(rows: Vec<Row>, statement: &TypedStatement) -> Result<Row,
     })
 }
 
-/// Reads a [`StaleTaskRow`].
-pub(crate) fn stale_task_row(
+/// Reads one row of a list function: `row_kind` `TASK` through `task`, or
+/// the `LIST_END` row from `list_state` and `row_bound`.
+fn list_row<T>(
     row: &Row,
     statement: &TypedStatement,
-) -> Result<StaleTaskRow, RowDecodeError> {
+    task: fn(&Row, &TypedStatement) -> Result<T, RowDecodeError>,
+) -> Result<ListRow<T>, RowDecodeError> {
+    let shape = |reason: String| RowDecodeError::Shape {
+        statement: statement.name(),
+        reason,
+    };
+    let kind: String = column(row, statement, "row_kind")?;
+    match kind.as_str() {
+        "TASK" => Ok(ListRow::Task(task(row, statement)?)),
+        "LIST_END" => {
+            let state: String = column(row, statement, "list_state")?;
+            match state.as_str() {
+                "COMPLETE" => Ok(ListRow::End(ListEnd::Complete)),
+                "TRUNCATED" => {
+                    let bound: i32 = column(row, statement, "row_bound")?;
+                    let bound = usize::try_from(bound)
+                        .map_err(|_| shape(format!("row_bound {bound} is negative")))?;
+                    Ok(ListRow::End(ListEnd::Truncated { bound }))
+                }
+                other => Err(shape(format!("unknown list_state {other:?}"))),
+            }
+        }
+        other => Err(shape(format!("unknown row_kind {other:?}"))),
+    }
+}
+
+/// Reads one row of `horsies_list_stale_tasks`.
+pub(crate) fn stale_list_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<ListRow<StaleTaskRow>, RowDecodeError> {
+    list_row(row, statement, stale_task_row)
+}
+
+/// Reads one row of `horsies_list_expired_tasks`.
+pub(crate) fn expired_list_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<ListRow<ExpiredTaskRow>, RowDecodeError> {
+    list_row(row, statement, expired_task_row)
+}
+
+/// Reads a [`StaleTaskRow`] from a `TASK` row of the stale list.
+fn stale_task_row(row: &Row, statement: &TypedStatement) -> Result<StaleTaskRow, RowDecodeError> {
     Ok(StaleTaskRow {
-        id: column(row, statement, "id")?,
+        id: column(row, statement, "task_id")?,
         task_name: column(row, statement, "task_name")?,
         worker_hostname: column(row, statement, "worker_hostname")?,
         worker_pid: column(row, statement, "worker_pid")?,
@@ -203,13 +255,13 @@ pub(crate) fn stale_task_row(
     })
 }
 
-/// Reads an [`ExpiredTaskRow`].
-pub(crate) fn expired_task_row(
+/// Reads an [`ExpiredTaskRow`] from a `TASK` row of the expired list.
+fn expired_task_row(
     row: &Row,
     statement: &TypedStatement,
 ) -> Result<ExpiredTaskRow, RowDecodeError> {
     Ok(ExpiredTaskRow {
-        id: column(row, statement, "id")?,
+        id: column(row, statement, "task_id")?,
         task_name: column(row, statement, "task_name")?,
         queue_name: column(row, statement, "queue_name")?,
         priority: column(row, statement, "priority")?,

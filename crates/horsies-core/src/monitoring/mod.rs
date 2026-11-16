@@ -6,6 +6,7 @@
 
 mod actions;
 mod errors;
+mod function_rows;
 mod history_window;
 mod models;
 mod queries;
