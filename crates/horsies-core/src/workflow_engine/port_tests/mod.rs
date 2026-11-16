@@ -10,6 +10,7 @@ mod dataflow;
 mod error_handling;
 mod handle_reads;
 mod joins_and_patterns;
+mod node_finalize;
 mod output_skipped;
 mod pause_resume_cancel;
 mod promotion_rows;
