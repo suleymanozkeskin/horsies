@@ -499,17 +499,22 @@ class ManifestLeafSelection:
     absent_relations: frozenset[str]
 
 
+# The parent is derived from the class key as `leaf_parent_name` derives it.
 _MANIFEST_SELECTION_SQL = f"""
 SELECT leaf_name,
-       class_key,
-       to_regclass(leaf_name) IS NOT NULL AS relation_exists
+       to_regclass(leaf_name) IS NOT NULL AS relation_exists,
+       to_regclass(
+           CASE class_key
+               WHEN :forever_class THEN :forever_parent
+               WHEN :heartbeat_class THEN :heartbeat_parent
+               ELSE :history_parent || '_' || class_key
+           END
+       ) IS NOT NULL AS parent_exists
 FROM {LEAF_CATALOG}
 WHERE detached_at IS NULL
   AND dropped_at IS NULL
 ORDER BY lower_anchor NULLS FIRST, leaf_name
 """
-
-_RELATION_EXISTS_SQL = 'SELECT to_regclass(:relation) IS NOT NULL'
 
 
 
@@ -544,7 +549,18 @@ async def read_manifest_leaf_rows(
     here would let a tolerated state raise, and a deployment holding only
     such rows would satisfy any threshold phrased over the whole catalog.
     """
-    rows = (await connection.execute(text(_MANIFEST_SELECTION_SQL))).all()
+    rows = (
+        await connection.execute(
+            text(_MANIFEST_SELECTION_SQL),
+            {
+                'forever_class': FOREVER_CLASS_KEY,
+                'forever_parent': TASK_HISTORY_FOREVER,
+                'heartbeat_class': HEARTBEAT_CLASS_KEY,
+                'heartbeat_parent': HEARTBEATS_TABLE,
+                'history_parent': TASK_HISTORY_PARENT,
+            },
+        )
+    ).all()
     attached: list[LeafCatalogRow] = []
     absent: list[str] = []
     history_rows = 0
@@ -561,15 +577,7 @@ async def read_manifest_leaf_rows(
             continue
         history_rows += 1
         relation_exists = _required_bool(row.relation_exists, 'relation_exists')
-        parent_exists = _required_bool(
-            (
-                await connection.execute(
-                    text(_RELATION_EXISTS_SQL),
-                    {'relation': catalog_row.parent_name},
-                )
-            ).scalar_one(),
-            'parent_exists',
-        )
+        parent_exists = _required_bool(row.parent_exists, 'parent_exists')
         any_parent_resolves = any_parent_resolves or parent_exists
         if not relation_exists:
             absent.append(leaf_name)
