@@ -740,7 +740,7 @@ class TestWorkflowBoundRowsAreUntouched:
                 dependencies=(),
                 allow_failed_deps=False,
                 kind=TaskNode(task_id=task.id),
-                error=None,
+                result=None,
                 created_at=ago(120),
                 started_at=None,
                 completed_at=None,

@@ -43,7 +43,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
-from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.typed import encode_task_result
+from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring import queries as queries_module
@@ -276,7 +279,7 @@ def make_node(
     is_subworkflow: bool = False,
     sub_workflow_id: str | None = None,
     allow_failed_deps: bool = False,
-    error: str | None = None,
+    result: str | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
 ) -> NodeRow:
@@ -298,7 +301,7 @@ def make_node(
             if is_subworkflow
             else TaskNode(task_id=task_id)
         ),
-        error=error,
+        result=result,
         created_at=ago(120),
         started_at=started_at,
         completed_at=completed_at,
@@ -1062,6 +1065,28 @@ class TestTaskBreakdown:
             BreakdownValueGroup(value='w1'),
         ]
         assert result.ok_value.total.total == 1
+
+
+def _stored_error(message: str) -> str:
+    """The stored result text of a failed node whose error has ``message``."""
+    failed: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(error_code='ORDER_REJECTED', message=message),
+    )
+    match dumps_json(encode_task_result(failed, type(None))):
+        case Ok(text_value):
+            return text_value
+        case Err(cause):
+            raise AssertionError(f'the failed result does not encode: {cause}')
+
+
+def _stored_value(value: int) -> str:
+    """The stored result text of a node that completed with ``value``."""
+    completed: TaskResult[int, TaskError] = TaskResult(ok=value)
+    match dumps_json(encode_task_result(completed, int)):
+        case Ok(text_value):
+            return text_value
+        case Err(cause):
+            raise AssertionError(f'the result does not encode: {cause}')
 
 
 def _uuid7_born_at(birth: datetime) -> str:
@@ -2543,7 +2568,7 @@ class TestGetWorkflowNode:
                 node_id='step-one',
                 status='FAILED',
                 task_id=task.id,
-                error='node blew up',
+                result=_stored_error('node blew up'),
             ),
             make_attempt(task_id=task.id, attempt=2),
             make_attempt(task_id=task.id, attempt=1, will_retry=True),
@@ -2643,7 +2668,10 @@ class TestGetWorkflowNode:
         run = make_workflow()
         await insert_rows(session, run)
         await insert_rows(
-            session, make_node(workflow_id=run.id, task_index=0, error='')
+            session,
+            make_node(
+                workflow_id=run.id, task_index=0, status='FAILED', result=_stored_error(''),
+            ),
         )
 
         result = await get_workflow_node(broker, run.id, 0)
@@ -2651,6 +2679,43 @@ class TestGetWorkflowNode:
         assert is_ok(result)
         assert result.ok_value is not None
         assert result.ok_value.node_error is None
+
+    async def test_a_node_whose_result_holds_a_value_has_no_error(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        run = make_workflow()
+        await insert_rows(session, run)
+        await insert_rows(
+            session,
+            make_node(
+                workflow_id=run.id, task_index=0, status='COMPLETED', result=_stored_value(7),
+            ),
+        )
+
+        result = await get_workflow_node(broker, run.id, 0)
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.node_error is None
+
+    async def test_a_node_result_that_does_not_decode_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        run = make_workflow()
+        await insert_rows(session, run)
+        await insert_rows(
+            session,
+            make_node(
+                workflow_id=run.id, task_index=0, status='FAILED', result='{"err": "boom"}',
+            ),
+        )
+
+        result = await get_workflow_node(broker, run.id, 0)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
 
 
 # --------------------------------------------------------------------------- #

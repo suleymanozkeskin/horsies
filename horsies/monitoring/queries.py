@@ -105,6 +105,10 @@ from horsies.core.history.reads.pages import (
     history_sort_expression,
 )
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
+from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.typed import decode_task_error, validate_task_result_envelope
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
@@ -1567,8 +1571,41 @@ _NODE_DETAIL_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     WorkflowTaskModel.status,
     WorkflowTaskModel.is_subworkflow,
     WorkflowTaskModel.task_id,
-    WorkflowTaskModel.error,
+    WorkflowTaskModel.result,
 )
+
+
+def _node_error(task_index: int, stored: str | None) -> str | None:
+    """The message of the error that a node's stored result holds.
+
+    A node has no error column of its own: its stored result holds the
+    error. No result, a result with a value, and an error with no message
+    give None.
+
+    Raises:
+        HistoryContractError: the stored result is not a task result
+            envelope, or its error does not decode.
+    """
+    match loads_json(stored):
+        case Err(cause):
+            raise HistoryContractError(
+                f'workflow node {task_index}: the stored result is not JSON: {cause}'
+            )
+        case Ok(None):
+            return None
+        case Ok(raw):
+            pass
+    try:
+        err_slot = validate_task_result_envelope(raw).get('err')
+        match err_slot:
+            case None:
+                return None
+            case _:
+                return nz(decode_task_error(err_slot).message)
+    except (StrictJsonError, ValueValidationError) as exc:
+        raise HistoryContractError(
+            f'workflow node {task_index}: the stored result does not decode: {exc}'
+        ) from exc
 
 
 async def list_workflow_names(
@@ -1747,6 +1784,10 @@ async def get_workflow_node(
 ) -> MonitoringResult[WorkflowTaskDetail | None]:
     """Detail for one node: node error, backing task, and attempt history.
 
+    ``node_error`` is the message of the error that the node's stored
+    result holds; a stored result that does not decode returns
+    ``MonitoringQueryHistoryContractViolation``.
+
     Returns None when the run has no node at that index. Subworkflow nodes
     have no backing task; drill into the child run instead. ``leaf`` is also
     None when the backing task row has been removed by retention, while its
@@ -1778,6 +1819,7 @@ async def get_workflow_node(
             node = (await session.execute(node_stmt)).scalar_one_or_none()
             if node is None:
                 return Ok(None)
+            node_error = _node_error(node.task_index, node.result)
 
             task: TaskModel | None = None
             history: HistoryTaskDetail | None = None
@@ -1817,7 +1859,7 @@ async def get_workflow_node(
             task_name=node.task_name,
             node_status=node.status,
             is_subworkflow=node.is_subworkflow,
-            node_error=nz(node.error),
+            node_error=node_error,
             leaf=leaf,
             attempts=attempts,
         )

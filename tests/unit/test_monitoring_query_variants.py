@@ -188,6 +188,7 @@ class TestHistoryContractViolation:
         _refuse_history_read(monkeypatch, cause)
         node = MagicMock()
         node.task_id = TASK_ID
+        node.result = None
         broker = _broker_with_session(
             _session(_scalar_result(node), _scalar_result(None)),
         )
