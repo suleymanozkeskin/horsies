@@ -96,7 +96,11 @@ fn envelope_of(end: RunEnd) -> String {
 #[test]
 fn a_value_becomes_the_ok_envelope_with_its_text_kept() {
     let envelope = envelope_of(result_end(TaskResult::Ok(br#"{"b":1,"a":2}"#.to_vec())));
-    assert_eq!(envelope, r#"{"__type":"ok","value":{"b":1,"a":2}}"#);
+    // The form of Python 0.7.0 `dumps_json(encode_task_result(..))`.
+    assert_eq!(
+        envelope,
+        r#"{"__h_task_result__":true,"ok":{"b":1,"a":2},"err":null}"#
+    );
 }
 
 #[test]
@@ -104,20 +108,22 @@ fn a_value_that_is_not_json_is_a_serialization_error() {
     let envelope = envelope_of(result_end(TaskResult::Ok(b"{not json".to_vec())));
     let parsed: TaskResult<serde_json::Value> = serde_json::from_str(&envelope).unwrap();
     match parsed {
-        TaskResult::Err(error) => assert_eq!(
-            error.error_code.map(|code| code.to_string()).as_deref(),
-            Some("WORKER_SERIALIZATION_ERROR")
-        ),
+        TaskResult::Err(error) => {
+            assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR")
+        }
         TaskResult::Ok(_) => panic!("expected an error envelope"),
     }
 }
 
 #[test]
 fn a_task_error_becomes_the_error_envelope() {
-    let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
     let envelope = envelope_of(result_end(TaskResult::Err(error)));
-    assert!(envelope.contains(r#""__type":"err""#), "{envelope}");
-    assert!(envelope.contains("TASK_ERROR"), "{envelope}");
+    assert!(
+        envelope.starts_with(r#"{"__h_task_result__":true,"ok":null,"err":{"#),
+        "{envelope}"
+    );
+    assert!(envelope.contains("TASK_EXCEPTION"), "{envelope}");
 }
 
 #[test]

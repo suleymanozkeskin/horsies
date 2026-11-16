@@ -323,7 +323,7 @@ mod tests {
         impl BlockingTaskFn for FailingTask {
             fn execute(&self, _args: &[u8]) -> RawTaskResult {
                 TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::TaskError,
+                    OperationalErrorCode::TaskException,
                     "something broke",
                 ))
             }

@@ -30,6 +30,8 @@ pub mod shared_stop;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod claim_plan_tests;
+#[cfg(test)]
 mod isolated_run_tests;
 #[cfg(test)]
 mod isolated_verdict_tests;
