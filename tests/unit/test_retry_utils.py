@@ -3,123 +3,78 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.codec.task_options import InvalidRetryPolicy, NoRetryPolicy
+from horsies.core.models.tasks import OperationalErrorCode, RetryPolicy
 from horsies.core.utils.retry import (
+    OptionsNotAnObject,
+    admitted_retry_policy,
     calculate_retry_delay,
-    check_retry_eligibility,
-    parse_retry_policy,
+    read_stored_retry_policy,
 )
+
+
+def _fixed(intervals: list[int], *, jitter: bool = False) -> RetryPolicy:
+    return RetryPolicy.fixed(intervals, auto_retry_for=['E'], jitter=jitter)
+
+
+def _exponential(
+    base: int,
+    *,
+    jitter: bool = False,
+    max_delay_seconds: int | None = None,
+) -> RetryPolicy:
+    return RetryPolicy.exponential(
+        base,
+        max_retries=20,
+        auto_retry_for=['E'],
+        jitter=jitter,
+        max_delay_seconds=max_delay_seconds,
+    )
 
 
 @pytest.mark.unit
 class TestCalculateRetryDelay:
-    """Tests for calculate_retry_delay (extracted from Worker._calculate_retry_delay)."""
+    """The delay of a retry from a validated policy; no default is used."""
 
     def test_fixed_strategy_uses_intervals(self) -> None:
-        policy = {'intervals': [10, 20, 30], 'backoff_strategy': 'fixed', 'jitter': False}
+        policy = _fixed([10, 20, 30])
         assert calculate_retry_delay(1, policy) == 10.0
         assert calculate_retry_delay(2, policy) == 20.0
         assert calculate_retry_delay(3, policy) == 30.0
 
     def test_fixed_strategy_clamps_beyond_length(self) -> None:
-        policy = {'intervals': [10, 20], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(5, policy) == 20.0
+        assert calculate_retry_delay(5, _fixed([10, 20])) == 20.0
 
     def test_exponential_strategy(self) -> None:
-        policy = {'intervals': [10], 'backoff_strategy': 'exponential', 'jitter': False}
+        policy = _exponential(10)
         assert calculate_retry_delay(1, policy) == 10.0
         assert calculate_retry_delay(2, policy) == 20.0
         assert calculate_retry_delay(3, policy) == 40.0
 
     def test_exponential_without_max_delay_remains_uncapped(self) -> None:
-        policy = {'intervals': [60], 'backoff_strategy': 'exponential', 'jitter': False}
-        assert calculate_retry_delay(20, policy) == 31_457_280.0
+        assert calculate_retry_delay(20, _exponential(60)) == 31_457_280.0
 
     def test_exponential_max_delay_caps_large_attempts(self) -> None:
-        policy = {
-            'intervals': [60],
-            'backoff_strategy': 'exponential',
-            'jitter': False,
-            'max_delay_seconds': 600,
-        }
-        assert calculate_retry_delay(20, policy) == 600.0
+        assert calculate_retry_delay(20, _exponential(60, max_delay_seconds=600)) == 600.0
 
     def test_max_delay_caps_after_jitter(self) -> None:
-        policy = {
-            'intervals': [60],
-            'backoff_strategy': 'exponential',
-            'jitter': True,
-            'max_delay_seconds': 600,
-        }
+        policy = _exponential(60, jitter=True, max_delay_seconds=600)
         for _ in range(50):
             assert calculate_retry_delay(5, policy) <= 600.0
 
     def test_jitter_varies_result(self) -> None:
-        policy = {'intervals': [100], 'backoff_strategy': 'fixed', 'jitter': True}
+        policy = _fixed([100], jitter=True)
         results = {calculate_retry_delay(1, policy) for _ in range(50)}
         assert len(results) > 1, 'Jitter should produce varied results'
-
-    def test_minimum_delay_is_one(self) -> None:
-        policy = {'intervals': [0], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 1.0
-
-    def test_defaults_when_keys_missing(self) -> None:
-        result = calculate_retry_delay(1, {})
-        assert result >= 1.0
-
-    def test_empty_intervals_falls_back_to_defaults(self) -> None:
-        # Regression: 'fixed' with intervals=[] used to raise IndexError.
-        policy = {'intervals': [], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_empty_intervals_exponential_falls_back_to_defaults(self) -> None:
-        policy = {'intervals': [], 'backoff_strategy': 'exponential', 'jitter': False}
-        assert calculate_retry_delay(2, policy) == 120.0
-
-    def test_non_numeric_intervals_fall_back_to_defaults(self) -> None:
-        # Regression: string entries used to raise TypeError in arithmetic.
-        policy = {'intervals': ['fast', 'slow'], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_bool_intervals_fall_back_to_defaults(self) -> None:
-        policy = {'intervals': [True, False], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_int_beyond_float_range_falls_back_to_defaults(self) -> None:
-        # Regression: math.isfinite()/float() raise OverflowError on ints
-        # beyond float range, so a huge JSON int crashed the helper.
-        policy = {'intervals': [10**400], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_negative_int_beyond_float_range_falls_back_to_defaults(self) -> None:
-        policy = {'intervals': [-(10**400)], 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_non_finite_intervals_fall_back_to_defaults(self) -> None:
-        policy = {
-            'intervals': [float('nan')],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-        }
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_non_list_intervals_fall_back_to_defaults(self) -> None:
-        policy = {'intervals': 'abc', 'backoff_strategy': 'fixed', 'jitter': False}
-        assert calculate_retry_delay(1, policy) == 60.0
-
-    def test_unknown_backoff_strategy_uses_first_interval(self) -> None:
-        policy = {'intervals': [10, 20], 'backoff_strategy': 'quadratic', 'jitter': False}
-        assert calculate_retry_delay(3, policy) == 10.0
 
     def test_jitter_above_floor_does_not_collapse_lower_half(self) -> None:
         # Regression: jitter is applied upward from the 1.0 floor, not as a
         # symmetric window that a trailing max(1.0, ...) clamps. base=1.0 used
         # to push the [0.75, 1.0) half onto exactly 1.0, destroying spread.
-        policy = {'intervals': [1], 'backoff_strategy': 'fixed', 'jitter': True}
+        policy = _fixed([1], jitter=True)
         samples = [calculate_retry_delay(1, policy) for _ in range(200)]
         assert all(d >= 1.0 for d in samples)
         assert all(d <= 1.25 + 1e-9 for d in samples)
@@ -127,128 +82,129 @@ class TestCalculateRetryDelay:
         assert len({round(d, 4) for d in samples}) > 5
 
 
-@pytest.mark.unit
-class TestParseRetryPolicy:
-    """Tests for parse_retry_policy."""
+_VALID_POLICY: dict[str, object] = {
+    'max_retries': 2,
+    'intervals': [5, 10],
+    'backoff_strategy': 'fixed',
+    'jitter': False,
+    'auto_retry_for': ['WORKER_CRASHED'],
+}
 
-    def test_returns_none_for_none_input(self) -> None:
-        assert parse_retry_policy(None) is None
 
-    def test_returns_none_for_empty_string(self) -> None:
-        assert parse_retry_policy('') is None
-
-    def test_returns_none_for_corrupt_json(self) -> None:
-        assert parse_retry_policy('{bad json') is None
-
-    def test_returns_none_for_non_dict(self) -> None:
-        assert parse_retry_policy(json.dumps([1, 2, 3])) is None
-
-    def test_returns_none_when_no_retry_policy_key(self) -> None:
-        assert parse_retry_policy(json.dumps({'task_name': 'x'})) is None
-
-    def test_returns_none_when_retry_policy_is_not_dict(self) -> None:
-        assert parse_retry_policy(json.dumps({'retry_policy': 'not a dict'})) is None
-
-    def test_returns_policy_dict(self) -> None:
-        opts = {'retry_policy': {'max_retries': 3, 'auto_retry_for': ['WORKER_CRASHED']}}
-        result = parse_retry_policy(json.dumps(opts))
-        assert result is not None
-        assert result['max_retries'] == 3
+def _options(policy: object) -> str:
+    return json.dumps({'retry_policy': policy})
 
 
 @pytest.mark.unit
-class TestCheckRetryEligibility:
-    """Tests for check_retry_eligibility."""
+class TestReadStoredRetryPolicy:
+    """The stored retry policy is read with the rule of enqueue."""
 
-    _DB_NOW = datetime(2025, 6, 1, 12, 0, tzinfo=timezone.utc)
+    @pytest.mark.parametrize(
+        'task_options',
+        [None, '', json.dumps({'timeout_ms': 5}), _options(None)],
+        ids=['no-options', 'empty-text', 'no-key', 'null'],
+    )
+    def test_no_policy(self, task_options: str | None) -> None:
+        assert read_stored_retry_policy(task_options) == NoRetryPolicy()
 
-    def _make_opts(
+    def test_a_valid_policy_reads_as_retry_policy(self) -> None:
+        assert read_stored_retry_policy(_options(_VALID_POLICY)) == RetryPolicy(
+            max_retries=2,
+            intervals=[5, 10],
+            backoff_strategy='fixed',
+            jitter=False,
+            auto_retry_for=['WORKER_CRASHED'],
+        )
+
+    @pytest.mark.parametrize(
+        ('task_options', 'cause'),
+        [
+            ('{bad json', 'stored task_options do not parse'),
+            (json.dumps([1, 2, 3]), 'stored task_options are a JSON list, not an object'),
+        ],
+        ids=['not-json', 'not-an-object'],
+    )
+    def test_options_that_are_not_an_object(
+        self, task_options: str, cause: str,
+    ) -> None:
+        match read_stored_retry_policy(task_options):
+            case OptionsNotAnObject(reason=reason):
+                assert reason.startswith(cause)
+            case other:
+                raise AssertionError(f'expected OptionsNotAnObject, got {other!r}')
+
+    @pytest.mark.parametrize(
+        'policy',
+        [
+            'not a dict',
+            {**_VALID_POLICY, 'intervals': []},
+            {**_VALID_POLICY, 'intervals': ['fast', 'slow']},
+            {**_VALID_POLICY, 'intervals': [True, False]},
+            {**_VALID_POLICY, 'intervals': 'abc'},
+            {**_VALID_POLICY, 'backoff_strategy': 'quadratic'},
+            {**_VALID_POLICY, 'max_retries': 3},
+            {**_VALID_POLICY, 'jitter': 'yes'},
+            {**_VALID_POLICY, 'auto_retry_for': []},
+            {**_VALID_POLICY, 'extra': 1},
+        ],
+        ids=[
+            'not-an-object', 'empty-intervals', 'string-intervals',
+            'bool-intervals', 'intervals-not-a-list', 'unknown-backoff',
+            'fixed-length-mismatch', 'jitter-not-bool', 'empty-auto-retry-for',
+            'unknown-key',
+        ],
+    )
+    def test_a_policy_that_does_not_validate_is_refused(self, policy: object) -> None:
+        """These shapes used to fall back to default intervals or backoff."""
+        assert isinstance(read_stored_retry_policy(_options(policy)), InvalidRetryPolicy)
+
+
+@pytest.mark.unit
+class TestAdmittedRetryPolicy:
+    """The policy when it retries the code now; the deadline is judged by SQL."""
+
+    _OPTIONS = _options({**_VALID_POLICY, 'auto_retry_for': ['WORKER_CRASHED', 'MY_ERROR']})
+
+    def _admitted(
         self,
         *,
-        auto_retry_for: list[str] | None = None,
-        max_retries: int = 3,
-    ) -> str:
-        return json.dumps({
-            'task_name': 'test',
-            'retry_policy': {
-                'max_retries': max_retries,
-                'intervals': [60],
-                'backoff_strategy': 'exponential',
-                'jitter': False,
-                'auto_retry_for': auto_retry_for or ['WORKER_CRASHED'],
-            },
-        })
+        retry_count: int = 0,
+        max_retries: int = 2,
+        task_options: str | None = _OPTIONS,
+        error_code: str | OperationalErrorCode | None = OperationalErrorCode.WORKER_CRASHED,
+    ) -> RetryPolicy | None:
+        return admitted_retry_policy(
+            retry_count=retry_count,
+            max_retries=max_retries,
+            task_options_json=task_options,
+            error_code=error_code,
+        )
 
-    def test_eligible_when_code_matches_and_retries_remaining(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=self._make_opts(),
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=None, db_now=self._DB_NOW,
-        ) is True
+    def test_a_named_code_with_retries_left_is_admitted(self) -> None:
+        admitted = self._admitted()
+        assert isinstance(admitted, RetryPolicy)
+        assert admitted.intervals == [5, 10]
 
-    def test_not_eligible_when_retries_exhausted(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=3, max_retries=3,
-            task_options_json=self._make_opts(),
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=None, db_now=self._DB_NOW,
-        ) is False
+    def test_a_named_user_code_is_admitted(self) -> None:
+        assert isinstance(self._admitted(error_code='MY_ERROR'), RetryPolicy)
 
-    def test_not_eligible_when_max_retries_zero(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=0,
-            task_options_json=self._make_opts(),
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=None, db_now=self._DB_NOW,
-        ) is False
+    def test_spent_retries_are_not_admitted(self) -> None:
+        assert self._admitted(retry_count=2) is None
 
-    def test_not_eligible_when_no_task_options(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=None,
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=None, db_now=self._DB_NOW,
-        ) is False
+    def test_zero_max_retries_is_not_admitted(self) -> None:
+        assert self._admitted(max_retries=0) is None
 
-    def test_not_eligible_when_code_not_in_auto_retry_for(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=self._make_opts(auto_retry_for=['RATE_LIMITED']),
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=None, db_now=self._DB_NOW,
-        ) is False
+    def test_no_options_are_not_admitted(self) -> None:
+        assert self._admitted(task_options=None) is None
 
-    def test_not_eligible_when_good_until_passed(self) -> None:
-        past = self._DB_NOW - timedelta(minutes=5)
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=self._make_opts(),
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=past, db_now=self._DB_NOW,
-        ) is False
+    def test_a_code_that_is_not_named_is_not_admitted(self) -> None:
+        assert self._admitted(error_code='OTHER') is None
 
-    def test_eligible_when_good_until_in_future(self) -> None:
-        future = self._DB_NOW + timedelta(hours=1)
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=self._make_opts(),
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            good_until=future, db_now=self._DB_NOW,
-        ) is True
+    @pytest.mark.parametrize('code', [None, ''], ids=['none', 'empty'])
+    def test_no_code_is_not_admitted(self, code: str | None) -> None:
+        assert self._admitted(error_code=code) is None
 
-    def test_string_error_code_matches(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=self._make_opts(auto_retry_for=['MY_ERROR']),
-            error_code='MY_ERROR',
-            good_until=None, db_now=self._DB_NOW,
-        ) is True
-
-    def test_none_error_code_not_eligible(self) -> None:
-        assert check_retry_eligibility(
-            retry_count=0, max_retries=3,
-            task_options_json=self._make_opts(),
-            error_code=None,
-            good_until=None, db_now=self._DB_NOW,
-        ) is False
+    def test_a_policy_that_does_not_validate_is_not_admitted(self) -> None:
+        """No retry with default intervals: the failure is terminal."""
+        options = _options({**_VALID_POLICY, 'intervals': []})
+        assert self._admitted(task_options=options) is None

@@ -458,6 +458,7 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     merged.args_from = Some(r#"{"value": 0}"#.to_owned());
     merged.sources = vec![ChildStartSource {
         task_index: 0,
+        node_id: Some("source".to_owned()),
         status: "COMPLETED".to_owned(),
         task_name: "source_task".to_owned(),
         definition_key: None,
@@ -592,6 +593,7 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
     refused.args_from = Some(r#"{"alpha": 0}"#.to_owned());
     refused.sources = vec![ChildStartSource {
         task_index: 0,
+        node_id: Some("source".to_owned()),
         status: "COMPLETED".to_owned(),
         task_name: "source_task".to_owned(),
         definition_key: None,
@@ -622,6 +624,43 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
         error.data,
         Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
+}
+
+/// A COMPLETED dependency with no stored result gives its `args_from` member
+/// a `RESULT_DESERIALIZATION_ERROR` that names the node id of the `SOURCE`
+/// row, the same text as `horsies_workflow_source_value` and Python
+/// `_missing_result_entry` (`core/workflows/engine.py:169-194`).
+#[test]
+fn a_source_with_no_stored_result_is_named_by_its_node_id() {
+    let mut merged = owed(Uuid::new_v4(), 0, CHILD_KEY);
+    merged.args_from = Some(r#"{"value": 0}"#.to_owned());
+    merged.sources = vec![ChildStartSource {
+        task_index: 0,
+        node_id: Some("fetch".to_owned()),
+        status: "COMPLETED".to_owned(),
+        task_name: "source_task".to_owned(),
+        definition_key: None,
+        result: None,
+    }];
+
+    let NodeInput::Input(input) = merged_child_input(&merged).expect("the merge") else {
+        panic!("the merge failed the node");
+    };
+    let members: serde_json::Value =
+        serde_json::from_str(&input.text).expect("the merged input parses");
+    let entry: TaskResult<serde_json::Value> = serde_json::from_str(&members["value"].to_string())
+        .expect("the member is a result envelope");
+    let TaskResult::Err(error) = entry else {
+        panic!("a source with no stored result gives an error entry");
+    };
+    assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Dependency node fetch (index 0, task source_task) is COMPLETED with no stored result"
+        )
+    );
+    assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 0})));
 }
 
 /// A step takes up to `MAX_WORKFLOW_NODES` child starts, those that its

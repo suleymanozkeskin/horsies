@@ -144,7 +144,7 @@ def _app() -> Horsies:
     app = Horsies(
         AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                database_url=SecretStr('postgresql://u:p@localhost/db'),
             ),
         ),
     )
@@ -163,7 +163,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
         ),

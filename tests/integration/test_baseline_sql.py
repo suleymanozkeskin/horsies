@@ -186,6 +186,26 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_monitoring_workflow_run',
         'horsies_monitoring_workflow_runs',
         'horsies_schedule_slot_task_id',
+        # 0008_history_maintenance_functions.sql. horsies_terminalization_miss
+        # gains an overload there; its name is listed above.
+        'horsies_coverage_probe',
+        'horsies_create_heartbeat_leaf',
+        'horsies_create_history_leaf',
+        'horsies_create_partition_leaf',
+        'horsies_heartbeat_leaf_name',
+        'horsies_history_absent_leaves',
+        'horsies_history_leaf_indexes',
+        'horsies_history_leaf_name',
+        'horsies_history_leaf_state',
+        'horsies_history_reader_manifest',
+        'horsies_history_reader_signatures',
+        'horsies_history_reader_stamp',
+        'horsies_history_readers_current',
+        'horsies_publish_history_readers',
+        'horsies_register_retention_classes',
+        'horsies_render_history_reader',
+        'horsies_retention_period_days',
+        'horsies_terminalization_family',
     }
 )
 
@@ -251,6 +271,27 @@ async def test_migration_creates_the_baseline_functions(
     installed: psycopg.AsyncConnection[tuple[object, ...]],
 ) -> None:
     assert await _names(installed, _FUNCTIONS_SQL) == EXPECTED_FUNCTIONS
+
+
+_MOVE_SIGNATURES_SQL: Final = """
+    SELECT p.oid::regprocedure::text
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = current_schema()
+      AND p.proname = 'horsies_move_task_to_history'
+"""
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_single_move_has_one_signature_that_takes_the_locked_row(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+) -> None:
+    assert await _names(installed, _MOVE_SIGNATURES_SQL) == frozenset(
+        {
+            'horsies_move_task_to_history(horsies_tasks,text,text,'
+            'timestamp with time zone,text,text,text)',
+        }
+    )
 
 
 @pytest.mark.asyncio(loop_scope='function')

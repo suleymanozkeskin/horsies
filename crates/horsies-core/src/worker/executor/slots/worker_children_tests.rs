@@ -14,7 +14,7 @@ use crate::core::config::worker_profile::WorkerProfile;
 use crate::worker::children::{ChildLaunch, PoolFacts, WorkerChildren};
 use crate::worker::executor::placement::CpuPlacement;
 use crate::worker::executor::protocol::{
-    ChildLogLevel, ChildProgram, DatabaseUrl, RunEnd, TaskInputText,
+    ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl, RunEnd, TaskInputText,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner};
 use crate::worker::retry::read_stored_options;
@@ -26,6 +26,7 @@ fn launch(command: ChildCommand) -> ChildLaunch {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
     }
 }
 

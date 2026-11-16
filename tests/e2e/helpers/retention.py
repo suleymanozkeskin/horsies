@@ -33,6 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
+from horsies.core.utils.url import sqlalchemy_url
 
 
 async def _forget(database_url: str, class_key: str) -> None:
@@ -41,7 +42,7 @@ async def _forget(database_url: str, class_key: str) -> None:
     # failure would leave a half-regenerated reader — the divergence this
     # helper exists to prevent. PostgreSQL has transactional DDL, so each
     # phase can be atomic at no cost.
-    engine = create_async_engine(database_url)
+    engine = create_async_engine(sqlalchemy_url(database_url))
     try:
         async with engine.begin() as connection:
             leaves = (

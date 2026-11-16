@@ -15,7 +15,7 @@ from horsies.core.brokers.listener import PostgresListener
 def _database_url() -> str:
     url = os.environ.get("HORSIES_TEST_DATABASE_URL") or os.environ.get("HORSES_E2E_DB_URL")
     if url is not None:
-        return url.replace("postgresql+psycopg://", "postgresql://", 1)
+        return url
     return f'postgresql://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
 
 

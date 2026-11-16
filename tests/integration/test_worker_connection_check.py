@@ -38,6 +38,7 @@ from horsies.core.worker.profile_fit import (
     ServerConnectionLimitUnreadable,
     read_server_connection_limit,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 pytestmark = [pytest.mark.integration]
 
@@ -46,7 +47,7 @@ THREAD_SEATS = 8
 
 async def _usable_slots(db_url: str) -> int:
     """The slots that an ordinary role can use on the test server."""
-    engine = create_async_engine(db_url)
+    engine = create_async_engine(sqlalchemy_url(db_url))
     try:
         factory = async_sessionmaker(engine, class_=AsyncSession)
         match await read_server_connection_limit(factory):

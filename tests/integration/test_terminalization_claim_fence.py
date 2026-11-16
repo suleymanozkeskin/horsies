@@ -60,7 +60,7 @@ _WORKER_ID = 'fence-worker-1'
 def _make_worker(engine: AsyncEngine) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -415,7 +415,7 @@ async def test_real_claim_path_arms_the_fence(
 
 
 def _psycopg_dsn(db_url: str) -> str:
-    return db_url.replace('postgresql+psycopg://', 'postgresql://')
+    return db_url
 
 
 @pytest.mark.parametrize(

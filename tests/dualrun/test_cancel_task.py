@@ -51,7 +51,8 @@ _AGO: Final = timedelta(minutes=1)
 
 _MOVE_SQL: Final[LiteralString] = """
     SELECT horsies_move_task_to_history(
-        %(task_id)s, %(status)s, %(kind)s, now(), %(result)s, %(error_code)s, %(reason)s
+        (SELECT t FROM horsies_tasks AS t WHERE t.id = CAST(%(task_id)s AS uuid) FOR UPDATE),
+        %(status)s, %(kind)s, now(), %(result)s, %(error_code)s, %(reason)s
     )
 """
 

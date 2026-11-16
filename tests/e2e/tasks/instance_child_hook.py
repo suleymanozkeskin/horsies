@@ -22,6 +22,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
+from horsies.core.utils.url import sqlalchemy_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -33,12 +34,12 @@ _app_engine: Engine | None = None
 def _build_engine(*, worker_child: bool) -> Engine:
     if worker_child:
         return create_engine(
-            DB_URL,
+            sqlalchemy_url(DB_URL),
             poolclass=NullPool,
             connect_args={'application_name': APP_ENGINE_APPLICATION_NAME},
         )
     return create_engine(
-        DB_URL,
+        sqlalchemy_url(DB_URL),
         pool_size=3,
         max_overflow=2,
         connect_args={'application_name': APP_ENGINE_APPLICATION_NAME},

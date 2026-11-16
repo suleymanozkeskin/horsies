@@ -214,6 +214,8 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
     types: &[
         <SessionDatabase as ManifestItem>::ITEM,
         <PoolRecycle as ManifestItem>::ITEM,
+        <TcpKeepalivesConfig as ManifestItem>::ITEM,
+        <TcpUserTimeoutConfig as ManifestItem>::ITEM,
         <WorkerDatabaseManifest as ManifestItem>::ITEM,
         <SendManifest as ManifestItem>::ITEM,
         <TaskLimit as ManifestItem>::ITEM,
@@ -603,6 +605,9 @@ mod tests {
             names,
             [
                 "WHOLE_SECONDS",
+                "KEEPALIVE_SECONDS",
+                "KEEPALIVE_PROBES",
+                "TCP_USER_TIMEOUT_MS",
                 "RESERVATION_WINDOW_MICROS",
                 "TASK_LIMIT",
                 "MEMORY_LIMIT_MB",

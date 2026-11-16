@@ -16,7 +16,7 @@ from horsies.core.models.broker import PostgresConfig
 app = Horsies(
     config=AppConfig(
         broker=PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+            database_url=SecretStr('postgresql://u:p@localhost/db'),
         ),
     ),
 )
