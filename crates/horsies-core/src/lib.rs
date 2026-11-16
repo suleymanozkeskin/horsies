@@ -103,7 +103,7 @@ pub use crate::broker::{
     StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
-pub use crate::broker::client_family::ClientFamily;
+pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
