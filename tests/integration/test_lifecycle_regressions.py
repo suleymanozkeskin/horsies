@@ -19,7 +19,7 @@ from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.lifecycle.commands import CompleteLockedTask
 from horsies.core.lifecycle.fences import PriorLockedRead
 from horsies.core.lifecycle.outcomes import Applied
-from horsies.core.lifecycle.persistence import apply_async
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL, apply_async
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     RetryPolicy,
@@ -575,7 +575,9 @@ async def test_finalizer_row_lock_wins_reaper_race(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A finalizer holding the task row makes the stale scan step around it."""
+    """A finalizer holding the task's locks makes the stale recovery wait;
+    after the finalizer commits, the recovery finds the row moved and counts
+    nothing."""
     worker_id = f'finalizer-race-{uuid.uuid4().hex}'
     task_id = await _insert_owned_running_task(
         session,
@@ -584,18 +586,17 @@ async def test_finalizer_row_lock_wins_reaper_race(
     )
 
     async with AsyncSession(engine, expire_on_commit=False) as finalizer:
+        await finalizer.execute(LOCK_TASK_SQL, {'task_id': task_id})
         locked = await finalizer.execute(
             text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
             {'id': task_id},
         )
         assert locked.scalar_one() == task_id
 
-        reaper_result = await asyncio.wait_for(
+        reaper = asyncio.ensure_future(
             broker.mark_stale_tasks_as_failed(stale_threshold_ms=1_000),
-            timeout=2,
         )
-        assert is_ok(reaper_result)
-        assert reaper_result.ok_value == 0
+        await _until_a_backend_waits_on_a_lock(engine, 'horsies_finish_stale_attempt')
 
         outcome = await apply_async(
             await finalizer.connection(),
@@ -608,9 +609,38 @@ async def test_finalizer_row_lock_wins_reaper_race(
         assert isinstance(outcome, Applied)
         await finalizer.commit()
 
+    reaper_result = await asyncio.wait_for(reaper, timeout=2)
+    assert is_ok(reaper_result)
+    assert reaper_result.ok_value == 0
     row = await _task_row(session, task_id)
     assert row['status'] == 'COMPLETED'
     assert row['terminalization_kind'] == 'COMPLETE_LOCKED'
+
+
+async def _until_a_backend_waits_on_a_lock(engine: AsyncEngine, query_part: str) -> None:
+    """Return once a backend whose query contains ``query_part`` waits on a lock."""
+    for _ in range(_LOCK_WAIT_POLLS):
+        async with engine.connect() as connection:
+            waiting = (
+                await connection.execute(
+                    text("""
+                        SELECT count(*) FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%' || :part || '%'
+                          AND pid <> pg_backend_pid()
+                    """),
+                    {'part': query_part},
+                )
+            ).scalar_one()
+        if waiting > 0:
+            return
+        await asyncio.sleep(_LOCK_WAIT_POLL_S)
+    raise AssertionError(f'no backend waited on a lock running {query_part!r}')
+
+
+_LOCK_WAIT_POLLS = 200
+_LOCK_WAIT_POLL_S = 0.01
 
 
 @pytest.mark.asyncio(loop_scope='function')
