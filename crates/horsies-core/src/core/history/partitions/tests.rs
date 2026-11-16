@@ -53,11 +53,11 @@ use super::catalog::{
 };
 use super::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
-    verify_static_forever_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine, NoQuarantine,
-    QuarantineRefusalVerdict, QuarantineRefused, QuarantineResult, TaskQuarantineRefusal,
-    STATIC_FOREVER_LEAF_BOUND,
+    verify_static_forever_leaf, DetachExpiredLeafOutcome, NoQuarantine, STATIC_FOREVER_LEAF_BOUND,
 };
 use super::publication::{LoaderPublication, LoaderRepublished, UnpublishedLoader};
+
+mod lifecycle_ports;
 
 #[derive(Debug, Default)]
 struct CatalogPublisher;
@@ -222,29 +222,6 @@ impl LoaderPublication for FailFirstStagedPublisher {
 }
 
 #[derive(Debug, Clone)]
-struct RefusingQuarantine {
-    task_id: Uuid,
-}
-
-impl LeafBlockerQuarantine for RefusingQuarantine {
-    async fn quarantine(
-        &self,
-        _connection: &mut PgConnection,
-        leaf: &LeafRef,
-        _horizon: Duration,
-    ) -> Result<QuarantineResult, crate::core::history::errors::HistoryError> {
-        Ok(QuarantineResult::Refused(QuarantineRefused {
-            leaf_name: leaf.leaf_name().to_owned(),
-            repointed: 0,
-            refusals: vec![TaskQuarantineRefusal {
-                task_id: self.task_id,
-                verdict: QuarantineRefusalVerdict::SourceAbsent,
-                detail: Some("history row absent at locator".to_owned()),
-            }],
-        }))
-    }
-}
-
 struct TestDatabase {
     pool: PgPool,
     database_name: String,
@@ -2047,33 +2024,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .await
     .expect("insert pending blocker");
     transaction.commit().await.expect("commit blocker");
-    let quarantine_detach =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(Duration::hours(1)), Some(5_000))
-            .expect("quarantine detach command");
-    let quarantine_refusal = detach_expired_leaf(
-        &database.pool,
-        &quarantine_detach,
-        &UnpublishedLoader,
-        &RefusingQuarantine {
-            task_id: pending_task_id,
-        },
-    )
-    .await
-    .expect("typed quarantine refusal");
-    match quarantine_refusal {
-        DetachExpiredLeafOutcome::QuarantineRefused(refusal) => {
-            assert_eq!(refusal.leaf_name, leaf.leaf_name());
-            assert_eq!(refusal.repointed, 0);
-            assert_eq!(refusal.refusals.len(), 1);
-            assert_eq!(refusal.refusals[0].task_id, pending_task_id);
-            assert_eq!(
-                refusal.refusals[0].verdict,
-                QuarantineRefusalVerdict::SourceAbsent
-            );
-            assert!(refusal.refusals[0].detail.is_some());
-        }
-        other => panic!("expected task-level quarantine refusal, got {other:?}"),
-    }
     let detach =
         DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
     let blocked = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
