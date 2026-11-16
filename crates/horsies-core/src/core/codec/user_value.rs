@@ -6,7 +6,7 @@
 //! - At most [`MAX_VALUE_JSON_DEPTH`] levels of arrays and objects. A stored text may have
 //!   [`MAX_JSON_DEPTH`] levels, so the engine has room for the envelopes that it puts around a value.
 
-use super::strict_read::MAX_JSON_DEPTH;
+use super::strict_read::{MAX_INT_DIGITS, MAX_JSON_DEPTH};
 
 /// Key prefixes that only the engine writes (Python `_RESERVED_KEY_PREFIXES`, `core/codec/typed.py:152`).
 pub const ENGINE_KEY_PREFIXES: [&str; 2] = ["__h_", "__horsies_"];
@@ -37,6 +37,10 @@ pub enum UserValueRefused {
     /// The value is nested deeper than any stored text may be.
     #[error("value is nested deeper than {MAX_JSON_DEPTH} levels")]
     DeeperThanTextBound,
+    /// An integer has more than [`MAX_INT_DIGITS`] digits. Only a value built with the `arbitrary-precision`
+    /// feature can hold one; Python's writer refuses it (`json.dumps`, the integer text limit).
+    #[error("an integer has more than {MAX_INT_DIGITS} digits")]
+    IntegerTooLong,
 }
 
 impl UserValueRefused {
@@ -48,6 +52,7 @@ impl UserValueRefused {
         match self {
             Self::EngineKey { .. } | Self::DeeperThanTextBound => "StrictJsonError",
             Self::DeeperThanValueBound { .. } => "ValueValidationError",
+            Self::IntegerTooLong => "SerializationError",
         }
     }
 }
@@ -93,6 +98,9 @@ pub fn check_user_value(
                     pending.push((item, level));
                 }
             }
+            serde_json::Value::Number(number) if integer_is_too_long(number) => {
+                return Err(UserValueRefused::IntegerTooLong);
+            }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)
             | serde_json::Value::Number(_)
@@ -103,6 +111,17 @@ pub fn check_user_value(
         true => Err(UserValueRefused::DeeperThanValueBound { limit: depth_limit }),
         false => Ok(()),
     }
+}
+
+/// Whether an integer has more than [`MAX_INT_DIGITS`] digits. A number that fits `i64`, `u64` or `f64` never
+/// does; only an integer of the `arbitrary-precision` feature is written out to count its digits.
+fn integer_is_too_long(number: &serde_json::Number) -> bool {
+    if number.is_i64() || number.is_u64() || number.is_f64() {
+        return false;
+    }
+    let text = number.to_string();
+    let is_integer_text = !text.contains(&['.', 'e', 'E'][..]);
+    is_integer_text && text.trim_start_matches('-').len() > MAX_INT_DIGITS
 }
 
 /// Why a task input is refused: the position and the rule (Python `encode_kwargs` and `decode_kwargs`,
@@ -293,6 +312,10 @@ mod tests {
         assert_eq!(
             UserValueRefused::DeeperThanValueBound { limit: 199 }.stored_cause(),
             "ValueValidationError"
+        );
+        assert_eq!(
+            UserValueRefused::IntegerTooLong.stored_cause(),
+            "SerializationError"
         );
     }
 }
