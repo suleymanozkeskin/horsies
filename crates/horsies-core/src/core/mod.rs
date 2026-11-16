@@ -24,7 +24,8 @@ pub use config::{
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
 pub use registry::{
-    BuilderHookName, RegisteredWorkflowSpec, SpecBuilderFn, TaskRegistry, WorkflowSpecRegistry,
+    BuilderHookName, RegisteredWorkflowSpec, SpecBuildError, SpecBuilderFn, TaskRegistry,
+    WorkflowSpecRegistry,
 };
 pub use task::{
     AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode, ExceptionRecord,

@@ -314,6 +314,93 @@ fn dep_parse_error_value(dep_idx: i32, error: serde_json::Error) -> serde_json::
     )
 }
 
+/// The input of a child build: the node input after the `args_from` merge, with its members in the
+/// order in which Python checks them, and the `args_from` keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildBuildInput {
+    /// The input text: the members of the stored input, then one member per `args_from` key in
+    /// [`args_from_keys`](Self::args_from_keys) order. For a node with no `args_from`: the stored
+    /// text, unchanged.
+    pub(crate) text: String,
+    /// The `args_from` keys in the order in which Python reads the stored `args_from` (`jsonb` key
+    /// order: shorter keys first, then by bytes). Empty for a node with no `args_from`.
+    pub(crate) args_from_keys: Vec<String>,
+}
+
+impl ChildBuildInput {
+    /// The stored input of a node with no `args_from`, unchanged.
+    pub(crate) fn without_args_from(text: String) -> Self {
+        Self {
+            text,
+            args_from_keys: Vec::new(),
+        }
+    }
+}
+
+/// The child build input of `merged`, the text of [`ArgsFromMerge::Merged`] for the same
+/// `args_from`. A decode in text order then meets every static member before any `args_from`
+/// member, as Python decodes the static members before it checks the `args_from` values
+/// (`core/workflows/engine.py:1063-1157`).
+///
+/// Errors: [`WorkflowError::Serialization`] for a merged text that does not parse;
+/// [`WorkflowError::Validation`] for a merged text that is not an object while `args_from` has keys
+/// (the merge writes an object then). Pure.
+pub(crate) fn child_build_input(
+    merged: String,
+    args_from: Option<&serde_json::Value>,
+) -> Result<ChildBuildInput, WorkflowError> {
+    let args_from_keys = jsonb_key_order(args_from);
+    if args_from_keys.is_empty() {
+        return Ok(ChildBuildInput::without_args_from(merged));
+    }
+    let mut deserializer = serde_json::Deserializer::from_str(&merged);
+    // The merge wrote this text from values that it read with serde_json's depth limit, and the
+    // object of the merge adds levels above them: the parse here takes every level it wrote.
+    deserializer.disable_recursion_limit();
+    let parsed = <serde_json::Value as serde::Deserialize>::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    let mut object = match parsed {
+        serde_json::Value::Object(object) => object,
+        _ => {
+            return Err(WorkflowError::Validation(
+                "a node input merged with args_from members is not a JSON object".to_owned(),
+            ))
+        }
+    };
+    let args_from_members: Vec<(String, serde_json::Value)> = args_from_keys
+        .iter()
+        .filter_map(|key| object.remove(key).map(|value| (key.clone(), value)))
+        .collect();
+    let mut members: Vec<(&String, &serde_json::Value)> = object.iter().collect();
+    members.extend(args_from_members.iter().map(|(key, value)| (key, value)));
+    let mut text = String::from("{");
+    for (position, (key, value)) in members.into_iter().enumerate() {
+        if position > 0 {
+            text.push(',');
+        }
+        text.push_str(&serde_json::to_string(key)?);
+        text.push(':');
+        text.push_str(&serde_json::to_string(value)?);
+    }
+    text.push('}');
+    Ok(ChildBuildInput {
+        text,
+        args_from_keys,
+    })
+}
+
+/// The keys of a stored `args_from` object in `jsonb` key order (shorter keys first, then by
+/// bytes), the order in which Python reads them. Empty when `args_from` is absent, not an object,
+/// or empty. Pure.
+fn jsonb_key_order(args_from: Option<&serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = args_from
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort_by(|left, right| (left.len(), left.as_bytes()).cmp(&(right.len(), right.as_bytes())));
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +417,51 @@ mod tests {
             ArgsFromMerge::StaticMemberConflict(conflict) => {
                 panic!("unexpected args_from conflict on '{}'", conflict.key)
             }
+        }
+    }
+
+    /// The child build input holds the static members first and the `args_from` members after
+    /// them, in `jsonb` key order; it holds the same members as the merged input.
+    #[test]
+    fn a_child_build_input_holds_its_static_members_first() {
+        let mut deps = HashMap::new();
+        for index in [0, 1] {
+            deps.insert(
+                index,
+                DepResult {
+                    status: "COMPLETED".to_owned(),
+                    result: Some(serde_json::to_string(&TaskResult::Ok(json!(index))).unwrap()),
+                },
+            );
+        }
+        let args_from = Some(json!({"bb": 0, "a": 1}));
+        let merged_text = merged(r#"{"z": 1, "c": 2}"#, &args_from, &deps);
+
+        let input = child_build_input(merged_text.clone(), args_from.as_ref()).unwrap();
+
+        assert_eq!(input.args_from_keys, vec!["a".to_owned(), "bb".to_owned()]);
+        let position = |member: &str| {
+            input
+                .text
+                .find(&format!("\"{member}\":"))
+                .unwrap_or_else(|| panic!("member {member} in {}", input.text))
+        };
+        assert!(position("c") < position("z"), "{}", input.text);
+        assert!(position("z") < position("a"), "{}", input.text);
+        assert!(position("a") < position("bb"), "{}", input.text);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&input.text).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&merged_text).unwrap()
+        );
+    }
+
+    /// With no `args_from` the child build input is the stored text, unchanged, also when it is
+    /// not an object.
+    #[test]
+    fn a_child_build_input_without_args_from_is_the_stored_text() {
+        for args_from in [None, Some(json!({}))] {
+            let input = child_build_input("null".to_owned(), args_from.as_ref()).unwrap();
+            assert_eq!(input, ChildBuildInput::without_args_from("null".to_owned()));
         }
     }
 

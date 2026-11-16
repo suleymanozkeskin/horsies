@@ -3,6 +3,6 @@ pub mod workflow;
 
 pub use task::TaskRegistry;
 pub use workflow::{
-    BuilderHookName, RegisteredWorkflowDefinition, RegisteredWorkflowSpec, SpecBuilderFn,
-    WorkflowSpecRegistry,
+    BuilderHookName, RegisteredWorkflowDefinition, RegisteredWorkflowSpec, SpecBuildError,
+    SpecBuilderFn, WorkflowSpecRegistry,
 };
