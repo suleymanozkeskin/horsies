@@ -964,6 +964,8 @@ async def enqueue_subworkflow_task(
     all_dep_task_names: dict[int, str] | None = None,
     parent_depth: int = 0,
     root_workflow_id: str | None = None,
+    *,
+    child_sent_at: datetime | None = None,
 ) -> str | None:
     """
     Start a child workflow for a SubWorkflowNode.
@@ -992,6 +994,12 @@ async def enqueue_subworkflow_task(
         all_dep_results: Results from ALL completed dependencies (by index)
         parent_depth: Nesting depth of the parent workflow
         root_workflow_id: Root workflow ID (for efficient queries)
+        child_sent_at: The ``sent_at`` of the child workflow and of the task
+            rows of its roots: the call time of the start that writes the
+            child. A workflow start passes its own call time for the child of
+            a sub-workflow root, and a child start passes its call time down
+            to the children of its own sub-workflow roots. ``None``: the call
+            time of this child start.
 
     Returns:
         child_workflow_id if started, None if already started or not ready.
@@ -1238,7 +1246,8 @@ async def enqueue_subworkflow_task(
             ]
 
     child_output_index = child_spec.output.index if child_spec.output else None
-    child_sent_at = datetime.now(timezone.utc)
+    if child_sent_at is None:
+        child_sent_at = datetime.now(timezone.utc)
 
     # Bulk insert params for ALL child nodes (one executemany), fast-root
     # task rows (one executemany), and slow roots (per-node path). Same
@@ -1508,6 +1517,7 @@ async def enqueue_subworkflow_task(
                     {},
                     parent_depth + 1,
                     root_workflow_id,
+                    child_sent_at=child_sent_at,
                 )
             else:
                 await enqueue_workflow_task(

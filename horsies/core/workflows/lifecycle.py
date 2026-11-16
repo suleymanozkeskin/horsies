@@ -720,6 +720,7 @@ async def start_workflow_async(
                                 all_dep_task_names={},
                                 parent_depth=0,
                                 root_workflow_id=wf_id,
+                                child_sent_at=workflow_sent_at,
                             )
                         else:
                             # Enqueue regular task
