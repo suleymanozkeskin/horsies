@@ -118,19 +118,15 @@ impl ArgsFromConflict {
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
-        TaskError {
-            data: Some(serde_json::json!({
-                "workflow_id": workflow_id.to_string(),
-                "task_index": task_index,
-            })),
-            ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
-                format!(
-                    "args_from key '{}' conflicts with static kwarg ({node})",
-                    self.key
-                ),
-            )
-        }
+        crate::workflow_engine::engine::node_not_prepared_error(
+            workflow_id,
+            task_index,
+            OperationalErrorCode::WorkflowEnqueueFailed,
+            format!(
+                "args_from key '{}' conflicts with static kwarg ({node})",
+                self.key
+            ),
+        )
     }
 }
 
@@ -342,23 +338,13 @@ fn args_from_inner(
         })
 }
 
-/// The input that a child workflow's spec builder reads: each `args_from` entry of an object input replaced by
-/// its `inner` result envelope. The builder runs in the engine, so it gets the result itself, not the wrap that
-/// crosses to a worker (Python `core/workflows/engine.py:1164-1173`). An input with no entry is returned
-/// unchanged.
-pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> {
-    let parsed: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
-        WorkflowError::Validation(format!("stored node input refused: {error}"))
-    })?;
-    let serde_json::Value::Object(mut object) = parsed else {
-        return Ok(input.to_owned());
-    };
-    let unwrapped = unwrap_args_from_entries(&mut object)
-        .map_err(|refusal| WorkflowError::Validation(refusal.to_string()))?;
-    match unwrapped.is_empty() {
-        true => Ok(input.to_owned()),
-        false => Ok(serde_json::to_string(&object)?),
-    }
+/// A merged node input from which [`child_build_input`] cannot make the builder input: the text does not
+/// parse, it is not an object while the node has `args_from` keys, or an `args_from` entry is malformed. The
+/// engine wrote that text, so this is corrupt stored data, not a user error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredInputRefused {
+    /// Why the text is refused.
+    pub(crate) refusal: String,
 }
 
 /// The result of one dependency, as the `inner` envelope of its `args_from` entry. Python:
@@ -434,6 +420,114 @@ fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
     )
 }
 
+/// The input of a child build: the node input after the `args_from` merge, with its members in the
+/// order in which Python checks them, and the `args_from` keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildBuildInput {
+    /// The input text: the members of the stored input, then one member per `args_from` key in
+    /// [`args_from_keys`](Self::args_from_keys) order, each `args_from` entry replaced by its `inner`
+    /// result envelope. For a node with no `args_from`: the stored text, unchanged.
+    pub(crate) text: String,
+    /// The `args_from` keys in the order in which Python reads the stored `args_from` (`jsonb` key
+    /// order: shorter keys first, then by bytes). Empty for a node with no `args_from`.
+    pub(crate) args_from_keys: Vec<String>,
+}
+
+impl ChildBuildInput {
+    /// The stored input of a node with no `args_from`, unchanged.
+    pub(crate) fn without_args_from(text: String) -> Self {
+        Self {
+            text,
+            args_from_keys: Vec::new(),
+        }
+    }
+}
+
+/// The child build input of `merged`, the text of [`ArgsFromMerge::Merged`] for the same
+/// `args_from`: the one place where a child's builder input is made. Each `args_from` entry is
+/// replaced by its `inner` result envelope, because the builder runs in the engine and gets the
+/// result itself, not the wrap that crosses to a worker (Python `core/workflows/engine.py:1164-1173`).
+/// The members are written static members first, then the `args_from` members in `jsonb` key
+/// order, so a decode in text order meets every static member before any `args_from` member, as
+/// Python decodes the static members before it checks the `args_from` values (`:1063-1157`).
+///
+/// Errors: [`StoredInputRefused`] for a merged text that does not parse, that is not an object
+/// while `args_from` has keys (the merge writes an object then), or that holds a malformed
+/// `args_from` entry. Pure.
+pub(crate) fn child_build_input(
+    merged: String,
+    args_from: Option<&serde_json::Value>,
+) -> Result<ChildBuildInput, StoredInputRefused> {
+    let args_from_keys = jsonb_key_order(args_from);
+    if args_from_keys.is_empty() {
+        return Ok(ChildBuildInput::without_args_from(merged));
+    }
+    let mut object = merged_object(&merged)?;
+    let _unwrapped =
+        unwrap_args_from_entries(&mut object).map_err(|refusal| StoredInputRefused {
+            refusal: refusal.to_string(),
+        })?;
+    let args_from_members: Vec<(String, serde_json::Value)> = args_from_keys
+        .iter()
+        .filter_map(|key| object.remove(key).map(|value| (key.clone(), value)))
+        .collect();
+    let mut members: Vec<(&String, &serde_json::Value)> = object.iter().collect();
+    members.extend(args_from_members.iter().map(|(key, value)| (key, value)));
+    let mut text = String::from("{");
+    for (position, (key, value)) in members.into_iter().enumerate() {
+        if position > 0 {
+            text.push(',');
+        }
+        text.push_str(&serde_json::Value::String(key.clone()).to_string());
+        text.push(':');
+        text.push_str(&value.to_string());
+    }
+    text.push('}');
+    Ok(ChildBuildInput {
+        text,
+        args_from_keys,
+    })
+}
+
+/// The object of a merged node input. The merge wrote this text from values that it read with
+/// serde_json's depth limit, and the object of the merge adds levels above them: the parse takes
+/// every level it wrote.
+///
+/// Errors: [`StoredInputRefused`] for a text that does not parse or that is not an object. Pure.
+fn merged_object(
+    merged: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, StoredInputRefused> {
+    let mut deserializer = serde_json::Deserializer::from_str(merged);
+    deserializer.disable_recursion_limit();
+    let parsed = <serde_json::Value as serde::Deserialize>::deserialize(&mut deserializer)
+        .and_then(|parsed| deserializer.end().map(|()| parsed))
+        .map_err(|error| StoredInputRefused {
+            refusal: error.to_string(),
+        })?;
+    match parsed {
+        serde_json::Value::Object(object) => Ok(object),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_)
+        | serde_json::Value::Array(_) => Err(StoredInputRefused {
+            refusal: "a node input merged with args_from members is not a JSON object".to_owned(),
+        }),
+    }
+}
+
+/// The keys of a stored `args_from` object in `jsonb` key order (shorter keys first, then by
+/// bytes), the order in which Python reads them. Empty when `args_from` is absent, not an object,
+/// or empty. Pure.
+fn jsonb_key_order(args_from: Option<&serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = args_from
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort_by(|left, right| (left.len(), left.as_bytes()).cmp(&(right.len(), right.as_bytes())));
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +563,57 @@ mod tests {
             ArgsFromMerge::StaticMemberConflict(conflict) => {
                 panic!("unexpected args_from conflict on '{}'", conflict.key)
             }
+        }
+    }
+
+    /// The child build input holds the static members first and the `args_from` members after
+    /// them, in `jsonb` key order; it holds the members of the merged input, each `args_from`
+    /// entry replaced by its `inner` envelope.
+    #[test]
+    fn a_child_build_input_holds_its_static_members_first() {
+        let mut deps = HashMap::new();
+        for index in [0, 1] {
+            deps.insert(
+                index,
+                dep(
+                    "COMPLETED",
+                    Some(serde_json::to_string(&TaskResult::Ok(json!(index))).unwrap()),
+                ),
+            );
+        }
+        let args_from = Some(json!({"bb": 0, "a": 1}));
+        let merged_text = merged(r#"{"z": 1, "c": 2}"#, &args_from, &deps);
+
+        let input = child_build_input(merged_text, args_from.as_ref()).unwrap();
+
+        assert_eq!(input.args_from_keys, vec!["a".to_owned(), "bb".to_owned()]);
+        let position = |member: &str| {
+            input
+                .text
+                .find(&format!("\"{member}\":"))
+                .unwrap_or_else(|| panic!("member {member} in {}", input.text))
+        };
+        assert!(position("c") < position("z"), "{}", input.text);
+        assert!(position("z") < position("a"), "{}", input.text);
+        assert!(position("a") < position("bb"), "{}", input.text);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&input.text).unwrap(),
+            json!({
+                "z": 1,
+                "c": 2,
+                "bb": {"__h_task_result__": true, "ok": 0, "err": null},
+                "a": {"__h_task_result__": true, "ok": 1, "err": null},
+            })
+        );
+    }
+
+    /// With no `args_from` the child build input is the stored text, unchanged, also when it is
+    /// not an object.
+    #[test]
+    fn a_child_build_input_without_args_from_is_the_stored_text() {
+        for args_from in [None, Some(json!({}))] {
+            let input = child_build_input("null".to_owned(), args_from.as_ref()).unwrap();
+            assert_eq!(input, ChildBuildInput::without_args_from("null".to_owned()));
         }
     }
 
@@ -698,16 +843,38 @@ mod tests {
         let mut deps = HashMap::new();
         let stored = serde_json::to_string(&TaskResult::Ok(json!(3))).unwrap();
         deps.insert(0, dep("COMPLETED", Some(stored)));
-        let merged = merged(r#"{"x": 1}"#, &Some(json!({"answer": 0})), &deps);
-        let builder_input = child_builder_input(&merged).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&builder_input).unwrap();
+        let args_from = Some(json!({"answer": 0}));
+        let merged = merged(r#"{"x": 1}"#, &args_from, &deps);
+        let input = child_build_input(merged, args_from.as_ref()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&input.text).unwrap();
         assert_eq!(
             parsed,
             json!({"x": 1, "answer": {"__h_task_result__": true, "ok": 3, "err": null}})
         );
-        for unchanged in ["null", "{}", r#"{"x":1}"#, "[1]"] {
-            assert_eq!(child_builder_input(unchanged).unwrap(), unchanged);
-        }
+    }
+
+    /// A merged input that holds a malformed `args_from` entry, that does not parse, or that is
+    /// not an object is a refused stored input.
+    #[test]
+    fn a_merged_input_the_builder_cannot_read_is_a_refused_stored_input() {
+        let args_from = Some(json!({"answer": 0}));
+        let no_inner =
+            json!({"answer": {"__h_taskresult_envelope__": true, "source_task_name": "t"}})
+                .to_string();
+        assert_eq!(
+            child_build_input(no_inner, args_from.as_ref()),
+            Err(StoredInputRefused {
+                refusal: "args_from envelope for kwarg 'answer' has no inner result".to_owned(),
+            })
+        );
+        assert!(child_build_input("{".to_owned(), args_from.as_ref()).is_err());
+        assert_eq!(
+            child_build_input("[1]".to_owned(), args_from.as_ref()),
+            Err(StoredInputRefused {
+                refusal: "a node input merged with args_from members is not a JSON object"
+                    .to_owned(),
+            })
+        );
     }
 
     #[test]

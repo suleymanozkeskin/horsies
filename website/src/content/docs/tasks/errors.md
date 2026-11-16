@@ -187,7 +187,7 @@ They also require `send_kind` (`SendKind` from `horsies.core.brokers.enqueue_tas
 | `message` | `str` | Human-readable description |
 | `retryable` | `bool` | Driver classification of the cause where the variant has a cause from the driver: `True` when the condition may clear, for example a lost connection. `False` on every other variant |
 | `exception` | `BaseException` on `BrokerOperationFailed` and `BrokerLoopRunnerFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
-| `owner_task_id` | `str` | The task that holds the idempotency key |
+| `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `loop_limit` | `EventLoopLimit` | The limit and the threads of the held event loops |
 
 The repr of a variant shows its class name and its other fields. `message` and `exception` are not in the repr.
@@ -245,11 +245,11 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
-| `task_id` | `str` | Task id of the prepared send |
+| `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
 | `retryable` | `bool` | Driver classification of the cause: `True` when the condition may clear, for example a lost connection |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception. On `TaskSendLoopRunnerFailed` it is `BaseException`: always the `LoopRunnerError` |
-| `owner_task_id` | `str` | The task that holds the idempotency key |
+| `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Length of the serialized kwargs |
 | `limit_bytes` | `int` | The configured `payload.reject_bytes` |
 
@@ -438,6 +438,8 @@ TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # co
 TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # correct — user string
 TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
 ```
+
+`WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(error_code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or an `auto_retry_for` entry with this name is refused like any other invalid code.
 
 **Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.
 

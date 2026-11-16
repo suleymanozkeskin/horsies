@@ -50,7 +50,9 @@ fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) ->
     let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
     Worker::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         app_config,
         WorkerConfig::default(),
         SelectedProfile {

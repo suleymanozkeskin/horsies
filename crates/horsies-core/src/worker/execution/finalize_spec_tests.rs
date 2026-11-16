@@ -28,7 +28,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
 const WORKER: &str = "finalize-spec-worker";
@@ -856,7 +856,7 @@ async fn phase_two(
 ) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         &PostgresBroker::from_pool(pool.clone()),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         task_id,
         queue,
         is_workflow_task,

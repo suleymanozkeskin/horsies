@@ -36,6 +36,7 @@ pub mod row;
 #[cfg(test)]
 mod send_path_tests;
 pub mod slot_health;
+pub mod stale_recovery;
 #[cfg(test)]
 mod start_deadline_tests;
 pub mod task_lists;

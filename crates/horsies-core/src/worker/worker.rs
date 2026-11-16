@@ -1609,7 +1609,9 @@ mod tests {
         let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
         Worker::new(
             broker,
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             app_config,
             worker_config,
             SelectedProfile {
@@ -2180,7 +2182,9 @@ mod tests {
             .expect("a lazy pool opens no connection");
         Worker::new(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
@@ -2211,7 +2215,9 @@ mod tests {
             .expect("a lazy pool opens no connection");
         let refused = Worker::new(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
@@ -2667,7 +2673,8 @@ mod tests {
         .await;
 
         if let Some(work) = phase2_work {
-            let registry = WorkflowSpecRegistry::new();
+            let registry =
+                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
             run_phase2(
                 &broker,
                 &registry,
@@ -2755,7 +2762,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        use crate::broker::terminalization::terminalize;
+        use crate::broker::terminalization::on_test_pool::terminalize;
         use crate::core::lifecycle::{
             PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
         };
@@ -2895,7 +2902,8 @@ mod tests {
         .await
         .unwrap();
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         crate::workflow_engine::engine::check_workflow_completion(
             &pool,
             workflow_id,
@@ -3051,7 +3059,7 @@ mod tests {
 
         run_phase2(
             &broker,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             phase2_work,
             &crate::core::RetentionConfig::default(),
         )
@@ -3104,7 +3112,7 @@ mod tests {
         .expect("terminal success should produce phase 2 work");
         run_phase2(
             &broker,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             phase2_work,
             &crate::core::RetentionConfig::default(),
         )
@@ -3160,7 +3168,8 @@ mod tests {
         assert_eq!(workflow_status, "RUNNING");
         assert_eq!(workflow_result, None);
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
             &broker,
             &registry,
@@ -3214,7 +3223,8 @@ mod tests {
             sqlx::postgres::PgPoolOptions::new().connect_lazy_with(missing_database),
         );
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
             &failed_phase2_broker,
             &registry,

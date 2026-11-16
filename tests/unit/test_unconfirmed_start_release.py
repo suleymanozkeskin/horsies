@@ -19,6 +19,7 @@ from horsies.core.types.result import Ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.runtime import _RequeueOutcome
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at
 
 pytestmark = [pytest.mark.unit]
 
@@ -51,7 +52,7 @@ async def _finalize_unconfirmed(worker: Worker) -> object:
         task_name='my_task',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=_GENERATION,
+        claim=claim_at(_GENERATION),
     )
 
 
@@ -73,7 +74,7 @@ async def test_the_claim_of_the_dispatch_generation_is_released(
     requeue.assert_awaited_once_with(
         'task-1',
         'the start of the attempt was not confirmed',
-        claimed_at=_GENERATION,
+        claim=claim_at(_GENERATION),
     )
     worker.sf.assert_not_called()  # type: ignore[attr-defined]
 

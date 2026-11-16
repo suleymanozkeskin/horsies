@@ -6,7 +6,7 @@
 //! proxy of this module.
 
 use super::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::reads::result::{read_task_result, TaskResultRead};
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 

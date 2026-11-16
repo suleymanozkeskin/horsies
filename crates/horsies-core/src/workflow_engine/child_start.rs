@@ -12,9 +12,9 @@
 //!   `horsies_workflow_start`, with its own pre-built children and
 //!   failed-node records.
 //! - `FAILURE`: the child cannot start (depth limit, no registration under
-//!   its key, an `args_from` key that names a static member, a failing
-//!   builder); the node fails with its error envelope and its workflow's
-//!   `on_error` applies.
+//!   its key, an `args_from` key that names a static member, an input member
+//!   that the builder's decode refuses, a failing builder); the node fails
+//!   with its error envelope and its workflow's `on_error` applies.
 //!
 //! A child start can owe further child starts; they run in the same
 //! transaction, at most [`MAX_WORKFLOW_NODES`] per step.
@@ -31,12 +31,13 @@ use crate::db::{
     TypedStatement,
 };
 use crate::workflow_engine::args_merge::{
-    merge_args_from_sync, ArgsFromMerge, DepResult, MergedNodeKind,
+    child_build_input, merge_args_from_sync, ArgsFromMerge, DepResult, MergedNodeKind,
 };
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::start::ChildSpecError;
 use crate::workflow_engine::start_statement::{
-    build_child, child_tree_arguments, node_failure_result, ChildBuildOutcome, ChildOfNode,
-    NodeInput, StartArguments,
+    build_child, build_failed_error, child_tree_arguments, node_failure_result, ChildBuildOutcome,
+    ChildOfNode, NodeInput, StartArguments,
 };
 use crate::workflow_engine::steps::{
     step_row_select, step_rows, ChildBuild, OwedChildStart, OwedParentAdvances, StepContractError,
@@ -261,13 +262,12 @@ pub(crate) fn child_start_kind(
     owed: &OwedChildStart,
     build: ChildBuild<'_>,
 ) -> Result<ChildStartKind, WorkflowError> {
-    let spec_name = owed.sub_workflow_name.as_deref().unwrap_or("?");
     let built = build_child(
         ChildOfNode {
             parent_workflow_id: owed.workflow_id,
+            parent_workflow_name: &owed.workflow_name,
             task_index: owed.task_index,
             parent_depth: owed.parent_depth,
-            spec_name,
             definition_key: owed.sub_definition_key.as_deref(),
         },
         || merged_child_input(owed),
@@ -287,7 +287,9 @@ pub(crate) fn child_start_kind(
         ChildBuildOutcome::NodeFails(error) => {
             tracing::error!(
                 workflow_id = %owed.workflow_id,
+                workflow_name = %owed.workflow_name,
                 task_index = owed.task_index,
+                sub_workflow_name = ?owed.sub_workflow_name,
                 definition_key = ?owed.sub_definition_key,
                 error = ?error.message,
                 "sub-workflow child not started; its node fails",
@@ -300,8 +302,11 @@ pub(crate) fn child_start_kind(
 }
 
 /// The node input of an owed child start with its `args_from` members
-/// merged; an `args_from` key that names a static member fails the node
-/// (Python `core/workflows/engine.py:1111-1123`).
+/// merged after its static members, each replaced by its `inner` envelope
+/// ([`child_build_input`]). An `args_from` key that names a static member
+/// fails the node (Python `core/workflows/engine.py:1111-1123`); so does a
+/// merged input from which the builder input cannot be made
+/// ([`ChildSpecError::of_stored_input`], `WORKFLOW_ENQUEUE_FAILED`).
 fn merged_child_input(owed: &OwedChildStart) -> Result<NodeInput, WorkflowError> {
     let args_from = owed
         .args_from
@@ -325,7 +330,15 @@ fn merged_child_input(owed: &OwedChildStart) -> Result<NodeInput, WorkflowError>
         .collect();
     Ok(
         match merge_args_from_sync(&owed.node_input, &args_from, &dependency_results)? {
-            ArgsFromMerge::Merged(input) => NodeInput::Input(input),
+            ArgsFromMerge::Merged(input) => match child_build_input(input, args_from.as_ref()) {
+                Ok(input) => NodeInput::Input(input),
+                Err(refused) => NodeInput::NodeFails(build_failed_error(
+                    owed.workflow_id,
+                    &owed.workflow_name,
+                    owed.task_index,
+                    &ChildSpecError::of_stored_input(refused),
+                )),
+            },
             ArgsFromMerge::StaticMemberConflict(conflict) => {
                 NodeInput::NodeFails(conflict.node_error(
                     owed.workflow_id,

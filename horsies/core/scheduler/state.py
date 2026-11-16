@@ -2,12 +2,18 @@
 from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import datetime
+from enum import Enum
+from typing import Any, Final
+import psycopg
 from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from horsies.core.models.task_pg import ScheduleStateModel
+from horsies.core.brokers.postgres import SendCommand
 from horsies.core.logging import get_logger
+from horsies.core.types.result import Err, Ok, Result
+from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 
 logger = get_logger('scheduler.state')
 
@@ -127,72 +133,207 @@ def _write_params(writes: Sequence[ScheduleStateWrite]) -> dict[str, Any]:
         'config_hashes': [write.config_hash for write in writes],
     }
 
-UPDATE_SCHEDULE_AFTER_RUN_SQL = text("""
-    UPDATE horsies_schedule_state
-    SET last_run_at = :executed_at,
-        next_run_at = :next_run_at,
-        last_task_id = :task_id,
-        run_count = run_count + 1,
-        updated_at = :now
-    WHERE schedule_name = :schedule_name
+# The fire: lock the state row, compare next_run_at, insert the slot tasks,
+# move the row, in one statement (horsies_fire_schedule, 0007).
+FIRE_SCHEDULE_SQL = text("""
+    SELECT row_kind, slot_at, task_id, slot_outcome
+    FROM horsies_fire_schedule(
+        CAST(:schedule_name AS text),
+        CAST(:expected_next_run_at AS timestamptz),
+        CAST(:next_run_at AS timestamptz),
+        CAST(:slot_ats AS timestamptz[]),
+        CAST(:task_name AS text),
+        CAST(:queue_name AS text),
+        CAST(:priority AS integer),
+        CAST(:input AS text),
+        CAST(:task_options AS text),
+        CAST(:execution AS text),
+        CAST(:max_retries AS integer),
+        CAST(:retention_class_key AS text),
+        CAST(:retain_rerun_input AS boolean),
+        CAST(:fingerprint_version AS smallint),
+        CAST(:fingerprint AS bytea)
+    )
 """)
 
-UPDATE_SCHEDULE_NEXT_RUN_SQL = text("""
-    UPDATE horsies_schedule_state
-    SET next_run_at = :next_run_at,
-        updated_at = :now
-    WHERE schedule_name = :schedule_name
-""")
+# The SQLSTATEs of an argument that breaks a precondition of the fire
+# function (invalid_parameter_value, null_value_not_allowed): a defect of the
+# caller, not a refusal of the fire.
+_CALLER_DEFECT_SQLSTATES: Final = frozenset({'22023', '22004'})
+
+
+class SlotOutcome(Enum):
+    """What the fire did with one slot (the outcomes of ``horsies_insert_task_rows``)."""
+
+    INSERTED = 'INSERTED'
+    """The slot's task row is new."""
+    SAME_COMMAND = 'SAME_COMMAND'
+    """An earlier fire of this slot committed its task: the same command."""
+    PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
+    """The slot's task id holds another command; the slot counts as fired."""
+    CONFLICT_UNVERIFIABLE = 'CONFLICT_UNVERIFIABLE'
+    """The slot's task existed and moved to history between the conflict and the
+    read: not enqueued again and not recorded as a run."""
+
+
+@dataclass(frozen=True, slots=True)
+class FiredSlot:
+    """One slot of an advanced fire."""
+
+    slot_at: datetime
+    task_id: str
+    outcome: SlotOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleFire:
+    """The arguments of one fire.
+
+    ``slot_ats`` strictly increase, from ``expected_next_run_at`` to before
+    ``next_run_at`` and not after the database time of the due read they were
+    computed from. Empty slots only move ``next_run_at``.
+    """
+
+    schedule_name: str
+    expected_next_run_at: datetime
+    next_run_at: datetime
+    slot_ats: tuple[datetime, ...]
+    command: SendCommand
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleAdvanced:
+    """The slots are written and the row moved, in one commit.
+
+    ``last_run_at``, ``last_task_id`` and ``run_count`` record the fire when
+    a slot is recorded (every outcome except ``CONFLICT_UNVERIFIABLE``).
+    """
+
+    slots: tuple[FiredSlot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleStateMissing:
+    """The schedule has no state row. Nothing was written."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleStateMoved:
+    """The row's next_run_at is not the expected one: another scheduler fired,
+    or a start moved the row. Nothing was written."""
+
+
+type ScheduleFireAnswer = ScheduleAdvanced | ScheduleStateMissing | ScheduleStateMoved
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleFireOutcomeUnknown:
+    """The connection failed during the fire: it may or may not have committed.
+
+    Transient. The next due read shows whether the row moved; a repeat of a
+    committed slot answers ``SAME_COMMAND`` or ``STATE_MOVED``, never a
+    second task.
+    """
+
+    schedule_name: str
+    cause: SQLAlchemyError
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleFireRefused:
+    """The database refused the fire (not a connection failure). Nothing committed.
+
+    A repeat with the same arguments gives the same refusal, for example a
+    CHECK violation of the slot rows.
+    """
+
+    schedule_name: str
+    cause: SQLAlchemyError
+
+
+type ScheduleFireError = ScheduleFireOutcomeUnknown | ScheduleFireRefused
+
+
+def _fire_params(fire: ScheduleFire) -> dict[str, Any]:
+    command = fire.command
+    return {
+        'schedule_name': fire.schedule_name,
+        'expected_next_run_at': fire.expected_next_run_at,
+        'next_run_at': fire.next_run_at,
+        'slot_ats': list(fire.slot_ats),
+        'task_name': command.task_name,
+        'queue_name': command.queue_name,
+        'priority': command.priority,
+        'input': command.stored_input,
+        'task_options': command.task_options,
+        'execution': command.execution.value,
+        'max_retries': command.max_retries,
+        'retention_class_key': command.retention_class_key,
+        'retain_rerun_input': command.retain_rerun_input,
+        'fingerprint_version': command.fingerprint_version,
+        'fingerprint': command.fingerprint,
+    }
+
+
+def _fired_slot(row: RowMapping) -> FiredSlot:
+    """One SLOT row; a NULL or a value of another type breaks the function's contract."""
+    slot_at = row['slot_at']
+    task_id = row['task_id']
+    outcome = row['slot_outcome']
+    assert row['row_kind'] == 'SLOT', row
+    assert isinstance(slot_at, datetime), row
+    assert isinstance(task_id, str), row
+    assert isinstance(outcome, str), row
+    return FiredSlot(slot_at=slot_at, task_id=task_id, outcome=SlotOutcome(outcome))
+
+
+def _fire_answer(fire: ScheduleFire, rows: Sequence[RowMapping]) -> ScheduleFireAnswer:
+    """The call outcome row, then one SLOT row per slot after ADVANCED."""
+    match rows:
+        case [first, *slot_rows]:
+            pass
+        case _:
+            raise AssertionError(f'the fire of {fire.schedule_name} answered no row')
+    match first['row_kind']:
+        case 'ADVANCED':
+            slots = tuple(_fired_slot(row) for row in slot_rows)
+            assert tuple(slot.slot_at for slot in slots) == fire.slot_ats, (
+                f'the fire of {fire.schedule_name} answered slots {slots}'
+            )
+            return ScheduleAdvanced(slots=slots)
+        case 'STATE_MISSING':
+            assert not slot_rows, slot_rows
+            return ScheduleStateMissing()
+        case 'STATE_MOVED':
+            assert not slot_rows, slot_rows
+            return ScheduleStateMoved()
+        case other:
+            raise AssertionError(f'the fire of {fire.schedule_name} answered row kind {other!r}')
+
+
+def _is_caller_defect(exc: SQLAlchemyError) -> bool:
+    """Whether the fire function refused an argument that breaks its precondition."""
+    match exc:
+        case DBAPIError(orig=psycopg.Error(sqlstate=sqlstate)) if (
+            sqlstate in _CALLER_DEFECT_SQLSTATES
+        ):
+            return True
+        case _:
+            return False
 
 
 class ScheduleStateManager:
     """
-    Manages schedule state persistence in PostgreSQL.
+    The scheduler's statements on ``horsies_schedule_state``.
 
-    Provides atomic operations for tracking schedule execution state:
-    - Get current state for a schedule
-    - Update state after execution
-    - Initialize new schedules
+    - the due read, the start read and write, the existence heal;
+    - the fire: the slot tasks and the state move in one statement.
 
-    All operations are async and use SQLAlchemy async sessions.
+    Each method sends one statement and uses SQLAlchemy async sessions.
     """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self.session_factory = session_factory
-
-    async def get_state(
-        self,
-        schedule_name: str,
-        session: Optional[AsyncSession] = None,
-    ) -> Optional[ScheduleStateModel]:
-        """
-        Retrieve current state for a schedule.
-
-        Args:
-            schedule_name: Unique schedule identifier
-            session: Reuse this session (caller owns the transaction);
-                None opens a short-lived owned session
-
-        Returns:
-            ScheduleStateModel if exists, None otherwise
-
-        Raises:
-            Exception: DB errors propagate to the per-schedule isolation
-                seams, which log and continue with the remaining schedules.
-                From `_check_and_run_schedules` the row is still due, so
-                the next tick retries; from `_initialize_schedules` the
-                schedule's init/config-check is skipped — a missing row is
-                then recreated by the tick loop's missing-row check
-                (`_ensure_states_exist`), while a config-hash recheck for
-                an existing row waits for the next restart. On the
-                session-reusing path the raise unwinds `_check_schedule`'s
-                transaction, releasing the schedule advisory lock.
-        """
-        if session is not None:
-            return await session.get(ScheduleStateModel, schedule_name)
-
-        async with self.session_factory() as owned_session:
-            return await owned_session.get(ScheduleStateModel, schedule_name)
 
     async def read_due_schedules(
         self,
@@ -320,245 +461,39 @@ class ScheduleStateManager:
             await session.commit()
         return healed
 
-    async def initialize_state(
+    async def fire_schedule(
         self,
-        schedule_name: str,
-        next_run_at: datetime,
-        config_hash: bytes,
-        session: Optional[AsyncSession] = None,
-    ) -> ScheduleStateModel:
+        fire: ScheduleFire,
+    ) -> Result[ScheduleFireAnswer, ScheduleFireError]:
         """
-        Initialize state for a new schedule.
+        Fire the slots of one schedule and move its state row, in one statement in autocommit.
 
-        Args:
-            schedule_name: Unique schedule identifier
-            next_run_at: Calculated next run time
-            config_hash: SHA-256 digest (32 bytes) of the schedule config,
-                for change detection. The column is NOT NULL.
-            session: Reuse this session (caller commits); None opens an
-                owned session that commits here
+        ``horsies_fire_schedule`` locks the row, compares ``next_run_at`` with
+        ``fire.expected_next_run_at``, inserts the slot tasks (task id from the
+        schedule name and the slot time, ``sent_at`` = the slot time, the
+        command's values) and moves the row to ``fire.next_run_at``. The slot
+        rows and the row move commit together or not at all.
 
         Returns:
-            Created ScheduleStateModel (or the existing one — check-then-
-            insert guard; a concurrent scheduler losing the race raises
-            IntegrityError on commit, landing at the same seam as any
-            other DB error)
+            Ok(ScheduleAdvanced): the slots, each with its outcome, in slot order.
+            Ok(ScheduleStateMissing | ScheduleStateMoved): nothing was written.
+            Err(ScheduleFireOutcomeUnknown): a connection failure; transient.
+            Err(ScheduleFireRefused): any other database error; nothing committed.
 
         Raises:
-            Exception: DB errors propagate to `_check_schedule`'s caller
-                (see `get_state`). A schedule left without a state row is
-                invisible to `read_due_schedules`; the tick loop's
-                existence heal (`_ensure_states_exist`) creates it.
+            DBAPIError: SQLSTATE 22023 or 22004, an argument that breaks the
+                function's precondition. A defect of the caller; nothing
+                committed.
         """
-        if session is not None:
-            return await self._initialize_state_on_session(
-                session=session,
-                schedule_name=schedule_name,
-                next_run_at=next_run_at,
-                config_hash=config_hash,
-                commit=False,
-            )
-
-        async with self.session_factory() as owned_session:
-            return await self._initialize_state_on_session(
-                session=owned_session,
-                schedule_name=schedule_name,
-                next_run_at=next_run_at,
-                config_hash=config_hash,
-                commit=True,
-            )
-
-    async def _initialize_state_on_session(
-        self,
-        session: AsyncSession,
-        schedule_name: str,
-        next_run_at: datetime,
-        config_hash: bytes,
-        commit: bool,
-    ) -> ScheduleStateModel:
-        """Create the state row unless it exists; commit when owning the
-        session. Raises DB errors to the caller's seam (see
-        `initialize_state`)."""
-        # Check if already exists (race condition guard)
-        existing = await session.get(ScheduleStateModel, schedule_name)
-        if existing:
-            logger.debug(f"Schedule '{schedule_name}' already initialized")
-            return existing
-
-        # Create new state
-        state = ScheduleStateModel(
-            schedule_name=schedule_name,
-            last_run_at=None,
-            next_run_at=next_run_at,
-            last_task_id=None,
-            run_count=0,
-            config_hash=config_hash,
-            updated_at=datetime.now(timezone.utc),
-        )
-        session.add(state)
-        if commit:
-            await session.commit()
-            await session.refresh(state)
-        logger.info(
-            f"Initialized schedule state for '{schedule_name}', next_run_at={next_run_at}"
-        )
-        return state
-
-    async def update_after_run(
-        self,
-        schedule_name: str,
-        task_id: str,
-        executed_at: datetime,
-        next_run_at: datetime,
-        session: Optional[AsyncSession] = None,
-    ) -> None:
-        """
-        Update schedule state after successful task enqueue.
-
-        Args:
-            schedule_name: Unique schedule identifier
-            task_id: ID of the enqueued task
-            executed_at: When the schedule was executed (UTC)
-            next_run_at: Calculated next run time (UTC)
-            session: Reuse this session (caller commits); None opens an
-                owned session that commits here
-
-        Raises:
-            Exception: DB errors propagate to `_check_schedule`'s except,
-                which rolls back — the slot stays due and re-fires next
-                tick. The re-enqueue is safe: the task_id is deterministic
-                per (schedule, slot), so the duplicate INSERT hits
-                ON CONFLICT DO NOTHING.
-        """
-        if session is not None:
-            await self._update_after_run_on_session(
-                session=session,
-                schedule_name=schedule_name,
-                task_id=task_id,
-                executed_at=executed_at,
-                next_run_at=next_run_at,
-                commit=False,
-            )
-            return
-
-        async with self.session_factory() as owned_session:
-            await self._update_after_run_on_session(
-                session=owned_session,
-                schedule_name=schedule_name,
-                task_id=task_id,
-                executed_at=executed_at,
-                next_run_at=next_run_at,
-                commit=True,
-            )
-
-    async def _update_after_run_on_session(
-        self,
-        session: AsyncSession,
-        schedule_name: str,
-        task_id: str,
-        executed_at: datetime,
-        next_run_at: datetime,
-        commit: bool,
-    ) -> None:
-        """Run the after-run UPDATE; commit when this call owns the session.
-
-        rowcount == 0 is log-only by design: no horsies code path deletes
-        state rows, and both callers read the row in this same transaction
-        first — 0 rows means an external delete landed in between. The
-        update is lost, and the tick loop's missing-row check recreates
-        the row (fresh next_run_at) on a subsequent tick.
-        Raises DB errors to the caller's seam (see `update_after_run`).
-        """
-        # Use raw SQL for atomic update with increment
-        result = await session.execute(
-            UPDATE_SCHEDULE_AFTER_RUN_SQL,
-            {
-                'schedule_name': schedule_name,
-                'executed_at': executed_at,
-                'next_run_at': next_run_at,
-                'task_id': task_id,
-                'now': datetime.now(timezone.utc),
-            },
-        )
-        if commit:
-            await session.commit()
-
-        rows_updated = getattr(result, 'rowcount', 0)
-        if rows_updated == 0:
-            logger.warning(
-                f"Failed to update schedule state for '{schedule_name}' - not found"
-            )
-        else:
-            logger.debug(
-                f"Updated schedule '{schedule_name}': "
-                f'last_run={executed_at}, next_run={next_run_at}, task_id={task_id}'
-            )
-
-    async def update_next_run(
-        self,
-        schedule_name: str,
-        next_run_at: datetime,
-        session: Optional[AsyncSession] = None,
-    ) -> None:
-        """
-        Update next_run_at without recording a run (rescheduling without execution).
-
-        Args:
-            schedule_name: Unique schedule identifier
-            next_run_at: New next run time (UTC)
-            session: Reuse this session (caller commits); None opens an
-                owned session that commits here
-
-        Raises:
-            Exception: DB errors propagate per call site. The tick-path
-                callers terminate at `_check_schedule`'s own except (log +
-                rollback; the row is unchanged and still due, so the next
-                tick retries).
-        """
-        if session is not None:
-            await self._update_next_run_on_session(
-                session=session,
-                schedule_name=schedule_name,
-                next_run_at=next_run_at,
-                commit=False,
-            )
-            return
-
-        async with self.session_factory() as owned_session:
-            await self._update_next_run_on_session(
-                session=owned_session,
-                schedule_name=schedule_name,
-                next_run_at=next_run_at,
-                commit=True,
-            )
-
-    async def _update_next_run_on_session(
-        self,
-        session: AsyncSession,
-        schedule_name: str,
-        next_run_at: datetime,
-        commit: bool,
-    ) -> None:
-        """Run the next-run UPDATE; commit when this call owns the session.
-
-        rowcount == 0 is log-only by design — same external-delete anomaly
-        as `_update_after_run_on_session`. The missing row is recreated by
-        the tick loop's missing-row check.
-        Raises DB errors to the caller's seam (see `update_next_run`).
-        """
-        result = await session.execute(
-            UPDATE_SCHEDULE_NEXT_RUN_SQL,
-            {
-                'schedule_name': schedule_name,
-                'next_run_at': next_run_at,
-                'now': datetime.now(timezone.utc),
-            },
-        )
-        if commit:
-            await session.commit()
-
-        rows_updated = getattr(result, 'rowcount', 0)
-        if rows_updated == 0:
-            logger.warning(f"Failed to update next_run for '{schedule_name}' - not found")
-        else:
-            logger.debug(f"Updated next_run for '{schedule_name}': {next_run_at}")
+        try:
+            async with self.session_factory() as session:
+                connection = await autocommit_connection(session)
+                result = await connection.execute(FIRE_SCHEDULE_SQL, _fire_params(fire))
+                rows = result.mappings().all()
+        except SQLAlchemyError as exc:
+            if _is_caller_defect(exc):
+                raise
+            if is_retryable_connection_error(exc):
+                return Err(ScheduleFireOutcomeUnknown(schedule_name=fire.schedule_name, cause=exc))
+            return Err(ScheduleFireRefused(schedule_name=fire.schedule_name, cause=exc))
+        return Ok(_fire_answer(fire, rows))

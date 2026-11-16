@@ -37,7 +37,9 @@ pub(crate) mod workflow_engine;
 pub(crate) use horsies_macros::WorkflowInput;
 
 // core re-exports
+pub use crate::core::BuilderHookName;
 pub use crate::core::RegisteredTask;
+pub use crate::core::SpecBuildError;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
@@ -102,14 +104,17 @@ pub use crate::broker::{
     StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
-pub use crate::broker::client_family::ClientFamily;
+pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
-pub use crate::workflow_engine::engine::{on_subworkflow_complete, on_workflow_task_complete};
+pub use crate::workflow_engine::engine::{
+    on_subworkflow_complete, on_workflow_task_complete, WorkflowTaskCompletion,
+    WorkflowTaskCompletionError,
+};
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};

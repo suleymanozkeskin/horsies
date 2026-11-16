@@ -819,15 +819,21 @@ async def test_claim_lost_writes_no_attempt(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_workflow_stopped_error_code_writes_no_attempt(
+async def test_workflow_stopped_error_code_writes_a_failed_attempt(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """WORKFLOW_STOPPED in TaskResult error_code does not write attempt row."""
+    """WORKFLOW_STOPPED is no task code: a result that carries it does not
+    decode and writes a FAILED attempt with WORKER_SERIALIZATION_ERROR."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    result_json = _serialize_err('WORKFLOW_STOPPED', 'workflow was stopped')
+    # TaskError refuses the code, so the stored text is written by hand.
+    result_json = (
+        '{"__h_task_result__":true,"ok":null,'
+        '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
+        '"data":null,"message":"workflow was stopped"}}'
+    )
 
     result = await worker._persist_task_terminal_state(
         task_id=task_id,
@@ -844,7 +850,12 @@ async def test_workflow_stopped_error_code_writes_no_attempt(
     assert is_ok(result)
     assert result.ok_value is None
     attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 0
+    assert len(attempts) == 1
+    attempt = attempts[0]
+    assert attempt['outcome'] == 'FAILED'
+    assert attempt['will_retry'] is False
+    assert attempt['error_code'] == 'WORKER_SERIALIZATION_ERROR'
+    assert 'reserved error code name' in attempt['error_message']
 
 
 # ---------------------------------------------------------------------------
@@ -947,7 +958,7 @@ async def test_task_info_lists_attempts_newest_first_live_and_history(
     task_id = await _insert_running_task(session, retry_count=2)
     await _insert_retried_attempts(session, task_id, through=2)
 
-    live = await broker.get_task_info_async(task_id, include_attempts=True)
+    live = await broker.get_task_info_async(uuid.UUID(task_id), include_attempts=True)
     assert is_ok(live)
     live_info = live.ok_value
     assert live_info is not None
@@ -969,7 +980,9 @@ async def test_task_info_lists_attempts_newest_first_live_and_history(
     )
     assert is_ok(finished)
 
-    history = await broker.get_task_info_async(task_id, include_attempts=True)
+    history = await broker.get_task_info_async(
+        uuid.UUID(task_id), include_attempts=True,
+    )
     assert is_ok(history)
     history_info = history.ok_value
     assert history_info is not None

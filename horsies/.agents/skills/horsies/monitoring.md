@@ -112,11 +112,11 @@ task_facets(broker, *, window, statuses, retried_only)          # + error_catego
 task_breakdown(broker, *, window, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
 list_tasks(broker, *, window, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
 get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
-list_workflow_names(broker)
+list_workflow_names(broker)                             # at most 10,000 names; a cut is logged as a warning
 list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
 get_workflow_node(broker, workflow_id, task_index)
-list_schedules(broker)
+list_schedules(broker)                                  # next run, then name; at most 10,000; a cut is logged
 ```
 
 - `task_breakdown` groups: each `GroupRow.group` is `BreakdownValueGroup(value)`
@@ -179,11 +179,15 @@ list_schedules(broker)
 A task that reaches a terminal status leaves `horsies_tasks` for the
 `horsies_task_history` archive in the same transaction. Detail, result, and
 attempt-history reads resolve on **both** sides, so a moved task still
-answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
-READ snapshot, so the live read and the history read see the same rows.
+answers. `get_task_detail` and `get_workflow_node` each send one statement
+(`horsies_monitoring_task_detail`, `horsies_monitoring_workflow_node`), so
+the live read and the history read see the same rows.
 
 `TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
-404 for each reason.
+404 for each reason. `get_task_detail` derives it from the detached history
+leaves: a UUIDv7 id born before the latest upper bound of a detached leaf of a
+period class (plus 5 s) predates retained history; any other UUIDv7 id is
+within it.
 
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |
@@ -205,6 +209,11 @@ bounds is a defect and raises `AssertionError`.
 `TaskListPage.total` follows a stated contract: **exact when any filter is
 active, a planner estimate on the unfiltered view.** Do not present an
 unfiltered total as an exact count.
+
+`list_tasks` orders by the sort key in the database collation (NULL keys
+last in both directions), then a live task before an ended task with the
+same value, then the task id ascending. The order is total, so a page does
+not reorder between polls.
 
 ## Task Actions — `cancel_task`
 

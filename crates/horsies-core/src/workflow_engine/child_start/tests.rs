@@ -13,7 +13,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 
 use super::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -35,6 +35,8 @@ use crate::TaskNode;
 
 const CHILD_KEY: &str = "tests.child_start.child.v1";
 const CHILD_NAME: &str = "child_start_child";
+/// The name of the parent workflow that [`seed_workflow`] writes.
+const PARENT_NAME: &str = "child_start_parent";
 const WORKER: &str = "child-start-worker";
 
 // ---------------------------------------------------------------------------
@@ -51,7 +53,8 @@ fn registry_with_child() -> WorkflowSpecRegistry {
             .priority(100),
     );
     builder.output(node);
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register(RegisteredWorkflowSpec {
             spec: builder.build().expect("child spec"),
@@ -66,6 +69,7 @@ fn registry_with_child() -> WorkflowSpecRegistry {
 fn owed(workflow_id: Uuid, parent_depth: i32, definition_key: &str) -> OwedChildStart {
     OwedChildStart {
         workflow_id,
+        workflow_name: PARENT_NAME.to_owned(),
         task_index: 1,
         node_input: "{}".to_owned(),
         args_from: None,
@@ -315,7 +319,9 @@ fn a_registered_child_is_a_tree_under_its_node() {
 
 /// A child with no registration under its key fails the node with
 /// `SUBWORKFLOW_LOAD_FAILED`; a child past the depth limit with
-/// `SUBWORKFLOW_DEPTH_LIMIT_REACHED`.
+/// `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. Each message names the parent workflow
+/// by the name on its `CHILD_START` row (Python
+/// `core/workflows/engine.py:577-581`, `:1017-1033`).
 #[test]
 fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     let workflow_id = Uuid::new_v4();
@@ -331,6 +337,10 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
             .expect("host build"),
     );
     assert_eq!(missing.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        missing.message.as_deref(),
+        Some("Failed to load subworkflow definition for child_start_parent:1")
+    );
     assert_eq!(
         missing.data,
         Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
@@ -348,6 +358,13 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     assert_eq!(
         too_deep.error_code.to_string(),
         "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
+    );
+    assert_eq!(
+        too_deep.message.as_deref(),
+        Some(
+            "Subworkflow not started: the child workflow would have depth 33, \
+             and the limit is 32 (workflow child_start_parent:1)"
+        )
     );
     assert_eq!(
         too_deep.data,
@@ -385,12 +402,14 @@ fn an_args_from_key_that_names_a_static_member_fails_the_node() {
 
 /// The registered builder gets the node input with each `args_from` member
 /// set to the stored result of its `SOURCE` dependency; a builder that fails
-/// fails the node with `WORKFLOW_ENQUEUE_FAILED`.
+/// fails the node with `WORKFLOW_ENQUEUE_FAILED`, the Python class of its
+/// error and its text, and the parent workflow by name (Python
+/// `core/workflows/engine.py:1196-1211`).
 #[test]
 fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     let workflow_id = Uuid::new_v4();
     let builder: crate::core::SpecBuilderFn = Arc::new(
-        |input: &str| -> Result<WorkflowSpec, crate::core::HorsiesError> {
+        |input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
             let parsed: serde_json::Value =
                 serde_json::from_str(input).expect("the merged input is JSON");
             match parsed["value"]["ok"] == serde_json::json!(7) {
@@ -403,9 +422,13 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
                             .priority(100),
                     );
                     spec_builder.output(node);
-                    spec_builder.build()
+                    spec_builder
+                        .build()
+                        .map_err(crate::core::SpecBuildError::Failed)
                 }
-                false => Err(crate::core::HorsiesError::new("no merged value")),
+                false => Err(crate::core::SpecBuildError::Failed(
+                    crate::core::HorsiesError::new("no merged value"),
+                )),
             }
         },
     );
@@ -417,7 +440,8 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
             .priority(100),
     );
     child.output(node);
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register(RegisteredWorkflowSpec {
             spec: child.build().expect("child spec"),
@@ -448,12 +472,155 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     merged.sources = Vec::new();
     let error = failure_error(child_start_kind(&merged, build).expect("host build"));
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
-    assert!(
-        error
-            .message
-            .as_deref()
-            .is_some_and(|message| message.starts_with("Subworkflow build failed: ")),
-        "{error:?}"
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Subworkflow build failed: HorsiesError: error: no merged value \
+             (workflow child_start_parent:1)"
+        )
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
+    );
+}
+
+/// A registry whose child under [`CHILD_KEY`] has `builder`, for the client
+/// whose builder hook is `hook`.
+fn registry_with_builder(
+    hook: crate::core::registry::BuilderHookName,
+    builder: crate::core::SpecBuilderFn,
+) -> WorkflowSpecRegistry {
+    let mut child = WorkflowSpecBuilder::new(CHILD_NAME);
+    child.definition_key(CHILD_KEY);
+    let node = child.task(
+        TaskNode::<String>::raw("child_start_task", "{}")
+            .queue("default")
+            .priority(100),
+    );
+    child.output(node);
+    let mut registry = WorkflowSpecRegistry::new(hook);
+    registry
+        .register(RegisteredWorkflowSpec {
+            spec: child.build().expect("child spec"),
+            spec_builder: Some(builder),
+        })
+        .expect("register the child");
+    registry
+}
+
+/// A static input member that the builder's decode refuses fails the node
+/// with `WORKER_SERIALIZATION_ERROR` and Python's text, not as a build
+/// failure (Python `core/workflows/engine.py:1063-1080`).
+#[test]
+fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_error() {
+    let workflow_id = Uuid::new_v4();
+    let builder: crate::core::SpecBuilderFn = Arc::new(
+        |_input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
+            Err(crate::core::SpecBuildError::MemberRefused {
+                key: "count".to_owned(),
+                cause: "count: invalid type: string \"x\", expected i64".to_owned(),
+            })
+        },
+    );
+    let registry = registry_with_builder(
+        crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        builder,
+    );
+    let retention = RetentionConfig::default();
+    let mut refused = owed(workflow_id, 0, CHILD_KEY);
+    refused.node_input = r#"{"count": "x"}"#.to_owned();
+    refused.sub_workflow_params = SubWorkflowParams::Given;
+
+    let error = failure_error(
+        child_start_kind(
+            &refused,
+            ChildBuild {
+                registry: &registry,
+                retention: &retention,
+            },
+        )
+        .expect("host build"),
+    );
+
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Typed decode of subworkflow kwargs failed for task 1: \
+             count: invalid type: string \"x\", expected i64"
+        )
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
+    );
+}
+
+/// An `args_from` value that the builder's decode refuses fails the node with
+/// `WORKER_SERIALIZATION_ERROR`; the text names the client's builder hook and
+/// keeps 200 characters of the refusal (Python
+/// `core/workflows/engine.py:1134-1157`). The builder gets the static
+/// members before the `args_from` members, so it meets a static member first,
+/// as Python's decode does.
+#[test]
+fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization_error() {
+    let workflow_id = Uuid::new_v4();
+    let builder: crate::core::SpecBuilderFn = Arc::new(
+        |input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
+            match input.starts_with(r#"{"zeta":"#) {
+                true => Err(crate::core::SpecBuildError::MemberRefused {
+                    key: "alpha".to_owned(),
+                    cause: "x".repeat(250),
+                }),
+                false => Err(crate::core::SpecBuildError::Failed(
+                    crate::core::HorsiesError::new(format!(
+                        "the static members are not first: {input}"
+                    )),
+                )),
+            }
+        },
+    );
+    let registry = registry_with_builder(
+        crate::core::registry::BuilderHookName::new("build_with()"),
+        builder,
+    );
+    let retention = RetentionConfig::default();
+    let mut refused = owed(workflow_id, 0, CHILD_KEY);
+    refused.node_input = r#"{"zeta": 1}"#.to_owned();
+    refused.sub_workflow_params = SubWorkflowParams::Given;
+    refused.args_from = Some(r#"{"alpha": 0}"#.to_owned());
+    refused.sources = vec![ChildStartSource {
+        task_index: 0,
+        status: "COMPLETED".to_owned(),
+        task_name: "source_task".to_owned(),
+        definition_key: None,
+        result: Some(r#"{"__h_task_result__":true,"ok":"seven","err":null}"#.to_owned()),
+    }];
+
+    let error = failure_error(
+        child_start_kind(
+            &refused,
+            ChildBuild {
+                registry: &registry,
+                retention: &retention,
+            },
+        )
+        .expect("host build"),
+    );
+
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message,
+        Some(format!(
+            "args_from value for 'alpha' does not fit the type that build_with() declares \
+             (subworkflow task 1): {}",
+            "x".repeat(200)
+        ))
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
     );
 }
 
@@ -537,7 +704,7 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
     seed_running_task_node(&pool, workflow_id, task_id).await;
     seed_subworkflow_node(&pool, workflow_id, 1, "PENDING", "{0}", None, CHILD_KEY).await;
     complete_task(&pool, task_id).await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let retention = RetentionConfig::default();
 
     let committed = node_finish_in_transaction(
@@ -573,6 +740,14 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
         panic!("the failed node stores an error");
     };
     assert_eq!(error.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Failed to load subworkflow definition for child_start_parent:1")
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"definition_key": CHILD_KEY}))
+    );
 }
 
 /// The advance of a parent node promotes its sub-workflow dependent; that
@@ -682,6 +857,14 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
         panic!("the failed root stores an error");
     };
     assert_eq!(error.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Failed to load subworkflow definition for child_start_failed_root:0")
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
+    );
     assert_child_started(&pool, workflow_id, 1, 0).await;
 }
 
