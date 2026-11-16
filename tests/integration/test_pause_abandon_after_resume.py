@@ -35,7 +35,7 @@ from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.workflows.lifecycle import resume_workflow
 from horsies.core.utils.db import PooledStatements
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.broker_resources_support import current_resources, listener_of
 
 pytestmark = [pytest.mark.integration]
@@ -49,32 +49,29 @@ async def _seed_paused_workflow_with_claimed_node(
 ) -> tuple[str, str]:
     task_id = str(uuid.uuid4())
     workflow_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='abandon_after_resume')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='abandon_after_resume')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, claimed_at,
-                 claimed_by_worker_id, claim_expires_at, enqueue_sha,
-                 is_workflow_task, retention_class_key,
-                 command_fingerprint_version, command_fingerprint,
-                 retain_rerun_input, prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'abandon_after_resume', 'default', 100, '[]', '{}',
-                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
-                 TRUE, 0, 0, :claimed_at,
-                 :worker_id, NOW() + interval '1 minute', :sha,
-                 TRUE, 'standard_30d',
-                 1, sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    claimed_at, claimed_by_worker_id, claim_expires_at,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                ) VALUES (
+                    :id, 'abandon_after_resume', 'default', 100, '{}', 'CLAIMED',
+                    :sent_at, NOW(), NOW(), NOW(), 0, 0, :claimed_at, :worker_id,
+                    NOW() + interval '1 minute', TRUE, 'standard_30d', NULL, NULL,
+                    FALSE, 'ISOLATED'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
             'claimed_at': claimed_at,
             'worker_id': WORKER_ID,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     await session.execute(
@@ -82,7 +79,7 @@ async def _seed_paused_workflow_with_claimed_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'FAIL', 0, :id,
+            VALUES (:id, 'abandon_after_resume_wf', 'PAUSED', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id},
@@ -90,13 +87,15 @@ async def _seed_paused_workflow_with_claimed_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
             VALUES (:id, :workflow_id, 0, 'node_0', 'abandon_after_resume',
-                    '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-                    'ENQUEUED', :task_id, NOW())
+                    '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+                    'ENQUEUED', :task_id, NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {'id': str(uuid.uuid4()), 'workflow_id': workflow_id, 'task_id': task_id},
     )
