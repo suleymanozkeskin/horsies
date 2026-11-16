@@ -26,14 +26,15 @@ use crate::core::{
 };
 
 use crate::broker::core_rows::{
-    checkout_batch, column, execute_in, expired_list_row, one_row, query_in, query_on, read_rows,
-    roll_back, scalar, stale_list_row, stored_worker_state, task_attempt_row, task_info_row,
-    task_result_row, RowDecodeError, StatementLog,
+    checkout_batch, column, execute_in, expired_list_row, listed_worker_state_row, one_row,
+    query_in, query_on, read_rows, roll_back, scalar, stale_list_row, stored_worker_state,
+    task_attempt_row, task_info_row, task_result_row, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
-    read_worker_snapshot, read_worker_snapshots, DatabasePing, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
+    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result};
 use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
@@ -632,6 +633,11 @@ static GET_TASK_INFO_REASON_ONLY: TypedStatement = TypedStatement::new(
 /// index scan, so the previous `DISTINCT ON (worker_id)` form read every
 /// retained snapshot in the timeseries to return one row per worker.
 /// Parity with horsies PR #170.
+///
+/// Each row also has `read_at`, the `statement_timestamp()` of this
+/// statement: the database clock, one value for every row. The web worker
+/// list measures ages from it (Python measures them with the web host clock,
+/// `horsies/web/routes/workers.py:108-119`).
 const LIST_WORKER_STATES_SQL: &str = "\
 WITH RECURSIVE latest AS (
     (
@@ -660,7 +666,7 @@ WITH RECURSIVE latest AS (
         LIMIT 1
     ) nxt
 )
-SELECT * FROM latest";
+SELECT latest.*, statement_timestamp() AS read_at FROM latest";
 
 /// Latest snapshot for a single worker.
 const GET_WORKER_STATE_LATEST_SQL: &str = "\
@@ -2966,11 +2972,23 @@ impl PostgresBroker {
     /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
     /// worker and the column (Python `postgres.py:2961-3034`).
     pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+        let listed = self.list_worker_states_with_read_time().await?;
+        Ok(listed.into_iter().map(|state| state.snapshot).collect())
+    }
+
+    /// [`list_worker_states`](Self::list_worker_states), with the database
+    /// clock of the list statement on each entry (`read_at`,
+    /// `statement_timestamp()`). The web worker list measures the snapshot
+    /// age, the staleness and the uptime from it. Same statement, same
+    /// errors; reads only.
+    pub(crate) async fn list_worker_states_with_read_time(
+        &self,
+    ) -> BrokerResult<Vec<ListedWorkerState>> {
         let rows = self
-            .read_main(&LIST_WORKER_STATES.bind().finish(), stored_worker_state)
+            .read_main(&LIST_WORKER_STATES.bind().finish(), listed_worker_state_row)
             .await
             .map_err(|error| monitoring_query_error("list_worker_states", error))?;
-        read_worker_snapshots("list_worker_states", rows)
+        read_listed_worker_states("list_worker_states", rows)
     }
 
     /// Latest state snapshot for one worker, or `None` if it has never reported.
