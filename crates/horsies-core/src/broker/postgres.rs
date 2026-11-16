@@ -1207,8 +1207,9 @@ impl PostgresBroker {
     }
 
     /// The core pool on `database_url`, for the lifecycle writers that run
-    /// on the statement layer ([`crate::broker::attempt_writes`]). In a
-    /// worker it is the worker profile pool.
+    /// on the statement layer ([`crate::broker::attempt_writes`],
+    /// [`crate::broker::terminalization::terminalize`]). In a worker it is
+    /// the worker profile pool.
     pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
         self.core.main()
     }
@@ -1687,10 +1688,15 @@ impl PostgresBroker {
     /// Runs through `horsies_expire_owned_claim`, which fences on worker
     /// ownership but deliberately not on the claim generation: once the
     /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. Returns the persisted `TaskResult::Err`
+    /// generation holds the row. One statement on the main core pool,
+    /// checked out as reserved work. Returns the persisted `TaskResult::Err`
     /// JSON when the transition was applied. Returns `None` if the deadline
     /// guard refused or another actor already moved the task (the outcome is
     /// logged with its evidence at the adapter boundary).
+    ///
+    /// Errors: [`BrokerError::Statement`], or
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
@@ -1705,7 +1711,8 @@ impl PostgresBroker {
             .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
 
         let outcomes = crate::broker::terminalization::terminalize(
-            &self.pool,
+            self.core_main_pool(),
+            self.statement_log,
             &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
                 task_id,
                 fence: crate::core::lifecycle::WorkerOwned {
@@ -4610,7 +4617,7 @@ mod fused_finalize_tests {
     //! locks the RUNNING row, writes the COMPLETED attempt from the locked
     //! row, transitions, and fires the capacity notify.
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
     use serial_test::serial;
     use uuid::Uuid;
@@ -5662,7 +5669,7 @@ mod terminal_at_stamp_tests {
         .await
         .expect("stamp claim generation");
 
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::CompleteTaskFused {
                 task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),
@@ -5698,7 +5705,7 @@ mod terminal_at_stamp_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
 
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
                 task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),

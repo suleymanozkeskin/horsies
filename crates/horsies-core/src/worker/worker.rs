@@ -501,6 +501,7 @@ impl Worker {
         // paused expiry, and partition maintenance share one cluster gate).
         let reaper_health = new_reaper_health();
         let reaper = spawn_reaper(
+            Arc::clone(&self.broker),
             self.broker.pool().clone(),
             self.broker.session_pool().clone(),
             Arc::clone(&self.workflow_registry),
@@ -1652,6 +1653,7 @@ mod tests {
         let claims = run.find("claim_batch(").expect("claim loop");
         let reaper = run.find("spawn_reaper(").expect("reaper startup");
         let reaper_call = &run[reaper..reaper + 500];
+        assert!(reaper_call.contains("Arc::clone(&self.broker)"));
         assert!(reaper_call.contains("self.broker.pool().clone()"));
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
         assert!(schema < coverage);
@@ -2027,7 +2029,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        use crate::broker::terminalization::terminalize;
+        use crate::broker::terminalization::on_test_pool::terminalize;
         use crate::core::lifecycle::{
             PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
         };

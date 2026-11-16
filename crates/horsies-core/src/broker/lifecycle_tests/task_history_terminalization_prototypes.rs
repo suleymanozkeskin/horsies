@@ -29,7 +29,8 @@ use super::support::*;
 use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::terminalization::{terminalize, terminalize_in_tx};
+use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
 use crate::core::lifecycle::{
     BatchSize, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
@@ -61,6 +62,8 @@ fn running_workflow_task() -> TaskSeed {
     }
 }
 
+/// The sqlx error of a command run in a sqlx transaction
+/// (`terminalize_in_tx`).
 fn database_error(result: Result<Vec<TerminalizationOutcome>, BrokerError>) -> sqlx::Error {
     match result {
         Err(BrokerError::Database(error)) => error,
@@ -212,9 +215,9 @@ async fn pending_expiry_missing_workflow_link_aborts_whole_batch() {
     let plain = seed_task(&pool, &TaskSeed::pending()).await;
     set_deadline(&pool, plain, Deadline::PassedSecondsAgo(2.0)).await;
 
-    let refused = database_error(terminalize(&pool, &expire_pending()).await);
+    let refused = server_refusal(terminalize(&pool, &expire_pending()).await);
 
-    assert_refused_with_message(Err::<(), _>(refused), "23503", "lacks exactly one node row");
+    assert_server_refusal(&refused, "23503", "lacks exactly one node row");
     for task_id in [unlinked, plain] {
         assert_eq!(status_of(&pool, task_id).await, "PENDING");
         assert_eq!(history_row(&pool, task_id).await, None);
@@ -657,9 +660,9 @@ async fn missing_history_leaf_rolls_back_fused_attempt_and_live_delete() {
     .await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = database_error(terminalize(&pool, &fused(task_id)).await);
+    let refused = server_refusal(terminalize(&pool, &fused(task_id)).await);
 
-    assert_refused(Err::<(), _>(refused), "23514", Constraint::Unnamed);
+    assert_eq!(refused.code().code(), "23514", "{refused}");
     assert_eq!(live_row(&pool, task_id).await, before);
     assert!(live_attempts(&pool, task_id).await.is_empty());
     assert_eq!(history_row(&pool, task_id).await, None);
@@ -677,13 +680,9 @@ async fn fused_completion_rejects_workflow_task_without_losing_phase2() {
     let workflow_id = link_workflow_task(&pool, task_id, "RUNNING", "RUNNING").await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = database_error(terminalize(&pool, &fused(task_id)).await);
+    let refused = server_refusal(terminalize(&pool, &fused(task_id)).await);
 
-    assert_refused_with_message(
-        Err::<(), _>(refused),
-        "22023",
-        "cannot terminalize a workflow task",
-    );
+    assert_server_refusal(&refused, "22023", "cannot terminalize a workflow task");
     assert_eq!(live_row(&pool, task_id).await, before);
     assert!(!phase2_pending(&pool, task_id).await);
     assert_eq!(

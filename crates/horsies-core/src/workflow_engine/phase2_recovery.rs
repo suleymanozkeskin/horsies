@@ -249,7 +249,7 @@ pub async fn drive_phase2_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::config::payload::PayloadPolicy;
     use crate::core::config::retention::RetentionConfig;
     use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};

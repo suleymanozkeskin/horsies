@@ -199,7 +199,8 @@ pub(crate) async fn confirm_ownership_and_set_running(
         {
             Ok(false) if orphan_self_heal => {
                 match terminalize(
-                    broker.pool(),
+                    broker.core_main_pool(),
+                    broker.statement_log(),
                     &TerminalizationCommand::CancelOwnedOrphan {
                         task_id,
                         fence: OwnedClaim {
@@ -733,9 +734,9 @@ async fn persist_ok_result(
     }
 }
 
-/// The success of a plain task: one statement locks the RUNNING row under the
-/// full fence, writes the attempt, moves the row and sends the capacity wake
-/// of the row's queue.
+/// The success of a plain task: one statement on the main core pool locks the
+/// RUNNING row under the full fence, writes the attempt, moves the row and
+/// sends the capacity wake of the row's queue.
 async fn persist_plain_success(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -747,7 +748,7 @@ async fn persist_plain_success(
         fence,
         result_json,
     };
-    let outcomes = terminalize(broker.pool(), &command)
+    let outcomes = terminalize(broker.core_main_pool(), broker.statement_log(), &command)
         .await
         .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
     match outcomes.into_iter().next() {
