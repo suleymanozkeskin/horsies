@@ -6,6 +6,7 @@
 mod support;
 
 mod completion_edges;
+mod dataflow;
 mod handle_reads;
 mod joins_and_patterns;
 mod output_skipped;
