@@ -142,9 +142,8 @@ pub fn core_for_call(py: Python<'_>) -> Result<&'static Core, CallRefusal> {
             let started = start_core()?;
             // Read the Python levels after the start lock is released: a
             // logging call can wait on a Python lock.
-            match started.log.refresh_levels(py) {
-                Ok(()) => {}
-                Err(error) => error.write_unraisable(py, None),
+            if let Err(error) = started.log.refresh_levels(py) {
+                error.write_unraisable(py, None);
             }
             started
         }
@@ -246,9 +245,10 @@ fn install_panic_hook() {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info: &PanicHookInfo<'_>| {
             let cause = describe_panic(info);
-            let _thread_ending = LAST_PANIC.try_with(|slot| match slot.try_borrow_mut() {
-                Ok(mut kept) => *kept = Some(cause),
-                Err(_already_borrowed) => {}
+            let _thread_ending = LAST_PANIC.try_with(|slot| {
+                if let Ok(mut kept) = slot.try_borrow_mut() {
+                    *kept = Some(cause);
+                }
             });
             previous(info);
         }));

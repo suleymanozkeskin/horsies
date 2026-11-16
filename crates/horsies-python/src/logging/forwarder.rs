@@ -114,39 +114,31 @@ fn forward_batch(
     refresh_due: bool,
 ) {
     if refresh_due {
-        match refresh_levels(py, loggers, sink) {
-            Ok(()) => {}
-            Err(error) => error.write_unraisable(py, None),
+        if let Err(error) = refresh_levels(py, loggers, sink) {
+            error.write_unraisable(py, None);
         }
     }
     for record in batch {
-        match forward_record(py, loggers, record) {
-            Ok(()) => {}
-            Err(error) => error.write_unraisable(py, None),
+        if let Err(error) = forward_record(py, loggers, record) {
+            error.write_unraisable(py, None);
         }
     }
-    let counts = sink.take_drop_counts();
-    match counts {
-        DropCounts {
-            dropped_low: 0,
-            spilled_high: 0,
-        } => {}
-        DropCounts {
-            dropped_low,
-            spilled_high,
-        } => {
-            let report = CoreLogRecord::bridge(
-                RecordLevel::Warning,
-                format!(
-                    "the core log channel was full: {dropped_low} DEBUG/INFO records were \
-                     dropped and {spilled_high} WARNING/ERROR records were written to stderr"
-                ),
-            );
-            match forward_record(py, loggers, &report) {
-                Ok(()) => {}
-                Err(error) => error.write_unraisable(py, None),
-            }
-        }
+    let DropCounts {
+        dropped_low,
+        spilled_high,
+    } = sink.take_drop_counts();
+    if dropped_low == 0 && spilled_high == 0 {
+        return;
+    }
+    let report = CoreLogRecord::bridge(
+        RecordLevel::Warning,
+        format!(
+            "the core log channel was full: {dropped_low} DEBUG/INFO records were \
+             dropped and {spilled_high} WARNING/ERROR records were written to stderr"
+        ),
+    );
+    if let Err(error) = forward_record(py, loggers, &report) {
+        error.write_unraisable(py, None);
     }
 }
 

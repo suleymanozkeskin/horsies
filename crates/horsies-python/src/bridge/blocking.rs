@@ -64,19 +64,13 @@ where
                 tokio::time::timeout(SIGNAL_CHECK_SLICE, guarded.as_mut()).await
             })
         });
-        match slice {
-            Ok(outcome) => {
-                let value = guarded_into_result(subject, outcome)?;
-                return value.into_py_any(py);
-            }
-            Err(_slice_ended) => {}
+        if let Ok(outcome) = slice {
+            let value = guarded_into_result(subject, outcome)?;
+            return value.into_py_any(py);
         }
-        match py.check_signals() {
-            Ok(()) => {}
-            Err(signal_error) => {
-                leave(core, subject, kind, guarded);
-                return Err(signal_error);
-            }
+        if let Err(signal_error) = py.check_signals() {
+            leave(core, subject, kind, guarded);
+            return Err(signal_error);
         }
     }
     leave(core, subject, kind, guarded);

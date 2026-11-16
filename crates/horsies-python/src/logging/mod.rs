@@ -223,9 +223,8 @@ impl LogBridge {
 
     /// Push a record of the bridge itself, if Python would handle it.
     pub fn push_bridge_record(&self, level: RecordLevel, message: String) {
-        match self.sink.enabled(LoggerName::Bridge, level) {
-            true => self.sink.push(CoreLogRecord::bridge(level, message)),
-            false => {}
+        if self.sink.enabled(LoggerName::Bridge, level) {
+            self.sink.push(CoreLogRecord::bridge(level, message));
         }
     }
 

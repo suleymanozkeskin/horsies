@@ -79,15 +79,15 @@ impl WakeChannel {
 
     /// Write one wake byte unless a wake is pending.
     fn wake(&self) {
-        match self.wake_pending.swap(true, Ordering::AcqRel) {
-            true => {}
-            false => match (&self.wake_writer).write(&[1]) {
-                Ok(_written) => {}
-                // A full socket already holds unread wake bytes.
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-                // The read end is closed: the loop is gone.
-                Err(_closed) => {}
-            },
+        if self.wake_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        match (&self.wake_writer).write(&[1]) {
+            Ok(_written) => {}
+            // A full socket already holds unread wake bytes.
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            // The read end is closed: the loop is gone.
+            Err(_closed) => {}
         }
     }
 
@@ -182,10 +182,8 @@ impl LoopQueue {
     fn take_finished(&self) -> Vec<Finished> {
         self.channel.wake_pending.store(false, Ordering::Release);
         let mut bytes = [0_u8; WAKE_READ_BYTES];
-        match (&self.wake_reader).read(&mut bytes) {
-            Ok(_read) => {}
-            Err(_nothing_to_read) => {}
-        }
+        // Nothing to read is not a failure: another drain took the bytes.
+        let _wake_bytes_cleared = (&self.wake_reader).read(&mut bytes);
         let receiver = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
         let mut batch = Vec::new();
         while batch.len() < MAX_DRAIN_BATCH {
@@ -202,9 +200,8 @@ impl LoopQueue {
     /// raised into the loop's exception handler.
     fn drain(&self, py: Python<'_>) -> PyResult<()> {
         let batch = self.take_finished();
-        match batch.len() == MAX_DRAIN_BATCH {
-            true => self.channel.wake(),
-            false => {}
+        if batch.len() == MAX_DRAIN_BATCH {
+            self.channel.wake();
         }
         let mut first_failure: Option<PyErr> = None;
         for finished in batch {
@@ -216,10 +213,7 @@ impl LoopQueue {
                     Ok(())
                 }
             };
-            match (delivered, first_failure.is_some()) {
-                (Err(failure), false) => first_failure = Some(failure),
-                (Err(_later_failure), true) | (Ok(()), _) => {}
-            }
+            first_failure = first_failure.or(delivered.err());
         }
         match first_failure {
             Some(failure) => Err(failure),
@@ -245,12 +239,14 @@ fn deliver(py: Python<'_>, future: &Py<PyAny>, completion: Completion) -> PyResu
 
 /// Record the end of an operation whose awaiting future was cancelled.
 fn log_discarded(subject: &'static str) {
-    match running_core() {
-        Some(core) => core.log().push_bridge_record(
+    if let Some(core) = running_core() {
+        core.log().push_bridge_record(
             RecordLevel::Debug,
-            format!("{subject} ended after its awaiting future was cancelled; the outcome was discarded"),
-        ),
-        None => {}
+            format!(
+                "{subject} ended after its awaiting future was cancelled; \
+                 the outcome was discarded"
+            ),
+        );
     }
 }
 
@@ -287,18 +283,13 @@ impl CallDone {
         match future.call_method0("cancelled")?.is_truthy()? {
             false => Ok(()),
             true => {
-                match self.queue.take_pending(self.id) {
-                    Some(PendingCall {
-                        cancel: CancelRoute::DropOperation(signal),
-                        ..
-                    }) => {
-                        let _operation_already_ended = signal.send(());
-                    }
-                    Some(PendingCall {
-                        cancel: CancelRoute::Detach,
-                        ..
-                    })
-                    | None => {}
+                // A write (`CancelRoute::Detach`) runs on; only its future goes.
+                if let Some(PendingCall {
+                    cancel: CancelRoute::DropOperation(signal),
+                    ..
+                }) = self.queue.take_pending(self.id)
+                {
+                    let _operation_already_ended = signal.send(());
                 }
                 Ok(())
             }
@@ -372,9 +363,8 @@ where
             id,
         },),
     )?;
-    match queue.channel.reserve() {
-        Ok(()) => {}
-        Err(bound) => return Err(TooManyPendingCalls::new_err((subject, bound))),
+    if let Err(bound) = queue.channel.reserve() {
+        return Err(TooManyPendingCalls::new_err((subject, bound)));
     }
     let (cancel, cancel_signal) = match kind {
         CallKind::Read => {

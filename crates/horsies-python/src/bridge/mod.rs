@@ -95,10 +95,9 @@ async fn stopped(core: &Core, stop: &mut tokio::sync::watch::Receiver<bool>) -> 
     // The borrow of the watched value ends in this statement: it must not be
     // held across an await, or the future would not be `Send`.
     let signal_seen = stop.wait_for(|stopped| *stopped).await.is_ok();
-    match signal_seen {
-        true => {}
+    if !signal_seen {
         // The sender lives in the core, which lives for the process.
-        false => std::future::pending::<()>().await,
+        std::future::pending::<()>().await;
     }
     match core.stopped_report() {
         Some(report) => report.clone(),
