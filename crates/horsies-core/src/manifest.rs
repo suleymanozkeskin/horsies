@@ -79,8 +79,12 @@ pub struct DatabaseManifest {
     /// The main URL points at a PgBouncer transaction-pool endpoint.
     pub pgbouncer_transaction_mode: bool,
     /// Ping a pooled connection before use (Python's rule: only after it
-    /// waited in the pool for more than 1 s).
+    /// waited in the pool for more than 1 s). Applies to every pool but the
+    /// pool of the worker process.
     pub pool_pre_ping: bool,
+    /// The same ping for the pool of the worker process (Python
+    /// `PostgresConfig.worker_pool_pre_ping`, default off).
+    pub worker_pool_pre_ping: bool,
     pub pool_size: PoolConnections,
     pub max_overflow: PoolConnections,
     pub pool_timeout: WholeSeconds,
@@ -220,10 +224,9 @@ impl DatabaseManifest {
     /// The broker config of these settings. `retain_rerun_input_default`
     /// comes from the send section of the same manifest.
     ///
-    /// The manifest holds the resolved settings of one process, so
-    /// `pool_pre_ping` is already the value of that process. Both pre-ping
-    /// fields of the config take it: the pool reads `pool_pre_ping`, and
-    /// [`PostgresConfig::worker_process_config`] reads `worker_pool_pre_ping`.
+    /// Each pre-ping field keeps its own value:
+    /// [`PostgresConfig::worker_process_config`] gives the worker process pool
+    /// `worker_pool_pre_ping`, and every other pool takes `pool_pre_ping`.
     pub fn to_postgres_config(&self, retain_rerun_input_default: bool) -> PostgresConfig {
         let session_database_url = match &self.session_database {
             SessionDatabase::SameAsDatabaseUrl => None,
@@ -234,7 +237,7 @@ impl DatabaseManifest {
             session_database_url,
             pgbouncer_transaction_mode: self.pgbouncer_transaction_mode,
             pool_pre_ping: self.pool_pre_ping,
-            worker_pool_pre_ping: self.pool_pre_ping,
+            worker_pool_pre_ping: self.worker_pool_pre_ping,
             pool_size: self.pool_size.get(),
             max_overflow: self.max_overflow.get(),
             retain_rerun_input_default,
@@ -302,6 +305,7 @@ mod tests {
                     "session_database": {session},
                     "pgbouncer_transaction_mode": false,
                     "pool_pre_ping": true,
+                    "worker_pool_pre_ping": false,
                     "pool_size": 30,
                     "max_overflow": 30,
                     "pool_timeout": 30,
@@ -344,21 +348,35 @@ mod tests {
         assert!(config.retain_rerun_input_default);
     }
 
-    /// The manifest's `pool_pre_ping` is the resolved value of its process;
-    /// both pre-ping fields of the broker config take it.
+    /// Python `PostgresConfig`: `worker_pool_pre_ping` (default off) is the
+    /// pre-ping of the worker process pool (`worker_process_config`), and
+    /// `pool_pre_ping` (default on) that of every other pool. Each field
+    /// reaches the config with its own value.
     #[test]
-    fn both_pre_ping_fields_take_the_resolved_pre_ping() {
-        for (text_value, resolved) in [("true", true), ("false", false)] {
-            let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
-                "\"pool_pre_ping\": true",
-                &format!("\"pool_pre_ping\": {text_value}"),
-                1,
-            );
-            let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
-            let config = manifest.database.to_postgres_config(false);
-            assert_eq!(config.pool_pre_ping, resolved);
-            assert_eq!(config.worker_pool_pre_ping, resolved);
-        }
+    fn the_worker_pool_pre_ping_is_its_own_field() {
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60);
+        let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
+        assert!(manifest.database.pool_pre_ping);
+        assert!(!manifest.database.worker_pool_pre_ping);
+
+        let config = manifest.database.to_postgres_config(false);
+
+        assert!(config.pool_pre_ping);
+        assert!(!config.worker_pool_pre_ping);
+        let parent_pool = std::num::NonZeroU32::new(7).expect("7 is not 0");
+        assert!(!config.worker_process_config(parent_pool).pool_pre_ping);
+        assert!(config.with_exact_pool(parent_pool).pool_pre_ping);
+    }
+
+    #[test]
+    fn a_manifest_without_the_worker_pool_pre_ping_is_refused() {
+        let text = manifest_text(r#"{"kind": "SAME_AS_DATABASE_URL"}"#, 60).replacen(
+            "\"worker_pool_pre_ping\": false,",
+            "",
+            1,
+        );
+        let refused = parse_producer_manifest(&text).expect_err("a missing field is refused");
+        assert!(refused.field_path.starts_with("database"), "{refused}");
     }
 
     #[test]
