@@ -11,9 +11,11 @@ use owo_colors::OwoColorize;
 
 use crate::core::config::app::AppConfig;
 use crate::core::config::queue::QueueMode;
-use crate::core::registry::task::TaskRegistry;
+use crate::core::config::worker_profile::WorkerProfile;
 
+use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
+use crate::worker::worker_state::ClaimColumns;
 
 // ---------------------------------------------------------------------------
 // ASCII art constants
@@ -57,7 +59,10 @@ pub struct BannerInfo<'a> {
     pub worker_id: &'a str,
     pub worker_config: &'a WorkerConfig,
     pub app_config: &'a AppConfig,
-    pub task_registry: &'a TaskRegistry,
+    /// The profile the worker runs: its children, seats and claim limits.
+    pub profile: &'a WorkerProfile,
+    /// The tasks the host registered, with their classes.
+    pub tasks: &'a RegisteredClasses,
     pub role: &'a str,
 }
 
@@ -101,27 +106,26 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     let queues_str = info.worker_config.queues.join(", ");
     write_kv(&mut buf, "queues", &queues_str);
 
-    // Concurrency
+    // Children and seats of the profile
     write_kv(
         &mut buf,
-        "concurrency",
-        &info.worker_config.concurrency.to_string(),
+        "processes",
+        &info.profile.child_count().to_string(),
     );
+    write_kv(&mut buf, "seats", &info.profile.seat_count().to_string());
 
-    // Max claim batch
+    // Claim limits of the profile; no per-worker limit is the seat count
+    let claim = ClaimColumns::of_profile(info.profile);
     write_kv(
         &mut buf,
         "max_claim_batch",
-        &info.worker_config.max_claim_batch.to_string(),
+        &claim.max_claim_batch.to_string(),
     );
-
-    // Max claim per worker
-    let max_claim_display = if info.worker_config.max_claim_per_worker == 0 {
-        format!("{} (auto)", info.worker_config.concurrency)
-    } else {
-        info.worker_config.max_claim_per_worker.to_string()
-    };
-    write_kv(&mut buf, "max_claim_per_worker", &max_claim_display);
+    write_kv(
+        &mut buf,
+        "max_claim_per_worker",
+        &claim.max_claim_per_worker.to_string(),
+    );
 
     // Broker URL (password masked)
     let masked_url = mask_broker_url(&info.app_config.broker.database_url);
@@ -176,7 +180,7 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     buf.push('\n');
 
     // --- [tasks] section ---
-    let mut task_names: Vec<&str> = info.task_registry.task_names().collect();
+    let mut task_names: Vec<&str> = info.tasks.task_names().collect();
     task_names.sort();
 
     let header = format!(
@@ -287,6 +291,14 @@ fn mask_broker_url(url: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A profile of two isolated children.
+    fn test_profile() -> WorkerProfile {
+        serde_json::from_value(serde_json::json!({
+            "isolated": {"kind": "isolated_children", "count": 2}
+        }))
+        .expect("a valid test profile")
+    }
+
     #[test]
     fn mask_url_with_password() {
         let url = "postgresql://user:secret@localhost:5432/mydb";
@@ -365,13 +377,15 @@ mod tests {
             resend_on_transient_err: false,
         };
         let worker_config = WorkerConfig::default();
-        let registry = TaskRegistry::new();
+        let profile = test_profile();
+        let tasks = RegisteredClasses::default();
 
         let info = BannerInfo {
             worker_id: "test-worker-id",
             worker_config: &worker_config,
             app_config: &app_config,
-            task_registry: &registry,
+            profile: &profile,
+            tasks: &tasks,
             role: "worker",
         };
 
@@ -403,13 +417,15 @@ mod tests {
             resend_on_transient_err: false,
         };
         let worker_config = WorkerConfig::default();
-        let registry = TaskRegistry::new();
+        let profile = test_profile();
+        let tasks = RegisteredClasses::default();
 
         let info = BannerInfo {
             worker_id: "test-worker-id",
             worker_config: &worker_config,
             app_config: &app_config,
-            task_registry: &registry,
+            profile: &profile,
+            tasks: &tasks,
             role: "worker",
         };
 
@@ -422,37 +438,16 @@ mod tests {
     fn banner_shows_tasks_sorted() {
         use crate::core::config::broker::PostgresConfig;
         use crate::core::config::recovery::RecoveryConfig;
-        use crate::core::task::fn_trait::{
-            BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMeta,
-        };
-        use std::sync::Arc;
+        use crate::core::task::Execution;
 
-        struct Dummy;
-        impl BlockingTaskFn for Dummy {
-            fn execute(&self, args: &[u8]) -> RawTaskResult {
-                crate::core::task::result::TaskResult::Ok(args.to_vec())
-            }
-        }
-
-        let mut registry = TaskRegistry::new();
-        registry
-            .register(
-                "zeta_task",
-                RegisteredTask::Blocking {
-                    task: Arc::new(Dummy),
-                    meta: TaskMeta::default(),
-                },
-            )
-            .unwrap();
-        registry
-            .register(
-                "alpha_task",
-                RegisteredTask::Blocking {
-                    task: Arc::new(Dummy),
-                    meta: TaskMeta::default(),
-                },
-            )
-            .unwrap();
+        let registry = RegisteredClasses::new(
+            [
+                ("zeta_task".to_owned(), Execution::Isolated),
+                ("alpha_task".to_owned(), Execution::SharedAsync),
+            ]
+            .into_iter()
+            .collect(),
+        );
 
         let app_config = AppConfig {
             payload: crate::core::config::payload::PayloadPolicy::default(),
@@ -471,12 +466,14 @@ mod tests {
             resend_on_transient_err: false,
         };
         let worker_config = WorkerConfig::default();
+        let profile = test_profile();
 
         let info = BannerInfo {
             worker_id: "test-id",
             worker_config: &worker_config,
             app_config: &app_config,
-            task_registry: &registry,
+            profile: &profile,
+            tasks: &registry,
             role: "worker",
         };
 
