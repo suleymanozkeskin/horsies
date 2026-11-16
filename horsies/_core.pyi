@@ -173,7 +173,7 @@ class SchemaInstalled:
 
 @final
 class SchemaInstallNotRun:
-    """The handle was built with the OBSERVE_ONLY schema mode, so the install ran nothing."""
+    """The handle was built with the OBSERVE_ONLY or the ASSUME_INITIALIZED schema mode, so the install ran nothing."""
 
 
 @final

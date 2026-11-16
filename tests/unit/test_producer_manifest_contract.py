@@ -12,6 +12,7 @@ unlimited size and a value without meaning are refused.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Final, cast
 
 import pytest
@@ -20,6 +21,7 @@ from pydantic import SecretStr
 from horsies._catalog.manifest import (
     MANIFEST_VERSION,
     POOL_CONNECTIONS_MAX,
+    RESERVATION_WINDOW_MICROS_MAX,
     POOL_SIZE_MAX,
     WHOLE_SECONDS_MAX,
     DatabaseManifest,
@@ -28,11 +30,21 @@ from horsies._catalog.manifest import (
     ProducerManifest,
     SendManifest,
     SessionDatabaseSameAsDatabaseUrl,
+    SchemaMode,
     SessionDatabaseSeparate,
     dump_producer_manifest,
 )
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.core.manifest import core_database_url, to_producer_manifest
+from horsies.core.history.identity.keys import (
+    IDEMPOTENCY_WINDOW_MAX,
+    validate_reservation_window,
+)
+from horsies.core.manifest import (
+    core_database_url,
+    reservation_window_micros,
+    schema_mode_of,
+    to_producer_manifest,
+)
 from horsies.core.models.broker import PostgresConfig
 
 pytestmark = [pytest.mark.unit]
@@ -56,8 +68,7 @@ MAPPED_FIELDS: Final[dict[str, str]] = {
 
 # PostgresConfig fields that the producer manifest does not hold.
 # worker_pool_pre_ping belongs to the worker. The TCP keepalive settings and
-# tcp_user_timeout_ms have no manifest field yet, so the core uses its own
-# values for them.
+# tcp_user_timeout_ms get their manifest fields from #775; #943 maps them.
 OUTSIDE_PRODUCER_MANIFEST: Final[frozenset[str]] = frozenset(
     {
         'worker_pool_pre_ping',
@@ -120,7 +131,7 @@ def test_every_manifest_field_has_a_source() -> None:
     manifest = to_producer_manifest(
         _config_with_every_value_set(),
         schema='MIGRATE_AND_VALIDATE',
-        idempotency_reservation_window_seconds=60,
+        idempotency_reservation_window=timedelta(seconds=60),
     )
     document: object = json.loads(dump_producer_manifest(manifest))
     sources = set(MAPPED_FIELDS.values()) | NOT_FROM_CONFIG
@@ -136,7 +147,7 @@ def test_a_config_resolves_field_by_field() -> None:
     manifest = to_producer_manifest(
         _config_with_every_value_set(),
         schema='OBSERVE_ONLY',
-        idempotency_reservation_window_seconds=86_400,
+        idempotency_reservation_window=timedelta(days=1),
     )
     assert manifest == ProducerManifest(
         manifest_version=MANIFEST_VERSION,
@@ -156,7 +167,7 @@ def test_a_config_resolves_field_by_field() -> None:
         schema='OBSERVE_ONLY',
         send=SendManifest(
             retain_rerun_input_default=True,
-            idempotency_reservation_window=86_400,
+            idempotency_reservation_window=86_400_000_000,
         ),
     )
 
@@ -165,7 +176,7 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
     manifest = to_producer_manifest(
         PostgresConfig(database_url=SecretStr(MAIN_URL)),
         schema='MIGRATE_AND_VALIDATE',
-        idempotency_reservation_window_seconds=60,
+        idempotency_reservation_window=timedelta(seconds=60),
     )
     document: object = json.loads(dump_producer_manifest(manifest))
     assert document == {
@@ -184,7 +195,7 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
         'schema': 'MIGRATE_AND_VALIDATE',
         'send': {
             'retain_rerun_input_default': False,
-            'idempotency_reservation_window': 60,
+            'idempotency_reservation_window': 60_000_000,
         },
     }
     assert manifest.database.session_database == SessionDatabaseSameAsDatabaseUrl()
@@ -196,7 +207,7 @@ def _database_of(field: str, value: int) -> DatabaseManifest:
     return to_producer_manifest(
         config,
         schema='MIGRATE_AND_VALIDATE',
-        idempotency_reservation_window_seconds=60,
+        idempotency_reservation_window=timedelta(seconds=60),
     ).database
 
 
@@ -270,3 +281,76 @@ def test_a_url_with_another_scheme_is_a_defect_named_without_its_password() -> N
         core_database_url('postgres://user:secret@host/app')
     assert 'postgres://' in str(raised.value)
     assert 'secret' not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ('window', 'micros'),
+    [
+        (timedelta(microseconds=1), 1),
+        (timedelta(seconds=1, microseconds=500_000), 1_500_000),
+        (timedelta(hours=24), 86_400_000_000),
+        (IDEMPOTENCY_WINDOW_MAX, RESERVATION_WINDOW_MICROS_MAX),
+    ],
+    ids=['one-microsecond', 'one-and-a-half-seconds', 'default-day', 'thirty-days'],
+)
+def test_a_valid_window_reaches_the_manifest_in_exact_microseconds(
+    window: timedelta,
+    micros: int,
+) -> None:
+    validated = validate_reservation_window(window)
+    manifest = to_producer_manifest(
+        PostgresConfig(database_url=SecretStr(MAIN_URL)),
+        schema='MIGRATE_AND_VALIDATE',
+        idempotency_reservation_window=validated,
+    )
+    assert manifest.send.idempotency_reservation_window == micros
+    assert timedelta(microseconds=micros) == window
+
+
+def test_python_s_window_bound_is_the_manifest_s() -> None:
+    assert IDEMPOTENCY_WINDOW_MAX // timedelta(microseconds=1) == RESERVATION_WINDOW_MICROS_MAX
+
+
+@pytest.mark.parametrize(
+    'window',
+    [timedelta(0), timedelta(microseconds=-1), IDEMPOTENCY_WINDOW_MAX + timedelta(microseconds=1)],
+    ids=['zero', 'negative', 'past-thirty-days'],
+)
+def test_a_window_that_the_validator_refuses_is_a_defect_here(window: timedelta) -> None:
+    with pytest.raises(ValueError):
+        validate_reservation_window(window)
+    with pytest.raises(AssertionError, match='reservation window'):
+        reservation_window_micros(window)
+
+
+@pytest.mark.parametrize(
+    ('run_schema_migrations', 'assume_initialized', 'mode'),
+    [
+        (True, False, 'MIGRATE_AND_VALIDATE'),
+        (False, False, 'OBSERVE_ONLY'),
+        (True, True, 'ASSUME_INITIALIZED'),
+        (False, True, 'ASSUME_INITIALIZED'),
+    ],
+)
+def test_the_broker_flags_give_one_schema_mode(
+    run_schema_migrations: bool,
+    assume_initialized: bool,
+    mode: SchemaMode,
+) -> None:
+    assert (
+        schema_mode_of(
+            run_schema_migrations=run_schema_migrations,
+            assume_initialized=assume_initialized,
+        )
+        == mode
+    )
+
+
+def test_an_assume_initialized_manifest_dumps_its_mode() -> None:
+    manifest = to_producer_manifest(
+        PostgresConfig(database_url=SecretStr(MAIN_URL)),
+        schema=schema_mode_of(run_schema_migrations=True, assume_initialized=True),
+        idempotency_reservation_window=timedelta(hours=24),
+    )
+    document: object = json.loads(dump_producer_manifest(manifest))
+    assert cast('dict[str, object]', document)['schema'] == 'ASSUME_INITIALIZED'
