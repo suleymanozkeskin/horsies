@@ -34,9 +34,10 @@ use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
-use crate::workflow_engine::engine::on_workflow_task_complete;
+use crate::workflow_engine::engine::{
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
+};
 use crate::workflow_engine::start::start_workflow;
-use crate::workflow_engine::WorkflowError;
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -843,15 +844,12 @@ pub(super) async fn try_finish_task(
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
     registry: &WorkflowSpecRegistry,
-) -> Result<(), WorkflowError> {
-    let result_json = finish_phase1(pool, task_id, outcome).await;
+) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
+    let _ = finish_phase1(pool, task_id, outcome).await;
     on_workflow_task_complete(
-        pool,
+        &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &result_json,
-        outcome.is_ok(),
         registry,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

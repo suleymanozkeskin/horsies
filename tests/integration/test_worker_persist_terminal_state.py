@@ -672,21 +672,26 @@ async def test_invalid_task_result_structure_marks_error(
 
 
 # ---------------------------------------------------------------------------
-# Group D: Error result with WORKFLOW_STOPPED code
-# Lines 1185-1191
+# Group D: Error result with the reserved WORKFLOW_STOPPED code
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_err_workflow_stopped_code_skips(
+async def test_err_workflow_stopped_code_fails_the_task(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """TaskResult with err.error_code=WORKFLOW_STOPPED → Ok(None), stays RUNNING."""
+    """WORKFLOW_STOPPED is no task code: the err slot does not decode, so the
+    task is FAILED with WORKER_SERIALIZATION_ERROR and not left RUNNING."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    result_json = _serialize_err('WORKFLOW_STOPPED', 'workflow was stopped')
+    # TaskError refuses the code, so the stored text is written by hand.
+    result_json = (
+        '{"__h_task_result__":true,"ok":null,'
+        '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
+        '"data":null,"message":"workflow was stopped"}}'
+    )
 
     result = await worker._persist_task_terminal_state(
         task_id=task_id,
@@ -702,8 +707,11 @@ async def test_err_workflow_stopped_code_skips(
 
     assert is_ok(result)
     assert result.ok_value is None
-    status, *_ = await _get_task_row(session, task_id)
-    assert status == 'RUNNING'
+    status, stored_result, _, _ = await _get_task_row(session, task_id)
+    assert status == 'FAILED'
+    assert stored_result is not None
+    assert 'WORKER_SERIALIZATION_ERROR' in stored_result
+    assert 'reserved error code name' in stored_result
 
 
 # ---------------------------------------------------------------------------
