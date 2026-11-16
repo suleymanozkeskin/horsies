@@ -7,18 +7,15 @@ use crate::core::workflow::spec::WorkflowSpec;
 
 /// Callback type for dynamically building a child WorkflowSpec at runtime.
 ///
-/// Receives the parent sub-workflow node's serialized args and kwargs
-/// (from `args_from` merging) and returns a new `WorkflowSpec`.
+/// Receives the parent sub-workflow node's encoded input as one JSON value
+/// (after `args_from` merging; `{}` when the node sets no params) and
+/// returns a new `WorkflowSpec`.
 /// This enables sub-workflows to be parameterized by upstream results.
 ///
 /// The default behavior (when `spec_builder` is `None`) is to use the
 /// static registered spec.
-pub type SpecBuilderFn = Arc<
-    dyn Fn(Option<&str>, Option<&str>) -> Result<WorkflowSpec, HorsiesError>
-        + Send
-        + Sync
-        + 'static,
->;
+pub type SpecBuilderFn =
+    Arc<dyn Fn(&str) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static>;
 
 /// A registered dynamic workflow definition for runtime-built child workflows.
 #[derive(Clone)]
@@ -618,9 +615,7 @@ impl WorkflowSpecRegistry {
                     .task_name
                     .strip_prefix("__sub_workflow:")
                     .unwrap_or(&node.task_name);
-                let has_input = node.args_json.is_some()
-                    || node.kwargs_json.is_some()
-                    || !node.args_from.is_empty();
+                let has_input = node.input_json.is_some() || !node.args_from.is_empty();
 
                 let Some(child_key) = node.sub_definition_key.as_deref() else {
                     return Err(HorsiesError::new(format!(
@@ -706,14 +701,12 @@ impl WorkflowSpecRegistry {
             // Validate input: task expects input but node has none.
             if let Some(defaults) = self.task_defaults_map.get(&node.task_name) {
                 if defaults.expects_input {
-                    let has_input = node.args_json.is_some()
-                        || node.kwargs_json.is_some()
-                        || !node.args_from.is_empty();
+                    let has_input = node.input_json.is_some() || !node.args_from.is_empty();
                     if !has_input {
                         let type_name = defaults.input_type_name.unwrap_or("non-unit type");
                         return Err(HorsiesError::new(format!(
                             "workflow '{}' node '{}' (task '{}') requires input `{}` \
-                             but has no args, kwargs, or args_from",
+                             but has no input or args_from",
                             spec.name,
                             node.node_id.as_deref().unwrap_or("?"),
                             node.task_name,
@@ -1135,7 +1128,7 @@ mod tests {
         RegisteredWorkflowDefinition {
             name: name.to_owned(),
             definition_key: def_key.to_owned(),
-            spec_builder: Arc::new(|_, _| {
+            spec_builder: Arc::new(|_| {
                 let mut b = WorkflowSpecBuilder::new("dummy");
                 b.task(TaskNode::<()>::raw("dummy_task"));
                 b.build()

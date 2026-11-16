@@ -35,7 +35,8 @@ use crate::core::history::maintenance::coverage::{
     StartupCoverageOutcome,
 };
 use crate::core::history::maintenance::pruning::{
-    prune_expired_partitions, sweep_expired_history_leaves, PruneReach,
+    prune_expired_partitions, sweep_counts_toward_bound, sweep_expired_history_leaves, LeafSweep,
+    PruneReach,
 };
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
@@ -1024,6 +1025,44 @@ async fn conformant_leaf_skips_a_busy_lock_and_missing_leaf_returns_busy() {
         .rollback()
         .await
         .expect("release parent relation lock");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_second_detach_reports_the_leaf_detached_by_the_first() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let lower =
+        utc_day_start(database_now(&mut clock).await.expect("database now") - Duration::days(5));
+    drop(clock);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let command =
+        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let first = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+        .await
+        .expect("first detach");
+    assert_eq!(
+        first,
+        DetachExpiredLeafOutcome::Detached {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }
+    );
+    let second = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+        .await
+        .expect("second detach");
+    assert!(matches!(
+        second,
+        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+    ));
+    assert!(!sweep_counts_toward_bound(&second, None));
+    assert!(sweep_counts_toward_bound(&first, None));
     database.drop().await;
 }
 
@@ -2064,7 +2103,7 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         .expect("detach expired leaf");
     assert!(matches!(
         detached,
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(&database.pool)
@@ -2110,7 +2149,7 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         )
         .await
         .expect("detach referenced leaf"),
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     let mut transaction = database.pool.begin().await.expect("begin refused drop");
     let refused = drop_detached_leaf(
@@ -2183,7 +2222,7 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
         detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
             .await
             .expect("detach expired leaf"),
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     let mut transaction = database.pool.begin().await.expect("begin drop");
     assert!(matches!(
@@ -2239,7 +2278,12 @@ async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
     transaction.commit().await.expect("commit heartbeat setup");
 
     let publisher = FailFirstRepublish::default();
-    let (swept, errors, reach) = sweep_expired_heartbeat_leaves(&database.pool, &publisher, 64)
+    let LeafSweep {
+        swept,
+        errors,
+        reach,
+        ..
+    } = sweep_expired_heartbeat_leaves(&database.pool, &publisher, 64)
         .await
         .expect("discover expired heartbeats");
     assert_eq!(reach, PruneReach::WithinBounds);
@@ -2250,7 +2294,7 @@ async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
     assert_eq!(swept[0].leaf_name, newer.leaf_name());
     assert!(matches!(
         swept[0].detach,
-        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        DetachExpiredLeafOutcome::Detached { .. }
     ));
     database.drop().await;
 }
@@ -2319,10 +2363,14 @@ async fn heartbeat_registration_coverage_and_expiry_sweep_share_the_catalog() {
     .expect("heartbeat probe index");
     assert!(index_ddl.contains("(task_id, role, sent_at DESC)"));
     transaction.commit().await.expect("commit heartbeat setup");
-    let (swept, errors, reach) =
-        sweep_expired_heartbeat_leaves(&database.pool, &UnpublishedLoader, 64)
-            .await
-            .expect("discover expired heartbeats");
+    let LeafSweep {
+        swept,
+        errors,
+        reach,
+        ..
+    } = sweep_expired_heartbeat_leaves(&database.pool, &UnpublishedLoader, 64)
+        .await
+        .expect("discover expired heartbeats");
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(reach, PruneReach::WithinBounds);
     assert_eq!(swept.len(), 1);
@@ -2565,13 +2613,21 @@ async fn history_sweep_stops_at_its_leaf_bound_and_reports_truncation() {
             LeafCreation::Created { .. }
         ));
     }
-    let (first, first_errors, first_reach) =
-        sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 2).await;
+    let LeafSweep {
+        swept: first,
+        errors: first_errors,
+        reach: first_reach,
+        ..
+    } = sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 2).await;
     assert!(first_errors.is_empty(), "{first_errors:?}");
     assert_eq!(first.len(), 2);
     assert_eq!(first_reach, PruneReach::Truncated);
-    let (second, second_errors, second_reach) =
-        sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 2).await;
+    let LeafSweep {
+        swept: second,
+        errors: second_errors,
+        reach: second_reach,
+        ..
+    } = sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 2).await;
     assert!(second_errors.is_empty(), "{second_errors:?}");
     assert_eq!(second.len(), 1);
     assert_eq!(second_reach, PruneReach::WithinBounds);
@@ -2579,6 +2635,64 @@ async fn history_sweep_stops_at_its_leaf_bound_and_reports_truncation() {
         .iter()
         .chain(second.iter())
         .all(|entry| matches!(entry.drop, Some(LeafDrop::Dropped { .. }))));
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_refused_leaf_does_not_count_toward_the_leaf_bound() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let base =
+        utc_day_start(database_now(&mut clock).await.expect("database now") - Duration::days(8));
+    drop(clock);
+    let leaves: Vec<LeafRef> = (0..3)
+        .map(|offset| leaf_ref(&parent, class_key, base + Duration::days(offset)))
+        .collect();
+    for leaf in &leaves {
+        assert!(matches!(
+            create_leaf(&database.pool, leaf).await,
+            LeafCreation::Created { .. }
+        ));
+    }
+    let mut holder = database.pool.acquire().await.expect("acquire lock holder");
+    sqlx::query(&format!(
+        "SELECT pg_advisory_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
+    ))
+    .bind(class_key)
+    .bind(leaves[0].bounds().lower())
+    .execute(&mut *holder)
+    .await
+    .expect("hold the oldest leaf's lock");
+
+    let sweep = sweep_expired_history_leaves(&database.pool, &UnpublishedLoader, 1).await;
+    assert!(sweep.errors.is_empty(), "{:?}", sweep.errors);
+    assert_eq!(sweep.swept.len(), 2);
+    assert_eq!(sweep.swept[0].leaf_name, leaves[0].leaf_name());
+    assert!(matches!(
+        sweep.swept[0].detach,
+        DetachExpiredLeafOutcome::Busy { .. }
+    ));
+    assert_eq!(sweep.swept[1].leaf_name, leaves[1].leaf_name());
+    assert!(matches!(
+        sweep.swept[1].drop,
+        Some(LeafDrop::Dropped { .. })
+    ));
+    assert_eq!(sweep.acted, 1);
+    assert_eq!(sweep.reach, PruneReach::Truncated);
+
+    let released: bool = sqlx::query_scalar(&format!(
+        "SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
+    ))
+    .bind(class_key)
+    .bind(leaves[0].bounds().lower())
+    .fetch_one(&mut *holder)
+    .await
+    .expect("release the oldest leaf's lock");
+    assert!(released);
+    drop(holder);
     database.drop().await;
 }
 
@@ -2803,10 +2917,7 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
                         detach_expired_leaf(&database.pool, &command, &publisher, &NoQuarantine)
                             .await
                             .unwrap();
-                    assert!(matches!(
-                        result,
-                        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
-                    ));
+                    assert!(matches!(result, DetachExpiredLeafOutcome::Detached { .. }));
                 }
             }
             let finalize = FinalizeInterruptedLeafDetach::new(leaf.clone(), Some(5_000)).unwrap();
