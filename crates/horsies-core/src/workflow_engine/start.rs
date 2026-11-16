@@ -21,25 +21,11 @@ use crate::core::{
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
+use crate::workflow_engine::start_statement::{start_arguments, start_tree, StartOutcome};
 
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-/// Inserts a top-level workflow row. No row comes back when the id exists; the caller then reads its name.
-/// `sent_at` is the caller's start time.
-const INSERT_WORKFLOW_SQL: &str = "\
-INSERT INTO horsies_workflows (
-    id, name, status, on_error, output_task_index, success_policy,
-    definition_key,
-    depth, root_workflow_id, sent_at, created_at, started_at, updated_at
-)
-VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, 0, $1::uuid, $7, NOW(), NOW(), NOW())
-ON CONFLICT (id) DO NOTHING
-RETURNING id";
-
-const GET_WORKFLOW_NAME_SQL: &str = "\
-SELECT name FROM horsies_workflows WHERE id = $1::uuid";
 
 /// `sent_at` is the time the engine built the child workflow.
 const INSERT_CHILD_WORKFLOW_SQL: &str = "\
@@ -110,15 +96,15 @@ struct DepthRow {
 /// The typed facts that a task node row stores, parsed once at workflow start
 /// (`horsies_workflow_tasks_task_facts_by_kind`). The task row minted from the
 /// node carries the same values.
-struct NodeTaskFacts {
-    max_retries: i32,
-    good_until: Option<DateTime<Utc>>,
-    facts: WorkflowTaskFacts,
+pub(crate) struct NodeTaskFacts {
+    pub(crate) max_retries: i32,
+    pub(crate) good_until: Option<DateTime<Utc>>,
+    pub(crate) facts: WorkflowTaskFacts,
 }
 
 /// Parse the typed facts of a task node from its merged task options and its
 /// queue's retention class.
-fn node_task_facts(
+pub(crate) fn node_task_facts(
     node: &AnyNode,
     queue: &str,
     merged_task_options: Option<&str>,
@@ -294,7 +280,7 @@ pub(crate) fn child_workflow_depth(
 }
 
 /// Refuses a sub-workflow node with no definition key: a child is resolved only by its key.
-fn require_subworkflow_node_keys(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
+pub(crate) fn require_subworkflow_node_keys(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
     let unkeyed = spec.tasks.iter().find(|node| {
         node.is_subworkflow
             && !matches!(
@@ -377,15 +363,21 @@ pub async fn start_workflow_with_retry<T>(
     Err(last_err.expect("loop ran at least once"))
 }
 
-/// Writes the workflow and its nodes in one transaction.
+/// Writes the workflow tree in one statement (`horsies_workflow_start`).
 ///
-/// Before the transaction, the broker handle checks its client family (`ensure_client_family_for_write`).
-/// A database of the other family, or with no family row, gives `WorkflowError::Broker` with
+/// The tree is built in memory first ([`start_arguments`]): the node rows of the workflow, and a pre-built
+/// child for every sub-workflow root, recursively. A child that cannot be built refuses the start and
+/// nothing is written (as before; Python fails only that node, which needs the transaction form with
+/// `horsies_workflow_child_start`, #751).
+///
+/// Then the broker handle checks its client family (`ensure_client_family_for_write`). A database of the
+/// other family, or with no family row, gives `WorkflowError::Broker` with
 /// `BrokerError::ClientFamilyMismatch` (`ENQUEUE_FAILED`, not retryable) and nothing is written.
 ///
-/// The workflow row goes in first with `ON CONFLICT (id) DO NOTHING`, so a concurrent start with the same id
-/// waits for the first one and then sees its row. An id that exists ends the attempt with no write: the
-/// transaction rolls back.
+/// The function inserts the top-level row with `ON CONFLICT (id) DO NOTHING`, so a concurrent start with the
+/// same id waits for the first one and then sees its row: `EXISTS` with the stored name, and nothing is
+/// written. Otherwise it inserts the child rows and every node row, links each sub-workflow root to its
+/// pre-built child, and mints the task rows of the READY task nodes, in one statement in autocommit.
 async fn start_workflow_inner(
     broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
@@ -394,99 +386,39 @@ async fn start_workflow_inner(
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
 ) -> Result<WorkflowRowInsert, WorkflowError> {
-    let pool = broker.pool();
-    let on_error_str = match spec.on_error {
-        OnError::Fail => "fail",
-        OnError::Pause => "pause",
-    };
-
-    let success_policy_json = spec
-        .success_policy
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?;
+    let arguments = start_arguments(spec, wf_id, registry, retention)?;
 
     // The handle writes only into a database of its own client family: checked once per handle,
     // before the first write. A mismatch is not retryable and writes nothing.
     broker.ensure_client_family_for_write().await?;
 
-    // Wrap the entire start operation in a transaction.
-    let mut tx = pool.begin().await?;
-
-    let row = WorkflowRowValues {
-        workflow_id: wf_id,
-        name: &spec.name,
-        on_error: on_error_str,
-        output_task_index: spec.output_index.map(|i| i as i32),
-        success_policy: &success_policy_json,
-        definition_key: spec.definition_key.as_deref(),
-        sent_at,
+    let outcome = match start_tree(broker, &arguments, sent_at).await? {
+        StartOutcome::Started => WorkflowRowInsert::Inserted,
+        StartOutcome::Exists { stored_name } => existing_workflow(stored_name, &spec.name),
     };
-    match insert_workflow_row(&mut tx, &row).await? {
-        WorkflowRowInsert::Inserted => {}
-        existing @ (WorkflowRowInsert::Existing | WorkflowRowInsert::IdConflict { .. }) => {
-            tx.rollback().await?;
-            tracing::warn!(
-                workflow_id = %wf_id,
-                outcome = ?existing,
-                "workflow id already exists; nothing was written",
-            );
-            return Ok(existing);
+    match &outcome {
+        WorkflowRowInsert::Inserted => {
+            tracing::debug!(workflow_id = %wf_id, name = %spec.name, "workflow created");
         }
+        WorkflowRowInsert::Existing | WorkflowRowInsert::IdConflict { .. } => tracing::warn!(
+            workflow_id = %wf_id,
+            outcome = ?outcome,
+            "workflow id already exists; nothing was written",
+        ),
     }
-
-    tracing::debug!(workflow_id = %wf_id, name = %spec.name, "workflow created");
-
-    // Insert all workflow_task rows and enqueue roots.
-    insert_workflow_tasks(&mut tx, wf_id, &spec.tasks, registry, retention).await?;
-
-    tx.commit().await?;
-
-    Ok(WorkflowRowInsert::Inserted)
+    Ok(outcome)
 }
 
-/// The values of a new top-level workflow row.
-struct WorkflowRowValues<'a> {
-    workflow_id: Uuid,
-    name: &'a str,
-    on_error: &'a str,
-    output_task_index: Option<i32>,
-    success_policy: &'a Option<serde_json::Value>,
-    definition_key: Option<&'a str>,
-    sent_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Inserts the workflow row, or reads the name stored under its id.
-///
-/// Python: `INSERT_WORKFLOW_SQL` and `GET_WORKFLOW_NAME_SQL` (`core/workflows/lifecycle.py:420-458`). A row that
-/// conflicted and then disappeared before the name read (a retention delete) gives `Existing`, as in Python.
-async fn insert_workflow_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    row: &WorkflowRowValues<'_>,
-) -> Result<WorkflowRowInsert, sqlx::Error> {
-    let inserted: Option<Uuid> = sqlx::query_scalar(INSERT_WORKFLOW_SQL)
-        .bind(row.workflow_id)
-        .bind(row.name)
-        .bind(row.on_error)
-        .bind(row.output_task_index)
-        .bind(row.success_policy)
-        .bind(row.definition_key)
-        .bind(row.sent_at)
-        .fetch_optional(&mut **tx)
-        .await?;
-    if inserted.is_some() {
-        return Ok(WorkflowRowInsert::Inserted);
-    }
-    let existing_name: Option<String> = sqlx::query_scalar(GET_WORKFLOW_NAME_SQL)
-        .bind(row.workflow_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-    Ok(match existing_name {
-        Some(existing_name) if existing_name != row.name => {
+/// What an existing top-level id means for a start of `name`: the same name is the existing workflow; another
+/// name is an id conflict. A row that conflicted and then disappeared before the name read (a retention
+/// delete) is `Existing`, as in Python (`core/workflows/lifecycle.py:420-458`). Pure.
+fn existing_workflow(stored_name: Option<String>, name: &str) -> WorkflowRowInsert {
+    match stored_name {
+        Some(existing_name) if existing_name != name => {
             WorkflowRowInsert::IdConflict { existing_name }
         }
         Some(_) | None => WorkflowRowInsert::Existing,
-    })
+    }
 }
 
 /// Maps a start error to its catalog code.
@@ -617,7 +549,7 @@ pub(crate) fn downstream_subworkflow_facts(nodes: &[AnyNode]) -> Vec<DownstreamS
 ///
 /// A sub-workflow node is never claimed as a task, so it has no queue and no priority; its row stores the
 /// constants of Python. A task node must have both resolved.
-fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), WorkflowError> {
+pub(crate) fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), WorkflowError> {
     match node.is_subworkflow {
         true => Ok((SUBWORKFLOW_NODE_QUEUE, SUBWORKFLOW_NODE_PRIORITY)),
         false => {
@@ -1478,48 +1410,59 @@ mod tests {
         assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let workflow_id = Uuid::new_v4();
-        let sent_at = chrono::Utc::now() - chrono::Duration::minutes(5);
-        let no_policy: Option<serde_json::Value> = None;
-        let row = |name: &'static str| WorkflowRowValues {
-            workflow_id,
-            name,
-            on_error: "fail",
-            output_task_index: None,
-            success_policy: &no_policy,
-            definition_key: Some("tests.start.conflict.v1"),
-            sent_at,
-        };
-
-        let mut tx = pool.begin().await.unwrap();
+    #[test]
+    fn an_existing_id_is_the_workflow_by_its_name_or_a_conflict() {
         assert_eq!(
-            insert_workflow_row(&mut tx, &row("first_name"))
-                .await
-                .unwrap(),
-            WorkflowRowInsert::Inserted
-        );
-        tx.commit().await.unwrap();
-
-        let mut tx = pool.begin().await.unwrap();
-        assert_eq!(
-            insert_workflow_row(&mut tx, &row("first_name"))
-                .await
-                .unwrap(),
+            existing_workflow(Some("first_name".to_owned()), "first_name"),
             WorkflowRowInsert::Existing
         );
         assert_eq!(
-            insert_workflow_row(&mut tx, &row("other_name"))
-                .await
-                .unwrap(),
+            existing_workflow(Some("first_name".to_owned()), "other_name"),
             WorkflowRowInsert::IdConflict {
                 existing_name: "first_name".to_owned()
             }
         );
-        tx.rollback().await.unwrap();
+        // The row was gone by the name read.
+        assert_eq!(
+            existing_workflow(None, "other_name"),
+            WorkflowRowInsert::Existing
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let registry = WorkflowSpecRegistry::new();
+        let retention = RetentionConfig::default();
+        let workflow_id = Uuid::new_v4();
+        let sent_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let mut first = keyed_spec(
+            Some("tests.start.conflict.v1"),
+            vec![node_with(false, Some(100))],
+        );
+        first.name = "first_name".to_owned();
+        let mut other = first.clone();
+        other.name = "other_name".to_owned();
+
+        for (spec, expected) in [
+            (&first, WorkflowRowInsert::Inserted),
+            (&first, WorkflowRowInsert::Existing),
+            (
+                &other,
+                WorkflowRowInsert::IdConflict {
+                    existing_name: "first_name".to_owned(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                start_workflow_inner(&broker, spec, workflow_id, sent_at, &registry, &retention)
+                    .await
+                    .expect("start"),
+                expected
+            );
+        }
 
         let (name, stored_sent_at): (String, chrono::DateTime<chrono::Utc>) =
             sqlx::query_as("SELECT name, sent_at FROM horsies_workflows WHERE id = $1")
@@ -1533,6 +1476,14 @@ mod tests {
             stored_sent_at.timestamp_micros(),
             sent_at.timestamp_micros()
         );
+        let node_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(node_rows, 1, "the repeated starts wrote no node row");
     }
 
     #[tokio::test]
