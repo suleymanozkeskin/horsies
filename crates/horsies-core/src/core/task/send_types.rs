@@ -253,6 +253,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::IncompleteTaskHistoryCutover
         | BrokerError::SchemaVersionMismatch { .. }
         | BrokerError::InvalidStatus(_)
+        | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
         | BrokerError::EnqueueConflictUnverifiable { .. }

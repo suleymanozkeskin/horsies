@@ -209,7 +209,6 @@ class TestDetachExpiredHistoryLeaf:
     def test_accepts_absent_timeout(self) -> None:
         command = DetachExpiredHistoryLeaf(
             leaf=make_leaf_ref(),
-            quarantine_horizon=None,
             statement_timeout_ms=None,
         )
         assert command.statement_timeout_ms is None
@@ -217,7 +216,6 @@ class TestDetachExpiredHistoryLeaf:
     def test_accepts_positive_timeout(self) -> None:
         command = DetachExpiredHistoryLeaf(
             leaf=make_leaf_ref(),
-            quarantine_horizon=None,
             statement_timeout_ms=5_000,
         )
         assert command.statement_timeout_ms == 5_000
@@ -227,13 +225,10 @@ class TestDetachExpiredHistoryLeaf:
         with pytest.raises(ValueError, match='positive'):
             DetachExpiredHistoryLeaf(
                 leaf=make_leaf_ref(),
-                quarantine_horizon=None,
                 statement_timeout_ms=timeout_ms,
             )
 
-    @pytest.mark.parametrize(
-        'field_name', ['quarantine_horizon', 'statement_timeout_ms']
-    )
+    @pytest.mark.parametrize('field_name', ['statement_timeout_ms'])
     def test_field_has_no_default(self, field_name: str) -> None:
         # Every call site states its detach posture explicitly; a silent
         # default would let existing callers change behavior without
@@ -265,25 +260,6 @@ class TestDetachExpiredHistoryLeaf:
                 leaf=make_leaf_ref(),
                 statement_timeout_ms=timeout_ms,
                 lifecycle=LeafLifecycle.RETENTION,
-            )
-
-    def test_accepts_positive_horizon(self) -> None:
-        command = DetachExpiredHistoryLeaf(
-            leaf=make_leaf_ref(),
-            quarantine_horizon=timedelta(days=7),
-            statement_timeout_ms=None,
-        )
-        assert command.quarantine_horizon == timedelta(days=7)
-
-    @pytest.mark.parametrize(
-        'horizon', [timedelta(0), timedelta(seconds=-1)]
-    )
-    def test_rejects_non_positive_horizon(self, horizon: object) -> None:
-        with pytest.raises(ValueError, match='horizon must be positive'):
-            DetachExpiredHistoryLeaf(
-                leaf=make_leaf_ref(),
-                quarantine_horizon=horizon,  # type: ignore[arg-type]
-                statement_timeout_ms=None,
             )
 
 
@@ -382,11 +358,7 @@ class TestCommandUnion:
             InspectHistoryLeaf: {'leaf', 'lifecycle'},
             CreateDailyHistoryLeaf: {'leaf'},
             EnsureLeafCoverage: {'class_key', 'horizon_days'},
-            DetachExpiredHistoryLeaf: {
-                'leaf',
-                'quarantine_horizon',
-                'statement_timeout_ms',
-            },
+            DetachExpiredHistoryLeaf: {'leaf', 'statement_timeout_ms'},
             DetachEmptyForeverLeaf: {'leaf', 'statement_timeout_ms'},
             FinalizeInterruptedLeafDetach: {
                 'leaf',

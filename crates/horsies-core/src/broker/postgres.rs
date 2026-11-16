@@ -255,7 +255,8 @@ WHERE id = $1";
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result
+       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result,
+       execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -268,7 +269,7 @@ const GET_TASK_INFO_MINIMAL_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, NULL::TEXT AS result
+       NULL::TEXT AS failed_reason, NULL::TEXT AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -277,7 +278,7 @@ const GET_TASK_INFO_RESULT_ONLY_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, result
+       NULL::TEXT AS failed_reason, result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -286,7 +287,7 @@ const GET_TASK_INFO_REASON_ONLY_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       failed_reason, NULL::TEXT AS result
+       failed_reason, NULL::TEXT AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -3014,6 +3015,8 @@ fn history_task_info(
             .flatten(),
         result,
         attempts,
+        // The history table has no `execution` column (Python reports `None`).
+        execution: crate::core::ExecutionClass::NotKeptInHistory,
     })
 }
 
@@ -3858,7 +3861,7 @@ mod horsies_claim_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'pr160_task', $2, $3, '{}', NULL, 'ISOLATED',
+                $1, 'pr160_task', $2, $3, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 $4, NOW(), CASE WHEN $4 IN ('CLAIMED', 'RUNNING') THEN NOW() END, $5, CASE WHEN $4 = 'CLAIMED' THEN COALESCE($6, NOW() + interval '1 minute') END,
@@ -4363,7 +4366,7 @@ mod fused_finalize_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'fused_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'fused_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
@@ -4654,7 +4657,7 @@ mod set_running_heartbeat_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'hb_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 'CLAIMED', NOW(), NOW(), $2, NOW() + interval '1 minute',
@@ -4800,7 +4803,7 @@ mod set_running_heartbeat_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'hb_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
@@ -5135,7 +5138,7 @@ mod filter_non_runnable_tests {
                             retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                             updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
                         ) VALUES (
-                            $1, 'lookup_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                            $1, 'lookup_test', 'default', 100, 'null', NULL, 'ISOLATED',
                             'forever', NOW(), NOW(),
                             1, decode(repeat('00', 32), 'hex'), NULL,
                             'PENDING', NOW(), NULL, NULL, NULL,
@@ -5246,7 +5249,7 @@ mod filter_non_runnable_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'c15_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'c15_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 NULL, NULL, NULL,
                 'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
@@ -5356,7 +5359,7 @@ mod terminal_at_stamp_tests {
                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'terminal_at_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                $1, 'terminal_at_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW(), NOW(),
                 1, decode(repeat('00', 32), 'hex'), NULL,
                 $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
