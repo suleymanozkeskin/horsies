@@ -148,14 +148,24 @@ pub fn core_for_call(py: Python<'_>) -> Result<&'static Core, CallRefusal> {
             started
         }
     };
+    match pure_call_refusal() {
+        Some(refusal) => Err(refusal),
+        None => Ok(core),
+    }
+}
+
+/// The refusal of a pure call (one that needs no runtime) in this process:
+/// the fork rule and the stop rule, as for every core call. Starts nothing.
+pub fn pure_call_refusal() -> Option<CallRefusal> {
+    let core = CORE.get()?;
     let this_pid = std::process::id();
     match (core.pid == this_pid, core.stopped_report()) {
-        (false, _) => Err(CallRefusal::ForkedAfterStart {
+        (false, _) => Some(CallRefusal::ForkedAfterStart {
             core_pid: core.pid,
             this_pid,
         }),
-        (true, Some(report)) => Err(CallRefusal::Stopped(report.clone())),
-        (true, None) => Ok(core),
+        (true, Some(report)) => Some(CallRefusal::Stopped(report.clone())),
+        (true, None) => None,
     }
 }
 

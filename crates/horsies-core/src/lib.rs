@@ -76,6 +76,8 @@ pub use crate::worker::{
     WorkerError,
 };
 
+pub use crate::broker::client_family::ClientFamily;
+pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,

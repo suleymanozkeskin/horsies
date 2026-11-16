@@ -2,7 +2,7 @@
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 use crate::surface::{
-    Constructor, ModuleSurface, StubClass, StubFunction, StubParameter, TypeText,
+    Constructor, ModuleSurface, ParameterKind, StubClass, StubFunction, StubParameter, TypeText,
 };
 
 /// The file name of the stubs, inside the package folder.
@@ -12,7 +12,9 @@ pub const CORE_STUB_FILE: &str = "_core.pyi";
 pub fn render_core_stub(surface: &ModuleSurface) -> String {
     let mut text = format!("{GENERATED_HEADER}\n");
     text.push_str("\"\"\"Type stubs of the extension module horsies._core.\"\"\"\n\n");
-    text.push_str("import asyncio\nfrom typing import Literal, final\n");
+    text.push_str(
+        "import asyncio\nimport datetime\nimport uuid\nfrom typing import Literal, final\n",
+    );
     for exception in surface.exceptions {
         text.push_str("\n\n");
         text.push_str(&format!("class {}({}):\n", exception.name, exception.base));
@@ -86,17 +88,29 @@ fn render_function(function: &StubFunction, indent: &str) -> String {
     }
 }
 
-/// `, name: type` for each parameter.
+/// `, name: type` for each parameter, with `, *` before the first
+/// keyword-only one.
 fn parameter_list(parameters: &[StubParameter]) -> String {
-    parameters
-        .iter()
-        .map(|parameter| format!(", {}: {}", parameter.name, type_text(&parameter.annotation)))
-        .collect()
+    let mut text = String::new();
+    let mut keyword_only_started = false;
+    for parameter in parameters {
+        if parameter.kind == ParameterKind::KeywordOnly && !keyword_only_started {
+            text.push_str(", *");
+            keyword_only_started = true;
+        }
+        text.push_str(&format!(
+            ", {}: {}",
+            parameter.name,
+            type_text(&parameter.annotation)
+        ));
+    }
+    text
 }
 
 fn type_text(annotation: &TypeText) -> String {
     match annotation {
         TypeText::Plain(text) => (*text).to_owned(),
+        TypeText::FutureOf(text) => format!("asyncio.Future[{text}]"),
         TypeText::WireValuesOf(catalog) => {
             let values: Vec<String> = catalog
                 .members
@@ -143,20 +157,28 @@ mod tests {
     fn a_method_takes_self_and_a_function_does_not() {
         let function = StubFunction {
             name: "probe",
-            parameters: &[StubParameter {
-                name: "value",
-                annotation: TypeText::Plain("int"),
-            }],
+            parameters: &[
+                StubParameter {
+                    name: "value",
+                    annotation: TypeText::Plain("int"),
+                    kind: ParameterKind::Positional,
+                },
+                StubParameter {
+                    name: "flag",
+                    annotation: TypeText::Plain("bool"),
+                    kind: ParameterKind::KeywordOnly,
+                },
+            ],
             returns: TypeText::Plain("None"),
             doc: "",
         };
         assert_eq!(
             render_function(&function, ""),
-            "def probe(value: int) -> None: ...\n"
+            "def probe(value: int, *, flag: bool) -> None: ...\n"
         );
         assert_eq!(
             render_function(&function, "    "),
-            "    def probe(self, value: int) -> None: ...\n"
+            "    def probe(self, value: int, *, flag: bool) -> None: ...\n"
         );
     }
 }
