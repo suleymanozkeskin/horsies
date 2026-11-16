@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
@@ -340,6 +341,19 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
     }
 }
 
+/// Checks, once per broker handle, that the database records the handle's client family, before the
+/// first write of a workflow operation (pause, resume, cancel).
+///
+/// A database of the other family, or with no family row, is `BrokerError::ClientFamilyMismatch`:
+/// `DB_OPERATION_FAILED`, not retryable, and nothing is written. A database failure of the check is
+/// `DB_OPERATION_FAILED`, retryable by the core's rule; the next call checks again.
+async fn admit_workflow_write(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<()> {
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(|error| to_handle_error(WorkflowError::Broker(error), workflow_id))
+}
+
 /// Check if a workflow exists. Returns `Err(WorkflowNotFound)` if not.
 async fn ensure_workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<(), WorkflowError> {
     let exists: Option<IdRow> = sqlx::query_as(CHECK_WORKFLOW_EXISTS_SQL)
@@ -361,9 +375,11 @@ async fn ensure_workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<(), 
 /// Transitions RUNNING/PAUSED -> CANCELLED. Skips all non-terminal
 /// workflow_tasks and cancels any enqueued horsies_tasks.
 ///
-/// Returns `true` if the workflow was actually cancelled.
-pub async fn cancel_workflow(pool: &PgPool, workflow_id: Uuid) -> HandleResult<bool> {
-    cancel_workflow_inner(pool, workflow_id)
+/// Returns `true` if the workflow was actually cancelled. The handle's client family is checked before
+/// the first write (`admit_workflow_write`).
+pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
+    admit_workflow_write(broker, workflow_id).await?;
+    cancel_workflow_inner(broker.pool(), workflow_id)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))
 }
@@ -606,9 +622,11 @@ async fn cancel_workflow_inner(pool: &PgPool, workflow_id: Uuid) -> Result<bool,
 /// Cascades pause to all running child workflows (iterative BFS),
 /// matching Python's `_cascade_pause_to_children()` behavior.
 ///
-/// Returns `true` if the workflow was actually paused.
-pub async fn pause_workflow(pool: &PgPool, workflow_id: Uuid) -> HandleResult<bool> {
-    pause_workflow_inner(pool, workflow_id)
+/// Returns `true` if the workflow was actually paused. The handle's client family is checked before
+/// the first write (`admit_workflow_write`).
+pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
+    admit_workflow_write(broker, workflow_id).await?;
+    pause_workflow_inner(broker.pool(), workflow_id)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))
 }
@@ -706,13 +724,17 @@ pub(crate) async fn pause_tree_and_relocate(
 /// - `Ok(false)` when there was nothing to do: the workflow is already RUNNING
 ///   and consistent, or it is in a terminal state.
 /// - `WorkflowNotFound` when the workflow does not exist.
+///
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn resume_workflow(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
+    admit_workflow_write(broker, workflow_id).await?;
+    let pool = broker.pool();
     let steps = resume_workflow_inner(pool, workflow_id, registry, payload, retention)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))?;
@@ -1341,7 +1363,7 @@ mod resume_idempotency_tests {
         insert_running_task(&pool, &child).await;
 
         let resumed = resume_workflow(
-            &pool,
+            &broker,
             Uuid::parse_str(&parent).expect("test identity must be UUID"),
             &registry,
             &PayloadPolicy::default(),
@@ -1377,7 +1399,7 @@ mod resume_idempotency_tests {
 
         // No paused children, no ready nodes → genuinely nothing to do.
         let resumed = resume_workflow(
-            &pool,
+            &broker,
             Uuid::parse_str(&id).expect("test identity must be UUID"),
             &registry,
             &PayloadPolicy::default(),
@@ -1650,7 +1672,7 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, unrelated_id, "RUNNING", None).await;
 
         assert!(resume_workflow(
-            &pool,
+            &PostgresBroker::from_pool(pool.clone()),
             root_id,
             &WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
@@ -1713,7 +1735,7 @@ mod p7_lifecycle_tests {
         );
 
         assert!(resume_workflow(
-            &pool,
+            &PostgresBroker::from_pool(pool.clone()),
             workflow_id,
             &WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
@@ -2289,7 +2311,11 @@ mod cancel_tree_tests {
         seed_pending_node(&pool, parent_id).await;
         seed_pending_node(&pool, child_id).await;
 
-        assert!(cancel_workflow(&pool, parent_id).await.unwrap());
+        assert!(
+            cancel_workflow(&PostgresBroker::from_pool(pool.clone()), parent_id)
+                .await
+                .unwrap()
+        );
 
         for workflow_id in [parent_id, child_id] {
             assert_eq!(
@@ -2334,7 +2360,7 @@ mod cancel_tree_tests {
         .await
         .unwrap();
 
-        let outcome = cancel_workflow(&pool, parent_id).await;
+        let outcome = cancel_workflow(&PostgresBroker::from_pool(pool.clone()), parent_id).await;
 
         sqlx::query("DROP TRIGGER cw_refuse_child_cancel ON horsies_workflows")
             .execute(&pool)
@@ -2389,5 +2415,84 @@ mod cancel_tree_tests {
             workflow_id,
         );
         assert_eq!(missing.code, HandleErrorCode::WorkflowNotFound);
+    }
+}
+
+#[cfg(test)]
+mod client_family_tests {
+    //! A workflow operation of a handle checks the client family before its first write.
+    use super::*;
+    use crate::broker::client_family::ClientFamily;
+    use serial_test::serial;
+
+    async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
+        sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .fetch_one(pool)
+            .await
+            .expect("workflow status")
+    }
+
+    /// Pause, resume and cancel through a handle of the other client family are refused as
+    /// `DB_OPERATION_FAILED`, not retryable, and write nothing. A handle of the recorded family
+    /// passes the same check.
+    #[tokio::test]
+    #[serial]
+    async fn pause_resume_and_cancel_of_another_family_write_nothing() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'family_check', 'RUNNING', 'fail', 'tests.family.v1', 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+        let python =
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python);
+
+        let refusals = [
+            pause_workflow(&python, workflow_id)
+                .await
+                .expect_err("pause of another family"),
+            resume_workflow(
+                &python,
+                workflow_id,
+                &WorkflowSpecRegistry::new(),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await
+            .expect_err("resume of another family"),
+            cancel_workflow(&python, workflow_id)
+                .await
+                .expect_err("cancel of another family"),
+        ];
+        for refused in refusals {
+            assert_eq!(refused.code, HandleErrorCode::DbOperationFailed);
+            assert!(!refused.retryable);
+            assert!(
+                refused.message.contains("its own family"),
+                "{}",
+                refused.message
+            );
+        }
+        assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
+
+        let rust = PostgresBroker::from_pool(pool.clone());
+        assert!(pause_workflow(&rust, workflow_id)
+            .await
+            .expect("pause of the recorded family"));
+        assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

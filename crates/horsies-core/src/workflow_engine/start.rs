@@ -379,6 +379,10 @@ pub async fn start_workflow_with_retry<T>(
 
 /// Writes the workflow and its nodes in one transaction.
 ///
+/// Before the transaction, the broker handle checks its client family (`ensure_client_family_for_write`).
+/// A database of the other family, or with no family row, gives `WorkflowError::Broker` with
+/// `BrokerError::ClientFamilyMismatch` (`ENQUEUE_FAILED`, not retryable) and nothing is written.
+///
 /// The workflow row goes in first with `ON CONFLICT (id) DO NOTHING`, so a concurrent start with the same id
 /// waits for the first one and then sees its row. An id that exists ends the attempt with no write: the
 /// transaction rolls back.
@@ -401,6 +405,10 @@ async fn start_workflow_inner(
         .as_ref()
         .map(serde_json::to_value)
         .transpose()?;
+
+    // The handle writes only into a database of its own client family: checked once per handle,
+    // before the first write. A mismatch is not retryable and writes nothing.
+    broker.ensure_client_family_for_write().await?;
 
     // Wrap the entire start operation in a transaction.
     let mut tx = pool.begin().await?;
@@ -1389,6 +1397,49 @@ mod tests {
         let message = error.message.unwrap();
         assert!(message.contains("depth 33"));
         assert!(message.contains(&format!("{parent}:4")));
+    }
+
+    /// A start through a handle of the other client family is refused before its first write:
+    /// `ENQUEUE_FAILED`, not retryable, and no workflow row.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_of_another_client_family_is_refused_and_writes_nothing() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(
+            PostgresBroker::from_pool(pool.clone())
+                .with_client_family(crate::broker::client_family::ClientFamily::Python),
+        );
+        let workflow_id = Uuid::new_v4();
+        let spec = keyed_spec(
+            Some("tests.family.start.v1"),
+            vec![node_with(false, Some(17))],
+        );
+
+        let refused = start_workflow::<serde_json::Value>(
+            &broker,
+            &spec,
+            Some(workflow_id),
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect_err("a start of another client family");
+
+        assert_eq!(refused.code, WorkflowStartErrorCode::EnqueueFailed);
+        assert!(!refused.retryable);
+        assert!(
+            refused.message.contains("its own family"),
+            "{}",
+            refused.message
+        );
+        let written: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(written, 0);
     }
 
     fn keyed_spec(definition_key: Option<&str>, tasks: Vec<AnyNode>) -> WorkflowSpec {
