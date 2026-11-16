@@ -52,6 +52,8 @@ mod action_tests;
 #[cfg(test)]
 mod aggregate_spec_tests;
 #[cfg(test)]
+mod cancel_spec_tests;
+#[cfg(test)]
 mod list_detail_spec_tests;
 #[cfg(test)]
 mod spec_support;
