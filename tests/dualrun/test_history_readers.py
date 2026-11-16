@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, LiteralString
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -146,7 +146,7 @@ type MissRead = Callable[[Connection, str, TerminalizationKind, str | None], Mis
 
 def _v7_born_at(birth: datetime) -> str:
     milliseconds = int(birth.timestamp() * 1000)
-    return MonotonicUuid7Generator(clock_ms=lambda: milliseconds).mint()
+    return str(MonotonicUuid7Generator(clock_ms=lambda: milliseconds).mint())
 
 
 def _make_seed() -> Seed:
@@ -395,8 +395,8 @@ async def _python_reads(
 async def _reads_on(
     connection: AsyncConnection, task_id: str
 ) -> tuple[TaskStateResult, TaskResultRead]:
-    state = await read_task_state(connection, task_id=task_id)
-    result = await read_task_result(connection, task_id=task_id)
+    state = await read_task_state(connection, task_id=UUID(task_id))
+    result = await read_task_result(connection, task_id=UUID(task_id))
     return state, result
 
 

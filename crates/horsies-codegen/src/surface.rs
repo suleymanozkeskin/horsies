@@ -369,7 +369,10 @@ const RECORD_CLASSES: [StubClass; 16] = [
         doc: "The schema state of the database.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("state", "Literal['MATCH', 'MISMATCH', 'ABSENT', 'UNKNOWN']"),
+            property(
+                "state",
+                "Literal['MATCH', 'MISMATCH', 'ABSENT', 'ZERO_X', 'UNKNOWN']",
+            ),
             property("version", "int | None"),
             property("expected_version", "int"),
         ],

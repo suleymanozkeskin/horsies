@@ -32,7 +32,7 @@ api.mount(
 
 ```bash
 horsies web myapp.tasks:app                    # app path: full feature set
-horsies web --database-url "postgresql+psycopg://..."   # registry-less
+horsies web --database-url "postgresql://..."   # registry-less
 ```
 
 | Flag | Default | Notes |

@@ -21,7 +21,7 @@ from horsies.core.models.broker import PostgresConfig
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(database_url="postgresql+psycopg://test:test@localhost/test"),
+            broker=PostgresConfig(database_url="postgresql://test:test@localhost/test"),
         )
     )
 
@@ -568,8 +568,8 @@ class TestLiveBrokerConnectivityCheck:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url="postgresql+psycopg://test:test@pooler/test",
-                    session_database_url="postgresql+psycopg://test:test@direct/test",
+                    database_url="postgresql://test:test@pooler/test",
+                    session_database_url="postgresql://test:test@direct/test",
                     pgbouncer_transaction_mode=True,
                 ),
             )
@@ -615,6 +615,7 @@ class TestLiveBrokerConnectivityCheck:
             errors = app.check(live=True)
 
         assert errors == []
+        # The engines open the configured URLs with the psycopg 3 driver.
         assert mock_create_engine.call_args_list[0].args[0] == (
             "postgresql+psycopg://test:test@pooler/test"
         )
@@ -639,8 +640,8 @@ class TestLiveBrokerConnectivityCheck:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url="postgresql+psycopg://test:test@pooler/test",
-                    session_database_url="postgresql+psycopg://test:test@direct/test",
+                    database_url="postgresql://test:test@pooler/test",
+                    session_database_url="postgresql://test:test@direct/test",
                     pgbouncer_transaction_mode=True,
                 ),
             )

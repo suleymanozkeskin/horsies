@@ -83,10 +83,10 @@ class ChildPreload(str, Enum):
 
 @dataclass
 class WorkerConfig:
-    dsn: str  # SQLAlchemy async URL (e.g. postgresql+psycopg://...)
+    dsn: str  # the database URL (postgresql://...), as PostgresConfig holds it
     psycopg_dsn: str  # plain psycopg URL for listener
     queues: list[str]  # which queues to serve
-    session_dsn: str = ''  # SQLAlchemy async URL for session features
+    session_dsn: str = ''  # the session database URL (postgresql://...)
     pgbouncer_transaction_mode: bool = False
     # The isolated children. 0 is valid when the worker has shared children.
     processes: int = os.cpu_count() or 2

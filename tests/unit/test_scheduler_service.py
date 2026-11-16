@@ -200,7 +200,7 @@ COMMAND = SendCommand(
 )
 
 # A broker that builds real send commands; it opens no connection.
-REAL_BROKER_URL = 'postgresql+psycopg://user:pass@localhost/db'
+REAL_BROKER_URL = 'postgresql://user:pass@localhost/db'
 
 
 def _fire_harness(

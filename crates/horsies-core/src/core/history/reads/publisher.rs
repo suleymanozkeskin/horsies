@@ -132,9 +132,14 @@ impl LoaderPublication for StagedLoaderPublisher {
             .execute(&mut *connection)
             .await?;
         rewrite_manifest_table(connection, &manifest).await?;
-        sqlx::raw_sql(&stamp_rendered_readers_ddl())
-            .execute(&mut *connection)
-            .await?;
+        // The trait call returns a boxed `Send` future. `RawSql::execute` is
+        // an `async fn` generic over the executor, and its future does not
+        // satisfy the `Send` bound of `republish` for every borrow lifetime.
+        sqlx::Executor::execute(
+            &mut *connection,
+            sqlx::raw_sql(&stamp_rendered_readers_ddl()),
+        )
+        .await?;
 
         let mut absent_leaves = selection.absent_relations;
         absent_leaves.sort();

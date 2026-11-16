@@ -433,6 +433,12 @@ impl CorePool {
         self.plan.sizing
     }
 
+    /// The connection plan that each new connection of the pool opens with.
+    #[cfg(test)]
+    pub(crate) fn connect_plan(&self) -> &ConnectPlan {
+        &self.connect
+    }
+
     /// Checks out a connection.
     ///
     /// Waits at most `checkout_wait` (gate and pool together). Until the
