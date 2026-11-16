@@ -47,10 +47,16 @@ pub enum OperationalErrorCode {
     SubworkflowDepthLimitReached,
     /// A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code.
     WorkflowStartIncomplete,
+    /// The task held the event loop of its shared async child for the block limit, before its
+    /// deadline; the worker killed the child.
+    TaskBlockedLoop,
+    /// Another task held the event loop of the shared async child; the worker killed the child, and
+    /// this task, before its deadline, ended with it.
+    NeighbourBlockedLoop,
 }
 
 impl OperationalErrorCode {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::UnhandledError,
         Self::TaskError,
         Self::WorkerCrashed,
@@ -63,6 +69,8 @@ impl OperationalErrorCode {
         Self::WorkflowRecoveryLimitReached,
         Self::SubworkflowDepthLimitReached,
         Self::WorkflowStartIncomplete,
+        Self::TaskBlockedLoop,
+        Self::NeighbourBlockedLoop,
     ];
 }
 
@@ -1201,6 +1209,20 @@ mod tests {
             let back: BuiltInTaskCode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, builtin);
         }
+    }
+
+    /// Python `OperationalErrorCode` names the two codes of a blocked event
+    /// loop this way.
+    #[test]
+    fn the_blocked_loop_codes_have_python_names() {
+        assert_eq!(
+            serde_json::to_string(&OperationalErrorCode::TaskBlockedLoop).unwrap(),
+            "\"TASK_BLOCKED_LOOP\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationalErrorCode::NeighbourBlockedLoop).unwrap(),
+            "\"NEIGHBOUR_BLOCKED_LOOP\""
+        );
     }
 
     #[test]
