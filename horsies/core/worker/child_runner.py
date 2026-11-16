@@ -725,7 +725,6 @@ _SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
                 started AS (
                     UPDATE horsies_tasks t
                     SET status = 'RUNNING',
-                        claimed = FALSE,
                         claim_expires_at = NULL,
                         started_at = NOW(),
                         worker_pid = %s,

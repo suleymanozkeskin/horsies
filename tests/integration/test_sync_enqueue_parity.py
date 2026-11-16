@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import text
@@ -48,6 +49,7 @@ async def _sync_enqueue(
         'parity.task',
         task_id=task_id,
         enqueue_sha='c' * 64,
+        sent_at=datetime.now(timezone.utc),
         args_json='[]',
         kwargs_json='{}',
         **keywords,
