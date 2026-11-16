@@ -272,6 +272,11 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"detail":"database"}"#,
         ),
         (
+            error(TaskActionErrorCode::EventLoopLimit, None, "loop limit"),
+            503,
+            r#"{"detail":"loop limit"}"#,
+        ),
+        (
             error(TaskActionErrorCode::StoredDataInvalid, None, "stored"),
             500,
             r#"{"detail":"stored"}"#,

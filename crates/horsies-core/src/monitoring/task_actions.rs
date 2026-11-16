@@ -26,6 +26,10 @@ pub enum TaskActionErrorCode {
     TaskNotCancellable,
     TaskIsWorkflowTask,
     DbOperationFailed,
+    /// The broker already holds resource sets for its limit of open event
+    /// loops, and this call ran on a new one. Nothing changed. Python client
+    /// only; removed before 0.8.0.
+    EventLoopLimit,
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the transaction did not commit. Not retryable: a repeat gives the
