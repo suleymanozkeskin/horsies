@@ -3832,8 +3832,6 @@ class TestHistoryTaskInfoResultDecode:
         detail.result_payload = payload
         detail.result_digest = archive_digest(payload)
         detail.result_envelope_version = 1
-        detail.result_codec = 'json-utf8'
-        detail.result_content_type = 'application/json'
 
         with (
             patch(

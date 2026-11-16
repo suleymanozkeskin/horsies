@@ -3939,8 +3939,6 @@ class PostgresBroker:
                 ))
             decoded = decode_result_envelope(
                 version=detail.result_envelope_version,
-                codec=detail.result_codec,
-                content_type=detail.result_content_type,
                 payload=detail.result_payload,
                 digest=detail.result_digest,
             )

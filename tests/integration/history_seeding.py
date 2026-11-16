@@ -32,11 +32,7 @@ from horsies.core.history.archive.attempts import (
     AttemptRecord,
     decode_attempt_snapshot,
 )
-from horsies.core.history.archive.versions import (
-    JSON_CONTENT_TYPE,
-    JSON_UTF8_CODEC,
-    DecodedArchiveValue,
-)
+from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.history.commands import EnsureLeafCoverage
 from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
 from horsies.core.history.ddl.classes import (
@@ -337,12 +333,8 @@ async def read_attempts(
     ).first()
     if snapshot is None:
         return ()
-    # Archive version 1 implies the JSON codec and content type; the
-    # history row stores neither.
     decoded = decode_attempt_snapshot(
         version=snapshot.attempt_archive_version,
-        codec=JSON_UTF8_CODEC,
-        content_type=JSON_CONTENT_TYPE,
         payload=bytes(snapshot.attempt_snapshot),
         digest=bytes(snapshot.attempt_snapshot_digest),
     )

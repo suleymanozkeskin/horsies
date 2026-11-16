@@ -76,11 +76,15 @@ async def insert_attempts(
             text("""
                 INSERT INTO horsies_task_attempts (
                     task_id, attempt, outcome, will_retry,
-                    started_at, finished_at, worker_id
+                    started_at, finished_at, error_code, error_message,
+                    failed_reason, worker_id, worker_hostname, worker_pid,
+                    worker_process_name
                 ) VALUES (
                     CAST(:task_id AS uuid), :attempt, 'FAILED', TRUE,
                     NOW() - interval '2 minutes', NOW() - interval '1 minute',
-                    :worker
+                    NULL, NULL,
+                    NULL, :worker, 'it-host', 4242,
+                    'it-proc'
                 )
             """),
             {'task_id': task_id, 'attempt': attempt, 'worker': WORKER},
@@ -124,8 +128,6 @@ class TestBatchSnapshotReuse:
             for row in history:
                 decoded = decode_attempt_snapshot(
                     version=row.attempt_archive_version,
-                    codec='json-utf8',
-                    content_type='application/json',
                     payload=bytes(row.attempt_snapshot),
                     digest=bytes(row.attempt_snapshot_digest),
                 )
