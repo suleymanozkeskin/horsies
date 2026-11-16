@@ -49,7 +49,7 @@ _DIGEST = b'\x02' * 32
 
 def _row(start: EnqueueStart = StartNow(), key: EnqueueKey = Unkeyed()) -> EnqueueRow:
     return EnqueueRow(
-        task_id='0190f0f0-0000-7000-8000-000000000001',
+        task_id=uuid.UUID('0190f0f0-0000-7000-8000-000000000001'),
         task_name='probe',
         queue_name='default',
         priority=100,
@@ -130,6 +130,7 @@ class TestParameters:
 
 
 _ID = uuid.UUID('0190f0f0-0000-7000-8000-000000000002')
+_SENT = uuid.UUID('0190f0f0-0000-7000-8000-000000000003')
 
 
 class TestOutcomeRows:
@@ -138,8 +139,8 @@ class TestOutcomeRows:
         [
             ('INSERTED', Inserted()),
             ('SAME_COMMAND', SameCommand()),
-            ('KEY_REPLAY', KeyReplay(task_id=str(_ID))),
-            ('KEY_CONFLICT', KeyConflict(owner_task_id=str(_ID))),
+            ('KEY_REPLAY', KeyReplay(task_id=_ID)),
+            ('KEY_CONFLICT', KeyConflict(owner_task_id=_ID)),
             ('PAYLOAD_MISMATCH', PayloadMismatch()),
             ('CONFLICT_UNVERIFIABLE', ConflictUnverifiable()),
         ],
@@ -150,7 +151,11 @@ class TestOutcomeRows:
         assert read_enqueue_outcome([(outcome, _ID)]) == expected
 
     def test_an_id_in_text_form_reads_the_same(self) -> None:
-        assert read_enqueue_outcome([('KEY_REPLAY', str(_ID))]) == KeyReplay(task_id=str(_ID))
+        assert read_enqueue_outcome([('KEY_REPLAY', str(_ID))]) == KeyReplay(task_id=_ID)
+
+    def test_a_holder_id_text_that_is_not_a_uuid_names_the_column(self) -> None:
+        with pytest.raises(ValueError, match='horsies_enqueue_task.task_id'):
+            read_enqueue_outcome([('KEY_CONFLICT', 'not-a-uuid')])
 
     @pytest.mark.parametrize(
         'rows',
@@ -170,29 +175,29 @@ class TestOutcomeRows:
 class TestResults:
     @pytest.mark.parametrize('outcome', [Inserted(), SameCommand()])
     def test_the_sent_id_holds_the_send(self, outcome: EnqueueOutcome) -> None:
-        assert enqueue_result(outcome, task_id='sent', task_name='probe') == Ok('sent')
+        assert enqueue_result(outcome, task_id=_SENT, task_name='probe') == Ok(_SENT)
 
     def test_a_key_replay_answers_the_id_that_holds_the_key(self) -> None:
-        result = enqueue_result(KeyReplay(task_id='holder'), task_id='sent', task_name='probe')
+        result = enqueue_result(KeyReplay(task_id=_ID), task_id=_SENT, task_name='probe')
 
-        assert result == Ok('holder')
+        assert result == Ok(_ID)
 
     def test_a_key_conflict_names_the_owner(self) -> None:
-        match enqueue_result(KeyConflict(owner_task_id='owner'), task_id='sent', task_name='probe'):
-            case Err(BrokerIdempotencyKeyConflict(owner_task_id='owner')):
+        match enqueue_result(KeyConflict(owner_task_id=_ID), task_id=_SENT, task_name='probe'):
+            case Err(BrokerIdempotencyKeyConflict(owner_task_id=owner)) if owner == _ID:
                 pass
             case other:
                 raise AssertionError(f'expected a key conflict, got {other!r}')
 
     def test_a_payload_mismatch_names_the_task_id(self) -> None:
-        match enqueue_result(PayloadMismatch(), task_id='sent', task_name='probe'):
+        match enqueue_result(PayloadMismatch(), task_id=_SENT, task_name='probe'):
             case Err(BrokerPayloadMismatch(message=message)):
-                assert 'sent' in message
+                assert str(_SENT) in message
             case other:
                 raise AssertionError(f'expected a payload mismatch, got {other!r}')
 
     def test_an_unverifiable_conflict_is_a_failure_that_is_not_retryable(self) -> None:
-        match enqueue_result(ConflictUnverifiable(), task_id='sent', task_name='probe'):
+        match enqueue_result(ConflictUnverifiable(), task_id=_SENT, task_name='probe'):
             case Err(BrokerEnqueueFailed(retryable=False, exception=NoCause(), message=message)):
                 assert 'cannot verify payload identity' in message
             case other:

@@ -29,6 +29,7 @@ from typing import (
 from abc import abstractmethod
 from collections.abc import Coroutine, Mapping
 from types import MappingProxyType
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
@@ -431,7 +432,7 @@ class TaskHandle(Generic[T]):
 
     def __init__(
         self,
-        task_id: str,
+        task_id: UUID,
         app: Optional['Horsies'] = None,
         broker_mode: bool = False,
         ok_type: TypeAnnotation | None = None,
@@ -556,7 +557,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=err_code,
                 message=broker_err.message,
-                data={'task_id': self.task_id, 'broker_code': broker_err.code.value},
+                data={'task_id': str(self.task_id), 'broker_code': broker_err.code.value},
                 exception=cause,
                 cache=cache,
             )
@@ -565,7 +566,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=RetrievalCode.TASK_NOT_FOUND,
                 message=f'Task {self.task_id} not found in database',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
                 # Possibly a handle reconstructed by id racing the enqueue
                 # commit; a later get() may find the row.
                 cache=False,
@@ -576,7 +577,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=OutcomeCode.TASK_CANCELLED,
                 message=f'Task {self.task_id} was cancelled before completion',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         if record.raw_result is None:
             # ``raw_result is None`` covers two distinct cases per the
@@ -603,7 +604,7 @@ class TaskHandle(Generic[T]):
                         f'payload'
                     ),
                     data={
-                        'task_id': self.task_id,
+                        'task_id': str(self.task_id),
                         'status': record.status.value,
                     },
                 )
@@ -616,7 +617,7 @@ class TaskHandle(Generic[T]):
                         f'running.'
                     ),
                     data={
-                        'task_id': self.task_id,
+                        'task_id': str(self.task_id),
                         'timeout_ms': timeout_ms,
                         'status': record.status.value,
                     },
@@ -636,7 +637,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'TaskResult envelope invalid: {exc}',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         err_slot = envelope.get('err')
         # Err-fast-path: TaskError is fixed-schema; decodable without
@@ -649,7 +650,7 @@ class TaskHandle(Generic[T]):
                 return self._error_result(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                     message=f'Failed to decode TaskError: {exc}',
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                 )
             decoded_err: TaskResult[T, TaskError] = TaskResult(
                 err=cast('TaskError', err_value),
@@ -667,7 +668,7 @@ class TaskHandle(Generic[T]):
                     f'a declared OkT; the handle has none (task not '
                     f'locally registered). Use raw_result() instead.'
                 ),
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         try:
             decoded = decode_task_result(raw, self.ok_type)
@@ -675,7 +676,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'decode_task_result failed: {exc}',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         decoded_tr = cast('TaskResult[T, TaskError]', decoded)
         self._cached_result = decoded_tr
@@ -701,7 +702,7 @@ class TaskHandle(Generic[T]):
             message=wait_inside_task_message(
                 f'TaskHandle.{operation}() for task {self.task_id}',
             ),
-            data={'task_id': self.task_id},
+            data={'task_id': str(self.task_id)},
             cache=False,
         )
 
@@ -734,7 +735,7 @@ class TaskHandle(Generic[T]):
                 return self._error_result(
                     error_code=RetrievalCode.INVALID_INPUT,
                     message=f'TaskHandle.get() for task {self.task_id}: {refused.message}',
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                     cache=False,
                 )
             case Ok():
@@ -745,7 +746,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result cache is empty after fetch',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -758,7 +759,7 @@ class TaskHandle(Generic[T]):
                         f'TaskHandle.get() for task {self.task_id}',
                         'handle.get_async(...)',
                     ),
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                     cache=False,
                 )
             broker = self._app.get_broker()
@@ -773,7 +774,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result not available - task may not have been executed',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -805,7 +806,7 @@ class TaskHandle(Generic[T]):
                 return self._error_result(
                     error_code=RetrievalCode.INVALID_INPUT,
                     message=f'TaskHandle.get_async() for task {self.task_id}: {refused.message}',
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                     cache=False,
                 )
             case Ok():
@@ -816,7 +817,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result cache is empty after fetch',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -834,7 +835,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result not available - task may not have been executed',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -1262,7 +1263,7 @@ class TaskSendOptions(Protocol[P, T]):
 
 def _map_broker_err(
     broker_err: BrokerEnqueueError | BrokerSyncCallError,
-    task_id: str,
+    task_id: UUID,
     payload: TaskSendPayload,
 ) -> _BrokerSendError:
     """Map a broker error variant to its send variant."""
@@ -2081,7 +2082,7 @@ def create_task_wrapper(
     # ---- Core send/schedule helpers ----
 
     def _do_send(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
@@ -2150,7 +2151,7 @@ def create_task_wrapper(
         return Err(last_err)
 
     async def _do_send_async(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
@@ -2208,7 +2209,7 @@ def create_task_wrapper(
         return Err(last_err)
 
     def _do_schedule(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
@@ -2278,7 +2279,7 @@ def create_task_wrapper(
         return Err(last_err)
 
     async def _do_schedule_async(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
@@ -2344,7 +2345,7 @@ def create_task_wrapper(
         kwargs_dict: dict[str, Any],
         enqueue_delay_seconds: int | None = None,
         good_until_override: datetime | None | object = _UNSET,
-    ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
+    ) -> TaskSendResult[tuple[UUID, TaskSendPayload]]:
         """Validate, serialize, and build a (task_id, TaskSendPayload) tuple.
 
         Returns Err(TaskSendError) on validation or serialization failure.
@@ -2912,7 +2913,7 @@ def create_task_wrapper(
         *,
         require_delay: bool = False,
         reject_delay: bool = False,
-    ) -> Result[tuple[str, TaskSendPayload], TaskSendValidationFailed]:
+    ) -> Result[tuple[UUID, TaskSendPayload], TaskSendValidationFailed]:
         """Check that a retryable error's payload fits this retry method.
 
         The parameter type admits ``TaskSendEnqueueFailed``,

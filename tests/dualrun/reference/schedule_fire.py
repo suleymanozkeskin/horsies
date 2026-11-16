@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -73,7 +74,7 @@ async def _update_after_run(
     session: AsyncSession,
     *,
     schedule_name: str,
-    task_id: str,
+    task_id: UUID,
     executed_at: datetime,
     next_run_at: datetime,
 ) -> None:
@@ -83,7 +84,7 @@ async def _update_after_run(
             'schedule_name': schedule_name,
             'executed_at': executed_at,
             'next_run_at': next_run_at,
-            'task_id': task_id,
+            'task_id': str(task_id),
             'now': datetime.now(timezone.utc),
         },
     )
@@ -108,7 +109,7 @@ async def enqueue_slot(
     *,
     slot_time: datetime,
     kwargs_json: str | None,
-) -> Result[str, BrokerEnqueueError]:
+) -> Result[UUID, BrokerEnqueueError]:
     """The old enqueue of one slot, with the given kwargs text.
 
     The slot id and ``sent_at`` come from the slot time; the fingerprint
@@ -195,7 +196,7 @@ async def check_schedule(
                 max_runs=schedule.max_catch_up_runs,
             )
         if due_runs:
-            last_task_id = ''
+            last_task_id: UUID | None = None
             caught_up: list[datetime] = []
             permanent_skip_slot: datetime | None = None
             for due_time in due_runs:
@@ -213,16 +214,19 @@ async def check_schedule(
                 await session.rollback()
                 return
             next_run = calculate_next_run(schedule.pattern, progress_slot, schedule.timezone)
-            if caught_up:
-                await _update_after_run(
-                    session,
-                    schedule_name=schedule.name,
-                    task_id=last_task_id,
-                    executed_at=check_time,
-                    next_run_at=next_run,
-                )
-            else:
-                await _update_next_run(session, schedule_name=schedule.name, next_run_at=next_run)
+            match last_task_id:
+                case UUID() as recorded_task_id:
+                    await _update_after_run(
+                        session,
+                        schedule_name=schedule.name,
+                        task_id=recorded_task_id,
+                        executed_at=check_time,
+                        next_run_at=next_run,
+                    )
+                case None:
+                    await _update_next_run(
+                        session, schedule_name=schedule.name, next_run_at=next_run,
+                    )
             await session.commit()
             return
 

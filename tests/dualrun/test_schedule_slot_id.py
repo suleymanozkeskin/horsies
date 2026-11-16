@@ -40,18 +40,20 @@ _SLOTS: Final = (
 )
 
 
-def _reference_id(name: str, slot: datetime) -> str:
+def _reference_id(name: str, slot: datetime) -> uuid.UUID:
     """The slot id before this change: UUIDv5 of ``name:<UTC isoformat>``."""
-    return str(uuid.uuid5(_REFERENCE_NAMESPACE, f'{name}:{slot.astimezone(timezone.utc).isoformat()}'))
+    return uuid.uuid5(_REFERENCE_NAMESPACE, f'{name}:{slot.astimezone(timezone.utc).isoformat()}')
 
 
-def _sql_id(connection: psycopg.Connection[tuple[object, ...]], name: str, slot: datetime) -> str:
+def _sql_id(
+    connection: psycopg.Connection[tuple[object, ...]], name: str, slot: datetime,
+) -> uuid.UUID:
     record = connection.execute(
         'SELECT horsies_schedule_slot_task_id(%s, %s)', (name, slot)
     ).fetchone()
     match record:
         case (uuid.UUID() as task_id,):
-            return str(task_id)
+            return task_id
         case _:
             raise AssertionError(f'the slot id function answered {record!r}')
 
