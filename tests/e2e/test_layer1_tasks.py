@@ -9,7 +9,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -156,7 +156,9 @@ def test_an_async_task_cannot_wait_for_another_task() -> None:
             workflow_get_async_refused=True,
         )
         sent = unwrap_get_result(
-            default_instance.app.get_result(value.sent_task_id, timeout_ms=10000),
+            default_instance.app.get_result(
+                UUID(value.sent_task_id), timeout_ms=10000,
+            ),
         )
         assert_ok(sent, expected_value=2)
 

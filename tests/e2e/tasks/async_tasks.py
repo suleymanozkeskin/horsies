@@ -109,7 +109,7 @@ async def async_wait_inside_task() -> TaskResult[AsyncWaitProbe, TaskError]:
     started = await spec_single_node.start_async()
     return TaskResult(
         ok=AsyncWaitProbe(
-            sent_task_id=handle.task_id,
+            sent_task_id=str(handle.task_id),
             get_async_refused=_refused(
                 await handle.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
             ),
