@@ -2,6 +2,8 @@
 
 pause_workflow / resume_workflow return ``HandleResult[bool]``. A database
 error is a ``HandleOperationError`` variant; any other exception propagates.
+The pause is one ``horsies_workflow_pause`` statement in autocommit; its
+outcome row decides the result.
 Resume runs its recovery pass in a second transaction after the commit, so a
 database error there is ``HandleResumeRecoveryFailed``. The sync wrappers
 return a ``LoopRunnerError`` as ``HandleLoopRunnerFailed`` and let other
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -110,67 +113,88 @@ def _mock_broker(
     return broker
 
 
-def _session_of(broker: MagicMock) -> AsyncMock:
-    """The session that ``_mock_broker`` hands out."""
-    resources = broker.select_resources.return_value.ok_value
-    session: AsyncMock = resources.session_factory.return_value.__aenter__.return_value
-    return session
-
-
 # ===========================================================================
 # pause_workflow async
 # ===========================================================================
 
 
+def _pause_broker(
+    *,
+    outcome: str = 'PAUSED',
+    side_effect: Exception | None = None,
+) -> tuple[MagicMock, AsyncMock, AsyncMock]:
+    """A mock broker whose autocommit connection returns one pause row.
+
+    Returns the broker, its session and the session's connection.
+    ``side_effect`` makes the session context manager raise instead.
+    """
+    connection = AsyncMock()
+    result = MagicMock()
+    result.fetchall.return_value = [SimpleNamespace(outcome=outcome)]
+    connection.execute = AsyncMock(return_value=result)
+    session = AsyncMock()
+    session.connection = AsyncMock(return_value=connection)
+    cm = AsyncMock()
+    match side_effect:
+        case None:
+            cm.__aenter__ = AsyncMock(return_value=session)
+        case _:
+            cm.__aenter__ = AsyncMock(side_effect=side_effect)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    broker = MagicMock()
+    attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=cm)))
+    return broker, session, connection
+
+
 @pytest.mark.unit
 class TestPauseWorkflowResult:
-    """pause_workflow returns HandleResult[bool]."""
+    """pause_workflow returns HandleResult[bool] from horsies_workflow_pause."""
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_running_returns_ok_true(self) -> None:
-        """Workflow in RUNNING state -> Ok(True)."""
-        from horsies.core.lifecycle.commands import (
-            AbandonNodesOfPausedWorkflows,
-        )
+        """PAUSED -> Ok(True); one statement on an autocommit connection."""
+        from horsies.core.workflows.functions import PAUSE_WORKFLOW_FUNCTION_SQL
         from horsies.core.workflows.lifecycle import pause_workflow
 
-        broker = _mock_broker(transition_row=('some-id',))
-        with patch(
-            'horsies.core.workflows.lifecycle.apply_batch_async',
-            new=AsyncMock(return_value=[]),
-        ) as apply:
-            result = await pause_workflow(broker, 'wf-1')
+        broker, session, connection = _pause_broker(outcome='PAUSED')
+        result = await pause_workflow(broker, WORKFLOW_ID)
 
         assert is_ok(result)
         assert result.ok_value is True
-        assert apply.await_args is not None
-        command = apply.await_args.args[1]
-        assert isinstance(command, AbandonNodesOfPausedWorkflows)
-        assert command.workflow_ids == ('wf-1',)
+        assert session.connection.await_args is not None
+        assert session.connection.await_args.kwargs == {
+            'execution_options': {'isolation_level': 'AUTOCOMMIT'},
+        }
+        assert connection.execute.await_count == 1
+        assert connection.execute.await_args is not None
+        assert connection.execute.await_args.args == (
+            PAUSE_WORKFLOW_FUNCTION_SQL, {'wf_id': WORKFLOW_ID},
+        )
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_wrong_state_returns_ok_false(self) -> None:
-        """Workflow exists but not RUNNING -> Ok(False)."""
+        """NOT_RUNNING -> Ok(False)."""
         from horsies.core.workflows.lifecycle import pause_workflow
 
-        broker = _mock_broker(transition_row=None, exists_row=('wf-1',))
-        result = await pause_workflow(broker, 'wf-1')
+        broker, _, _ = _pause_broker(outcome='NOT_RUNNING')
+        result = await pause_workflow(broker, WORKFLOW_ID)
 
         assert is_ok(result)
         assert result.ok_value is False
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_not_found_returns_err(self) -> None:
-        """Workflow does not exist -> Err(WORKFLOW_NOT_FOUND)."""
+        """NOT_FOUND -> Err(WORKFLOW_NOT_FOUND)."""
         from horsies.core.workflows.lifecycle import pause_workflow
 
-        broker = _mock_broker(transition_row=None, exists_row=None)
-        result = await pause_workflow(broker, 'wf-1')
+        broker, _, _ = _pause_broker(outcome='NOT_FOUND')
+        result = await pause_workflow(broker, WORKFLOW_ID)
 
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, HandleWorkflowNotFound)
-        assert err.workflow_id == 'wf-1'
+        assert err.workflow_id == WORKFLOW_ID
         assert err.retryable is False
 
     @pytest.mark.asyncio(loop_scope='function')
@@ -179,40 +203,39 @@ class TestPauseWorkflowResult:
         from horsies.core.workflows.lifecycle import pause_workflow
 
         db_exc = _db_error()
-        broker = _mock_broker(side_effect=db_exc)
-        result = await pause_workflow(broker, 'wf-1')
+        broker, _, _ = _pause_broker(side_effect=db_exc)
+        result = await pause_workflow(broker, WORKFLOW_ID)
 
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, HandleDbOperationFailed)
-        assert err.workflow_id == 'wf-1'
+        assert err.workflow_id == WORKFLOW_ID
         assert err.exception is db_exc
         assert err.retryable is True
 
     @pytest.mark.asyncio(loop_scope='function')
-    @pytest.mark.parametrize(
-        'defect', [RuntimeError('logic bug'), AssertionError('invariant')],
-        ids=type,
-    )
-    async def test_pause_defect_in_the_body_propagates(
-        self, defect: Exception,
-    ) -> None:
-        """An exception that is not a database error propagates; nothing commits."""
+    async def test_pause_statement_error_returns_db_operation_failed(self) -> None:
+        """An error of the statement itself -> Err(HandleDbOperationFailed)."""
         from horsies.core.workflows.lifecycle import pause_workflow
 
-        broker = _mock_broker(transition_row=('some-id',))
-        session = _session_of(broker)
-        with (
-            patch(
-                'horsies.core.workflows.lifecycle.cascade_pause_to_children',
-                new=AsyncMock(side_effect=defect),
-            ),
-            pytest.raises(type(defect)) as exc_info,
-        ):
-            await pause_workflow(broker, 'wf-1')
+        db_exc = _db_error()
+        broker, _, connection = _pause_broker()
+        connection.execute = AsyncMock(side_effect=db_exc)
+        result = await pause_workflow(broker, WORKFLOW_ID)
 
-        assert exc_info.value is defect
-        session.commit.assert_not_awaited()
+        assert is_err(result)
+        assert isinstance(result.err_value, HandleDbOperationFailed)
+        assert result.err_value.exception is db_exc
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_pause_row_outside_the_contract_propagates(self) -> None:
+        """An outcome the function does not define is a defect: it raises."""
+        from horsies.core.lifecycle.outcomes import OutcomeDecodeError
+        from horsies.core.workflows.lifecycle import pause_workflow
+
+        broker, _, _ = _pause_broker(outcome='PAUSED_TWICE')
+        with pytest.raises(OutcomeDecodeError, match='PAUSED_TWICE'):
+            await pause_workflow(broker, WORKFLOW_ID)
 
 
 # ===========================================================================

@@ -16,14 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typing import Final
 
 
-from horsies.core.lifecycle.commands import AbandonNodesOfPausedWorkflows
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    Applied,
-    LostClaim,
-    SourceStateConflict,
-    TaskAbsent,
-)
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.codec.json_io import Json, dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
@@ -46,7 +38,7 @@ from horsies.core.models.workflow import (
 from horsies.core.models.workflow.handle import _OUTPUTLESS_TERMINALS
 from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
 from horsies.core.errors import WorkflowValidationError, ErrorCode
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
     HandleDbOperationFailed,
@@ -66,6 +58,11 @@ from horsies.core.workflows.start_types import (
     WorkflowStartValidationFailed,
 )
 from horsies.core.history.periods import RetentionClassKey
+from horsies.core.workflows.functions import (
+    PAUSE_WORKFLOW_FUNCTION_SQL,
+    PauseOutcome,
+    decode_pause_outcome,
+)
 from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
     GET_WORKFLOW_STATUS_SQL,
@@ -75,10 +72,8 @@ from horsies.core.workflows.sql import (
     CHECK_WORKFLOW_EXISTS_SQL,
     GET_WORKFLOW_NAME_SQL,
     INSERT_WORKFLOW_SQL,
-    PAUSE_WORKFLOW_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
-    RESET_ABANDONED_WORKFLOW_TASKS_SQL,
     RESUME_WORKFLOW_SQL,
     GET_PENDING_WORKFLOW_TASKS_SQL,
     GET_READY_WORKFLOW_TASKS_SQL,
@@ -903,7 +898,10 @@ async def pause_workflow(
     - No READY tasks will be enqueued
     - Workflow completion check is skipped while PAUSED
 
-    Also cascades pause to all running child workflows (iteratively, not recursively).
+    Also pauses every RUNNING descendant workflow, and abandons the claimed
+    tasks of the paused tree: their nodes go back to READY, so the resume
+    enqueues new tasks. One statement in autocommit
+    (``horsies_workflow_pause``).
 
     Use resume_workflow() to continue execution.
 
@@ -916,10 +914,11 @@ async def pause_workflow(
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
         ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
         ``Err(HandleDbOperationFailed)`` on a database error; the
-        transaction rolled back, or its commit outcome is unknown.
+        statement wrote nothing, or its commit outcome is unknown.
         ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
         of open event loops and this is a new one; nothing ran.
-        Any other exception propagates.
+        ``OutcomeDecodeError`` if the function returns a row outside its
+        contract (a defect). Any other exception propagates.
     """
     match await broker.select_resources():
         case Err(loop_limit):
@@ -928,67 +927,12 @@ async def pause_workflow(
             pass
     try:
         async with resources.session_factory() as session:
-            result = await session.execute(
-                PAUSE_WORKFLOW_SQL,
+            connection = await autocommit_connection(session)
+            result = await connection.execute(
+                PAUSE_WORKFLOW_FUNCTION_SQL,
                 {'wf_id': workflow_id},
             )
-            row = result.fetchone()
-            if row is None:
-                exists = await session.execute(
-                    CHECK_WORKFLOW_EXISTS_SQL,
-                    {'wf_id': workflow_id},
-                )
-                if exists.fetchone() is None:
-                    return Err(HandleWorkflowNotFound(
-                        message=f'Workflow {workflow_id} not found',
-                        workflow_id=workflow_id,
-                    ))
-                return Ok(False)
-
-            # Cascade pause to running child workflows (iterative BFS)
-            paused_workflow_ids = [workflow_id]
-            paused_workflow_ids.extend(
-                await cascade_pause_to_children(session, workflow_id)
-            )
-
-            # Claimed-but-not-started task rows cannot safely remain claimable
-            # after their workflow_task is reset to READY for resume. Cancel the
-            # abandoned internal task rows and let resume enqueue fresh rows.
-            abandon_outcomes = await apply_batch_async(
-                await session.connection(),
-                AbandonNodesOfPausedWorkflows(
-                    workflow_ids=tuple(paused_workflow_ids),
-                ),
-            )
-            abandoned_task_ids: list[str] = []
-            for outcome in abandon_outcomes:
-                match outcome:
-                    case Applied(task_id=task_id):
-                        abandoned_task_ids.append(task_id)
-                    case (
-                        AlreadyApplied()
-                        | LostClaim()
-                        | SourceStateConflict()
-                        | TaskAbsent()
-                    ):
-                        raise RuntimeError(
-                            'paused-workflow abandonment returned '
-                            f'{type(outcome).__name__}; workflow-scoped '
-                            'batches report transitioned rows only'
-                        )
-                    case _ as unreachable:
-                        assert_never(unreachable)
-            if abandoned_task_ids:
-                await session.execute(
-                    RESET_ABANDONED_WORKFLOW_TASKS_SQL,
-                    {'task_ids': abandoned_task_ids},
-                )
-
-            # The status trigger (horsies_notify_workflow_changes) sends
-            # workflow_done for each paused workflow at commit, so get()
-            # returns WORKFLOW_PAUSED without waiting for a poll.
-            await session.commit()
-            return Ok(True)
+            rows = result.fetchall()
     except SQLAlchemyError as exc:
         return Err(HandleDbOperationFailed(
             message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
@@ -996,9 +940,21 @@ async def pause_workflow(
             workflow_id=workflow_id,
             exception=exc,
         ))
-
-
-
+    # The status trigger (horsies_notify_workflow_changes) sends
+    # workflow_done for each paused workflow at commit, so get() returns
+    # WORKFLOW_PAUSED without waiting for a poll.
+    match decode_pause_outcome(rows):
+        case PauseOutcome.PAUSED:
+            return Ok(True)
+        case PauseOutcome.NOT_RUNNING:
+            return Ok(False)
+        case PauseOutcome.NOT_FOUND:
+            return Err(HandleWorkflowNotFound(
+                message=f'Workflow {workflow_id} not found',
+                workflow_id=workflow_id,
+            ))
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 async def cascade_pause_to_children(
