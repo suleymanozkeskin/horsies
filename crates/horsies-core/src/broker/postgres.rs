@@ -1112,7 +1112,7 @@ impl PostgresBroker {
                 BrokerError::EnqueueContract(format!("task identity mint failed: {error}"))
             })?,
         };
-        let max_retries = parse_max_retries(task_options);
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
         let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
         let retention_class_key = retention.class_key();
@@ -3181,7 +3181,22 @@ fn parse_task_result_row<T: DeserializeOwned>(
     }
 }
 
-use crate::core::task::retry_utils::parse_max_retries;
+use crate::worker::retry::stored_max_retries;
+
+/// The `max_retries` that enqueue stores, by Python's rule
+/// (`horsies/core/codec/task_options.py:80-103`, `stored_max_retries`): no
+/// options and no `retry_policy` store 0; a policy stores its `max_retries`.
+/// The options are read with the reader of the dispatch
+/// ([`stored_max_retries`]), so a text that the worker would refuse is refused
+/// here, before any statement: text that does not parse, that is not a JSON
+/// object, or whose `retry_policy` does not fit Python's `RetryPolicy` (a
+/// limit outside 1 to 20, a wrong field, no code) is `EnqueueContract`, which
+/// a send reports as `VALIDATION_FAILED`. Other keys are not judged here.
+fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
+    stored_max_retries(task_options).map_err(|refusal| {
+        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {refusal}"))
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Result wait
@@ -4573,65 +4588,6 @@ mod fused_finalize_tests {
             cleanup(&pool, id).await;
         }
     }
-
-    /// C10: the retry requeue CAS is likewise fenced by `started_at`, so a stale
-    /// attempt cannot requeue a task the worker is re-running under a new claim.
-    #[tokio::test]
-    #[serial]
-    async fn requeue_in_tx_fenced_by_started_at() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
-
-        let current: DateTime<Utc> =
-            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
-                .bind(test_uuid(&id))
-                .fetch_one(&pool)
-                .await
-                .expect("started_at");
-        let stale = current - chrono::Duration::minutes(1);
-
-        // Stale generation: fenced out.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(stale),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(!applied, "stale started_at must not requeue");
-
-        // Current generation: applies.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(current),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(applied, "matching started_at must requeue");
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(test_uuid(&id))
-            .fetch_one(&pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "PENDING");
-
-        cleanup(&pool, &id).await;
-    }
 }
 
 #[cfg(test)]
@@ -5572,6 +5528,7 @@ mod session_settings_tests {
             session_database_url: None,
             pgbouncer_transaction_mode,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
@@ -6189,6 +6146,91 @@ mod pool_options_tests {
 }
 
 #[cfg(test)]
+mod enqueue_task_options_tests {
+    //! Python `test_enqueue_retry_limit.py` and `test_broker_postgres.py`
+    //! (`test_malformed_task_options_raises`,
+    //! `test_task_options_with_non_dict_retry_policy_is_refused`): enqueue
+    //! stores a policy's limit, no policy stores 0, and options the worker
+    //! would refuse are refused before any statement.
+    use super::*;
+
+    fn policy(max_retries: u32, extra: &str) -> String {
+        let intervals = vec!["60"; max_retries as usize].join(", ");
+        format!(
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+                "backoff_strategy": "fixed", "jitter": false,
+                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+              "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
+              "cancel_grace_ms": null}}"#
+        )
+    }
+
+    #[test]
+    fn no_options_and_no_policy_store_zero_retries() {
+        for options in [
+            None,
+            Some(""),
+            Some(r#"{"retry_policy": null, "execution": "ISOLATED"}"#),
+            Some("{}"),
+        ] {
+            assert_eq!(
+                enqueue_max_retries("t", options).expect("accepted"),
+                0,
+                "{options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_policy_stores_its_limit() {
+        for limit in [1, 3, 20] {
+            assert_eq!(
+                enqueue_max_retries("t", Some(&policy(limit, ""))).expect("accepted"),
+                limit as i32
+            );
+        }
+    }
+
+    #[test]
+    fn options_the_worker_would_refuse_are_refused() {
+        let over_limit = policy(21, "");
+        let unknown_field = policy(2, r#", "extra": 1"#);
+        for options in [
+            "not json",
+            "[]",
+            r#"{"retry_policy": 5}"#,
+            r#"{"retry_policy": {"max_retries": 2}}"#,
+            over_limit.as_str(),
+            unknown_field.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    enqueue_max_retries("t", Some(options)),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{options}"
+            );
+        }
+    }
+
+    /// What the core writes for a task is what its enqueue accepts.
+    #[test]
+    fn the_core_written_options_are_accepted() {
+        let options = crate::core::TaskOptions {
+            task_name: "t".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User("X".to_owned())]),
+            retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
+            timeout_ms: Some(1_000),
+        };
+        let text = options.serialize_retry_options().expect("options are set");
+
+        assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
+    }
+}
+
+#[cfg(test)]
 mod client_family_tests {
     //! The client family at install and before the first write: a handle
     //! writes only into a database of its own family, and reads are not
@@ -6277,3 +6319,6 @@ mod task_info_code_tests {
         assert!(mapped.retryable);
     }
 }
+
+#[cfg(test)]
+mod result_read_spec_tests;

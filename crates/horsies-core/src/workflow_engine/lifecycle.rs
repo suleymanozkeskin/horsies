@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
 use sqlx::PgPool;
@@ -11,7 +10,6 @@ use uuid::Uuid;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
@@ -160,7 +158,7 @@ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -997,7 +995,11 @@ async fn reevaluate_and_enqueue(
                 crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
                     WorkflowError::Validation(format!("task identity mint failed: {error}"))
                 })?;
-            let max_retries = parse_max_retries(task.task_options.as_deref());
+            let max_retries = crate::workflow_engine::node_max_retries(
+                task.task_index,
+                &task.task_name,
+                task.task_options.as_deref(),
+            )?;
 
             // Merge args_from if present.
             let merged_input = merge_args_from_for_ready(
@@ -1023,7 +1025,11 @@ async fn reevaluate_and_enqueue(
             )
             .await?;
 
-            let good_until = parse_good_until_from_options(task.task_options.as_deref());
+            let good_until = crate::workflow_engine::node_good_until(
+                task.task_index,
+                &task.task_name,
+                task.task_options.as_deref(),
+            )?;
             let retention_class_key = retention.resolve_queue_class(&task.queue_name);
             let facts = prepare_workflow_task_facts(
                 &merged_input,
@@ -1400,6 +1406,18 @@ mod resume_idempotency_tests {
         .await
         .expect("resume enqueue path");
         assert_eq!(enqueued, 1);
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the resume node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input
