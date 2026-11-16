@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 ///   PENDING → EXPIRED (good_until passed before claim)
 ///   CLAIMED → EXPIRED (good_until passed before execution started)
 ///   RUNNING → PENDING (retry on failure/crash)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "status", base = "enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskStatus {
     /// Awaiting execution. Default status when the task is sent.
@@ -93,7 +96,10 @@ impl std::str::FromStr for TaskStatus {
 /// Outcome of a single task execution attempt.
 ///
 /// Recorded in `horsies_task_attempts.outcome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "status", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskAttemptOutcome {
     /// Task completed successfully.

@@ -1,6 +1,6 @@
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::enqueue::{prepare_enqueue_facts, EnqueueInputEligibility};
+use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
@@ -16,6 +16,7 @@ use crate::workflow_engine::recovery_limit::{
 };
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 // ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ LIMIT CAST($2 AS bigint)";
 /// Case 1: READY regular wf_tasks with no linked horsies_task.
 const GLOBAL_CASE1_READY_NO_TASK_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
-       wt.task_args, wt.task_kwargs, wt.queue_name, wt.priority,
+       wt.input, wt.queue_name, wt.priority,
        wt.task_options, wt.args_from, wt.workflow_ctx_from, wt.dependencies
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
@@ -170,7 +171,7 @@ LIMIT CAST($1 AS bigint)";
 
 const TREE_CASE1_READY_NO_TASK_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
-       wt.task_args, wt.task_kwargs, wt.queue_name, wt.priority,
+       wt.input, wt.queue_name, wt.priority,
        wt.task_options, wt.args_from, wt.workflow_ctx_from, wt.dependencies
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
@@ -184,8 +185,8 @@ LIMIT CAST($2 AS bigint)";
 /// Case 1.5: READY sub-workflow wf_tasks with no child workflow started.
 const GLOBAL_CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
-       wt.task_args, wt.task_kwargs, wt.args_from, wt.dependencies,
-       wt.sub_workflow_name, wt.sub_definition_key
+       wt.input, wt.args_from, wt.dependencies,
+       wt.sub_workflow_name, wt.sub_definition_key, wt.sub_workflow_params
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -196,8 +197,8 @@ LIMIT CAST($1 AS bigint)";
 
 const TREE_CASE1_5_READY_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.task_name,
-       wt.task_args, wt.task_kwargs, wt.args_from, wt.dependencies,
-       wt.sub_workflow_name, wt.sub_definition_key
+       wt.input, wt.args_from, wt.dependencies,
+       wt.sub_workflow_name, wt.sub_definition_key, wt.sub_workflow_params
 FROM horsies_workflow_tasks wt
 JOIN horsies_workflows w ON w.id = wt.workflow_id
 WHERE wt.status = 'READY'
@@ -475,26 +476,24 @@ WHERE id = $1
   AND EXISTS (SELECT 1 FROM claim)";
 
 /// Re-enqueue a READY task into horsies_tasks.
+/// An engine-minted task row carries no command fingerprint, no idempotency
+/// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, args, kwargs,
-    status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at,
-    command_fingerprint_version, command_fingerprint, retention_class_key,
-    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
-    retain_rerun_input, prepared_rerun_input_disposition,
-    prepared_rerun_input_version, prepared_rerun_input_codec,
-    prepared_rerun_input_content_type, prepared_rerun_input_digest,
-    prepared_rerun_input_inline, prepared_rerun_input_reference
+    id, task_name, queue_name, priority, input, task_options, execution,
+    retention_class_key, sent_at, created_at,
+    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+    status, enqueued_at, retry_count, max_retries, good_until,
+    is_workflow_task, updated_at,
+    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10,
-        TRUE, NOW(), NOW(), $11, $12, $13, $14, NULL, NULL, NULL, $15, $16,
-        $17, $18, $19, $20, $21, NULL)";
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+        'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// Link workflow_task to a newly created horsies_task.
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -531,8 +530,7 @@ struct ReadyTaskRow {
     workflow_id: Uuid,
     task_index: i32,
     task_name: String,
-    task_args: Option<String>,
-    task_kwargs: Option<String>,
+    input: String,
     queue_name: String,
     priority: i32,
     task_options: Option<String>,
@@ -547,12 +545,13 @@ struct ReadySubworkflowRow {
     workflow_id: Uuid,
     task_index: i32,
     task_name: String,
-    task_args: Option<String>,
-    task_kwargs: Option<String>,
+    input: String,
     args_from: Option<serde_json::Value>,
     dependencies: Vec<i32>,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice (`NOT_GIVEN` or `GIVEN`).
+    sub_workflow_params: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1536,10 +1535,10 @@ async fn enqueue_ready_task(
     })?;
     let max_retries = parse_max_retries(row.task_options.as_deref());
 
-    let merged_kwargs = merge_args_from_for_ready(
+    let merged_input = merge_args_from_for_ready(
         pool,
         row.workflow_id,
-        row.task_kwargs.as_deref(),
+        &row.input,
         &row.args_from,
         &row.dependencies,
     )
@@ -1548,32 +1547,22 @@ async fn enqueue_ready_task(
     // Inject workflow_ctx for ctx-capable nodes, matching the runtime promotion
     // path. Without this, a READY `workflow_ctx_from` task recovered here would
     // run with no upstream context and fail or produce a wrong result.
-    let merged_kwargs = engine::inject_workflow_ctx_into_kwargs(
+    let merged_input = engine::inject_workflow_ctx_into_input(
         pool,
         row.workflow_id,
         row.task_index,
         &row.task_name,
         row.workflow_ctx_from.as_deref(),
-        merged_kwargs,
+        merged_input,
     )
     .await?;
 
-    let enqueue_sha = format!("wf-{}", task_id);
     let good_until = parse_good_until_from_options(row.task_options.as_deref());
     let retention_class_key = retention.resolve_queue_class(&row.queue_name);
-    let facts = prepare_enqueue_facts(
-        &row.task_name,
-        &row.queue_name,
-        row.priority,
-        row.task_args.as_deref(),
-        merged_kwargs.as_deref(),
-        good_until,
-        None,
+    let facts = prepare_workflow_task_facts(
+        &merged_input,
         row.task_options.as_deref(),
         retention_class_key.as_deref(),
-        false,
-        None,
-        EnqueueInputEligibility::NeverEligible,
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
@@ -1585,32 +1574,16 @@ async fn enqueue_ready_task(
     let mut tx = pool.begin().await?;
 
     sqlx::query(ENQUEUE_TASK_SQL)
-        .bind(&task_id)
+        .bind(task_id)
         .bind(&row.task_name)
         .bind(&row.queue_name)
         .bind(row.priority)
-        .bind(&row.task_args)
-        .bind(&merged_kwargs)
-        .bind(good_until)
-        .bind(max_retries)
+        .bind(&merged_input)
         .bind(&row.task_options)
-        .bind(&enqueue_sha)
-        .bind(facts.command_fingerprint_version)
-        .bind(facts.command_fingerprint.as_slice())
+        .bind(facts.execution.as_str())
         .bind(&facts.retention_class_key)
-        .bind(facts.input_digest.as_slice())
-        .bind(facts.retain_rerun_input)
-        .bind(facts.prepared_rerun_input_disposition.as_str())
-        .bind(facts.prepared_rerun_input_version)
-        .bind(facts.prepared_rerun_input_codec)
-        .bind(facts.prepared_rerun_input_content_type)
-        .bind(
-            facts
-                .prepared_rerun_input_digest
-                .as_ref()
-                .map(|digest| digest.as_slice()),
-        )
-        .bind(facts.prepared_rerun_input_inline.as_deref())
+        .bind(max_retries)
+        .bind(good_until)
         .execute(&mut *tx)
         .await?;
 
@@ -1694,23 +1667,16 @@ async fn start_stuck_subworkflow(
         .await;
     };
 
-    let merged_kwargs = merge_args_from_for_ready(
+    let merged_input = merge_args_from_for_ready(
         pool,
         row.workflow_id,
-        row.task_kwargs.as_deref(),
+        &row.input,
         &row.args_from,
         &row.dependencies,
     )
     .await?;
-    let has_child_inputs =
-        row.task_args.is_some() || row.task_kwargs.is_some() || row.args_from.is_some();
-    let child_spec = materialize_child_spec(
-        registered,
-        has_child_inputs,
-        row.task_args.as_deref(),
-        merged_kwargs.as_deref(),
-        registry,
-    )?;
+    let params = stored_sub_workflow_params(row.sub_workflow_params.as_deref())?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);
 
@@ -1868,14 +1834,14 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name,
-                 queue_name, priority, dependencies, allow_failed_deps,
-                 join_type, status, is_subworkflow, created_at
-             ) VALUES (
-                 $1, $2, 0, 'root', 'bounded_recovery_watermark_task',
-                 'default', 100, '{}'::integer[], FALSE,
-                 'all', 'PENDING', FALSE, $3
-             )",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'bounded_recovery_watermark_task', 'null', 'default', 100,
+                '{}'::integer[], FALSE, 'all', 'PENDING', FALSE, $3, 0, 'ISOLATED',
+                'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -2095,12 +2061,13 @@ mod cap_tests {
         for (task_index, dependencies) in [(0_i32, vec![]), (1_i32, vec![2_i32])] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                     id, workflow_id, task_index, node_id, task_name, task_args,
-                     task_kwargs, queue_name, priority, dependencies,
-                     allow_failed_deps, join_type, status, is_subworkflow,
-                     created_at
-                 ) VALUES ($1, $2, $3, $4, $5, '[]', '{}', 'default', 100,
-                           $6, FALSE, 'all', 'PENDING', FALSE, NOW())",
+                    id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                    priority, dependencies, allow_failed_deps, join_type, status,
+                    is_subworkflow, created_at, max_retries, execution, retention_class_key
+                ) VALUES (
+                    $1, $2, $3, $4, $5, 'null', 'default', 100, $6, FALSE, 'all', 'PENDING',
+                    FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+                )",
             )
             .bind(Uuid::new_v4())
             .bind(workflow_id)
@@ -2114,11 +2081,13 @@ mod cap_tests {
         }
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, queue_name,
-                 priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, created_at
-             ) VALUES ($1, $2, 2, 'blocker', 'p7_case0_blocker', 'default',
-                       100, '{}', FALSE, 'all', 'RUNNING', FALSE, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 2, 'blocker', 'p7_case0_blocker', 'null', 'default', 100, '{}', FALSE,
+                'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -2229,10 +2198,11 @@ mod cap_tests {
         sqlx::raw_sql("DELETE FROM horsies_workflow_tasks; DELETE FROM horsies_workflows;
             UPDATE horsies_recovery_scan_cursors SET last_created_at=NULL,last_id=NULL,
                 cycle_upper_created_at=NULL,cycle_upper_id=NULL,claim_token=NULL,claim_expires_at=NULL;
-            INSERT INTO horsies_workflows(id,name,status)
-                SELECT md5('partial-'||n)::uuid,'partial_index','RUNNING' FROM generate_series(1,200) n;
-            INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status)
-                SELECT gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','COMPLETED'
+            INSERT INTO horsies_workflows(id,name,status,on_error,depth,root_workflow_id,sent_at,created_at,updated_at)
+                SELECT md5('partial-'||n)::uuid,'partial_index','RUNNING','fail',0,md5('partial-'||n)::uuid,NOW(),NOW(),NOW()
+                FROM generate_series(1,200) n;
+            INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,created_at)
+                SELECT gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','null','default',100,'{}',FALSE,'all','COMPLETED',FALSE,0,'ISOLATED','standard_30d',NOW()
                 FROM generate_series(1,200) n CROSS JOIN LATERAL generate_series(0,CASE WHEN n=200 THEN 1000 ELSE 0 END) i;
             ANALYZE horsies_workflows, horsies_workflow_tasks;
             SET LOCAL plan_cache_mode=force_generic_plan;")
@@ -2357,15 +2327,16 @@ mod cap_tests {
                  FROM generate_series(1, 50000) AS g
              )
              INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name,
+                 id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps,
-                 join_type, status, is_subworkflow, created_at
+                 join_type, status, is_subworkflow, max_retries, execution,
+                 retention_class_key, created_at
              )
-             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_stable_task',
+             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_stable_task', 'null',
                     'default', 100, '{}'::integer[], FALSE,
                     'all',
                     CASE WHEN g % 4 = 0 THEN 'PENDING' ELSE 'COMPLETED' END,
-                    FALSE, NOW()
+                    FALSE, 0, 'ISOLATED', 'standard_30d', NOW()
              FROM generated",
         )
         .execute(&pool)
@@ -2536,14 +2507,15 @@ mod cap_tests {
                  FROM generate_series(1, 201) AS g
              )
              INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name,
+                 id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps,
-                 join_type, status, is_subworkflow, completed_at, created_at
+                 join_type, status, is_subworkflow, max_retries, execution,
+                 retention_class_key, completed_at, created_at
              )
-             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_cursor_task',
+             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_cursor_task', 'null',
                     'default', 100, '{}'::integer[], FALSE, 'all',
                     CASE WHEN g = 201 THEN 'COMPLETED' ELSE 'PENDING' END,
-                    FALSE,
+                    FALSE, 0, 'ISOLATED', 'standard_30d',
                     CASE WHEN g = 201 THEN NOW() ELSE NULL END,
                     NOW()
              FROM generated",
@@ -2767,14 +2739,14 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name,
-                 queue_name, priority, dependencies, allow_failed_deps,
-                 join_type, status, is_subworkflow, completed_at, created_at
-             ) VALUES (
-                 $1, $2, 0, 'root', 'bounded_recovery_retry_task',
-                 'default', 100, '{}'::integer[], FALSE,
-                 'all', 'COMPLETED', FALSE, NOW(), NOW()
-             )",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                completed_at, created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'bounded_recovery_retry_task', 'null', 'default', 100,
+                '{}'::integer[], FALSE, 'all', 'COMPLETED', FALSE, NOW(), NOW(), 0, 'ISOLATED',
+                'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -2898,14 +2870,14 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name,
-                 queue_name, priority, dependencies, allow_failed_deps,
-                 join_type, status, is_subworkflow, completed_at, created_at
-             ) VALUES (
-                 $1, $2, 0, 'root', 'bounded_recovery_fenced_task',
-                 'default', 100, '{}'::integer[], FALSE,
-                 'all', 'COMPLETED', FALSE, NOW(), NOW()
-             )",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                completed_at, created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'bounded_recovery_fenced_task', 'null', 'default', 100,
+                '{}'::integer[], FALSE, 'all', 'COMPLETED', FALSE, NOW(), NOW(), 0, 'ISOLATED',
+                'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -3111,13 +3083,13 @@ mod cap_tests {
         .expect("insert recovery workflow");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, created_at
-             ) VALUES (
-                $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '[1]', '{}',
-                'bulk', 17, '{}', FALSE, 'all', 'READY', FALSE, NOW()
-             )",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '1', 'bulk', 17,
+                '{}', FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(&workflow_id)
@@ -3128,8 +3100,7 @@ mod cap_tests {
             workflow_id,
             task_index: 0,
             task_name: "p6_recovery_task".to_owned(),
-            task_args: Some("[1]".to_owned()),
-            task_kwargs: Some("{}".to_owned()),
+            input: "1".to_owned(),
             queue_name: "bulk".to_owned(),
             priority: 17,
             task_options: None,
@@ -3144,10 +3115,21 @@ mod cap_tests {
         assert!(enqueue_ready_task(&pool, &row, &retention)
             .await
             .expect("recovery enqueue path"));
-        let facts: (String, String, i32, i32, bool, Option<i32>) = sqlx::query_as(
-            "SELECT t.retention_class_key, t.prepared_rerun_input_disposition,
-                    octet_length(t.command_fingerprint), octet_length(t.input_digest),
-                    t.retain_rerun_input, octet_length(t.prepared_rerun_input_inline)
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the recovery node enqueue time");
+        assert!(node_holds_enqueue_time);
+        let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
+            "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
+                    t.command_fingerprint_version, t.retain_rerun_input
              FROM horsies_tasks t
              JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
              WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
@@ -3157,11 +3139,9 @@ mod cap_tests {
         .await
         .expect("read recovery enqueue facts");
         assert_eq!(facts.0, "standard_7d");
-        assert_eq!(facts.1, "NEVER_ELIGIBLE");
-        assert_eq!(facts.2, 32);
-        assert_eq!(facts.3, 32);
-        assert!(!facts.4);
-        assert!(facts.5.is_none());
+        assert!(facts.1.is_none());
+        assert!(facts.2.is_none());
+        assert!(!facts.3);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (

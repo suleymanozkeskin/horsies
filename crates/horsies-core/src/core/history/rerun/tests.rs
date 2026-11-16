@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::input_envelope::encode_input_envelope_v1;
 use super::operations::{
     rerun_task_in_tx, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
@@ -28,8 +27,7 @@ use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
 const WORKER: &str = "p8-rerun-worker";
 const SOURCE_CLASS: &str = "forever";
 const CURRENT_POLICY_CLASS: &str = "standard_14d";
-const PAYLOAD_ARGS: &str = "[1,\"x\"]";
-const PAYLOAD_KWARGS: &str = "{\"k\":\"v\"}";
+const PAYLOAD_INPUT: &str = "{\"k\":\"v\"}";
 const PAYLOAD_OPTIONS: &str = "{\"timeout_ms\":5}";
 
 fn digest_hex(payload: &[u8]) -> String {
@@ -73,13 +71,6 @@ async fn seed_source(
     rerun_root: Option<Uuid>,
 ) -> (Uuid, Option<Uuid>) {
     let task_id = Uuid::new_v4();
-    let input_payload = encode_input_envelope_v1(
-        &[serde_json::json!(1), serde_json::json!("x")],
-        &serde_json::from_str(PAYLOAD_KWARGS).unwrap(),
-        Some(&serde_json::from_str(PAYLOAD_OPTIONS).unwrap()),
-    )
-    .unwrap();
-    let input_digest = Sha256::digest(&input_payload).to_vec();
     let (status, worker, started_at, claimed_at, good_until) = match kind {
         TerminalSource::Failed | TerminalSource::Completed => (
             "RUNNING",
@@ -99,41 +90,36 @@ async fn seed_source(
     };
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, task_options,
-             status, sent_at, enqueued_at, started_at, claimed, claimed_at,
-             claimed_by_worker_id, good_until, is_workflow_task,
-             retry_count, max_retries, enqueue_sha,
+             id, task_name, queue_name, priority, input, task_options, execution,
+             status, sent_at, enqueued_at, started_at, claimed_at,
+             claimed_by_worker_id, claim_expires_at, good_until, is_workflow_task,
+             retry_count, max_retries,
              command_fingerprint_version, command_fingerprint,
-             retention_class_key, input_digest, rerun_of_task_id,
+             retention_class_key, rerun_of_task_id,
              rerun_root_task_id, retain_rerun_input,
-             prepared_rerun_input_disposition, prepared_rerun_input_version,
-             prepared_rerun_input_codec, prepared_rerun_input_content_type,
-             prepared_rerun_input_digest, prepared_rerun_input_inline,
              created_at, updated_at
          ) VALUES (
-             $1, 'p8.rerun', 'default', 50, $2, $3, $4,
-             $5, NOW(), NOW(), $6, $7::text IS NOT NULL, $8, $7, $9, $10,
-             0, 3, $1::text, 1, $11, $12, $13, $14, $15, TRUE,
-             'INLINE', 1, 'json-utf8', 'application/json', $13, $16,
+             $1, 'p8.rerun', 'default', 50, $2, $3, 'ISOLATED',
+             $4, NOW(), NOW(), $5, $6, $7,
+             CASE WHEN $4 = 'CLAIMED' THEN NOW() + interval '1 hour' END, $8, $9,
+             0, 3, CASE WHEN $9 THEN NULL ELSE 1 END,
+             CASE WHEN $9 THEN NULL ELSE $10 END, $11, $12, $13, TRUE,
              NOW(), NOW()
          )",
     )
     .bind(task_id)
-    .bind(PAYLOAD_ARGS)
-    .bind(PAYLOAD_KWARGS)
+    .bind(PAYLOAD_INPUT)
     .bind(PAYLOAD_OPTIONS)
     .bind(status)
     .bind(started_at)
-    .bind(worker)
     .bind(claimed_at)
+    .bind(worker)
     .bind(good_until)
     .bind(workflow_task)
     .bind(vec![9_u8; 32])
     .bind(SOURCE_CLASS)
-    .bind(&input_digest)
     .bind(rerun_root.map(|_| Uuid::new_v4()))
     .bind(rerun_root)
-    .bind(&input_payload)
     .execute(pool)
     .await
     .unwrap();
@@ -154,17 +140,18 @@ async fn seed_source(
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                 id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, is_subworkflow,
+                 max_retries, execution, retention_class_key,
                  task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p8.rerun', $3, $4, 'default',
-                       50, '{}', FALSE, 'all', 'RUNNING', FALSE, $5, NOW())",
+             ) VALUES ($1, $2, 0, 'root', 'p8.rerun', $3, 'default',
+                       50, '{}', FALSE, 'all', 'RUNNING', FALSE,
+                       3, 'ISOLATED', 'forever', $4, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
-        .bind(PAYLOAD_ARGS)
-        .bind(PAYLOAD_KWARGS)
+        .bind(PAYLOAD_INPUT)
         .bind(task_id)
         .execute(pool)
         .await
@@ -320,16 +307,12 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         assert_ne!(new_task_id, source);
         assert_eq!(new_task_id.get_version_num(), 7);
         let row = sqlx::query(
-            "SELECT task_name, queue_name, priority, args, kwargs, task_options,
+            "SELECT task_name, queue_name, priority, input, task_options, execution,
                     status, retry_count, max_retries, good_until,
                     retention_class_key, rerun_of_task_id, rerun_root_task_id,
-                    command_fingerprint, input_digest,
-                    prepared_rerun_input_disposition,
-                    prepared_rerun_input_inline, claimed, claimed_at,
+                    retain_rerun_input, command_fingerprint, claimed_at,
                     claimed_by_worker_id, claim_expires_at, next_retry_at,
-                    started_at, completed_at, failed_at, terminal_at,
-                    terminalization_kind, result, failed_reason, error_code,
-                    finalizing_at, finalizing_by_worker_id, worker_pid,
+                    started_at, finalizing_at, finalizing_by_worker_id, worker_pid,
                     worker_hostname, worker_process_name
              FROM horsies_tasks WHERE id = $1",
         )
@@ -340,9 +323,9 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         assert_eq!(row.get::<String, _>("task_name"), "p8.rerun");
         assert_eq!(row.get::<String, _>("queue_name"), "default");
         assert_eq!(row.get::<i32, _>("priority"), 50);
-        assert_eq!(row.get::<String, _>("args"), PAYLOAD_ARGS);
-        assert_eq!(row.get::<String, _>("kwargs"), PAYLOAD_KWARGS);
+        assert_eq!(row.get::<String, _>("input"), PAYLOAD_INPUT);
         assert_eq!(row.get::<String, _>("task_options"), PAYLOAD_OPTIONS);
+        assert_eq!(row.get::<String, _>("execution"), "ISOLATED");
         assert_eq!(row.get::<String, _>("status"), "PENDING");
         assert_eq!(row.get::<i32, _>("retry_count"), 0);
         assert_eq!(row.get::<i32, _>("max_retries"), 3);
@@ -350,31 +333,13 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         assert_eq!(row.get::<String, _>("retention_class_key"), target_class);
         assert_eq!(row.get::<Uuid, _>("rerun_of_task_id"), source);
         assert_eq!(row.get::<Uuid, _>("rerun_root_task_id"), source);
-        let canonical_input = encode_input_envelope_v1(
-            &[serde_json::json!(1), serde_json::json!("x")],
-            &serde_json::from_str(PAYLOAD_KWARGS).unwrap(),
-            Some(&serde_json::from_str(PAYLOAD_OPTIONS).unwrap()),
-        )
-        .unwrap();
-        let expected_disposition = if retain_rerun_input {
-            "INLINE"
-        } else {
-            "DECLINED_BY_POLICY"
-        };
-        assert_eq!(
-            row.get::<String, _>("prepared_rerun_input_disposition"),
-            expected_disposition
-        );
-        assert_eq!(
-            row.get::<Option<Vec<u8>>, _>("prepared_rerun_input_inline"),
-            retain_rerun_input.then_some(canonical_input.clone())
-        );
+        assert_eq!(row.get::<bool, _>("retain_rerun_input"), retain_rerun_input);
         let expected_fingerprint = EnqueueCommandV1::new(
             "p8.rerun",
             "default",
             50,
-            Some(PAYLOAD_ARGS.to_owned()),
-            Some(PAYLOAD_KWARGS.to_owned()),
+            None,
+            Some(PAYLOAD_INPUT.to_owned()),
             Some(deadline),
             None,
             Some(PAYLOAD_OPTIONS.to_owned()),
@@ -390,19 +355,11 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
             row.get::<Vec<u8>, _>("command_fingerprint"),
             expected_fingerprint
         );
-        assert_eq!(
-            row.get::<Vec<u8>, _>("input_digest"),
-            Sha256::digest(&canonical_input).to_vec()
-        );
-        assert!(!row.get::<bool, _>("claimed"));
         for field in [
             "claimed_at",
             "claim_expires_at",
             "next_retry_at",
             "started_at",
-            "completed_at",
-            "failed_at",
-            "terminal_at",
             "finalizing_at",
         ] {
             assert!(
@@ -411,10 +368,7 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
             );
         }
         for field in [
-            "terminalization_kind",
-            "result",
-            "failed_reason",
-            "error_code",
+            "claimed_by_worker_id",
             "finalizing_by_worker_id",
             "worker_hostname",
             "worker_process_name",
@@ -466,11 +420,10 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    let python_payload =
-        br#"{"args":[1e-07],"kwargs":{"v":1e-06},"options":{"nested":[1e+20,0.0001,-0.0]}}"#;
+    let python_payload = br#"{"input":{"v":1e-06},"options":{"nested":[1e+20,0.0001,-0.0]}}"#;
     assert_eq!(
         digest_hex(python_payload),
-        "5c58503b12b755a4dba5612b59af861473b6b0dca19635b04d936de8e10d3d05"
+        "b1f1429240dc21f6584df5cd92073ea0b620826459b8b2624cd54f7bb74b6a4e"
     );
     sqlx::query(
         "UPDATE horsies_task_history
@@ -494,33 +447,23 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
         panic!("expected enqueue");
     };
     let row = sqlx::query(
-        "SELECT args, kwargs, task_options, input_digest,
-                prepared_rerun_input_inline, command_fingerprint
+        "SELECT input, task_options, command_fingerprint
          FROM horsies_tasks WHERE id = $1",
     )
     .bind(new_task_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(row.get::<String, _>("args"), "[1e-07]");
-    assert_eq!(row.get::<String, _>("kwargs"), r#"{"v":1e-06}"#);
+    assert_eq!(row.get::<String, _>("input"), r#"{"v":1e-06}"#);
     assert_eq!(
         row.get::<String, _>("task_options"),
         r#"{"nested":[1e+20,0.0001,-0.0]}"#
-    );
-    assert_eq!(
-        row.get::<Vec<u8>, _>("prepared_rerun_input_inline"),
-        python_payload
-    );
-    assert_eq!(
-        row.get::<Vec<u8>, _>("input_digest"),
-        Sha256::digest(python_payload).to_vec()
     );
     let expected_fingerprint = EnqueueCommandV1::new(
         "p8.rerun",
         "default",
         50,
-        Some("[1e-07]".to_owned()),
+        None,
         Some(r#"{"v":1e-06}"#.to_owned()),
         None,
         None,
@@ -596,14 +539,14 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let live = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, retry_count, max_retries, enqueue_sha,
-             command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES ($1, 'p8.live', 'default', 50, '[]', '{}', 'PENDING',
-                   NOW(), NOW(), 0, 0, $1::text, 1, $2, 'forever', FALSE,
-                   'DECLINED_BY_POLICY', NOW(), NOW())",
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            retry_count, max_retries, command_fingerprint_version, command_fingerprint,
+            retention_class_key, retain_rerun_input, created_at, updated_at, execution,
+            is_workflow_task
+        ) VALUES (
+            $1, 'p8.live', 'default', 50, 'null', 'PENDING', NOW(), NOW(), 0, 0, 1, $2,
+            'forever', FALSE, NOW(), NOW(), 'ISOLATED', FALSE
+        )",
     )
     .bind(live)
     .bind(vec![4_u8; 32])
@@ -643,6 +586,10 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .unwrap();
     assert_eq!(live_info.task_id, live);
     assert_eq!(live_info.status, TaskStatus::Pending);
+    assert_eq!(
+        live_info.execution,
+        crate::core::ExecutionClass::Live(crate::core::Execution::Isolated)
+    );
     let live_attempts = live_info.attempts.unwrap();
     assert_eq!(live_attempts.len(), 1);
     assert_eq!(
@@ -757,12 +704,8 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         );
     }
 
-    let valid_payload = encode_input_envelope_v1(
-        &[serde_json::json!(1), serde_json::json!("x")],
-        &serde_json::from_str(PAYLOAD_KWARGS).unwrap(),
-        Some(&serde_json::from_str(PAYLOAD_OPTIONS).unwrap()),
-    )
-    .unwrap();
+    let valid_payload =
+        format!("{{\"input\":{PAYLOAD_INPUT},\"options\":{PAYLOAD_OPTIONS}}}").into_bytes();
     let valid_digest = Sha256::digest(&valid_payload).to_vec();
 
     let mut incomplete = pool.begin().await.unwrap();
@@ -920,8 +863,8 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
             "p8.rerun",
             "default",
             50,
-            Some(PAYLOAD_ARGS.to_owned()),
-            Some(PAYLOAD_KWARGS.to_owned()),
+            None,
+            Some(PAYLOAD_INPUT.to_owned()),
             None,
             None,
             Some(PAYLOAD_OPTIONS.to_owned()),
@@ -1110,6 +1053,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .unwrap();
     assert_eq!(info.status, TaskStatus::Completed);
+    assert_eq!(
+        info.execution,
+        crate::core::ExecutionClass::NotKeptInHistory
+    );
     let attempts = info.attempts.unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].task_id, completed);

@@ -53,6 +53,7 @@ from tests.integration.monitoring_seeding import (
     insert_rows,
     task_row,
 )
+from tests.session_database import database_name_prefix
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -628,7 +629,7 @@ class TestWorkerReads:
         assert stream['execution'] == 'ISOLATED'
         assert stream['coverage'] == {'kind': 'unserved'}
         assert stream['wait']['kind'] == 'waiting'
-        assert body['not_recorded'] == []
+        assert 'not_recorded' not in body
         assert body['workers'] == [
             {
                 'worker_id': 'w-async',
@@ -644,42 +645,6 @@ class TestWorkerReads:
                 ],
             },
         ]
-
-    async def test_class_report_names_a_live_worker_without_budgets(
-        self,
-        api: AsyncClient,
-        session: AsyncSession,
-    ) -> None:
-        """A live snapshot without class_capacity does not fail the route: the
-        report answers and lists the worker as not recorded."""
-        await session.execute(text('DELETE FROM horsies_worker_states'))
-        await session.execute(
-            text("""
-                INSERT INTO horsies_worker_states (
-                    worker_id, snapshot_at, hostname, pid, processes,
-                    max_claim_batch, max_claim_per_worker, queues,
-                    tasks_running, tasks_claimed, worker_started_at,
-                    slots_down, class_capacity
-                ) VALUES (
-                    'w-old', now(), 'itest-host', 4242, 2, 0, 2,
-                    ARRAY['default'], 0, 0, now(), NULL, NULL
-                )
-            """),
-        )
-        await session.commit()
-        await persist(session, make_task())
-        try:
-            response = await api.get('/api/workers/classes')
-        finally:
-            await session.execute(text('DELETE FROM horsies_worker_states'))
-            await session.commit()
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body['workers'] == []
-        assert [entry['worker_id'] for entry in body['not_recorded']] == ['w-old']
-        (stream,) = body['streams']
-        assert stream['coverage'] == {'kind': 'unserved'}
 
     async def test_schedules_answer(self, api: AsyncClient) -> None:
         response = await api.get('/api/workers/schedules')
@@ -1126,7 +1091,7 @@ def web_args(**overrides: Any) -> Any:
 @pytest_asyncio.fixture
 async def fresh_database() -> AsyncGenerator[str, None]:
     """A brand-new database with no horsies schema in it."""
-    name = f'horsies_noddl_{uuid.uuid4().hex[:12]}'
+    name = f'{database_name_prefix()}noddl_{uuid.uuid4().hex[:12]}'
     admin = to_psycopg_url(DB_URL)
 
     connection = await psycopg.AsyncConnection.connect(admin, autocommit=True)

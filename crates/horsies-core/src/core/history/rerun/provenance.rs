@@ -11,6 +11,7 @@ pub enum FieldProvenance {
     FreshRuntimeState,
 }
 
+/// One entry per column of the baseline `horsies_tasks` table.
 pub const RERUN_FIELD_PROVENANCE: &[(&str, FieldProvenance)] = &[
     ("id", FieldProvenance::NewIdentity),
     ("created_at", FieldProvenance::NewIdentity),
@@ -22,64 +23,27 @@ pub const RERUN_FIELD_PROVENANCE: &[(&str, FieldProvenance)] = &[
     ("priority", FieldProvenance::ReplayedFromSource),
     ("max_retries", FieldProvenance::ReplayedFromSource),
     ("is_workflow_task", FieldProvenance::ReplayedFromSource),
-    ("input_digest", FieldProvenance::ReplayedFromSource),
-    ("args", FieldProvenance::ReplayedViaEnvelope),
-    ("kwargs", FieldProvenance::ReplayedViaEnvelope),
+    ("input", FieldProvenance::ReplayedViaEnvelope),
     ("task_options", FieldProvenance::ReplayedViaEnvelope),
     ("rerun_of_task_id", FieldProvenance::Lineage),
     ("rerun_root_task_id", FieldProvenance::Lineage),
     ("good_until", FieldProvenance::CallerExplicit),
+    ("execution", FieldProvenance::ResolvedAtEnqueue),
     ("retention_class_key", FieldProvenance::ResolvedAtEnqueue),
     ("retain_rerun_input", FieldProvenance::ResolvedAtEnqueue),
-    (
-        "prepared_rerun_input_disposition",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
-    (
-        "prepared_rerun_input_version",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
-    (
-        "prepared_rerun_input_codec",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
-    (
-        "prepared_rerun_input_content_type",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
-    (
-        "prepared_rerun_input_digest",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
-    (
-        "prepared_rerun_input_inline",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
-    (
-        "prepared_rerun_input_reference",
-        FieldProvenance::ResolvedAtEnqueue,
-    ),
     ("idempotency_key_digest", FieldProvenance::ResolvedAtEnqueue),
     (
         "command_fingerprint_version",
         FieldProvenance::ResolvedAtEnqueue,
     ),
     ("command_fingerprint", FieldProvenance::ResolvedAtEnqueue),
-    ("enqueue_sha", FieldProvenance::ResolvedAtEnqueue),
     ("status", FieldProvenance::FreshRuntimeState),
     ("retry_count", FieldProvenance::FreshRuntimeState),
     ("next_retry_at", FieldProvenance::FreshRuntimeState),
-    ("claimed", FieldProvenance::FreshRuntimeState),
     ("claimed_at", FieldProvenance::FreshRuntimeState),
     ("claimed_by_worker_id", FieldProvenance::FreshRuntimeState),
     ("claim_expires_at", FieldProvenance::FreshRuntimeState),
     ("started_at", FieldProvenance::FreshRuntimeState),
-    ("completed_at", FieldProvenance::FreshRuntimeState),
-    ("failed_at", FieldProvenance::FreshRuntimeState),
-    ("terminal_at", FieldProvenance::FreshRuntimeState),
-    ("result", FieldProvenance::FreshRuntimeState),
-    ("failed_reason", FieldProvenance::FreshRuntimeState),
-    ("error_code", FieldProvenance::FreshRuntimeState),
     ("finalizing_at", FieldProvenance::FreshRuntimeState),
     (
         "finalizing_by_worker_id",

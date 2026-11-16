@@ -19,6 +19,11 @@ pub enum SchemaState {
     Match,
     Mismatch,
     Absent,
+    /// A horsies 0.x schema: `horsies_schema_version` without
+    /// `horsies_migrations` (Python 0.x), or a highest successful version
+    /// below the baseline's (horsies-rust 0.x, whose versions end at 65).
+    /// This build neither reads nor upgrades it.
+    ZeroX,
     Unknown,
 }
 
@@ -55,6 +60,11 @@ impl SchemaIncompatible {
                 "This database has no horsies schema, so actions are unavailable. Start a horsies app or worker to initialize it; the monitoring tool never modifies the database schema."
                     .to_owned(),
             ),
+            SchemaState::ZeroX => (
+                SCHEMA_INCOMPATIBLE,
+                "This database holds a horsies 0.x schema, so actions are unavailable. This build does not read or upgrade a 0.x database: drain it and point the fleet at a new database."
+                    .to_owned(),
+            ),
             SchemaState::Mismatch => (
                 SCHEMA_INCOMPATIBLE,
                 format!(
@@ -85,16 +95,17 @@ struct BrokerSchemaReader {
 #[async_trait]
 impl SchemaReader for BrokerSchemaReader {
     async fn read(&self, expected_version: i64) -> Result<SchemaStatus, sqlx::Error> {
-        let migrations_present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-            .bind(MIGRATIONS_TABLE)
-            .fetch_one(self.broker.pool())
-            .await?;
-        if !migrations_present {
-            return Ok(SchemaStatus {
-                state: SchemaState::Absent,
-                version: None,
+        let (migrations_table, schema_version_table): (bool, bool) = sqlx::query_as(
+            "SELECT to_regclass($1) IS NOT NULL, to_regclass('horsies_schema_version') IS NOT NULL",
+        )
+        .bind(MIGRATIONS_TABLE)
+        .fetch_one(self.broker.pool())
+        .await?;
+        if !migrations_table {
+            return Ok(classify_without_migrations(
+                schema_version_table,
                 expected_version,
-            });
+            ));
         }
 
         let stored: i64 = sqlx::query_scalar(&format!(
@@ -102,25 +113,48 @@ impl SchemaReader for BrokerSchemaReader {
         ))
         .fetch_one(self.broker.pool())
         .await?;
-        if stored == 0 {
-            return Ok(SchemaStatus {
+        Ok(classify_stored_version(stored, expected_version))
+    }
+}
+
+/// The verdict for a database without `horsies_migrations` (Python
+/// `classify_without_migrations`, `horsies/web/schema.py`):
+/// `horsies_schema_version` is the bookkeeping of horsies 0.x Python, so with
+/// it the database holds a 0.x schema; without it the database has no
+/// horsies schema. The 0.x version is not read.
+fn classify_without_migrations(schema_version_table: bool, expected_version: i64) -> SchemaStatus {
+    SchemaStatus {
+        state: match schema_version_table {
+            true => SchemaState::ZeroX,
+            false => SchemaState::Absent,
+        },
+        version: None,
+        expected_version,
+    }
+}
+
+/// The verdict for the highest successful version in `horsies_migrations`
+/// (Python `classify_stored_version`): 0 is no schema; a version below the
+/// baseline's is horsies-rust 0.x bookkeeping, because the first version of
+/// this schema line is the baseline; otherwise the version matches or
+/// differs from the one this build expects.
+fn classify_stored_version(stored: i64, expected_version: i64) -> SchemaStatus {
+    let state = match stored {
+        0 => {
+            return SchemaStatus {
                 state: SchemaState::Absent,
                 version: None,
                 expected_version,
-            });
+            }
         }
-        if stored != expected_version {
-            return Ok(SchemaStatus {
-                state: SchemaState::Mismatch,
-                version: Some(stored),
-                expected_version,
-            });
-        }
-        Ok(SchemaStatus {
-            state: SchemaState::Match,
-            version: Some(stored),
-            expected_version,
-        })
+        _ if stored < crate::broker::migrations::BASELINE_MIGRATION_VERSION => SchemaState::ZeroX,
+        _ if stored == expected_version => SchemaState::Match,
+        _ => SchemaState::Mismatch,
+    };
+    SchemaStatus {
+        state,
+        version: Some(stored),
+        expected_version,
     }
 }
 
@@ -198,5 +232,66 @@ impl SchemaProbe {
                     })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    const EXPECTED: i64 = crate::broker::migrations::BASELINE_MIGRATION_VERSION;
+
+    /// Python `test_web_schema_probe.py`: `horsies_schema_version` without
+    /// `horsies_migrations` is a 0.x Python schema; neither table is no schema.
+    #[test]
+    fn a_database_without_the_ledger_is_zero_x_or_absent() {
+        assert_eq!(
+            classify_without_migrations(true, EXPECTED).state,
+            SchemaState::ZeroX
+        );
+        assert_eq!(
+            classify_without_migrations(false, EXPECTED).state,
+            SchemaState::Absent
+        );
+        assert_eq!(classify_without_migrations(true, EXPECTED).version, None);
+    }
+
+    /// A version below the baseline is horsies-rust 0.x bookkeeping.
+    #[test]
+    fn the_stored_version_decides_the_state() {
+        assert_eq!(
+            classify_stored_version(0, EXPECTED).state,
+            SchemaState::Absent
+        );
+        assert_eq!(classify_stored_version(0, EXPECTED).version, None);
+        for rust_zero_x in [1, 65, EXPECTED - 1] {
+            let status = classify_stored_version(rust_zero_x, EXPECTED);
+            assert_eq!(status.state, SchemaState::ZeroX, "{rust_zero_x}");
+            assert_eq!(status.version, Some(rust_zero_x));
+        }
+        assert_eq!(
+            classify_stored_version(EXPECTED, EXPECTED).state,
+            SchemaState::Match
+        );
+        assert_eq!(
+            classify_stored_version(EXPECTED + 1, EXPECTED).state,
+            SchemaState::Mismatch
+        );
+    }
+
+    #[test]
+    fn a_zero_x_database_disables_actions_with_python_s_detail() {
+        let refused = SchemaIncompatible::from_status(classify_without_migrations(true, EXPECTED));
+
+        assert_eq!(refused.code, SCHEMA_INCOMPATIBLE);
+        assert!(
+            refused.detail.contains("horsies 0.x schema"),
+            "{}",
+            refused.detail
+        );
+        assert_eq!(
+            serde_json::to_string(&SchemaState::ZeroX).unwrap(),
+            "\"ZERO_X\""
+        );
     }
 }

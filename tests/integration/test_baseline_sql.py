@@ -338,3 +338,68 @@ async def test_forever_leaf_starts_at_minvalue_with_an_open_catalog_bound(
         'OPEN',
         True,
     )
+
+
+_TASK_ROW_SQL: Final = """
+    INSERT INTO horsies_tasks (
+        id, task_name, queue_name, priority, input, task_options, execution, retention_class_key,
+        sent_at, created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+        status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at,
+        finalizing_at, finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name,
+        retry_count, max_retries, next_retry_at, good_until, is_workflow_task, updated_at,
+        retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+    ) VALUES (
+        %(id)s, 'notify.task', 'default', 100, '{}', NULL, 'ISOLATED', 'forever',
+        now(), now(), 1, sha256('x'::bytea), NULL,
+        CAST(%(status)s AS varchar), now(),
+        CASE WHEN CAST(%(status)s AS varchar) = 'PENDING' THEN NULL ELSE now() END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'PENDING' THEN NULL ELSE 'w1' END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'CLAIMED' THEN now() + interval '1 minute' END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN now() END,
+        NULL, NULL,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN 1 END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN 'host' END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN 'proc' END,
+        0, 0, NULL, NULL, FALSE, now(), FALSE, NULL, NULL
+    )
+"""
+
+_INSERT_CHANNELS: Final = ('task_new', 'task_queue_default', 'horsies_task_status')
+_NOTIFY_WAIT_S: Final = 0.5
+_TASK_ID: Final = '00000000-0000-7000-8000-0000000000c1'
+
+
+@pytest.mark.parametrize(
+    ('status', 'expected'),
+    [
+        (
+            'PENDING',
+            [
+                ('task_new', _TASK_ID),
+                ('task_queue_default', 'new'),
+                ('horsies_task_status', _TASK_ID),
+            ],
+        ),
+        ('CLAIMED', [('horsies_task_status', _TASK_ID)]),
+        ('RUNNING', [('horsies_task_status', _TASK_ID)]),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_task_insert_wakes_its_queue_only_when_pending(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    status: str,
+    expected: list[tuple[str, str]],
+) -> None:
+    """Every insert sends the status event; only a PENDING insert sends the
+    task_new and task_queue_<queue> wake."""
+    await installed.set_autocommit(True)
+    for channel in _INSERT_CHANNELS:
+        await installed.execute(f'LISTEN {channel}'.encode('utf-8'))
+    await installed.execute(_TASK_ROW_SQL, {'id': _TASK_ID, 'status': status})
+
+    received = [
+        (notify.channel, notify.payload)
+        async for notify in installed.notifies(timeout=_NOTIFY_WAIT_S)
+    ]
+
+    assert received == expected

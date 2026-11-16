@@ -11,7 +11,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use chrono::Duration;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-use crate::core::history::ddl::classes::{DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DAYS};
+use crate::core::history::ddl::classes::{
+    DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DAYS, FOREVER_CLASS_KEY,
+};
 use crate::core::history::periods::{PeriodRefused, RetentionDays};
 
 /// The send-time retention choice that overrides the queue mapping.
@@ -26,6 +28,30 @@ impl RetentionChoice {
     /// The choice of a finite period, or why the duration is not a period.
     pub fn period(period: Duration) -> Result<Self, PeriodRefused> {
         RetentionDays::parse_period(period).map(Self::Period)
+    }
+}
+
+/// The retention class of one enqueue (Python's broker rule: a call that
+/// names no class stores the default class `standard_30d`; an explicit `None`
+/// stores forever).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueRetention {
+    /// The call names no class: the default class, `standard_30d`.
+    Default,
+    /// The record is kept forever.
+    Forever,
+    /// A finite period of whole days.
+    Period(RetentionDays),
+}
+
+impl EnqueueRetention {
+    /// The class key that the task row stores.
+    pub fn class_key(self) -> String {
+        match self {
+            Self::Default => DEFAULT_RETENTION_CLASS_KEY.to_owned(),
+            Self::Forever => FOREVER_CLASS_KEY.to_owned(),
+            Self::Period(days) => days.class_key(),
+        }
     }
 }
 
@@ -301,6 +327,17 @@ impl RetentionConfig {
             None => Some(DEFAULT_RETENTION_CLASS_KEY.to_owned()),
             Some(None) => None,
             Some(Some(period)) => Some(validated_days(*period).class_key()),
+        }
+    }
+
+    /// The retention of one enqueue on this queue when the send chooses
+    /// none: the default class for an unmapped queue, forever for a queue
+    /// mapped to `None`, or the mapped period.
+    pub fn resolve_queue_retention(&self, queue_name: &str) -> EnqueueRetention {
+        match self.queue_retention.get(queue_name) {
+            None => EnqueueRetention::Default,
+            Some(None) => EnqueueRetention::Forever,
+            Some(Some(period)) => EnqueueRetention::Period(validated_days(*period)),
         }
     }
 

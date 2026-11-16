@@ -102,7 +102,7 @@ async def test_history_detach_republishes_once_and_a_recorded_detach_does_not(
     detached = await detach_expired_leaf(
         _database(terminalization_schema),
         DetachExpiredHistoryLeaf(
-            leaf=ref, quarantine_horizon=None, statement_timeout_ms=None,
+            leaf=ref, statement_timeout_ms=None,
         ),
         publisher,
     )

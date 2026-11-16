@@ -93,7 +93,6 @@ from ..partitions.locks import (
 )
 from ..partitions.manager import detach_expired_leaf, drop_detached_leaf, inspect_leaf
 from ..partitions.publication import LoaderPublication
-from ..phase2.quarantine import QuarantineRefused
 
 _HOURLY = timedelta(hours=1)
 _HORIZON_FLOOR = timedelta(hours=1)
@@ -580,7 +579,7 @@ class HeartbeatLeafSwept:
     the leaf reached the detached state, the drop outcome."""
 
     leaf_name: str
-    detach: LeafInspection | LeafMaintenanceBusy | QuarantineRefused
+    detach: LeafInspection | LeafMaintenanceBusy
     drop: LeafDrop | None
 
 
@@ -594,7 +593,7 @@ async def sweep_expired_heartbeat_leaves(
     bound plus the stored horizon has elapsed. Each leaf goes through the
     shared manager machinery — the same detach and drop history leaves
     use; a heartbeat leaf can never be pending-blocked because no pending
-    locator carries the reserved class, so the horizon posture is None.
+    locator carries the reserved class.
     One leaf per transaction (the inherited bounded-relations invariant).
     """
     async with database.connect() as connection:
@@ -630,7 +629,6 @@ async def sweep_expired_heartbeat_leaves(
             database,
             DetachExpiredHistoryLeaf(
                 leaf=ref,
-                quarantine_horizon=None,
                 statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
             ),
             publisher,

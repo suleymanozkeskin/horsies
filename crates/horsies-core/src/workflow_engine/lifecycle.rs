@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::enqueue::{prepare_enqueue_facts, EnqueueInputEligibility};
+use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::{WorkflowSpecRegistry, WorkflowStatus};
@@ -14,6 +14,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+    stored_sub_workflow_params,
 };
 
 #[cfg(test)]
@@ -121,7 +122,7 @@ const GET_WORKFLOW_STATUS_SQL: &str = "\
 SELECT status FROM horsies_workflows WHERE id = $1";
 
 const FIND_PENDING_TASKS_SQL: &str = "\
-SELECT task_index, dependencies, task_name, task_args, task_kwargs,
+SELECT task_index, dependencies, task_name, input,
        queue_name, priority, args_from, workflow_ctx_from,
        allow_failed_deps, join_type, min_success,
        node_id, task_options
@@ -129,10 +130,10 @@ FROM horsies_workflow_tasks
 WHERE workflow_id = $1::uuid AND status = 'PENDING'";
 
 const FIND_READY_TASKS_SQL: &str = "\
-SELECT task_index, task_name, task_args, task_kwargs,
+SELECT task_index, task_name, input,
        queue_name, priority, task_options, node_id,
        args_from, workflow_ctx_from, dependencies, is_subworkflow,
-       sub_workflow_name, sub_definition_key
+       sub_workflow_name, sub_definition_key, sub_workflow_params
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1::uuid AND status = 'READY'";
 
@@ -143,25 +144,23 @@ FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = ANY($2)
   AND status IN ('COMPLETED', 'FAILED', 'SKIPPED')";
 
+// An engine-minted task row carries no command fingerprint, no idempotency
+// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, args, kwargs,
-    status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at,
-    command_fingerprint_version, command_fingerprint, retention_class_key,
-    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
-    retain_rerun_input, prepared_rerun_input_disposition,
-    prepared_rerun_input_version, prepared_rerun_input_codec,
-    prepared_rerun_input_content_type, prepared_rerun_input_digest,
-    prepared_rerun_input_inline, prepared_rerun_input_reference
+    id, task_name, queue_name, priority, input, task_options, execution,
+    retention_class_key, sent_at, created_at,
+    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+    status, enqueued_at, retry_count, max_retries, good_until,
+    is_workflow_task, updated_at,
+    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10,
-        TRUE, NOW(), NOW(), $11, $12, $13, $14, NULL, NULL, NULL, $15, $16,
-        $17, $18, $19, $20, $21, NULL)";
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+        'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -252,8 +251,7 @@ struct PendingTaskRow {
     task_index: i32,
     dependencies: Vec<i32>,
     task_name: String,
-    task_args: Option<String>,
-    task_kwargs: Option<String>,
+    input: String,
     queue_name: String,
     priority: i32,
     args_from: Option<serde_json::Value>,
@@ -270,8 +268,7 @@ struct PendingTaskRow {
 struct ReadyTaskRow {
     task_index: i32,
     task_name: String,
-    task_args: Option<String>,
-    task_kwargs: Option<String>,
+    input: String,
     queue_name: String,
     priority: i32,
     task_options: Option<String>,
@@ -282,6 +279,9 @@ struct ReadyTaskRow {
     is_subworkflow: bool,
     sub_workflow_name: Option<String>,
     sub_definition_key: Option<String>,
+    /// The client's params choice on a sub-workflow node (`NOT_GIVEN` or
+    /// `GIVEN`); `NULL` on a task node.
+    sub_workflow_params: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1000,10 +1000,10 @@ async fn reevaluate_and_enqueue(
             let max_retries = parse_max_retries(task.task_options.as_deref());
 
             // Merge args_from if present.
-            let merged_kwargs = merge_args_from_for_ready(
+            let merged_input = merge_args_from_for_ready(
                 pool,
                 workflow_id,
-                task.task_kwargs.as_deref(),
+                &task.input,
                 &task.args_from,
                 &task.dependencies,
             )
@@ -1013,32 +1013,22 @@ async fn reevaluate_and_enqueue(
             // promotion path. Without this, a READY `workflow_ctx_from` task
             // (e.g. reset to READY at pause time) would be enqueued on resume
             // with no upstream context and fail or produce a wrong result.
-            let merged_kwargs = engine::inject_workflow_ctx_into_kwargs(
+            let merged_input = engine::inject_workflow_ctx_into_input(
                 pool,
                 workflow_id,
                 task.task_index,
                 &task.task_name,
                 task.workflow_ctx_from.as_deref(),
-                merged_kwargs,
+                merged_input,
             )
             .await?;
 
-            let enqueue_sha = format!("wf-{}", task_id);
             let good_until = parse_good_until_from_options(task.task_options.as_deref());
             let retention_class_key = retention.resolve_queue_class(&task.queue_name);
-            let facts = prepare_enqueue_facts(
-                &task.task_name,
-                &task.queue_name,
-                task.priority,
-                task.task_args.as_deref(),
-                merged_kwargs.as_deref(),
-                good_until,
-                None,
+            let facts = prepare_workflow_task_facts(
+                &merged_input,
                 task.task_options.as_deref(),
                 retention_class_key.as_deref(),
-                false,
-                None,
-                EnqueueInputEligibility::NeverEligible,
             )
             .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
@@ -1049,32 +1039,16 @@ async fn reevaluate_and_enqueue(
             let mut tx = pool.begin().await?;
 
             sqlx::query(ENQUEUE_TASK_SQL)
-                .bind(&task_id)
+                .bind(task_id)
                 .bind(&task.task_name)
                 .bind(&task.queue_name)
                 .bind(task.priority)
-                .bind(&task.task_args)
-                .bind(&merged_kwargs)
-                .bind(good_until)
-                .bind(max_retries)
+                .bind(&merged_input)
                 .bind(&task.task_options)
-                .bind(&enqueue_sha)
-                .bind(facts.command_fingerprint_version)
-                .bind(facts.command_fingerprint.as_slice())
+                .bind(facts.execution.as_str())
                 .bind(&facts.retention_class_key)
-                .bind(facts.input_digest.as_slice())
-                .bind(facts.retain_rerun_input)
-                .bind(facts.prepared_rerun_input_disposition.as_str())
-                .bind(facts.prepared_rerun_input_version)
-                .bind(facts.prepared_rerun_input_codec)
-                .bind(facts.prepared_rerun_input_content_type)
-                .bind(
-                    facts
-                        .prepared_rerun_input_digest
-                        .as_ref()
-                        .map(|digest| digest.as_slice()),
-                )
-                .bind(facts.prepared_rerun_input_inline.as_deref())
+                .bind(max_retries)
+                .bind(good_until)
                 .execute(&mut *tx)
                 .await?;
 
@@ -1174,24 +1148,17 @@ async fn enqueue_subworkflow_on_resume(
     };
 
     // Build the child spec (supports dynamic parameterization via spec_builder).
-    let has_child_inputs =
-        task.task_args.is_some() || task.task_kwargs.is_some() || task.args_from.is_some();
+    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
 
-    let merged_kwargs = merge_args_from_for_ready(
+    let merged_input = merge_args_from_for_ready(
         pool,
         workflow_id,
-        task.task_kwargs.as_deref(),
+        &task.input,
         &task.args_from,
         &task.dependencies,
     )
     .await?;
-    let child_spec = materialize_child_spec(
-        registered,
-        has_child_inputs,
-        task.task_args.as_deref(),
-        merged_kwargs.as_deref(),
-        registry,
-    )?;
+    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
@@ -1281,13 +1248,12 @@ mod resume_idempotency_tests {
     async fn insert_running_task(pool: &PgPool, wf_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, created_at
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'c8_task', '[]', '{}',
-                'default', 100, '{}', FALSE, 'all',
-                'RUNNING', FALSE, NOW()
+                $1, $2, 0, 'node_0', 'c8_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
         .bind(Uuid::new_v4())
@@ -1401,13 +1367,13 @@ mod resume_idempotency_tests {
         insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, created_at
-             ) VALUES (
-                $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '[1]', '{}',
-                'bulk', 17, '{}', FALSE, 'all', 'READY', FALSE, NOW()
-             )",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '1', 'bulk', 17, '{}',
+                FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(&workflow_id)
@@ -1429,10 +1395,21 @@ mod resume_idempotency_tests {
         .await
         .expect("resume enqueue path");
         assert_eq!(enqueued, 1);
-        let facts: (String, String, i32, i32, bool, Option<i32>) = sqlx::query_as(
-            "SELECT t.retention_class_key, t.prepared_rerun_input_disposition,
-                    octet_length(t.command_fingerprint), octet_length(t.input_digest),
-                    t.retain_rerun_input, octet_length(t.prepared_rerun_input_inline)
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the resume node enqueue time");
+        assert!(node_holds_enqueue_time);
+        let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
+            "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
+                    t.command_fingerprint_version, t.retain_rerun_input
              FROM horsies_tasks t
              JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
              WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
@@ -1442,11 +1419,9 @@ mod resume_idempotency_tests {
         .await
         .expect("read resume enqueue facts");
         assert_eq!(facts.0, "standard_7d");
-        assert_eq!(facts.1, "NEVER_ELIGIBLE");
-        assert_eq!(facts.2, 32);
-        assert_eq!(facts.3, 32);
-        assert!(!facts.4);
-        assert!(facts.5.is_none());
+        assert!(facts.1.is_none());
+        assert!(facts.2.is_none());
+        assert!(!facts.3);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (
@@ -1491,31 +1466,29 @@ mod p7_lifecycle_tests {
     async fn seed_claimed_backing(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                 id, task_name, queue_name, priority, args, kwargs, status,
-                 sent_at, enqueued_at, claimed, claimed_at, claimed_by_worker_id,
-                 max_retries, retry_count, enqueue_sha, is_workflow_task,
-                 command_fingerprint_version, command_fingerprint,
-                 retention_class_key, retain_rerun_input,
-                 prepared_rerun_input_disposition, created_at, updated_at
-             ) VALUES ($1, 'p7_lifecycle_task', 'default', 100, '[]', '{}',
-                       'CLAIMED', NOW(), NOW(), TRUE, NOW(), 'p7-worker', 0, 0,
-                       $1::text, TRUE, 1, $2, 'forever', FALSE,
-                       'NEVER_ELIGIBLE', NOW(), NOW())",
+                id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+                claimed_at, claimed_by_worker_id, max_retries, retry_count, is_workflow_task,
+                command_fingerprint_version, command_fingerprint, retention_class_key,
+                retain_rerun_input, created_at, updated_at, execution, claim_expires_at
+            ) VALUES (
+                $1, 'p7_lifecycle_task', 'default', 100, 'null', 'CLAIMED', NOW(), NOW(),
+                NOW(), 'p7-worker', 0, 0, TRUE, NULL, NULL, 'forever', FALSE, NOW(), NOW(),
+                'ISOLATED', NOW() + interval '1 hour'
+            )",
         )
         .bind(task_id)
-        .bind(vec![29_u8; 32])
         .execute(pool)
         .await
         .expect("seed backing task");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
-                 allow_failed_deps, join_type, status, is_subworkflow,
-                 task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p7_lifecycle_task', '[]', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'ENQUEUED', FALSE,
-                       $3, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+                created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'p7_lifecycle_task', 'null', 'default', 100, '{}', FALSE,
+                'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -1528,13 +1501,13 @@ mod p7_lifecycle_tests {
     async fn seed_running_node(pool: &PgPool, workflow_id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
-                 allow_failed_deps, join_type, status, is_subworkflow,
-                 created_at
-             ) VALUES ($1, $2, 0, 'root', 'p7_running_node', '[]', '{}',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE,
-                       NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'root', 'p7_running_node', 'null', 'default', 100, '{}', FALSE,
+                'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(workflow_id)
@@ -1734,11 +1707,12 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, queue_name,
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', 'default',
-                       100, '{}', FALSE, 'all', 'RUNNING', TRUE, $3, NOW())",
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
+             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
+                       $3, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(parent_id)
@@ -1748,11 +1722,13 @@ mod p7_lifecycle_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, queue_name,
-                 priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, created_at
-             ) VALUES ($1, $2, 0, 'pending', 'p7_child_pending', 'default',
-                       100, '{}', FALSE, 'all', 'PENDING', FALSE, NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'pending', 'p7_child_pending', 'null', 'default', 100, '{}', FALSE,
+                'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(child_id)
@@ -1816,11 +1792,11 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "PAUSED", Some(parent_id)).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, queue_name,
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
+             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_poison_child', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -1831,12 +1807,13 @@ mod p7_lifecycle_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, queue_name,
-                 priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, created_at
-             ) VALUES ($1, $2, 0, 'pending', 'p7_poison_child_pending',
-                       'default', 100, '{}', FALSE, 'all', 'PENDING', FALSE,
-                       NOW())",
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
+            ) VALUES (
+                $1, $2, 0, 'pending', 'p7_poison_child_pending', 'null', 'default', 100, '{}',
+                FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
         )
         .bind(Uuid::new_v4())
         .bind(child_id)
@@ -1937,11 +1914,11 @@ mod p7_lifecycle_tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, queue_name,
+                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
-                 is_subworkflow, sub_workflow_id, created_at
-             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock',
-                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE,
+                 is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
+             ) VALUES ($1, $2, 0, 'child', '__sub_workflow:p7_child_lock', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN',
                        $3, NOW())",
         )
         .bind(Uuid::new_v4())
@@ -2029,13 +2006,12 @@ mod cancel_lock_order_tests {
     async fn insert_wf_task(pool: &PgPool, wf_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
-                queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, created_at
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'n6_task', '[]', '{}',
-                'default', 100, '{}', FALSE, 'all',
-                'RUNNING', FALSE, NOW()
+                $1, $2, 0, 'node_0', 'n6_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
         .bind(Uuid::new_v4())
