@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::error::{BuiltInTaskCode, OperationalErrorCode, TaskError, TaskErrorCode};
 
@@ -12,13 +14,89 @@ use super::error::{BuiltInTaskCode, OperationalErrorCode, TaskError, TaskErrorCo
 /// `Err(TaskError)` with the appropriate `BuiltInTaskCode` — one result type,
 /// one error taxonomy, one matching shape.
 ///
-/// Serializes with adjacently tagged encoding:
-/// `{"__type": "ok", "value": ...}`, `{"__type": "err", "value": {...}}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "__type", content = "value", rename_all = "snake_case")]
+/// Stored as Python's result envelope (`encode_task_result`, `core/codec/typed.py:798-859`):
+/// `{"__h_task_result__": true, "ok": <value>, "err": null}` or
+/// `{"__h_task_result__": true, "ok": null, "err": {...}}`. A read refuses any other shape
+/// (`validate_task_result_envelope`, `core/codec/typed.py:1133-1180`): not an object, the marker missing or not
+/// `true`, a missing or an extra key, or both slots set. A non-null `err` slot is an error; otherwise the `ok`
+/// slot is the value, `null` included.
+#[derive(Debug, Clone)]
 pub enum TaskResult<T> {
     Ok(T),
     Err(TaskError),
+}
+
+/// The marker key of a stored task result (Python `_TASK_RESULT_ENVELOPE_KEY`).
+pub const TASK_RESULT_ENVELOPE_KEY: &str = "__h_task_result__";
+
+const OK_SLOT: &str = "ok";
+const ERR_SLOT: &str = "err";
+
+impl<T: Serialize> Serialize for TaskResult<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut envelope = serializer.serialize_map(Some(3))?;
+        envelope.serialize_entry(TASK_RESULT_ENVELOPE_KEY, &true)?;
+        match self {
+            Self::Ok(value) => {
+                envelope.serialize_entry(OK_SLOT, value)?;
+                envelope.serialize_entry(ERR_SLOT, &serde_json::Value::Null)?;
+            }
+            Self::Err(error) => {
+                envelope.serialize_entry(OK_SLOT, &serde_json::Value::Null)?;
+                envelope.serialize_entry(ERR_SLOT, error)?;
+            }
+        }
+        envelope.end()
+    }
+}
+
+/// The envelope is taken as raw text and read by the core's strict reader (`crate::core::codec::from_json_str`):
+/// the depth bound is the core's 300 levels, not the 128 of the caller's deserializer, so a value of 200 levels
+/// reads back inside its envelopes (Python `core/codec/json_value.py:54-75`).
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for TaskResult<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw_text = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        let raw: serde_json::Value =
+            crate::core::codec::from_json_str(raw_text.get()).map_err(D::Error::custom)?;
+        let serde_json::Value::Object(mut envelope) = raw else {
+            return Err(D::Error::custom(
+                "TaskResult envelope must be a JSON object",
+            ));
+        };
+        match envelope.get(TASK_RESULT_ENVELOPE_KEY) {
+            Some(serde_json::Value::Bool(true)) => {}
+            _ => {
+                return Err(D::Error::custom(format!(
+                    "TaskResult envelope missing {TASK_RESULT_ENVELOPE_KEY:?} marker (or marker is not true)"
+                )))
+            }
+        }
+        if let Some(extra) = envelope
+            .keys()
+            .find(|key| !matches!(key.as_str(), TASK_RESULT_ENVELOPE_KEY | OK_SLOT | ERR_SLOT))
+        {
+            return Err(D::Error::custom(format!(
+                "unexpected key {extra:?} in TaskResult envelope"
+            )));
+        }
+        let (Some(ok_slot), Some(err_slot)) = (envelope.remove(OK_SLOT), envelope.remove(ERR_SLOT))
+        else {
+            return Err(D::Error::custom(
+                "TaskResult envelope missing a required key (ok, err)",
+            ));
+        };
+        match (ok_slot, err_slot) {
+            (ok_slot, serde_json::Value::Null) => T::deserialize(ok_slot)
+                .map(Self::Ok)
+                .map_err(D::Error::custom),
+            (serde_json::Value::Null, err_slot) => TaskError::from_stored_value(err_slot)
+                .map(Self::Err)
+                .map_err(D::Error::custom),
+            (_, _) => Err(D::Error::custom(
+                "TaskResult envelope has both ok and err populated; exactly one must be set",
+            )),
+        }
+    }
 }
 
 impl<T> TaskResult<T> {
@@ -99,10 +177,10 @@ impl TaskError {
     pub fn is_transient(&self) -> bool {
         matches!(
             &self.error_code,
-            Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(_)))
-                | Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
+            TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(_))
+                | TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
                     OperationalErrorCode::BrokerError,
-                )))
+                ))
         )
     }
 }
@@ -157,7 +235,7 @@ mod tests {
         let extracted = result.unwrap_err();
         assert_eq!(
             extracted.error_code,
-            Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
+            TaskErrorCode::from(OperationalErrorCode::TaskError),
         );
     }
 
@@ -221,18 +299,96 @@ mod tests {
         let err = back.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::from(OperationalErrorCode::TaskError)),
+            TaskErrorCode::from(OperationalErrorCode::TaskError),
         );
         assert_eq!(err.message.as_deref(), Some("boom"));
     }
 
     #[test]
-    fn serde_ok_contains_type_tag() {
-        let result: TaskResult<i32> = TaskResult::Ok(42);
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"__type\""));
-        assert!(json.contains("\"ok\""));
-        assert!(json.contains("\"value\""));
+    fn stored_text_is_the_python_envelope() {
+        let ok: TaskResult<serde_json::Value> = TaskResult::Ok(serde_json::json!({"total": 3}));
+        assert_eq!(
+            serde_json::to_string(&ok).unwrap(),
+            r#"{"__h_task_result__":true,"ok":{"total":3},"err":null}"#
+        );
+        let unit: TaskResult<()> = TaskResult::Ok(());
+        assert_eq!(
+            serde_json::to_string(&unit).unwrap(),
+            r#"{"__h_task_result__":true,"ok":null,"err":null}"#
+        );
+        let err: TaskResult<i32> =
+            TaskResult::Err(TaskError::new("RATE_LIMITED", "slow down").unwrap());
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":"RATE_LIMITED","data":null,"message":"slow down"}}"#
+        );
+    }
+
+    #[test]
+    fn python_envelopes_read_back() {
+        let ok: TaskResult<i32> =
+            serde_json::from_str(r#"{"__h_task_result__":true,"ok":7,"err":null}"#).unwrap();
+        assert!(matches!(ok, TaskResult::Ok(7)));
+        let null_ok: TaskResult<Option<i32>> =
+            serde_json::from_str(r#"{"__h_task_result__":true,"ok":null,"err":null}"#).unwrap();
+        assert!(matches!(null_ok, TaskResult::Ok(None)));
+        let err: TaskResult<i32> = serde_json::from_str(
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_TIMEOUT"},"data":null,"message":"late"}}"#,
+        )
+        .unwrap();
+        assert_eq!(err.unwrap_err().error_code.to_string(), "TASK_TIMEOUT");
+    }
+
+    /// An err slot is read by the error contract: a missing code, an unknown key or a plain built-in name is
+    /// refused (Python `decode_task_error`).
+    #[test]
+    fn an_err_slot_follows_the_error_contract() {
+        for text in [
+            r#"{"__h_task_result__":true,"ok":null,"err":{"message":"m"}}"#,
+            r#"{"__h_task_result__":true,"ok":null,"err":{"error_code":"X","extra":1}}"#,
+            r#"{"__h_task_result__":true,"ok":null,"err":{"error_code":"TASK_TIMEOUT"}}"#,
+            r#"{"__h_task_result__":true,"ok":null,"err":{"error_code":"X","data":{"__h_x":1}}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskResult<serde_json::Value>>(text).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    /// The core's strict reader reads the envelope: a repeated key is refused, and a value deeper than
+    /// serde_json's own limit of 128 reads back inside a caller's plain `serde_json::from_str`.
+    #[test]
+    fn the_envelope_is_read_by_the_strict_reader() {
+        assert!(serde_json::from_str::<TaskResult<i32>>(
+            r#"{"__h_task_result__":true,"ok":1,"ok":2,"err":null}"#
+        )
+        .is_err());
+        let mut value = serde_json::json!([1]);
+        for _ in 1..crate::core::codec::MAX_VALUE_JSON_DEPTH {
+            value = serde_json::Value::Array(vec![value]);
+        }
+        let text = serde_json::to_string(&TaskResult::Ok(value.clone())).unwrap();
+        let back: TaskResult<serde_json::Value> = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.unwrap(), value);
+    }
+
+    #[test]
+    fn malformed_envelopes_are_refused() {
+        for text in [
+            r#"{"__type":"ok","value":1}"#,
+            r#"[1]"#,
+            r#"{"__h_task_result__":false,"ok":1,"err":null}"#,
+            r#"{"ok":1,"err":null}"#,
+            r#"{"__h_task_result__":true,"ok":1}"#,
+            r#"{"__h_task_result__":true,"ok":1,"err":null,"extra":1}"#,
+            r#"{"__h_task_result__":true,"ok":1,"err":{"error_code":"X","message":"m"}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskResult<serde_json::Value>>(text).is_err(),
+                "{text} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -267,10 +423,9 @@ mod tests {
 
     #[test]
     fn display_err_variant() {
-        let r: TaskResult<i32> = TaskResult::Err(TaskError::new(
-            "BAD_INPUT".to_owned(),
-            "invalid data".to_owned(),
-        ));
+        let r: TaskResult<i32> = TaskResult::Err(
+            TaskError::new("BAD_INPUT".to_owned(), "invalid data".to_owned()).unwrap(),
+        );
         let s = format!("{}", r);
         assert!(
             s.contains("Err"),
@@ -324,10 +479,9 @@ mod tests {
 
     #[test]
     fn user_code_is_terminal() {
-        let r: TaskResult<i32> = TaskResult::Err(TaskError::new(
-            "MY_ERROR".to_owned(),
-            "custom fail".to_owned(),
-        ));
+        let r: TaskResult<i32> = TaskResult::Err(
+            TaskError::new("MY_ERROR".to_owned(), "custom fail".to_owned()).unwrap(),
+        );
         assert!(r.is_terminal());
         assert!(!r.is_transient());
     }

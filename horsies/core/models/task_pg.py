@@ -35,223 +35,110 @@ class Base(DeclarativeBase):
 
 
 class TaskModel(Base):
-    """
-    SQLAlchemy model for storing tasks in the database.
+    """The live task row (``horsies_tasks``) of the baseline schema.
 
-    - id: str # uuid4
-    - task_name: str # name of the task, coming from the task decorator
-    - queue_name: str # name of the queue, coming from the task decorator, defaulting to "default"
-    - priority: int # 1..100, set by the queue's priority value, defaulting to 100, least important
-    - args: str # task arguments, serialized as json
-    - kwargs: str # task keyword arguments, serialized as json
-    - status: TaskStatus # PENDING, CLAIMED, RUNNING, COMPLETED, FAILED
-    - sent_at: datetime # immutable call-site timestamp (when .send()/.schedule()/.start() was called)
-    - enqueued_at: datetime # mutable dispatch timestamp (when task becomes eligible for claiming)
-    - claimed_at: datetime # when task was claimed by a worker
-    - started_at: datetime # when task actually started running in the worker's process
-    - completed_at: datetime # when task was completed, set by the process
-    - failed_at: datetime # when task failed, set by the process
-    - terminal_at: datetime # canonical terminal instant; NULL exactly while the task is live
-    - result: str # task result, serialized as json
-    - failed_reason: str # reason for task failure, serialized as json
-    - claimed: bool # whether the task is claimed by a worker
-    - claim_expires_at: datetime # when a prefetched claim expires and can be reclaimed
-    - good_until: datetime # when the task will be considered expired and retried
-    - retry_count: int # current number of retry attempts
-    - max_retries: int # maximum number of retry attempts allowed
-    - next_retry_at: datetime # when the task should be retried next
-    - task_options: str # serialized TaskOptions configuration for retry policies
-    - execution: str # Execution value: ISOLATED, SHARED_ASYNC or SHARED_THREAD
-    - worker_pid: int # process ID of the worker executing this task
-    - worker_hostname: str # hostname of the machine running the worker
-    - worker_process_name: str # name/identifier of the worker process
-    - created_at: datetime # when the task was created
-    - updated_at: datetime # when the task was last updated
+    A row is PENDING, CLAIMED or RUNNING; a terminal task moves to
+    ``horsies_task_history`` with its result. The model is a query helper:
+    the baseline SQL creates the table, its checks and its indexes, and it
+    has no database defaults, so every insert names every value. The
+    ``default`` values here are filled in by SQLAlchemy on an ORM insert.
     """
 
     __tablename__ = 'horsies_tasks'
 
-    # Basic task information
-    id: Mapped[str] = mapped_column(
-        Uuid(as_uuid=False), primary_key=True
-    )
+    # Identity and command, written once at enqueue.
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True)
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    queue_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    queue_name: Mapped[str] = mapped_column(String(100), nullable=False)
     priority: Mapped[int] = mapped_column(
-        nullable=False, default=100, server_default=text('100'),
+        Integer, nullable=False, default=100,
     )  # 1..100
+    # The task's keyword arguments as one JSON object text, stored exactly
+    # as the send carried it ('{}' when the send has none). The command
+    # fingerprint covers these bytes.
+    input: Mapped[str] = mapped_column(Text, nullable=False)
+    task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The task's `Execution` value: ISOLATED, SHARED_ASYNC or SHARED_THREAD.
+    execution: Mapped[str] = mapped_column(Text, nullable=False)
+    retention_class_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The call time of the command that made the row; never changed.
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now,
+    )
 
-    # Function arguments (stored as JSON)
-    args: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    kwargs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Fingerprints and keys. Both fingerprint columns are NULL on a row
+    # that the workflow engine wrote, and set on a sent row.
+    command_fingerprint_version: Mapped[Optional[int]] = mapped_column(
+        SmallInteger, nullable=True,
+    )
+    command_fingerprint: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True,
+    )
+    idempotency_key_digest: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True,
+    )
 
-    # Task status and execution tracking
+    # Lifecycle.
     status: Mapped[TaskStatus] = mapped_column(
         SQLAlchemyEnum(TaskStatus, native_enum=False),
         nullable=False,
         default=TaskStatus.PENDING,
-        index=True,
     )
-
-    # Timestamps
-    sent_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )  # immutable call-site timestamp (Python clock); never mutated after insert
+    # When the row becomes eligible for a claim; moved by a retry.
     enqueued_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text('NOW()'),
-    )  # mutable dispatch/eligibility timestamp; updated on retry
+        DateTime(timezone=True), nullable=False,
+    )
     claimed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )  # when the task was claimed by a worker
-    started_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True,
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    failed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    # Canonical terminal instant, assigned by database time in the terminal
-    # transition transaction. Non-NULL exactly for COMPLETED/FAILED/CANCELLED/
-    # EXPIRED; cleared by manual in-place retry. Eight of the sixteen terminal
-    # writers record no completed_at or failed_at, so this is the only column
-    # that dates every terminal row uniformly.
-    terminal_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    # Results and error handling
-    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    failed_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    error_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Task claiming and lifecycle
-    claimed: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=sa_false(),
-    )  # informational; never a query predicate (no index)
     claimed_by_worker_id: Mapped[Optional[str]] = mapped_column(
-        String(255), nullable=True
+        String(255), nullable=True,
     )
-    # Claim lease expiry: prefetched claims expire after this time and can be reclaimed.
-    # NULL means no expiry (task is within running capacity, not prefetched).
+    # The claim lease: set exactly while the row is CLAIMED.
     claim_expires_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )  # served by idx_horsies_tasks_claim_expired (partial, schema v3)
-    is_workflow_task: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=sa_false(),
-    )  # near-zero selectivity; no query needs an index on it
+        DateTime(timezone=True), nullable=True,
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
     finalizing_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )  # only OR-combined behind status filters; index never selective
+        DateTime(timezone=True), nullable=True,
+    )
     finalizing_by_worker_id: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True
+        Text, nullable=True,
     )
-    good_until: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )  # served by idx_horsies_tasks_good_until_set (partial, schema v5)
-
-    # Retry configuration and tracking
-    retry_count: Mapped[int] = mapped_column(
-        Integer, default=0, server_default=text('0'), nullable=False,
-    )
-    max_retries: Mapped[int] = mapped_column(
-        Integer, default=0, server_default=text('0'), nullable=False,
-    )
-    next_retry_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )  # filter inside claim index scans only; standalone index unused
-    task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # The task's `Execution` value (schema v54). Every insert path writes it
-    # from the stored options. The default serves rows written before v54
-    # and writers that do not know the column; the CHECK
-    # ck_horsies_tasks_execution (migration DDL) bounds the domain.
-    execution: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'ISOLATED'"),
-    )
-
-    # Idempotent enqueue verification
-    enqueue_sha: Mapped[str] = mapped_column(
-        String(64), nullable=False,
-    )  # SHA-256 hex digest
-
-    # Worker process tracking
     worker_pid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     worker_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     worker_process_name: Mapped[Optional[str]] = mapped_column(
-        String(255), nullable=True
+        String(255), nullable=True,
     )
-
-    # Live cutover columns (schema v27, transitional): every column is
-    # Optional because the catalog at v27 is nullable and check-free —
-    # the model must never claim a strictness the catalog does not
-    # enforce. The converted enqueue writes real values into all of them.
-    #
-    # v32 tightens them on a uuid-born install, so the two worlds now
-    # disagree: fresh catalogs require these columns, and an upgraded
-    # catalog does not until its operator runs the offline cutover. The
-    # typings stay Optional while that is true — flipping them would
-    # claim, on every pre-cutover install, exactly the strictness the
-    # rule above forbids claiming. They flip when both worlds enforce
-    # it, which is a decision about which pre-cutover states remain
-    # supported, not a consequence of v32.
-    command_fingerprint_version: Mapped[Optional[int]] = mapped_column(
-        SmallInteger, nullable=True
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )
-    command_fingerprint: Mapped[Optional[bytes]] = mapped_column(
-        LargeBinary, nullable=True
+    good_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )
-    retention_class_key: Mapped[Optional[str]] = mapped_column(
-        String(64), nullable=True
-    )
-    input_digest: Mapped[Optional[bytes]] = mapped_column(
-        LargeBinary, nullable=True
-    )
-    rerun_of_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        Uuid, nullable=True
-    )
-    rerun_root_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        Uuid, nullable=True
-    )
-    idempotency_key_digest: Mapped[Optional[bytes]] = mapped_column(
-        LargeBinary, nullable=True
-    )
-    retain_rerun_input: Mapped[Optional[bool]] = mapped_column(
-        Boolean, nullable=True
-    )
-    prepared_rerun_input_disposition: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True
-    )
-    prepared_rerun_input_version: Mapped[Optional[int]] = mapped_column(
-        SmallInteger, nullable=True
-    )
-    prepared_rerun_input_codec: Mapped[Optional[str]] = mapped_column(
-        String(64), nullable=True
-    )
-    prepared_rerun_input_content_type: Mapped[Optional[str]] = mapped_column(
-        String(255), nullable=True
-    )
-    prepared_rerun_input_digest: Mapped[Optional[bytes]] = mapped_column(
-        LargeBinary, nullable=True
-    )
-    prepared_rerun_input_inline: Mapped[Optional[bytes]] = mapped_column(
-        LargeBinary, nullable=True
-    )
-    prepared_rerun_input_reference: Mapped[Optional[str]] = mapped_column(
-        String(2048), nullable=True
-    )
-
-    # Metadata
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        server_default=text('NOW()'),
+    is_workflow_task: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        nullable=False,
         default=utc_now,
-        server_default=text('NOW()'),
         onupdate=utc_now,
+    )
+
+    # Rerun: the policy resolved at enqueue, and the lineage pair (both or
+    # neither).
+    retain_rerun_input: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    rerun_of_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, nullable=True,
+    )
+    rerun_root_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, nullable=True,
     )
 
 

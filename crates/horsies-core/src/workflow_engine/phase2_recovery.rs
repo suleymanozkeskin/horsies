@@ -758,8 +758,10 @@ mod tests {
         let prior_task = Uuid::new_v4();
         let current_task = Uuid::new_v4();
         seed_workflow_task(&pool, workflow_id, prior_task, false).await;
-        let prior_error = crate::core::TaskError::new("PRIOR_FAILURE", "prior node failed");
-        let current_error = crate::core::TaskError::new("CURRENT_FAILURE", "current node failed");
+        let prior_error =
+            crate::core::TaskError::new("PRIOR_FAILURE", "prior node failed").unwrap();
+        let current_error =
+            crate::core::TaskError::new("CURRENT_FAILURE", "current node failed").unwrap();
         let prior_result = serde_json::to_string(
             &crate::core::TaskResult::<serde_json::Value>::Err(prior_error),
         )
