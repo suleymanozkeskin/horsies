@@ -3,7 +3,7 @@
 The task-detail and workflow-node routes served whole rows from
 `horsies_tasks`; terminalization moves those rows, so both re-point
 through the staged detail read when the live side is empty. Proven on
-migrated, relocated, tightened databases: the same response shapes
+installed databases with seeded history rows: the same response shapes
 come back with the history-side values — the terminal instant landing
 in the status-appropriate end stamp, the failure reason from the
 recorded terminal context, attempts decoded from the snapshot — and a
@@ -17,19 +17,17 @@ import uuid
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import TaskStatus
 from horsies.core.types.result import is_err
 from horsies.monitoring import TaskDetail, TaskDetailNotFound
 from horsies.monitoring.queries import get_task_detail, get_workflow_node
 from tests.integration.test_task_result_history_fallback import (
-    _populated_history,
-)
-from tests.integration.test_task_history_relocation import (
-    insert_legacy_task,
-    relocate_all,
+    populated_history,
+    seed_history_task,
 )
 from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
@@ -52,7 +50,7 @@ class TestTaskDetailFromHistory:
         )
         try:
             await broker.ensure_schema_initialized()
-            completed, cancelled = await _populated_history(url)
+            completed, cancelled = await populated_history(url)
 
             outcome = await get_task_detail(broker, completed)
             assert not is_err(outcome), outcome
@@ -89,20 +87,15 @@ class TestTaskDetailFromHistory:
             engine = create_async_engine(url)
             workflow_id = str(uuid.uuid4())
             try:
-                async with engine.begin() as connection:
-                    from tests.integration.test_task_history_relocation import (
-                        install_program_state,
-                    )
-
-                    await install_program_state(connection)
-                    task_id = await insert_legacy_task(
-                        connection,
-                        status='COMPLETED',
-                        kind=None,
-                        result='{"ok": 1}',
+                async with AsyncSession(engine) as session:
+                    task_id = await seed_history_task(
+                        session,
+                        status=TaskStatus.COMPLETED,
+                        result_json='{"ok": 1}',
                         is_workflow_task=True,
+                        workflow_id=workflow_id,
                     )
-                    await connection.execute(
+                    _ = await session.execute(
                         text(
                             'INSERT INTO horsies_workflows '
                             '(id, name, status, on_error, depth, '
@@ -114,7 +107,7 @@ class TestTaskDetailFromHistory:
                         ),
                         {'w': workflow_id},
                     )
-                    await connection.execute(
+                    _ = await session.execute(
                         text(
                             'INSERT INTO horsies_workflow_tasks '
                             '(id, workflow_id, task_id, task_index, '
@@ -131,21 +124,7 @@ class TestTaskDetailFromHistory:
                             't': task_id,
                         },
                     )
-                    await relocate_all(connection)
-                    from horsies.core.history.cutover.tighten import (
-                        TightenComplete,
-                        confirmation_phrase,
-                        tighten_to_frozen,
-                    )
-
-                    tightened = await tighten_to_frozen(
-                        connection,
-                        backup_label='node-test',
-                        operator_confirmation=confirmation_phrase(
-                            'node-test'
-                        ),
-                    )
-                    assert isinstance(tightened, TightenComplete)
+                    await session.commit()
             finally:
                 await engine.dispose()
 

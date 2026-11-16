@@ -92,15 +92,6 @@ END
 $guard$
 """
 
-DROP_DUPLICATE_GUARD_DDL: Final = (
-    f'DROP FUNCTION IF EXISTS {TASK_DUPLICATE_GUARD_FUNCTION}(uuid)'
-)
-DROP_CLOCK_SKEW_EXCEPTIONS_DDL: Final = f'DROP TABLE IF EXISTS {CLOCK_SKEW_EXCEPTIONS}'
-DROP_UUID7_BIRTH_FUNCTION_DDL: Final = (
-    f'DROP FUNCTION IF EXISTS {UUID7_BIRTH_FUNCTION}(uuid)'
-)
-
-
 def duplicate_guard_fragments() -> tuple[str, ...]:
     """The exception table, the birth helper, and the first guard version."""
     return (
@@ -108,15 +99,6 @@ def duplicate_guard_fragments() -> tuple[str, ...]:
         CLOCK_SKEW_EXCEPTIONS_INDEX_DDL,
         UUID7_BIRTH_FUNCTION_DDL,
         DUPLICATE_GUARD_FIRST_VERSION_DDL,
-    )
-
-
-def duplicate_guard_teardown() -> tuple[str, ...]:
-    """Reverse `duplicate_guard_fragments`."""
-    return (
-        DROP_DUPLICATE_GUARD_DDL,
-        DROP_UUID7_BIRTH_FUNCTION_DDL,
-        DROP_CLOCK_SKEW_EXCEPTIONS_DDL,
     )
 
 

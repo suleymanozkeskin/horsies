@@ -697,6 +697,16 @@ fn prepared_statement_tracking_error(err: sqlx::Error) -> BrokerError {
     ))
 }
 
+/// A claim-pass count as the claim function's `integer` argument.
+fn claim_argument(name: &str, value: u32) -> Result<i32, BrokerError> {
+    i32::try_from(value).map_err(|_| {
+        BrokerError::InvalidClaimArgument(format!(
+            "{name} = {value} is above the claim function's limit of {}",
+            i32::MAX
+        ))
+    })
+}
+
 /// Inputs to one `horsies_claim` pass (parity with horsies PR #160): the
 /// serviced queue set with its priority/cap config, the budget knobs, and the
 /// advisory lock keys the pass must hold.
@@ -717,8 +727,11 @@ pub struct ClaimPassParams {
     pub max_claim_per_worker: u32,
     pub max_claim_batch: u32,
     pub cluster_wide_cap: Option<u32>,
-    /// `None` claims with `claim_expires_at = NULL` (no lease expiry).
-    pub claim_lease_ms: Option<u32>,
+    /// The lease of every claim this pass takes. Every claim has a lease
+    /// (Python `core/worker/claiming.py`; the baseline CHECK requires
+    /// `claim_expires_at` on every CLAIMED row), so a missing or zero lease
+    /// is not representable.
+    pub claim_lease_ms: std::num::NonZeroU32,
     /// Advisory keys for consistent cap accounting; acquired ascending.
     pub lock_keys: Vec<i64>,
 }
@@ -1287,6 +1300,17 @@ impl PostgresBroker {
         &self,
         params: &ClaimPassParams,
     ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
+        // Every count is refused, not clamped, when the claim function's
+        // integer argument cannot hold it.
+        let processes = claim_argument("processes", params.processes)?;
+        let prefetch_buffer = claim_argument("prefetch_buffer", params.prefetch_buffer)?;
+        let max_claim_per_worker =
+            claim_argument("max_claim_per_worker", params.max_claim_per_worker)?;
+        let max_claim_batch = claim_argument("max_claim_batch", params.max_claim_batch)?;
+        let cluster_wide_cap = params
+            .cluster_wide_cap
+            .map(|cap| claim_argument("cluster_wide_cap", cap))
+            .transpose()?;
         let started = std::time::Instant::now();
         let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
         let acquired = std::time::Instant::now();
@@ -1296,16 +1320,12 @@ impl PostgresBroker {
             .bind(sqlx::types::Json(&params.queue_priority))
             .bind(sqlx::types::Json(&params.queue_max_concurrency))
             .bind(params.hard_cap_mode)
-            .bind(i32::try_from(params.processes).unwrap_or(i32::MAX))
-            .bind(i32::try_from(params.prefetch_buffer).unwrap_or(i32::MAX))
-            .bind(i32::try_from(params.max_claim_per_worker).unwrap_or(i32::MAX))
-            .bind(i32::try_from(params.max_claim_batch).unwrap_or(i32::MAX))
-            .bind(
-                params
-                    .cluster_wide_cap
-                    .map(|cap| i32::try_from(cap).unwrap_or(i32::MAX)),
-            )
-            .bind(params.claim_lease_ms.map(i64::from))
+            .bind(processes)
+            .bind(prefetch_buffer)
+            .bind(max_claim_per_worker)
+            .bind(max_claim_batch)
+            .bind(cluster_wide_cap)
+            .bind(i64::from(params.claim_lease_ms.get()))
             .bind(sqlx::types::Json(&params.lock_keys))
             .fetch_all(&mut *connection)
             .await;
@@ -3699,18 +3719,23 @@ mod horsies_claim_tests {
         let expires = lease_offset_secs.map(|s| Utc::now() + chrono::Duration::seconds(s));
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, max_retries,
-                enqueue_sha, claimed_by_worker_id, claim_expires_at,
-                is_workflow_task, created_at, updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'pr160_task', $2, $3, '[]', '{}',
-                $4, NOW(), NOW(), 0,
-                $1::text, $5, $6,
-                FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'pr160_task', $2, $3, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                $4, NOW(), CASE WHEN $4 IN ('CLAIMED', 'RUNNING') THEN NOW() END, $5, CASE WHEN $4 = 'CLAIMED' THEN COALESCE($6, NOW() + interval '1 minute') END,
+                NULL, NULL, NULL,
+                CASE WHEN $4 = 'RUNNING' THEN 4242 END, CASE WHEN $4 = 'RUNNING' THEN 'test-host' END, CASE WHEN $4 = 'RUNNING' THEN 'test-process' END,
+                0, 0, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(id)
@@ -3737,7 +3762,7 @@ mod horsies_claim_tests {
             max_claim_per_worker: 0,
             max_claim_batch: 0,
             cluster_wide_cap: None,
-            claim_lease_ms: Some(60_000),
+            claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
             lock_keys: Vec::new(),
         }
     }
@@ -3964,9 +3989,13 @@ mod horsies_claim_tests {
         cleanup(&pool, &queues).await;
     }
 
+    /// Python `core/worker/claiming.py`: every claim carries a lease. A
+    /// claim pass sets `claim_expires_at` on every row it takes; a pass
+    /// without a lease is not representable (`ClaimPassParams.claim_lease_ms`
+    /// is `NonZeroU32`).
     #[tokio::test]
     #[serial]
-    async fn null_lease_claims_without_expiry_and_lease_sets_it() {
+    async fn every_claim_carries_its_lease() {
         let broker = connect_migrated().await;
         let pool = broker.pool().clone();
         let suffix = Uuid::new_v4().simple().to_string();
@@ -3974,42 +4003,37 @@ mod horsies_claim_tests {
         let qa = format!("pr160_lease_{suffix}");
         let queues = vec![qa.clone()];
 
-        let a = seed(&pool, &qa, "PENDING", 0, None, None).await;
-        let b = seed(&pool, &qa, "PENDING", 0, None, None).await;
+        let _task = seed(&pool, &qa, "PENDING", 0, None, None).await;
 
-        let mut params = base_params(&wid, &queues);
-        params.claim_lease_ms = None;
-        params.max_claim_batch = 1;
+        let params = base_params(&wid, &queues);
         let rows = broker.claim_batch(&params).await.expect("claim");
         assert_eq!(rows.len(), 1);
 
-        params.claim_lease_ms = Some(60_000);
-        let rows2 = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows2.len(), 1);
-
-        let leases: Vec<(Uuid, Option<DateTime<Utc>>)> =
-            sqlx::query_as("SELECT id, claim_expires_at FROM horsies_tasks WHERE id = ANY($1)")
-                .bind(vec![a.clone(), b.clone()])
-                .fetch_all(&pool)
+        let lease: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
+                .bind(rows[0].id)
+                .fetch_one(&pool)
                 .await
-                .expect("read leases");
-        let lease_of = |id: Uuid| {
-            leases
-                .iter()
-                .find(|(row_id, _)| *row_id == id)
-                .map(|(_, lease)| *lease)
-                .expect("row present")
-        };
-        assert!(
-            lease_of(rows[0].id).is_none(),
-            "NULL p_lease_ms claims with claim_expires_at NULL",
-        );
-        assert!(
-            lease_of(rows2[0].id).is_some(),
-            "explicit lease sets claim_expires_at",
-        );
+                .expect("read lease");
+        assert!(lease.is_some(), "every claim sets claim_expires_at");
 
         cleanup(&pool, &queues).await;
+    }
+
+    /// A count that the claim function's integer argument cannot hold is
+    /// refused before any statement, never clamped to `i32::MAX`.
+    #[tokio::test]
+    #[serial]
+    async fn a_claim_count_above_the_integer_range_is_refused() {
+        let broker = connect_migrated().await;
+        let mut params = base_params("w-range", &["range_queue".to_owned()]);
+        params.max_claim_batch = u32::MAX;
+        match broker.claim_batch(&params).await {
+            Err(BrokerError::InvalidClaimArgument(message)) => {
+                assert!(message.contains("max_claim_batch"), "{message}");
+            }
+            other => panic!("expected InvalidClaimArgument, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -4200,22 +4224,23 @@ mod fused_finalize_tests {
     async fn seed(pool: &sqlx::PgPool, id: &str, status: &str, worker: Option<&str>, retry: i32) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                enqueue_sha, claimed_by_worker_id, claimed_at, worker_hostname,
-                worker_pid, worker_process_name, is_workflow_task, created_at,
-                updated_at, terminal_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'fused_task', 'default', 100, '[]', '{}',
-                $2, NOW(), NOW(), NOW(), 3, $4,
-                $1, $3, CASE WHEN $3 IS NOT NULL THEN NOW() END, 'host1',
-                123, 'worker-123', FALSE, NOW(),
-                NOW(),
-                CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                     THEN NOW() END,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'fused_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
+                NOW(), NULL, NULL,
+                123, 'host1', 'worker-123',
+                $4, 3, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(id))
@@ -4490,16 +4515,23 @@ mod set_running_heartbeat_tests {
     async fn seed_claimed(pool: &sqlx::PgPool, id: &str, worker: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, claimed, claimed_at, claimed_by_worker_id,
-                max_retries, enqueue_sha, is_workflow_task, created_at, updated_at,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '[]', '{}',
-                'CLAIMED', NOW(), NOW(), TRUE, NOW(), $2,
-                3, $1, FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'CLAIMED', NOW(), NOW(), $2, NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                0, 3, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(id))
@@ -4629,18 +4661,23 @@ mod set_running_heartbeat_tests {
             .expect("truncate to microseconds");
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, claimed, claimed_at, claimed_by_worker_id,
-                retry_count, max_retries, good_until,
-                enqueue_sha, is_workflow_task, created_at, updated_at,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '[]', '{}',
-                'CLAIMED', NOW(), NOW(), TRUE, NOW(), 'w1',
-                2, 7, $2,
-                $1, FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'hb_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                2, 7, NULL, $2, FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(&id))
@@ -4958,7 +4995,25 @@ mod filter_non_runnable_tests {
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
                 if index == 0 {
-                    sqlx::query("INSERT INTO horsies_tasks(id,task_name,queue_name,enqueue_sha,command_fingerprint_version,command_fingerprint,retention_class_key,retain_rerun_input,prepared_rerun_input_disposition) VALUES($1,'lookup_test','default','fixture',1,decode(repeat('00',32),'hex'),'forever',false,'DECLINED_BY_POLICY')")
+                    sqlx::query("INSERT INTO horsies_tasks (
+                            id, task_name, queue_name, priority, input, task_options, execution,
+                            retention_class_key, sent_at, created_at,
+                            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                            started_at, finalizing_at, finalizing_by_worker_id,
+                            worker_pid, worker_hostname, worker_process_name,
+                            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+                        ) VALUES (
+                            $1, 'lookup_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                            'forever', NOW(), NOW(),
+                            1, decode(repeat('00', 32), 'hex'), NULL,
+                            'PENDING', NOW(), NULL, NULL, NULL,
+                            NULL, NULL, NULL,
+                            NULL, NULL, NULL,
+                            0, 3, NULL, NULL, FALSE,
+                            NOW(), FALSE, NULL, NULL
+                        )")
                         .bind(task_id).execute(&mut *tx).await.unwrap();
                 }
             }
@@ -5050,17 +5105,24 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, claimed_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, is_workflow_task, enqueue_sha,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
-            ) VALUES ($1, 'c15_task', 'default', 100, '[]', '{}', 'CLAIMED',
-                      NOW(), NOW(), NOW(), NOW(), TRUE,
-                      'w1', 0, 3, TRUE,
-                      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                      1, decode(repeat('00', 32), 'hex'), 'standard_30d',
-                      FALSE, 'NEVER_ELIGIBLE')",
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+            ) VALUES (
+                $1, 'c15_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                NULL, NULL, NULL,
+                'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                0, 3, NULL, NULL, TRUE,
+                NOW(), FALSE, NULL, NULL
+            )",
         )
         .bind(&task_id)
         .execute(&pool)
@@ -5153,18 +5215,23 @@ mod terminal_at_stamp_tests {
     ) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                enqueue_sha, claimed_by_worker_id, claimed, good_until,
-                is_workflow_task, created_at, updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'terminal_at_task', 'default', 100, '[]', '{}',
-                $2, NOW(), NOW(), NOW(), 3, 0,
-                $1, $3, $3 IS NOT NULL, NOW() + $4 * INTERVAL '1 second',
-                FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'terminal_at_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                $2, NOW(), CASE WHEN $3 IS NOT NULL THEN NOW() END, $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
+                NOW(), NULL, NULL,
+                CASE WHEN $2 = 'RUNNING' THEN 4242 END, CASE WHEN $2 = 'RUNNING' THEN 'test-host' END, CASE WHEN $2 = 'RUNNING' THEN 'test-process' END,
+                0, 3, NULL, NOW() + $4 * INTERVAL '1 second', FALSE,
+                NOW(), FALSE, NULL, NULL
             )",
         )
         .bind(test_uuid(id))
