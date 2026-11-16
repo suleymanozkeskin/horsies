@@ -10,7 +10,7 @@ pub mod status;
 pub mod sub_workflow;
 pub mod summary;
 
-pub use context::{WorkflowContext, WORKFLOW_CTX_KWARG};
+pub use context::{WorkflowContext, WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 pub use definition::{WorkflowDefConfig, WorkflowDefinition};
 pub use handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 pub use meta::WorkflowMeta;

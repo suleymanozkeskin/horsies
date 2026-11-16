@@ -26,6 +26,7 @@ use crate::broker::attempt_writes::{
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::core::codec::user_value::check_task_input;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -37,7 +38,8 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
-use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
+use crate::workflow_engine::args_merge::unwrap_args_from_entries;
 
 use crate::worker::retry::{
     admit_retry, read_stored_options, RetryAdmission, RunPermit, StoredOptions,
@@ -440,20 +442,25 @@ pub(crate) fn build_task_envelope(
 /// payload validation (schedules and workflow nodes) so check-time dry-runs
 /// use the exact same args-coercion and kwargs-object rejection as execution.
 ///
-/// `accepts_workflow_ctx` controls the `__horsies_workflow_ctx__` →
-/// `workflow_ctx` rename; check-time callers pass `false` (no runtime context).
+/// Engine positions (Python `core/worker/child_runner.py:1546-1645`):
+/// - `WORKFLOW_CTX_KWARG` becomes `workflow_ctx` when `accepts_workflow_ctx`
+///   (check-time callers pass `false`: no runtime context);
+/// - `WORKFLOW_META_KWARG` is removed;
+/// - an `args_from` entry is replaced by its `inner` result envelope, which
+///   the receiving `TaskResult` field decodes with its own type.
+///
+/// Every other value follows the rules of a user value (no engine key, at
+/// most `MAX_VALUE_JSON_DEPTH` levels), and no other kwarg name is an engine
+/// key. A refusal is `WORKER_SERIALIZATION_ERROR`, as Python's
+/// `_serialization_error_response`.
 pub(crate) fn build_envelope_from_parts(
     args: Option<&str>,
     kwargs: Option<&str>,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
     let args_value: serde_json::Value = match args {
-        Some(json) => serde_json::from_str(json).map_err(|e| {
-            TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                format!("failed to parse args JSON: {}", e),
-            )
-        })?,
+        Some(json) => crate::core::codec::from_json_str(json)
+            .map_err(|e| serialization_error(format!("failed to parse args JSON: {}", e)))?,
         None => serde_json::Value::Null,
     };
 
@@ -464,12 +471,8 @@ pub(crate) fn build_envelope_from_parts(
     };
 
     let kwargs_value: serde_json::Value = match kwargs {
-        Some(json) => serde_json::from_str(json).map_err(|e| {
-            TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                format!("failed to parse kwargs JSON: {}", e),
-            )
-        })?,
+        Some(json) => crate::core::codec::from_json_str(json)
+            .map_err(|e| serialization_error(format!("failed to parse kwargs JSON: {}", e)))?,
         None => serde_json::Value::Null,
     };
 
@@ -477,21 +480,25 @@ pub(crate) fn build_envelope_from_parts(
         serde_json::Value::Null => serde_json::Map::new(),
         serde_json::Value::Object(map) => map,
         _ => {
-            return Err(TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
-                "kwargs payload is not a JSON object",
+            return Err(serialization_error(
+                "kwargs payload is not a JSON object".to_owned(),
             ));
         }
     };
 
-    if let Some(ctx_value) = kwargs_object.remove(WORKFLOW_CTX_KWARG) {
+    let workflow_ctx = kwargs_object.remove(WORKFLOW_CTX_KWARG);
+    let _ = kwargs_object.remove(WORKFLOW_META_KWARG);
+    let args_from_kwargs = unwrap_args_from_entries(&mut kwargs_object)
+        .map_err(|refusal| serialization_error(refusal.to_string()))?;
+    check_task_input(&args_array, &kwargs_object, &args_from_kwargs).map_err(|refusal| {
+        serialization_error(format!("failed to decode task input: {refusal}"))
+    })?;
+
+    if let Some(ctx_value) = workflow_ctx {
         if accepts_workflow_ctx {
             let workflow_ctx = parse_workflow_ctx(ctx_value)?;
             let ctx_json = serde_json::to_value(&workflow_ctx).map_err(|e| {
-                TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
-                    format!("failed to serialize workflow context: {}", e),
-                )
+                serialization_error(format!("failed to serialize workflow context: {}", e))
             })?;
             kwargs_object.insert("workflow_ctx".to_owned(), ctx_json);
         }
@@ -503,11 +510,12 @@ pub(crate) fn build_envelope_from_parts(
     });
 
     serde_json::to_vec(&envelope).map_err(|e| {
-        TaskError::builtin(
-            OperationalErrorCode::WorkerSerializationError,
-            format!("failed to serialize args/kwargs envelope: {}", e),
-        )
+        serialization_error(format!("failed to serialize args/kwargs envelope: {}", e))
     })
+}
+
+fn serialization_error(message: String) -> TaskError {
+    TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1567,24 +1575,35 @@ fn phase_retry_delay(attempt: u32) -> f64 {
 mod parse {
     use std::collections::HashMap;
 
-    use crate::core::task::error::{OperationalErrorCode, TaskError};
+    use crate::core::task::error::{OperationalErrorCode, TaskError, TaskErrorKind};
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::context::WorkflowContext;
     use crate::core::workflow::SubWorkflowSummary;
     use serde::Deserialize;
     use uuid::Uuid;
 
+    /// The context payload in Python's shape (`core/workflows/engine.py:1700-1721`). `definition_key_by_id`
+    /// is not read: the receiving task decodes each result with its own type.
     #[derive(Debug, Deserialize)]
     struct WorkflowCtxPayload {
         workflow_id: Uuid,
         task_index: i32,
         task_name: String,
         #[serde(default)]
-        results_by_id: HashMap<String, String>,
+        results_by_id: HashMap<String, serde_json::Value>,
         #[serde(default)]
-        summaries_by_id: HashMap<String, String>,
+        task_name_by_id: HashMap<String, serde_json::Value>,
+        #[serde(default)]
+        summaries_by_id: HashMap<String, serde_json::Value>,
     }
 
+    /// Read the context payload (Python `core/worker/child_runner.py:1654-1766`).
+    ///
+    /// - A result entry that is `null`, that has no task name, or that is not a result envelope becomes a
+    ///   `RESULT_DESERIALIZATION_ERROR` entry naming the node; the other entries stay readable.
+    /// - A summary entry is the stored summary text; one that does not parse is `WORKER_SERIALIZATION_ERROR`
+    ///   for the whole task. An entry that is not text is skipped.
+    /// - A payload of another shape is `WORKER_SERIALIZATION_ERROR`.
     pub(crate) fn parse_workflow_ctx(
         value: serde_json::Value,
     ) -> Result<WorkflowContext, TaskError> {
@@ -1597,24 +1616,18 @@ mod parse {
 
         let mut results_by_id: HashMap<String, TaskResult<serde_json::Value>> =
             HashMap::with_capacity(payload.results_by_id.len());
-        for (node_id, result_json) in payload.results_by_id {
-            let parsed: TaskResult<serde_json::Value> = serde_json::from_str(&result_json)
-                .map_err(|e| {
-                    TaskError::builtin(
-                        OperationalErrorCode::WorkerSerializationError,
-                        format!(
-                            "failed to parse workflow context result for node_id '{}': {}",
-                            node_id, e,
-                        ),
-                    )
-                })?;
-            results_by_id.insert(node_id, parsed);
+        for (node_id, envelope) in payload.results_by_id {
+            let entry = context_entry(&node_id, envelope, payload.task_name_by_id.get(&node_id));
+            results_by_id.insert(node_id, entry);
         }
 
         let mut summaries_by_id: HashMap<String, SubWorkflowSummary> =
             HashMap::with_capacity(payload.summaries_by_id.len());
         for (node_id, summary_json) in payload.summaries_by_id {
-            let parsed: SubWorkflowSummary = serde_json::from_str(&summary_json).map_err(|e| {
+            let serde_json::Value::String(summary_text) = summary_json else {
+                continue;
+            };
+            let parsed: SubWorkflowSummary = serde_json::from_str(&summary_text).map_err(|e| {
                 TaskError::builtin(
                     OperationalErrorCode::WorkerSerializationError,
                     format!(
@@ -1633,6 +1646,45 @@ mod parse {
             results_by_id,
             summaries_by_id,
         ))
+    }
+
+    /// One result entry of the context, with Python's sentinel errors (`core/worker/child_runner.py:1666-1739`).
+    fn context_entry(
+        node_id: &str,
+        envelope: serde_json::Value,
+        source_task_name: Option<&serde_json::Value>,
+    ) -> TaskResult<serde_json::Value> {
+        let unreadable =
+            |message: String, data: serde_json::Value| -> TaskResult<serde_json::Value> {
+                TaskResult::Err(TaskError {
+                    exception: None,
+                    error_code: OperationalErrorCode::ResultDeserializationError.into(),
+                    data: Some(data),
+                    message: Some(message),
+                    kind: TaskErrorKind::Plain,
+                })
+            };
+        if envelope.is_null() {
+            return unreadable(
+                format!(
+                    "workflow_ctx result for node '{node_id}' unavailable (source task not registered at encode time)"
+                ),
+                serde_json::json!({ "node_id": node_id }),
+            );
+        }
+        let Some(serde_json::Value::String(source_task_name)) = source_task_name else {
+            return unreadable(
+                format!("workflow_ctx missing task_name for node '{node_id}'; cannot decode"),
+                serde_json::json!({ "node_id": node_id }),
+            );
+        };
+        match serde_json::from_value::<TaskResult<serde_json::Value>>(envelope) {
+            Ok(result) => result,
+            Err(e) => unreadable(
+                format!("decode_task_result failed for workflow_ctx node '{node_id}': {e}"),
+                serde_json::json!({ "node_id": node_id, "source_task_name": source_task_name }),
+            ),
+        }
     }
 }
 
@@ -1718,6 +1770,155 @@ mod envelope_tests {
             .message
             .unwrap_or_default()
             .contains("kwargs payload is not a JSON object"));
+    }
+
+    fn refusal(args: Option<&str>, kwargs: Option<&str>) -> String {
+        let err = build_envelope_from_parts(args, kwargs, false).unwrap_err();
+        assert_eq!(err.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+        err.message.unwrap_or_default()
+    }
+
+    /// Python `core/worker/child_runner.py:1566-1612`: the receiving task gets the `inner` envelope of an
+    /// `args_from` entry.
+    #[test]
+    fn an_args_from_entry_is_replaced_by_its_inner_envelope() {
+        let kwargs = r#"{"x": 1, "dep": {"__h_taskresult_envelope__": true, "source_task_name": "produce",
+            "source_definition_key": null, "inner": {"__h_task_result__": true, "ok": 7, "err": null}}}"#;
+        assert_eq!(
+            envelope(None, Some(kwargs)),
+            serde_json::json!({"args": [], "kwargs": {
+                "x": 1,
+                "dep": {"__h_task_result__": true, "ok": 7, "err": null},
+            }}),
+        );
+    }
+
+    #[test]
+    fn a_malformed_args_from_entry_is_refused() {
+        for entry in [
+            r#"{"__h_taskresult_envelope__": true, "inner": null}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "p", "source_definition_key": 3, "inner": null}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "p", "source_definition_key": null}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "p", "source_definition_key": null, "inner": null, "x": 1}"#,
+        ] {
+            let message = refusal(None, Some(&format!(r#"{{"dep": {entry}}}"#)));
+            assert!(
+                message.contains("args_from envelope for kwarg 'dep'"),
+                "{message}"
+            );
+        }
+    }
+
+    /// Python's child removes the metadata kwarg before the call (`core/worker/child_runner.py:1641-1642`).
+    #[test]
+    fn the_workflow_meta_kwarg_is_removed() {
+        let kwargs = r#"{"x": 1, "__h_workflow_meta__": {"workflow_id": "w", "task_index": 0, "task_name": "t"}}"#;
+        assert_eq!(
+            envelope(None, Some(kwargs)),
+            serde_json::json!({"args": [], "kwargs": {"x": 1}}),
+        );
+    }
+
+    /// Python `decode_kwargs` and `decode_value`: an engine key in a user value, or as a kwarg name, is
+    /// refused; so is a value deeper than 200 levels.
+    #[test]
+    fn user_input_follows_the_user_value_rules() {
+        for (args, kwargs) in [
+            (None, Some(r#"{"x": {"__h_task_result__": true}}"#)),
+            (None, Some(r#"{"x": [{"__builtin_task_code__": "X"}]}"#)),
+            (None, Some(r#"{"__horsies_workflow_ctx__": {}}"#)),
+            (None, Some(r#"{"__h_other__": 1}"#)),
+            (Some(r#"[{"__h_x": 1}]"#), None),
+        ] {
+            assert!(
+                refusal(args, kwargs).contains("reserved key"),
+                "{args:?} {kwargs:?}"
+            );
+        }
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let deep = format!(
+            r#"{{"x": {}}}"#,
+            nested(crate::core::codec::MAX_VALUE_JSON_DEPTH + 1)
+        );
+        assert!(refusal(None, Some(&deep)).contains("nested deeper than 200"));
+        let at_bound = format!(
+            r#"{{"x": {}}}"#,
+            nested(crate::core::codec::MAX_VALUE_JSON_DEPTH)
+        );
+        assert!(build_envelope_from_parts(None, Some(&at_bound), false).is_ok());
+    }
+
+    /// The context kwarg is Python's key; at check time (no runtime context) it is dropped.
+    #[test]
+    fn the_context_kwarg_is_pythons_key() {
+        assert_eq!(
+            crate::core::workflow::context::WORKFLOW_CTX_KWARG,
+            "__h_workflow_ctx__"
+        );
+        let kwargs = r#"{"x": 1, "__h_workflow_ctx__": {"workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 0, "task_name": "t"}}"#;
+        assert_eq!(
+            envelope(None, Some(kwargs)),
+            serde_json::json!({"args": [], "kwargs": {"x": 1}}),
+        );
+    }
+}
+
+#[cfg(test)]
+mod workflow_ctx_tests {
+    use super::parse_workflow_ctx;
+    use crate::core::task::result::TaskResult;
+    use crate::core::workflow::node::NodeKey;
+
+    /// Python's payload (`core/workflows/engine.py:1700-1721`): envelope objects or null, the task name and
+    /// the definition key of each node, and the stored summary text.
+    #[test]
+    fn pythons_context_payload_reads() {
+        let summary = r#"{"status":"COMPLETED","output":5,"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}"#;
+        let payload = serde_json::json!({
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 2,
+            "task_name": "consume",
+            "results_by_id": {
+                "a": {"__h_task_result__": true, "ok": 41, "err": null},
+                "b": null,
+                "c": {"__h_task_result__": true, "ok": 1, "err": null},
+                "d": {"not": "an envelope"},
+                "sub": {"__h_task_result__": true, "ok": 5, "err": null},
+            },
+            "task_name_by_id": {"a": "produce", "b": "produce", "d": "produce", "sub": "__sub_workflow:child"},
+            "definition_key_by_id": {"a": null, "b": null, "c": null, "d": null, "sub": "app.child"},
+            "summaries_by_id": {"sub": summary},
+        });
+        let ctx = parse_workflow_ctx(payload).unwrap();
+        let value: TaskResult<i32> = ctx.result_for(&NodeKey::new("a".to_owned())).unwrap();
+        assert_eq!(value.unwrap(), 41);
+        for (node, message) in [
+            ("b", "unavailable"),
+            ("c", "missing task_name"),
+            ("d", "decode_task_result failed"),
+        ] {
+            let entry: TaskResult<i32> = ctx.result_for(&NodeKey::new(node.to_owned())).unwrap();
+            let error = entry.unwrap_err();
+            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+            assert!(error.message.unwrap().contains(message), "{node}");
+        }
+        let summary = ctx
+            .summary_for(&NodeKey::<i32>::new("sub".to_owned()))
+            .unwrap();
+        assert_eq!(summary.output, Some(serde_json::json!(5)));
+    }
+
+    #[test]
+    fn a_summary_text_that_does_not_parse_fails_the_task() {
+        let payload = serde_json::json!({
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
+            "task_index": 0,
+            "task_name": "t",
+            "summaries_by_id": {"sub": "{not json"},
+        });
+        let error = parse_workflow_ctx(payload).unwrap_err();
+        assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
     }
 }
 

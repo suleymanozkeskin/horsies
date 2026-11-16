@@ -49,6 +49,70 @@ use crate::broker::task_lists::{
 };
 use crate::broker::wait_limit::WaitLimit;
 
+/// Refuse a sent task input whose user values break the rules of a user value: an engine key at any depth or
+/// as a kwarg name, or a value deeper than `MAX_VALUE_JSON_DEPTH` (Python `.send()` refuses it as
+/// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). A text that is not strict JSON is refused. A
+/// kwargs text that is not an object is left to `prepare_enqueue_facts`, which refuses it with its own error.
+fn check_sent_input(args: Option<&str>, kwargs: Option<&str>) -> Result<(), BrokerError> {
+    let refused =
+        |cause: String| BrokerError::EnqueueContract(format!("task input refused: {cause}"));
+    let args_value: serde_json::Value = match args {
+        Some(text) => {
+            crate::core::codec::from_json_str(text).map_err(|e| refused(e.to_string()))?
+        }
+        None => serde_json::Value::Null,
+    };
+    let args_list = match args_value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(items) => items,
+        other => vec![other],
+    };
+    let kwargs_value: serde_json::Value = match kwargs {
+        Some(text) => {
+            crate::core::codec::from_json_str(text).map_err(|e| refused(e.to_string()))?
+        }
+        None => serde_json::Value::Null,
+    };
+    let kwargs_map = match kwargs_value {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    crate::core::codec::user_value::check_task_input(
+        &args_list,
+        &kwargs_map,
+        &std::collections::HashSet::new(),
+    )
+    .map_err(|refusal| refused(refusal.to_string()))
+}
+
+#[cfg(test)]
+mod sent_input_tests {
+    use super::check_sent_input;
+    use crate::broker::BrokerError;
+
+    /// Python `.send()` refuses an engine key in the input as `VALIDATION_FAILED`
+    /// (`core/task_decorator.py:2378-2387`).
+    #[test]
+    fn a_sent_input_with_an_engine_key_is_refused() {
+        for (args, kwargs) in [
+            (None, Some(r#"{"x": {"__h_task_result__": true}}"#)),
+            (None, Some(r#"{"__h_workflow_ctx__": {}}"#)),
+            (Some(r#"[{"a": [{"__builtin_task_code__": "X"}]}]"#), None),
+            (None, Some(r#"{"x": NaN}"#)),
+        ] {
+            assert!(
+                matches!(
+                    check_sent_input(args, kwargs),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{args:?} {kwargs:?}"
+            );
+        }
+        assert!(check_sent_input(Some("[1]"), Some(r#"{"x": {"y": [1, 2]}}"#)).is_ok());
+        assert!(check_sent_input(None, None).is_ok());
+    }
+}
+
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
     Uuid::parse_str(value).expect("test identity must be UUID")
@@ -1012,6 +1076,9 @@ impl PostgresBroker {
 
     /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
     ///
+    /// The input follows the rules of a user value (`check_sent_input`); a refusal is
+    /// `EnqueueContract`, which the send maps to `VALIDATION_FAILED`.
+    ///
     /// Uses ON CONFLICT DO NOTHING with `enqueue_sha` verification for
     /// idempotent enqueue — matching Python's `enqueue_async()` behaviour.
     #[allow(clippy::too_many_arguments)]
@@ -1046,6 +1113,7 @@ impl PostgresBroker {
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
             ));
         }
+        check_sent_input(args, kwargs)?;
         let task_id = match predetermined_task_id {
             Some(task_id) => task_id,
             None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
