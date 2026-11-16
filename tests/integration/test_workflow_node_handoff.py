@@ -19,7 +19,7 @@ from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
     _initialize_worker_pool,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import listener_of
 
 pytestmark = [pytest.mark.integration]
@@ -35,32 +35,30 @@ async def _seed_claimed_workflow_task(
 ) -> str:
     """Insert a CLAIMED workflow task owned by WORKER_ID."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='node_handoff')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='node_handoff')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, claimed_at,
-                 claimed_by_worker_id, enqueue_sha, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'node_handoff', 'default', 100, '[]', '{}',
-                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
-                 TRUE, 0, 0, :claimed_at,
-                 :worker_id, :sha, TRUE,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    claimed_at, claimed_by_worker_id, is_workflow_task,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution,
+                    claim_expires_at
+                ) VALUES (
+                    :id, 'node_handoff', 'default', 100, '{}', 'CLAIMED', :sent_at,
+                    NOW(), NOW(), NOW(), 0, 0, :claimed_at, :worker_id, TRUE,
+                    'standard_30d', NULL, NULL, FALSE, 'ISOLATED',
+                    NOW() + INTERVAL '5 minutes'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
             'claimed_at': claimed_at,
             'worker_id': WORKER_ID,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     return task_id
@@ -78,7 +76,7 @@ async def _seed_running_workflow_with_node(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'node_handoff_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'node_handoff_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': workflow_id},
@@ -86,13 +84,15 @@ async def _seed_running_workflow_with_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, started_at, created_at)
-            VALUES (:id, :workflow_id, 0, 'node_0', 'node_handoff', '[]',
-                    '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-                    :node_status, :task_id, :started_at, NOW())
+                 task_id, started_at, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES (:id, :workflow_id, 0, 'node_0', 'node_handoff', '{}',
+                    'default', 100, '{}', FALSE, 'all', FALSE,
+                    :node_status, :task_id, :started_at, NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'id': str(uuid.uuid4()),

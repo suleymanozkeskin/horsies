@@ -201,13 +201,14 @@ async fn diagnose_live_miss<T>(
         .await
         .map_err(|error| history_failure(task_id, error))?
     {
-        TaskDetailResult::History(detail) => {
-            let status = parse_stored_status(task_id, &detail.status)?;
-            match detail.is_workflow_task {
-                true => Err(workflow_bound(task_id, Some(status))),
-                false => Err(state_conflict(task_id, &detail.status, Some(status))),
-            }
-        }
+        TaskDetailResult::History(detail) => match detail.is_workflow_task {
+            true => Err(workflow_bound(task_id, Some(detail.status))),
+            false => Err(state_conflict(
+                task_id,
+                &detail.status.to_string(),
+                Some(detail.status),
+            )),
+        },
         TaskDetailResult::Live { .. } | TaskDetailResult::Absent { .. } => Err(not_found(task_id)),
     }
 }
@@ -222,6 +223,10 @@ pub async fn cancel_task(
     task_id: Uuid,
     include_running: bool,
 ) -> TaskActionResult<TaskCancelled> {
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(|error| broker_failure(task_id, error))?;
     let mut transaction = broker
         .pool()
         .begin()
