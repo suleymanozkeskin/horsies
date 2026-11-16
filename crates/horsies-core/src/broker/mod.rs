@@ -31,7 +31,7 @@ pub use postgres::{
     ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
 };
 pub use process_listener::{
-    CheckInterruption, ListenError, ListenerDisabledCause, ListenerPlanError, SessionCheckFailure,
+    CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;

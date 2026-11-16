@@ -1384,7 +1384,7 @@ mod tests {
             matches!(
                 refused,
                 WorkerError::SessionCheck(crate::broker::SessionCheckFailure::Subscribe(
-                    crate::broker::ListenError::Disabled { .. }
+                    crate::broker::ListenError::NoSessionUrl
                 ))
             ),
             "{refused}"
