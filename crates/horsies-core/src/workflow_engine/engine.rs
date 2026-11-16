@@ -759,7 +759,6 @@ async fn enqueue_phase2_dependent_in_tx(
             )
         })
         .collect();
-    let merged_input = merge_args_from(&node.input, &node.args_from, &dep_results)?;
     if node.is_subworkflow {
         return enqueue_phase2_subworkflow_in_tx(
             transaction,
@@ -772,6 +771,21 @@ async fn enqueue_phase2_dependent_in_tx(
         )
         .await;
     }
+    let merged_input = match merge_args_from(&node.input, &node.args_from, &dep_results)? {
+        ArgsFromMerge::Merged(merged_input) => merged_input,
+        ArgsFromMerge::StaticMemberConflict(conflict) => {
+            return fail_phase2_node_at_enqueue_in_tx(
+                transaction,
+                workflow_id,
+                node.task_index,
+                conflict.node_error(workflow_id, node.task_index, MergedNodeKind::Task),
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
     let merged_input =
         inject_phase2_workflow_context_in_tx(transaction, workflow_id, node, merged_input).await?;
     enforce_payload_policy(
@@ -870,7 +884,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
         match child_workflow_depth(depth.depth.unwrap_or(0), workflow_id, node.task_index) {
             Ok(child_depth) => child_depth,
             Err(error) => {
-                return fail_phase2_subworkflow_node_in_tx(
+                return fail_phase2_node_at_enqueue_in_tx(
                     transaction,
                     workflow_id,
                     node.task_index,
@@ -887,7 +901,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .as_deref()
         .and_then(|key| registry.resolve_child_registration(key))
     else {
-        return fail_phase2_subworkflow_node_in_tx(
+        return fail_phase2_node_at_enqueue_in_tx(
             transaction,
             workflow_id,
             node.task_index,
@@ -898,7 +912,21 @@ async fn enqueue_phase2_subworkflow_in_tx(
         )
         .await;
     };
-    let merged_input = merge_args_from(&node.input, &node.args_from, dep_results)?;
+    let merged_input = match merge_args_from(&node.input, &node.args_from, dep_results)? {
+        ArgsFromMerge::Merged(merged_input) => merged_input,
+        ArgsFromMerge::StaticMemberConflict(conflict) => {
+            return fail_phase2_node_at_enqueue_in_tx(
+                transaction,
+                workflow_id,
+                node.task_index,
+                conflict.node_error(workflow_id, node.task_index, MergedNodeKind::SubWorkflow),
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
     let has_inputs = node.input != NO_NODE_INPUT || node.args_from.is_some();
     let child_spec = materialize_child_spec(registered, has_inputs, &merged_input, registry)?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
@@ -927,10 +955,11 @@ async fn enqueue_phase2_subworkflow_in_tx(
     Ok(())
 }
 
-/// Fails a sub-workflow node whose child cannot start, inside the phase-2 transaction, and applies the
-/// failure as a node finish (failure policy, dependents, completion). Nothing is written when the node is
-/// already terminal.
-async fn fail_phase2_subworkflow_node_in_tx(
+/// Fails a node at its enqueue step, inside the phase-2 transaction, and applies the failure as a node
+/// finish (failure policy, dependents, completion): a sub-workflow node whose child cannot start, or a
+/// node whose `args_from` names a member of its static input. Nothing is written when the node is already
+/// terminal.
+async fn fail_phase2_node_at_enqueue_in_tx(
     transaction: &mut Transaction<'_, Postgres>,
     workflow_id: Uuid,
     task_index: i32,
@@ -1207,7 +1236,9 @@ fn dep_status_count(counts: &serde_json::Value, status: &str) -> i32 {
 /// READY->ENQUEUED CAS, one bulk task INSERT + one bulk LINK — all writes in a
 /// single transaction so a crash rolls back atomically (no orphan task row, no
 /// stranded ENQUEUED). SubWorkflowNode and `workflow_ctx_from` dependents take the
-/// per-node `try_make_ready_and_enqueue` path unchanged.
+/// per-node `try_make_ready_and_enqueue` path unchanged. A plain dependent whose
+/// `args_from` names a member of its static input is failed before the level's
+/// transaction (`fail_node_at_enqueue`).
 async fn promote_dependents_level(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1309,6 +1340,49 @@ async fn promote_dependents_level(
         get_dependency_results(pool, workflow_id, &dep_union).await?
     };
 
+    // Build the task row of each ready plain node before the level writes; these nodes take no
+    // workflow context, so the build reads no row. A node whose `args_from` names a member of its
+    // static input fails here, before the level writes, as Python fails it inside its level
+    // (`core/workflows/engine.py:834-839`, `:2516-2527`). When that failure pauses the workflow,
+    // the ENQUEUED write below (guarded on RUNNING) moves no sibling: they stay READY with no task
+    // row, as Python's level moves them back to READY (`:2440-2451`). A build failure leaves the
+    // node READY (recovery/resume re-enqueue it) — same as the per-node path.
+    let mut built_by_index: HashMap<i32, EnqueueInsertParams> = HashMap::new();
+    let mut refused: Vec<(i32, TaskError)> = Vec::new();
+    for node in &ready_plain {
+        match build_enqueued_task_params(pool, workflow_id, node, &dep_results, payload, retention)
+            .await
+        {
+            Ok(NodeEnqueueBuild::Ready(params)) => {
+                built_by_index.insert(node.task_index, params);
+            }
+            Ok(NodeEnqueueBuild::Refused(error)) => refused.push((node.task_index, error)),
+            Err(e) => {
+                tracing::error!(
+                    workflow_id = %workflow_id,
+                    task_index = node.task_index,
+                    error = %e,
+                    "failed to build enqueued task params; node stays READY",
+                );
+            }
+        }
+    }
+    let refused_indexes: std::collections::HashSet<i32> =
+        refused.iter().map(|(task_index, _)| *task_index).collect();
+    ready_plain.retain(|node| !refused_indexes.contains(&node.task_index));
+    for (task_index, error) in refused {
+        fail_node_at_enqueue(
+            pool,
+            workflow_id,
+            task_index,
+            error,
+            registry,
+            payload,
+            retention,
+        )
+        .await?;
+    }
+
     let mut newly_skipped: Vec<i32> = Vec::new();
     let mut tx = pool.begin().await?;
 
@@ -1332,36 +1406,17 @@ async fn promote_dependents_level(
             .await?;
         let ready_won: std::collections::HashSet<i32> = won_rows.into_iter().map(|r| r.0).collect();
 
-        // 3. Build INSERT payloads for the won nodes. A build failure leaves the
-        // node READY (recovery/resume re-enqueue it) — same as the per-node path.
+        // 3. The INSERT payloads of the won nodes, built above. A node whose build
+        // failed has none and stays READY.
         let mut built: Vec<EnqueueInsertParams> = Vec::new();
         let mut built_indexes: Vec<i32> = Vec::new();
         for node in &ready_plain {
             if !ready_won.contains(&node.task_index) {
                 continue;
             }
-            match build_enqueued_task_params(
-                pool,
-                workflow_id,
-                node,
-                &dep_results,
-                payload,
-                retention,
-            )
-            .await
-            {
-                Ok(params) => {
-                    built_indexes.push(node.task_index);
-                    built.push(params);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        workflow_id = %workflow_id,
-                        task_index = node.task_index,
-                        error = %e,
-                        "failed to build enqueued task params; node stays READY",
-                    );
-                }
+            if let Some(params) = built_by_index.remove(&node.task_index) {
+                built_indexes.push(node.task_index);
+                built.push(params);
             }
         }
 
@@ -1622,7 +1677,16 @@ async fn try_make_ready_and_enqueue(
         .await?;
     } else {
         // Regular task: enqueue into horsies_tasks.
-        enqueue_workflow_task(pool, workflow_id, task, &dep_results, payload, retention).await?;
+        enqueue_workflow_task(
+            pool,
+            workflow_id,
+            task,
+            &dep_results,
+            registry,
+            payload,
+            retention,
+        )
+        .await?;
     }
 
     Ok(())
@@ -1713,13 +1777,24 @@ struct EnqueueInsertParams {
     facts: WorkflowTaskFacts,
 }
 
+/// What the build of a ready task node gives.
+enum NodeEnqueueBuild {
+    /// The insert values of the node's task row.
+    Ready(EnqueueInsertParams),
+    /// The node cannot be enqueued and fails with this error: its `args_from` names a member of its
+    /// static input (Python `core/workflows/engine.py:834-839`).
+    Refused(TaskError),
+}
+
 /// Build the `horsies_tasks` INSERT params for a workflow node ready to enqueue.
 ///
 /// Shared by `enqueue_workflow_task` (single-node) and the batched promotion
 /// pipeline. Merges `args_from` dependency results into the node's input, injects
 /// `workflow_ctx` when configured (the only DB read here), parses retry/good_until
-/// and the execution class from task_options, and generates the task id. Errors
-/// are per-node and propagate to the caller exactly as the inline code did.
+/// and the execution class from task_options, and generates the task id. An
+/// `args_from` key that the static input also sets gives `Refused`; the caller
+/// fails the node. Errors are per-node and propagate to the caller exactly as the
+/// inline code did.
 async fn build_enqueued_task_params(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1727,13 +1802,22 @@ async fn build_enqueued_task_params(
     dep_results: &HashMap<i32, DepResultValue>,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<EnqueueInsertParams, WorkflowError> {
+) -> Result<NodeEnqueueBuild, WorkflowError> {
     let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
     })?;
 
     // Merge args_from into the node's input.
-    let merged_input = merge_args_from(&task.input, &task.args_from, dep_results)?;
+    let merged_input = match merge_args_from(&task.input, &task.args_from, dep_results)? {
+        ArgsFromMerge::Merged(merged_input) => merged_input,
+        ArgsFromMerge::StaticMemberConflict(conflict) => {
+            return Ok(NodeEnqueueBuild::Refused(conflict.node_error(
+                workflow_id,
+                task.task_index,
+                MergedNodeKind::Task,
+            )));
+        }
+    };
 
     // Inject workflow_ctx if configured (shared with the resume/recovery
     // re-enqueue paths via inject_workflow_ctx_into_input, so all three paths
@@ -1772,7 +1856,7 @@ async fn build_enqueued_task_params(
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
-    Ok(EnqueueInsertParams {
+    Ok(NodeEnqueueBuild::Ready(EnqueueInsertParams {
         task_id,
         task_name: task.task_name.clone(),
         queue_name: task.queue_name.clone(),
@@ -1782,7 +1866,7 @@ async fn build_enqueued_task_params(
         max_retries,
         task_options: task.task_options.clone(),
         facts,
-    })
+    }))
 }
 
 /// Inject the `workflow_ctx` payload into a node's input when `workflow_ctx_from`
@@ -1817,18 +1901,35 @@ pub(crate) async fn inject_workflow_ctx_into_input(
 
 /// Create a horsies_tasks row for a workflow task and link it.
 ///
-/// Merges `args_from` results into the task's kwargs/args.
+/// Merges `args_from` results into the task's input. A node whose `args_from` names a member of its
+/// static input is failed instead (`fail_node_at_enqueue`).
 async fn enqueue_workflow_task(
     pool: &PgPool,
     workflow_id: Uuid,
     task: &DependentRow,
     dep_results: &HashMap<i32, DepResultValue>,
+    registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let params =
-        build_enqueued_task_params(pool, workflow_id, task, dep_results, payload, retention)
-            .await?;
+        match build_enqueued_task_params(pool, workflow_id, task, dep_results, payload, retention)
+            .await?
+        {
+            NodeEnqueueBuild::Ready(params) => params,
+            NodeEnqueueBuild::Refused(error) => {
+                return fail_node_at_enqueue(
+                    pool,
+                    workflow_id,
+                    task.task_index,
+                    error,
+                    registry,
+                    payload,
+                    retention,
+                )
+                .await;
+            }
+        };
 
     // INSERT + LINK in a single transaction to prevent orphaned horsies_task rows
     // if the workflow is paused/cancelled between INSERT and LINK.
@@ -1890,16 +1991,17 @@ async fn enqueue_workflow_task(
 /// Launch a child workflow for a sub-workflow node.
 ///
 /// Looks up the child spec in the registry, builds it dynamically if a
-/// Mark a sub-workflow node FAILED when its child cannot start: the child definition is not registered
-/// under the node's key (`SUBWORKFLOW_LOAD_FAILED`), or the child would pass the depth limit
-/// (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`).
+/// Mark a node FAILED at its enqueue step: a sub-workflow node whose child definition is not registered
+/// under the node's key (`SUBWORKFLOW_LOAD_FAILED`) or whose child would pass the depth limit
+/// (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`), or a node whose `args_from` names a member of its static input
+/// (`WORKFLOW_ENQUEUE_FAILED`).
 ///
 /// Mirrors Python's `_fail_subworkflow_load` and `_fail_enqueued_task`: writes FAILED via the terminal-state
 /// CAS guard (`UPDATE_WORKFLOW_TASK_FAILED_SQL`), then runs the failure-propagation
 /// chain (handle failure policy → process dependents → check completion). On a
 /// CAS-miss (row already terminal), skips propagation because whichever path set
 /// the terminal state has already propagated the appropriate outcome.
-pub(crate) async fn fail_subworkflow_node(
+pub(crate) async fn fail_node_at_enqueue(
     pool: &PgPool,
     workflow_id: Uuid,
     task_index: i32,
@@ -1925,7 +2027,7 @@ pub(crate) async fn fail_subworkflow_node(
         tracing::warn!(
             workflow_id = %workflow_id,
             task_index,
-            "skipped sub-workflow load failure mark for terminal workflow task",
+            "skipped the enqueue failure mark for a terminal workflow task",
         );
         return Ok(());
     }
@@ -1934,7 +2036,7 @@ pub(crate) async fn fail_subworkflow_node(
         workflow_id = %workflow_id,
         task_index,
         error_code = ?error_code,
-        "sub-workflow child did not start, parent task marked FAILED",
+        "workflow node failed at its enqueue step",
     );
 
     // Run the failure-propagation chain (same shape as on_workflow_task_complete).
@@ -2000,7 +2102,7 @@ async fn enqueue_subworkflow_task(
         match child_workflow_depth(depth_row.depth.unwrap_or(0), workflow_id, task.task_index) {
             Ok(child_depth) => child_depth,
             Err(error) => {
-                return fail_subworkflow_node(
+                return fail_node_at_enqueue(
                     pool,
                     workflow_id,
                     task.task_index,
@@ -2022,7 +2124,7 @@ async fn enqueue_subworkflow_task(
         // workflow_task FAILED and propagate, rather than returning an error
         // that leaves the parent stuck in READY and the workflow RUNNING
         // forever (parity with Python's _fail_subworkflow_load / PR #39).
-        return fail_subworkflow_node(
+        return fail_node_at_enqueue(
             pool,
             workflow_id,
             task.task_index,
@@ -2038,7 +2140,21 @@ async fn enqueue_subworkflow_task(
     // otherwise use the static registered spec.
     let has_child_inputs = task.input != NO_NODE_INPUT || task.args_from.is_some();
 
-    let merged_input = merge_args_from(&task.input, &task.args_from, dep_results)?;
+    let merged_input = match merge_args_from(&task.input, &task.args_from, dep_results)? {
+        ArgsFromMerge::Merged(merged_input) => merged_input,
+        ArgsFromMerge::StaticMemberConflict(conflict) => {
+            return fail_node_at_enqueue(
+                pool,
+                workflow_id,
+                task.task_index,
+                conflict.node_error(workflow_id, task.task_index, MergedNodeKind::SubWorkflow),
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
     let child_spec = materialize_child_spec(registered, has_child_inputs, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
@@ -3173,6 +3289,7 @@ async fn get_dependency_results(
 
 use crate::workflow_engine::args_merge::input_object;
 use crate::workflow_engine::args_merge::merge_args_from_sync as merge_args_from;
+use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
 
 #[derive(Debug)]
 struct WorkflowContextData {
@@ -4908,6 +5025,251 @@ mod promotion_batch_tests {
         .await
         .expect("count conformant promoted task facts");
         assert_eq!(conformant_count, fan as i64);
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Gives node `idx` the static input `{"x": 5}` and `args_from` `{"x": 0}`: the `args_from` key
+    /// names a member of the static input.
+    async fn set_conflicting_args_from(pool: &PgPool, wf_id: &str, idx: i32) {
+        sqlx::query(
+            r#"UPDATE horsies_workflow_tasks
+               SET input = '{"x": 5}', args_from = '{"x": 0}'::jsonb
+               WHERE workflow_id = $1::uuid AND task_index = $2"#,
+        )
+        .bind(test_uuid(wf_id))
+        .bind(idx)
+        .execute(pool)
+        .await
+        .expect("set a conflicting args_from");
+    }
+
+    /// The status and the stored error of a node.
+    async fn failed_node(pool: &PgPool, wf_id: &str, idx: i32) -> (String, TaskError) {
+        let (status, result): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, result FROM horsies_workflow_tasks
+             WHERE workflow_id = $1::uuid AND task_index = $2",
+        )
+        .bind(test_uuid(wf_id))
+        .bind(idx)
+        .fetch_one(pool)
+        .await
+        .expect("node status and result");
+        let result = result.unwrap_or_else(|| panic!("node {idx} has no stored result"));
+        match serde_json::from_str::<TaskResult<serde_json::Value>>(&result)
+            .expect("stored node result")
+        {
+            TaskResult::Err(error) => (status, error),
+            TaskResult::Ok(value) => panic!("node {idx} holds an ok result: {value}"),
+        }
+    }
+
+    /// The node failed with Python's conflict error (`core/workflows/engine.py:834-839`, `:1151-1163`).
+    fn assert_conflict_error(error: &TaskError, wf_id: &str, idx: i32, message: &str) {
+        assert_eq!(
+            error
+                .error_code
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("WORKFLOW_ENQUEUE_FAILED")
+        );
+        assert_eq!(error.message.as_deref(), Some(message));
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": wf_id, "task_index": idx}))
+        );
+    }
+
+    /// On the batched level, a plain dependent whose `args_from` names a member of its static
+    /// input fails with the conflict error and gets no task row; its sibling is enqueued
+    /// (`on_error=fail`).
+    #[tokio::test]
+    #[serial]
+    async fn an_args_from_conflict_fails_the_node_on_the_batched_level() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+        insert_node(&pool, &wf_id, 2, vec![0], "PENDING", "all", false).await;
+        set_conflicting_args_from(&pool, &wf_id, 1).await;
+
+        process_dependents(
+            &pool,
+            test_uuid(&wf_id),
+            0,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+
+        let (status, error) = failed_node(&pool, &wf_id, 1).await;
+        assert_eq!(status, "FAILED");
+        assert_conflict_error(
+            &error,
+            &wf_id,
+            1,
+            "args_from key 'x' conflicts with static kwarg (task 1)",
+        );
+        assert!(task_id_of(&pool, &wf_id, 1).await.is_none());
+        assert_eq!(node_status(&pool, &wf_id, 2).await, "ENQUEUED");
+        assert!(task_id_of(&pool, &wf_id, 2).await.is_some());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// With `on_error=pause`, the conflict pauses the workflow before the level writes: the sibling
+    /// stays READY with no task row, as Python's level moves its siblings back to READY.
+    #[tokio::test]
+    #[serial]
+    async fn an_args_from_conflict_that_pauses_leaves_the_level_without_task_rows() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        sqlx::query("UPDATE horsies_workflows SET on_error = 'pause' WHERE id = $1::uuid")
+            .bind(test_uuid(&wf_id))
+            .execute(&pool)
+            .await
+            .expect("on_error=pause");
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+        insert_node(&pool, &wf_id, 2, vec![0], "PENDING", "all", false).await;
+        set_conflicting_args_from(&pool, &wf_id, 1).await;
+
+        process_dependents(
+            &pool,
+            test_uuid(&wf_id),
+            0,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+
+        let workflow_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1::uuid")
+                .bind(test_uuid(&wf_id))
+                .fetch_one(&pool)
+                .await
+                .expect("workflow status");
+        assert_eq!(workflow_status, "PAUSED");
+        assert_eq!(failed_node(&pool, &wf_id, 1).await.0, "FAILED");
+        assert_eq!(node_status(&pool, &wf_id, 2).await, "READY");
+        assert!(task_id_of(&pool, &wf_id, 2).await.is_none());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// Phase 2 fails a task node with an `args_from` conflict inside its transaction.
+    #[tokio::test]
+    #[serial]
+    async fn an_args_from_conflict_fails_the_node_in_phase_2() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+        set_conflicting_args_from(&pool, &wf_id, 1).await;
+
+        let mut transaction = pool.begin().await.expect("phase-2 transaction");
+        promote_phase2_dependents_in_tx(
+            &mut transaction,
+            test_uuid(&wf_id),
+            0,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("phase-2 promotion");
+        transaction.commit().await.expect("commit phase 2");
+
+        let (status, error) = failed_node(&pool, &wf_id, 1).await;
+        assert_eq!(status, "FAILED");
+        assert_conflict_error(
+            &error,
+            &wf_id,
+            1,
+            "args_from key 'x' conflicts with static kwarg (task 1)",
+        );
+        assert!(task_id_of(&pool, &wf_id, 1).await.is_none());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// A sub-workflow node with an `args_from` conflict fails before its child starts: no child
+    /// workflow row is written.
+    #[tokio::test]
+    #[serial]
+    async fn an_args_from_conflict_fails_a_subworkflow_node_before_its_child_starts() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let child_key = "tests.args_from_conflict.child.v1";
+        let mut registry = WorkflowSpecRegistry::new();
+        registry
+            .register(crate::core::registry::workflow::RegisteredWorkflowSpec {
+                spec: crate::core::WorkflowSpec {
+                    name: "args_from_conflict_child".to_owned(),
+                    definition_key: Some(child_key.to_owned()),
+                    tasks: Vec::new(),
+                    on_error: crate::core::OnError::Fail,
+                    output_index: None,
+                    success_policy: None,
+                },
+                spec_builder: None,
+            })
+            .expect("register the child definition");
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        sqlx::query(
+            r#"INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
+                sub_workflow_name, sub_definition_key, created_at
+            ) VALUES (
+                $1, $2::uuid, 1, 'child', 'args_from_conflict_child', '{"x": 5}', 'default',
+                100, '{0}', '{"x": 0}'::jsonb, FALSE, 'all', 'PENDING', TRUE,
+                'args_from_conflict_child', $3, NOW()
+            )"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(test_uuid(&wf_id))
+        .bind(child_key)
+        .execute(&pool)
+        .await
+        .expect("insert the sub-workflow node");
+
+        process_dependents(
+            &pool,
+            test_uuid(&wf_id),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+
+        let (status, error) = failed_node(&pool, &wf_id, 1).await;
+        assert_eq!(status, "FAILED");
+        assert_conflict_error(
+            &error,
+            &wf_id,
+            1,
+            "args_from key 'x' conflicts with static kwarg (subworkflow task 1)",
+        );
+        let children: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM horsies_workflows WHERE parent_workflow_id = $1::uuid",
+        )
+        .bind(test_uuid(&wf_id))
+        .fetch_one(&pool)
+        .await
+        .expect("count child workflows");
+        assert_eq!(children, 0);
 
         cleanup(&pool, &wf_id).await;
     }
