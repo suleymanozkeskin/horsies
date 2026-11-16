@@ -14,8 +14,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from psycopg.errors import UniqueViolation
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.integration.task_history_harness import (
@@ -278,6 +279,9 @@ class TestOrphanSingle:
     async def test_links_to_distinct_workflows_fail_closed(
         self, terminalization_schema: HistorySchema
     ) -> None:
+        """A task backs at most one node: the unique index on the node's
+        task_id refuses the second link, so no cancel can find a task
+        linked to two workflows."""
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
             task_id = await insert_live_task(
@@ -288,11 +292,16 @@ class TestOrphanSingle:
                 is_workflow_task=True,
             )
             await link_node(connection, task_id, status='COMPLETED')
-            await link_node(
-                connection, task_id, status='FAILED', task_index=1
+            with pytest.raises(IntegrityError) as refused:
+                async with connection.begin_nested():
+                    await link_node(
+                        connection, task_id, status='FAILED', task_index=1
+                    )
+            cause = refused.value.orig
+            assert isinstance(cause, UniqueViolation)
+            assert cause.diag.constraint_name == (
+                'ix_horsies_workflow_tasks_task_id'
             )
-            with pytest.raises(DBAPIError, match='multiple workflows'):
-                await cancel_orphan(connection, task_id)
 
 
 class TestOrphanSweep:
