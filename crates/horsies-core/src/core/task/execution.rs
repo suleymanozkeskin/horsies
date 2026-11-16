@@ -1,7 +1,9 @@
-//! The execution class that every task row and every task node stores.
+//! The execution class that every task row and every task node stores, and
+//! the class that task info reports.
 //!
-//! Python reference: `Execution` (`horsies/core/models/tasks.py`) and
-//! `stored_execution` (`horsies/core/codec/task_options.py`).
+//! Python reference: `Execution` and `TaskInfo.execution`
+//! (`horsies/core/models/tasks.py`), and `stored_execution`
+//! (`horsies/core/codec/task_options.py`).
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -47,6 +49,66 @@ impl Execution {
             "SHARED_THREAD" => Some(Self::SharedThread),
             _ => None,
         }
+    }
+}
+
+/// The reported value of [`ExecutionClass::NotKeptInHistory`].
+const NOT_KEPT_IN_HISTORY: &str = "NOT_KEPT_IN_HISTORY";
+
+/// The execution class that task info reports for one task.
+///
+/// A live task reports the class in its `execution` column. A task read from
+/// history reports [`ExecutionClass::NotKeptInHistory`]: the history table
+/// has no `execution` column, as in Python, where `TaskInfo.execution` is
+/// `None` for a history read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionClass {
+    /// A live task: the class stored in its `execution` column.
+    Live(Execution),
+    /// A task read from history. The history table does not keep the class.
+    NotKeptInHistory,
+}
+
+impl ExecutionClass {
+    /// The reported value: the stored class name of a live task (`ISOLATED`,
+    /// `SHARED_ASYNC` or `SHARED_THREAD`), or `NOT_KEPT_IN_HISTORY`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live(execution) => execution.as_str(),
+            Self::NotKeptInHistory => NOT_KEPT_IN_HISTORY,
+        }
+    }
+
+    /// The class of a reported value; `None` for any other text.
+    fn from_reported(value: &str) -> Option<Self> {
+        match value {
+            NOT_KEPT_IN_HISTORY => Some(Self::NotKeptInHistory),
+            stored => Execution::from_stored(stored).map(Self::Live),
+        }
+    }
+}
+
+impl serde::Serialize for ExecutionClass {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ExecutionClass {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_reported(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "execution is not one of ISOLATED, SHARED_ASYNC, SHARED_THREAD, {}: {}",
+                NOT_KEPT_IN_HISTORY, value,
+            ))
+        })
     }
 }
 
@@ -211,5 +273,36 @@ mod tests {
             stored_execution(Some(&thread_null)),
             Ok(Execution::SharedThread)
         );
+    }
+
+    #[test]
+    fn execution_class_reports_the_live_class_or_not_kept_in_history() {
+        for (class, reported) in [
+            (ExecutionClass::Live(Execution::Isolated), "ISOLATED"),
+            (ExecutionClass::Live(Execution::SharedAsync), "SHARED_ASYNC"),
+            (
+                ExecutionClass::Live(Execution::SharedThread),
+                "SHARED_THREAD",
+            ),
+            (ExecutionClass::NotKeptInHistory, "NOT_KEPT_IN_HISTORY"),
+        ] {
+            assert_eq!(class.as_str(), reported);
+            let encoded = serde_json::to_value(class).unwrap();
+            assert_eq!(encoded, Value::String(reported.to_owned()));
+            let decoded: ExecutionClass = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, class);
+        }
+    }
+
+    #[test]
+    fn execution_class_refuses_other_values() {
+        for refused in [
+            serde_json::json!("PARALLEL"),
+            serde_json::json!("isolated"),
+            serde_json::json!(null),
+            serde_json::json!(1),
+        ] {
+            assert!(serde_json::from_value::<ExecutionClass>(refused).is_err());
+        }
     }
 }

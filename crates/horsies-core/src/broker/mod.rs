@@ -7,6 +7,7 @@ pub mod class_coverage;
 #[cfg(test)]
 mod class_coverage_read_tests;
 pub mod class_coverage_reads;
+pub mod client_family;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
 pub mod error;
