@@ -5513,6 +5513,7 @@ mod session_settings_tests {
             session_database_url: None,
             pgbouncer_transaction_mode,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
