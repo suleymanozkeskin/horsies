@@ -14,9 +14,14 @@
 //!   timeout of the config ([`PostgresConfig::socket_settings`]) on each
 //!   connection. The main pool sends unnamed statements only in PgBouncer
 //!   transaction mode; the session pool always keeps its session.
+//! - A child of a worker ([`PoolProfile::Child`]) gets the pool of Python's
+//!   child (`horsies/core/worker/child_pool.py:122-136`): its main URL pool
+//!   keeps `min_size` connections open, and with `check` it pings every
+//!   pooled connection at checkout in place of the 1 s idle ping.
 //!
 //! Building the pools connects to nothing: a connection opens at the first
-//! checkout.
+//! checkout. A child's main pool that keeps connections open starts the task
+//! that opens them.
 //!
 //! [`CoreHandle`] holds the pools between `Idle` and `Open`: an operation
 //! opens them when the handle is `Idle`, and [`CoreHandle::close`] returns the
@@ -31,7 +36,7 @@ use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
 use crate::core::PostgresConfig;
 use crate::db::{
     parse_connection_url, ConnectPlan, ConnectPlanError, ConnectionAge, ConnectionEnvironment,
-    CorePool, EnvironmentError, IdlePing, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
+    CorePool, EnvironmentError, IdlePing, KeptOpen, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
     PoolSizingError, Reserve, SocketSettings, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
     WORKER_RESERVED_CONNECTIONS,
 };
@@ -49,6 +54,13 @@ pub enum PoolProfile {
     /// A worker parent: the main URL pool is the worker profile pool, which
     /// keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts.
     Worker,
+    /// A child process of a worker: the main URL pool keeps no reserve,
+    /// keeps `kept_open` connections open (Python `min_size`), and with
+    /// `check` pings every pooled connection at checkout
+    /// ([`IdlePing::EveryCheckout`], Python
+    /// `check=ConnectionPool.check_connection`); without `check` it pings
+    /// none.
+    Child { kept_open: KeptOpen, check: bool },
 }
 
 /// The pool that session work (schema work, partition maintenance) uses.
@@ -100,8 +112,10 @@ impl BrokerPools {
     ///
     /// Reads, per URL, the TLS files the URL names, `~/.pgpass` when no
     /// password is given, and the process user name when the URL names no
-    /// user. Connects to nothing. Every pool takes the socket settings of
-    /// `config`.
+    /// user. Connects to nothing, but for a [`PoolProfile::Child`] main pool
+    /// that keeps connections open: it starts the task that opens them, so it
+    /// must run inside a tokio runtime. Every pool takes the socket settings
+    /// of `config`.
     ///
     /// Errors: [`PoolSettingsError`]; nothing was built.
     pub(crate) fn open_with_environment(
@@ -113,13 +127,7 @@ impl BrokerPools {
         let main_shape = main_pool_shape(profile);
         let (main, main_url) = open_pool(
             &config.database_url,
-            pool_plan(
-                config,
-                main_shape.role,
-                main_shape.reserve,
-                runtime_protocol(config),
-            )
-            .map_err(|cause| PoolSettingsError::Sizing {
+            main_pool_plan(config, profile).map_err(|cause| PoolSettingsError::Sizing {
                 role: main_shape.role,
                 cause,
             })?,
@@ -363,6 +371,34 @@ fn main_pool_shape(profile: PoolProfile) -> MainPoolShape {
             role: PoolRole::WorkerProfile,
             reserve: Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS),
         },
+        PoolProfile::Child { .. } => MainPoolShape {
+            role: PoolRole::Main,
+            reserve: Reserve::NoReserve,
+        },
+    }
+}
+
+/// The plan of the main URL pool of `profile`. Pure.
+///
+/// Errors: [`PoolSizingError`] as [`pool_plan`], and
+/// [`PoolSizingError::KeptOpenAboveSize`] for a child that keeps more
+/// connections open than its pool holds.
+fn main_pool_plan(
+    config: &PostgresConfig,
+    profile: PoolProfile,
+) -> Result<PoolPlan, PoolSizingError> {
+    let shape = main_pool_shape(profile);
+    let plan = pool_plan(config, shape.role, shape.reserve, runtime_protocol(config))?;
+    match profile {
+        PoolProfile::Producer | PoolProfile::Worker => Ok(plan),
+        PoolProfile::Child { kept_open, check } => Ok(PoolPlan {
+            sizing: plan.sizing.keeping_open(kept_open)?,
+            idle_ping: match check {
+                true => IdlePing::EveryCheckout,
+                false => IdlePing::Off,
+            },
+            ..plan
+        }),
     }
 }
 
@@ -548,6 +584,8 @@ pub(crate) fn unpinged_single_connection_core_pool(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
     use crate::core::config::socket::{
         KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig,
@@ -638,6 +676,79 @@ mod tests {
         let shape = main_pool_shape(PoolProfile::Producer);
         assert_eq!(shape.role, PoolRole::Main);
         assert_eq!(shape.reserve, Reserve::NoReserve);
+    }
+
+    fn kept(count: u32) -> KeptOpen {
+        KeptOpen::Connections(NonZeroU32::new(count).expect("a kept count above 0"))
+    }
+
+    /// Python `_initialize_worker_pool(min_size=2, check_on_checkout=True)`:
+    /// two connections stay open, and each checkout checks its connection.
+    #[test]
+    fn a_child_pool_keeps_its_minimum_open_and_checks_each_checkout() {
+        let plan = main_pool_plan(
+            &config(),
+            PoolProfile::Child {
+                kept_open: kept(2),
+                check: true,
+            },
+        )
+        .expect("valid plan");
+        assert_eq!(plan.role, PoolRole::Main);
+        assert_eq!(plan.sizing.size(), 8);
+        assert_eq!(plan.sizing.reserve(), Reserve::NoReserve);
+        assert_eq!(plan.sizing.kept_open(), kept(2));
+        assert_eq!(plan.idle_ping, IdlePing::EveryCheckout);
+        assert_eq!(plan.checkout_wait, Duration::from_secs(7));
+        assert_eq!(
+            plan.max_age,
+            ConnectionAge::ReplaceAfter(Duration::from_secs(1800))
+        );
+    }
+
+    /// Python `check_on_checkout=False`: no check, also when the config's
+    /// `pool_pre_ping` is on.
+    #[test]
+    fn a_child_pool_without_check_pings_no_connection() {
+        let plan = main_pool_plan(
+            &config(),
+            PoolProfile::Child {
+                kept_open: KeptOpen::NoConnections,
+                check: false,
+            },
+        )
+        .expect("valid plan");
+        assert_eq!(plan.idle_ping, IdlePing::Off);
+        assert_eq!(plan.sizing.kept_open(), KeptOpen::NoConnections);
+    }
+
+    /// Python `ValueError('min_size must be <= max_size')`.
+    #[test]
+    fn a_child_pool_that_keeps_more_than_its_size_open_is_refused() {
+        let refused = BrokerPools::open_with_environment(
+            &config(),
+            PoolProfile::Child {
+                kept_open: kept(9),
+                check: false,
+            },
+            &ConnectionEnvironment::isolated(),
+        );
+        assert!(matches!(
+            refused,
+            Err(PoolSettingsError::Sizing {
+                role: PoolRole::Main,
+                cause: PoolSizingError::KeptOpenAboveSize { size: 8, kept: 9 },
+            })
+        ));
+    }
+
+    #[test]
+    fn producer_and_worker_pools_keep_no_connection_open() {
+        for profile in [PoolProfile::Producer, PoolProfile::Worker] {
+            let plan = main_pool_plan(&config(), profile).expect("valid plan");
+            assert_eq!(plan.sizing.kept_open(), KeptOpen::NoConnections);
+            assert_eq!(plan.idle_ping, IdlePing::AfterIdle(DEFAULT_IDLE_PING_AFTER));
+        }
     }
 
     #[test]
@@ -888,6 +999,8 @@ mod kept_session_tests {
     //! makes it `session`. So the tests hold on a server whose own setting is
     //! `jit = off`, where the value alone could not tell the two apart.
 
+    use std::num::NonZeroU32;
+
     use serial_test::serial;
 
     use super::*;
@@ -1031,5 +1144,42 @@ mod kept_session_tests {
 
         assert_ne!(main_setting.source, "session", "{main_setting:?}");
         assert_eq!(session_setting, JitSetting::set_off_on_the_session());
+    }
+
+    /// The most checks of the open count while a child pool opens its kept
+    /// connections.
+    const KEPT_OPEN_CHECKS: u32 = 100;
+    const KEPT_OPEN_CHECK_EVERY: Duration = Duration::from_millis(50);
+
+    /// Python `ConnectionPool(min_size=2).open()`: the connections open
+    /// without a checkout, and the pool keeps no more than `min_size`.
+    #[tokio::test]
+    #[serial]
+    async fn a_child_pool_opens_its_kept_connections_without_a_checkout() {
+        let url = migrated_database_url().await;
+        let mut config = PostgresConfig::from_url(&url);
+        config.pool_size = 3;
+        config.max_overflow = 0;
+        let pools = BrokerPools::open_with_environment(
+            &config,
+            PoolProfile::Child {
+                kept_open: KeptOpen::Connections(NonZeroU32::new(2).expect("two")),
+                check: true,
+            },
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("the pools of the test database build");
+        let mut status = pools.main().status();
+        for _ in 0..KEPT_OPEN_CHECKS {
+            if status.open >= 2 && status.idle >= 2 {
+                break;
+            }
+            tokio::time::sleep(KEPT_OPEN_CHECK_EVERY).await;
+            status = pools.main().status();
+        }
+        pools.close();
+
+        assert_eq!(status.open, 2, "{status:?}");
+        assert_eq!(status.idle, 2, "{status:?}");
     }
 }
