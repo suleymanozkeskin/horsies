@@ -2,10 +2,10 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::core::history::reads::pages::HistoryWindow;
+use crate::core::history::reads::pages::{HistoryWindow, HISTORY_WINDOW_MAX};
 
 pub const MONITORING_WINDOW_DEFAULT: Duration = Duration::hours(24);
-pub const MONITORING_WINDOW_MAX: Duration = Duration::days(30);
+pub const MONITORING_WINDOW_MAX: Duration = HISTORY_WINDOW_MAX;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{reason}")]

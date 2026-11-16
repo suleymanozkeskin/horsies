@@ -9,6 +9,7 @@ use crate::core::history::commands::{
 };
 use crate::core::history::ddl::runtime_names::render_daily_leaf_ddl;
 use crate::core::history::errors::HistoryError;
+use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES,
 };
@@ -290,10 +291,41 @@ pub async fn create_hourly_heartbeat_leaf(
                     leaf_name: leaf.leaf_name().to_owned(),
                 });
             }
+            // Read the state again under the relation lock.
+            let physical = read_leaf_physical_state(
+                connection,
+                leaf.leaf_name(),
+                HEARTBEATS_TABLE,
+                &index_name,
+                LeafPartitionBoundExpectation::Requested(leaf.bounds()),
+                LeafIndexKind::Heartbeat,
+            )
+            .await?;
+            if !physical.relation_exists
+                || physical.detach_pending != Some(false)
+                || !physical.partition_bound_matches_expected
+            {
+                return Ok(LeafCreation::CatalogConflict {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                    kind: CatalogConflictKind::PhysicalNonconformant,
+                    detail: "the leaf changed before its index repair took the relation lock"
+                        .to_owned(),
+                });
+            }
+            if physical.id_index_conformant {
+                return Ok(LeafCreation::AlreadyConformant {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                });
+            }
             match remove_attached_index_for_repair(connection, leaf.leaf_name(), &index_name)
                 .await?
             {
                 IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
+                IndexRepairRemoval::Busy => {
+                    return Ok(LeafCreation::Busy {
+                        leaf_name: leaf.leaf_name().to_owned(),
+                    });
+                }
                 IndexRepairRemoval::Foreign => {
                     return Ok(LeafCreation::CatalogConflict {
                         leaf_name: leaf.leaf_name().to_owned(),
@@ -430,11 +462,12 @@ pub struct HeartbeatLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
-/// Sweep expired heartbeat leaves through a direct or session-capable pool.
-pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
+/// The oldest expired heartbeat leaves, at most `max_leaves`, and whether
+/// more remain.
+async fn expired_heartbeat_leaves(
     pool: &PgPool,
-    publisher: &P,
-) -> Result<Vec<HeartbeatLeafSwept>, HistoryError> {
+    max_leaves: usize,
+) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
     let sql = format!(
         "SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
          FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
@@ -443,39 +476,55 @@ pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
            AND c.lower_bound_kind = '{AT_LOWER_BOUND_KIND}' AND c.dropped_at IS NULL
            AND c.upper_anchor + make_interval(hours => r.heartbeat_horizon_hours)
                <= statement_timestamp()
-         ORDER BY c.lower_anchor"
+         ORDER BY c.lower_anchor
+         LIMIT $2"
     );
+    let fetch_limit = i64::try_from(max_leaves.saturating_add(1)).unwrap_or(i64::MAX);
     let rows: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&sql)
         .bind(HEARTBEAT_CLASS_KEY)
+        .bind(fetch_limit)
         .fetch_all(pool)
         .await?;
-    let mut swept = Vec::with_capacity(rows.len());
-    for (leaf_name, lower, upper) in rows {
-        let leaf = LeafRef::new(
-            leaf_name,
-            HEARTBEAT_CLASS_KEY,
-            LeafBounds::new(lower, upper)
-                .map_err(|error| HistoryError::contract(error.to_string()))?,
-        )
-        .map_err(|error| HistoryError::contract(error.to_string()))?;
-        let detach_command =
-            DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(DETACH_STATEMENT_TIMEOUT_MS))
+    let reach = match rows.len() > max_leaves {
+        true => PruneReach::Truncated,
+        false => PruneReach::WithinBounds,
+    };
+    let leaves = rows
+        .into_iter()
+        .take(max_leaves)
+        .map(|(leaf_name, lower, upper)| {
+            let bounds = LeafBounds::new(lower, upper)
                 .map_err(|error| HistoryError::contract(error.to_string()))?;
-        let detach = detach_expired_leaf(pool, &detach_command, publisher, &NoQuarantine).await?;
-        let is_detached = matches!(
-            &detach,
-            DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
-        );
-        let detached = if is_detached {
-            true
-        } else {
+            LeafRef::new(leaf_name, HEARTBEAT_CLASS_KEY, bounds)
+                .map_err(|error| HistoryError::contract(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((leaves, reach))
+}
+
+/// Detach one expired heartbeat leaf and drop it once detached. A leaf left
+/// detached by an earlier crash is dropped too.
+async fn sweep_heartbeat_leaf<P: LoaderPublication>(
+    pool: &PgPool,
+    leaf: &LeafRef,
+    publisher: &P,
+) -> Result<HeartbeatLeafSwept, HistoryError> {
+    let detach_command =
+        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(DETACH_STATEMENT_TIMEOUT_MS))
+            .map_err(|error| HistoryError::contract(error.to_string()))?;
+    let detach = detach_expired_leaf(pool, &detach_command, publisher, &NoQuarantine).await?;
+    let detached = match &detach {
+        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
+        _ => {
             let mut connection = pool.acquire().await?;
             matches!(
                 inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
                 LeafInspection::Detached { .. }
             )
-        };
-        let drop = if detached {
+        }
+    };
+    let drop = match detached {
+        true => {
             let mut transaction = pool.begin().await?;
             let outcome = drop_detached_leaf(
                 &mut transaction,
@@ -485,14 +534,35 @@ pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
             .await?;
             transaction.commit().await?;
             Some(outcome)
-        } else {
-            None
-        };
-        swept.push(HeartbeatLeafSwept {
-            leaf_name: leaf.leaf_name().to_owned(),
-            detach,
-            drop,
-        });
+        }
+        false => None,
+    };
+    Ok(HeartbeatLeafSwept {
+        leaf_name: leaf.leaf_name().to_owned(),
+        detach,
+        drop,
+    })
+}
+
+/// Sweep at most `max_leaves` expired heartbeat leaves, oldest first, through
+/// a direct or session-capable pool. The `Err` side is a failed discovery,
+/// which sweeps nothing. One leaf's error goes to the error list of the `Ok`
+/// side and the sweep goes on with the next leaf; every leaf in either list
+/// counts toward `max_leaves`. `Truncated` when more expired leaves remain
+/// for the next pass.
+pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
+    pool: &PgPool,
+    publisher: &P,
+    max_leaves: usize,
+) -> Result<(Vec<HeartbeatLeafSwept>, Vec<String>, PruneReach), HistoryError> {
+    let (leaves, reach) = expired_heartbeat_leaves(pool, max_leaves).await?;
+    let mut swept = Vec::with_capacity(leaves.len());
+    let mut errors = Vec::new();
+    for leaf in leaves {
+        match sweep_heartbeat_leaf(pool, &leaf, publisher).await {
+            Ok(entry) => swept.push(entry),
+            Err(error) => errors.push(format!("{}: {error}", leaf.leaf_name())),
+        }
     }
-    Ok(swept)
+    Ok((swept, errors, reach))
 }

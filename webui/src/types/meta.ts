@@ -5,6 +5,7 @@ export type ServerSchemaState =
   | 'MATCH'
   | 'MISMATCH'
   | 'ABSENT'
+  | 'ZERO_X'
   | 'UNKNOWN';
 
 export interface MonitoringMeta {
