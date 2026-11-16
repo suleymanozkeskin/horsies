@@ -310,14 +310,13 @@ class TestHistoryFoundationList:
         indices = [frozen.index(f) for f in history_foundation_fragments()]
         assert indices == sorted(indices)
 
-    def test_carries_the_history_parent_and_the_gate(self) -> None:
+    def test_carries_the_history_parent(self) -> None:
         from horsies.core.history.ddl.fragments import (
             history_foundation_fragments,
         )
 
         combined = '\n'.join(history_foundation_fragments())
         assert 'CREATE TABLE horsies_task_history (' in combined
-        assert 'horsies_archive_access_gate' in combined
         assert 'CREATE TABLE horsies_key_reservations' not in combined
 
 

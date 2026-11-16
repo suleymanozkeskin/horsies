@@ -14,6 +14,10 @@ use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
 /// Convert a task name to a slug suitable for auto-generated node IDs.
 /// Replaces non-alphanumeric characters with `_`.
+/// The most nodes that one workflow spec holds. A larger workflow splits its nodes into sub-workflows; each
+/// child workflow has its own limit.
+pub const MAX_WORKFLOW_NODES: usize = 10_000;
+
 fn slugify(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -260,6 +264,22 @@ impl WorkflowSpecBuilder {
             report.add(
                 HorsiesError::new("workflow must have at least one task")
                     .with_code(ErrorCode::WorkflowNoNodes),
+            );
+            return;
+        }
+
+        // Python: MAX_WORKFLOW_NODES (core/models/workflow/limits.py), checked in
+        // WorkflowSpec.__post_init__ before any other node check.
+        if self.tasks.len() > MAX_WORKFLOW_NODES {
+            report.add(
+                HorsiesError::new(format!(
+                    "WorkflowSpec has {} nodes, more than the limit of {MAX_WORKFLOW_NODES}",
+                    self.tasks.len(),
+                ))
+                .with_code(ErrorCode::WorkflowTooManyNodes)
+                .with_help(
+                    "split the nodes into SubWorkflowNodes; each child workflow has its own limit",
+                ),
             );
             return;
         }
@@ -600,7 +620,22 @@ impl WorkflowSpecBuilder {
 
         // Success policy indices in range.
         if let Some(ref policy) = self.success_policy {
+            // Python: WorkflowSpec._validate_success_policy (core/models/workflow/spec.py:1500-1521).
+            if policy.cases.is_empty() {
+                report.add(
+                    HorsiesError::new("SuccessPolicy must have at least one SuccessCase")
+                        .with_code(ErrorCode::WorkflowInvalidSuccessPolicy)
+                        .with_help("add at least one SuccessCase to the cases list"),
+                );
+            }
             for (case_idx, case) in policy.cases.iter().enumerate() {
+                if case.required_indices.is_empty() {
+                    report.add(
+                        HorsiesError::new(format!("SuccessCase[{case_idx}] has no required tasks"))
+                            .with_code(ErrorCode::WorkflowInvalidSuccessPolicy)
+                            .with_help("add at least one task to the required list"),
+                    );
+                }
                 for &req_idx in &case.required_indices {
                     if req_idx >= task_count {
                         report.add(
@@ -726,6 +761,47 @@ mod tests {
         let b = WorkflowSpecBuilder::new("empty");
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowNoNodes));
+    }
+
+    #[test]
+    fn a_success_case_with_no_required_task_is_refused() {
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.task(simple_node("a"));
+        b.success_policy(SuccessPolicy {
+            cases: vec![SuccessCase {
+                required_indices: vec![],
+            }],
+            optional_indices: None,
+        });
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidSuccessPolicy));
+        assert!(err
+            .to_string()
+            .contains("SuccessCase[0] has no required tasks"));
+    }
+
+    #[test]
+    fn a_success_policy_with_no_case_is_refused() {
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.task(simple_node("a"));
+        b.success_policy(SuccessPolicy {
+            cases: vec![],
+            optional_indices: None,
+        });
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidSuccessPolicy));
+    }
+
+    #[test]
+    fn a_spec_over_the_node_limit_is_refused() {
+        let mut b = WorkflowSpecBuilder::new("too_large");
+        for _ in 0..=MAX_WORKFLOW_NODES {
+            b.task(simple_node("a"));
+        }
+        let err = b.build().unwrap_err();
+        assert_eq!(err.code, Some(ErrorCode::WorkflowTooManyNodes));
+        assert_eq!(ErrorCode::WorkflowTooManyNodes.as_code_str(), "HRS-038");
+        assert!(err.to_string().contains("10001 nodes"));
     }
 
     #[test]
@@ -1050,7 +1126,6 @@ mod tests {
         b.success_policy(SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0, 99],
-                name: None,
             }],
             optional_indices: None,
         });
@@ -1065,7 +1140,6 @@ mod tests {
         b.success_policy(SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![0],
-                name: None,
             }],
             optional_indices: Some(vec![50]),
         });
@@ -1236,7 +1310,6 @@ mod tests {
         b.success_policy(SuccessPolicy {
             cases: vec![SuccessCase {
                 required_indices: vec![2],
-                name: None,
             }],
             optional_indices: Some(vec![0]),
         });

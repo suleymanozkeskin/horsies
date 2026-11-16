@@ -51,8 +51,7 @@ function FullScreen({
   );
 }
 
-/** Read-only banner shown for the whole session while the schema mismatches
- * or the offline cutover is incomplete. */
+/** Read-only banner shown for the whole session while the schema mismatches. */
 function SchemaBanner({
   meta,
   state,
@@ -165,7 +164,7 @@ export function AppShell() {
   return (
     <CapabilityProvider meta={meta}>
       <div className="flex min-h-screen flex-col">
-        {(state === 'mismatch' || state === 'cutover_required') && (
+        {state === 'mismatch' && (
           <SchemaBanner meta={meta} state={state} />
         )}
         <header className="glass sticky top-0 z-40 flex flex-wrap items-center gap-4 border-b border-border px-4 py-3">
