@@ -206,7 +206,7 @@ class _AtLimit:
 def at_limit() -> Generator[_AtLimit, None, None]:
     """No database: building a set does no I/O, and the limit stops each call first."""
     app = Horsies(AppConfig(broker=PostgresConfig(
-        database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+        database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
     )))
     broker = app.get_broker()
     loops = [asyncio.new_event_loop() for _ in range(MAX_CALLER_EVENT_LOOPS)]

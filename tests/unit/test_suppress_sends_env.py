@@ -24,7 +24,7 @@ def _build_app() -> Horsies:
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://user:pass@localhost:5432/db'),
+                database_url=SecretStr('postgresql://user:pass@localhost:5432/db'),
             ),
         )
     )

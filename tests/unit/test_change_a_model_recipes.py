@@ -52,7 +52,7 @@ class _AliasWithoutNewName(BaseModel):
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/x'),
+            broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
         ),
     )
 

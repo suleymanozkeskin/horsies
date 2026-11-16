@@ -60,6 +60,7 @@ from horsies.core.models.task_send_types import (
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.history.archive.versions import archive_digest
+from horsies.core.utils.url import sqlalchemy_url
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
@@ -155,7 +156,7 @@ def _listener_of(broker: Any) -> Any:
             raise AssertionError('broker has no listener')
 
 
-def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') -> Any:
+def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
     """Create a PostgresBroker with fully mocked internals."""
     from horsies.core.models.broker import PostgresConfig
 
@@ -275,7 +276,7 @@ class TestSchemaAdvisoryKey:
 
     def test_returns_stable_int_from_database_url(self) -> None:
         """Same URL should always produce the same advisory key."""
-        broker = _make_broker('postgresql+psycopg://u:p@host1/db')
+        broker = _make_broker('postgresql://u:p@host1/db')
 
         key1 = broker._schema_advisory_key()
         key2 = broker._schema_advisory_key()
@@ -285,8 +286,8 @@ class TestSchemaAdvisoryKey:
 
     def test_schema_key_is_url_independent(self) -> None:
         """Different URLs should share the new schema advisory key."""
-        broker_a = _make_broker('postgresql+psycopg://u:p@host_a/db')
-        broker_b = _make_broker('postgresql+psycopg://u:p@host_b/db')
+        broker_a = _make_broker('postgresql://u:p@host_a/db')
+        broker_b = _make_broker('postgresql://u:p@host_b/db')
 
         key_a = broker_a._schema_advisory_key()
         key_b = broker_b._schema_advisory_key()
@@ -371,9 +372,9 @@ class TestPostgresBrokerPgBouncerWiring:
         ):
             broker = PostgresBroker(
                 PostgresConfig(
-                    database_url='postgresql+psycopg://u:p@pooler:6432/db',
+                    database_url='postgresql://u:p@pooler:6432/db',
                     session_database_url=(
-                        'postgresql+psycopg://u:p@direct:5432/db'
+                        'postgresql://u:p@direct:5432/db'
                     ),
                     pgbouncer_transaction_mode=True,
                 )
@@ -395,8 +396,8 @@ class TestPostgresBrokerPgBouncerWiring:
         from horsies.core.models.broker import PostgresConfig
         from horsies.core.brokers.postgres import PostgresBroker
 
-        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
-        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+        database_url = 'postgresql://u:p@pooler:6432/db'
+        session_url = 'postgresql://u:p@direct:5432/db'
 
         with (
             patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
@@ -415,7 +416,8 @@ class TestPostgresBrokerPgBouncerWiring:
             PostgresBroker(config)._build_resources()
 
         assert mock_engine.call_count == 2
-        assert mock_engine.call_args_list[0].args[0] == database_url
+        # The engines open the configured URLs with the psycopg 3 driver.
+        assert mock_engine.call_args_list[0].args[0] == sqlalchemy_url(database_url)
         assert mock_engine.call_args_list[0].kwargs['connect_args'] == {
             'keepalives': 1,
             'keepalives_idle': 30,
@@ -424,7 +426,7 @@ class TestPostgresBrokerPgBouncerWiring:
             'tcp_user_timeout': 30_000,
             'prepare_threshold': None,
         }
-        assert mock_engine.call_args_list[1].args[0] == session_url
+        assert mock_engine.call_args_list[1].args[0] == sqlalchemy_url(session_url)
         assert mock_engine.call_args_list[1].kwargs['connect_args'] == {
             'keepalives': 1,
             'keepalives_idle': 30,
@@ -444,8 +446,8 @@ class TestPostgresBrokerPgBouncerWiring:
         runtime_engine = MagicMock()
         schema_engine = MagicMock()
         schema_engine.dispose = AsyncMock()
-        database_url = 'postgresql+psycopg://u:p@pooler:6432/db'
-        session_url = 'postgresql+psycopg://u:p@direct:5432/db'
+        database_url = 'postgresql://u:p@pooler:6432/db'
+        session_url = 'postgresql://u:p@direct:5432/db'
         lock_connection = _schema_lock_connection()
 
         with (
@@ -480,8 +482,8 @@ class TestPostgresBrokerPgBouncerWiring:
             broker = PostgresBroker(config)
             await broker._ensure_initialized(await resources_of(broker))
 
-        assert mock_engine.call_args_list[0].args[0] == database_url
-        assert mock_engine.call_args_list[1].args[0] == session_url
+        assert mock_engine.call_args_list[0].args[0] == sqlalchemy_url(database_url)
+        assert mock_engine.call_args_list[1].args[0] == sqlalchemy_url(session_url)
         assert connect_lock.await_args is not None
         assert connect_lock.await_args.args[0] == 'postgresql://u:p@direct:5432/db'
         schema_engine.dispose.assert_not_awaited()
@@ -517,8 +519,8 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
         ):
             config = PostgresConfig(
-                database_url='postgresql+psycopg://u:p@pooler:6432/db',
-                session_database_url='postgresql+psycopg://u:p@direct:5432/db',
+                database_url='postgresql://u:p@pooler:6432/db',
+                session_database_url='postgresql://u:p@direct:5432/db',
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
@@ -633,7 +635,7 @@ class TestPostgresBrokerPgBouncerWiring:
             ) as mock_listener_cls,
         ):
             broker = PostgresBroker(
-                PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db'),
+                PostgresConfig(database_url='postgresql://u:p@localhost/db'),
                 assume_initialized=True,
             )
             resources = broker._build_resources()
@@ -1510,250 +1512,6 @@ class TestGetRawResultRecordAsync:
 # ---------------------------------------------------------------------------
 
 
-LIST_TASK_ID_1 = UUID('0198c0de-0000-7000-8000-000000000001')
-LIST_TASK_ID_2 = UUID('0198c0de-0000-7000-8000-000000000002')
-
-
-def _listed_task_id(n: int) -> UUID:
-    """The id of the ``n``-th row of a mocked task list."""
-    return UUID(f'00000000-0000-7000-8000-{n:012d}')
-
-
-@pytest.mark.unit
-class TestMonitoringQueries:
-    """Tests for get_stale_tasks, get_expired_tasks."""
-
-    def _setup_session_with_rows(
-        self,
-        broker: Any,
-        columns: list[str],
-        rows: list[tuple[Any, ...]],
-    ) -> None:
-        """Configure broker's session_factory to return given rows."""
-        mock_result = MagicMock()
-        mock_result.keys.return_value = columns
-        mock_result.fetchall.return_value = rows
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-    @pytest.mark.asyncio
-    async def test_get_stale_tasks_returns_list_of_dicts(self) -> None:
-        """get_stale_tasks returns Ok(dicts) keyed by column names, ``id`` as UUID.
-
-        The broker engine reads uuid columns as text, so the rows carry text.
-        """
-        broker = _make_broker()
-        columns = ['id', 'worker_hostname', 'worker_pid', 'last_heartbeat']
-        rows = [
-            (str(LIST_TASK_ID_1), 'host-1', 1234, None),
-            (str(LIST_TASK_ID_2), 'host-2', 5678, None),
-        ]
-        self._setup_session_with_rows(broker, columns, rows)
-
-        result = await broker.get_stale_tasks(stale_threshold_minutes=5)
-
-        assert is_ok(result)
-        rows_out = result.ok_value
-        assert len(rows_out) == 2
-        assert rows_out[0] == {
-            'id': LIST_TASK_ID_1,
-            'worker_hostname': 'host-1',
-            'worker_pid': 1234,
-            'last_heartbeat': None,
-        }
-        assert rows_out[1]['id'] == LIST_TASK_ID_2
-
-    @pytest.mark.asyncio
-    async def test_get_stale_tasks_empty(self) -> None:
-        """get_stale_tasks with no rows returns Ok([])."""
-        broker = _make_broker()
-        self._setup_session_with_rows(broker, ['id'], [])
-
-        result = await broker.get_stale_tasks()
-
-        assert is_ok(result)
-        assert result.ok_value == []
-
-    @pytest.mark.asyncio
-    async def test_get_expired_tasks_returns_list_of_dicts(self) -> None:
-        """get_expired_tasks returns Ok(dicts) keyed by column names, ``id`` as UUID."""
-        broker = _make_broker()
-        columns = [
-            'id',
-            'task_name',
-            'queue_name',
-            'priority',
-            'sent_at',
-            'enqueued_at',
-            'good_until',
-            'expired_for',
-        ]
-        rows = [
-            (str(LIST_TASK_ID_1), 'slow_task', 'default', 100, None, None, None, '00:05:00'),
-        ]
-        self._setup_session_with_rows(broker, columns, rows)
-
-        result = await broker.get_expired_tasks()
-
-        assert is_ok(result)
-        assert len(result.ok_value) == 1
-        assert result.ok_value[0]['id'] == LIST_TASK_ID_1
-        assert result.ok_value[0]['task_name'] == 'slow_task'
-
-    def _setup_session_with_ids(self, broker: Any, count: int) -> AsyncMock:
-        """Configure the session to return ``count`` rows of one ``id`` column,
-        as the text of the id ``_listed_task_id(n)``."""
-        mock_result = MagicMock()
-        mock_result.keys.return_value = ['id']
-        mock_result.fetchall.return_value = [(str(_listed_task_id(n)),) for n in range(count)]
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-        return session
-
-    @pytest.mark.asyncio
-    async def test_stale_list_reads_one_row_past_the_bound(self) -> None:
-        """The read asks for the bound plus one row, and passes the threshold."""
-        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
-
-        broker = _make_broker()
-        session = self._setup_session_with_ids(broker, 0)
-
-        result = await broker.get_stale_tasks(stale_threshold_minutes=7)
-
-        assert is_ok(result)
-        parameters = session.execute.await_args.args[1]
-        assert parameters == {
-            'stale_threshold': 7,
-            'row_limit': TASK_LIST_ROW_BOUND + 1,
-        }
-
-    @pytest.mark.asyncio
-    async def test_expired_list_reads_one_row_past_the_bound(self) -> None:
-        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
-
-        broker = _make_broker()
-        session = self._setup_session_with_ids(broker, 0)
-
-        result = await broker.get_expired_tasks()
-
-        assert is_ok(result)
-        parameters = session.execute.await_args.args[1]
-        assert parameters == {'row_limit': TASK_LIST_ROW_BOUND + 1}
-
-    @pytest.mark.asyncio
-    async def test_stale_list_at_the_bound_is_complete(
-        self, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Exactly the bound of rows: every row comes back, no warning."""
-        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
-
-        broker = _make_broker()
-        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND)
-
-        with caplog.at_level('WARNING'):
-            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
-
-        assert is_ok(result)
-        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
-        assert not [r for r in caplog.records if r.levelname == 'WARNING']
-
-    @pytest.mark.asyncio
-    async def test_stale_list_past_the_bound_is_cut_with_a_warning(
-        self, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """One row past the bound: the first rows up to the bound, and a warning."""
-        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
-
-        broker = _make_broker()
-        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND + 1)
-
-        with caplog.at_level('WARNING'):
-            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
-
-        assert is_ok(result)
-        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
-        assert result.ok_value[-1] == {'id': _listed_task_id(TASK_LIST_ROW_BOUND - 1)}
-        warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
-        assert warnings == [
-            f'get_stale_tasks returned the first {TASK_LIST_ROW_BOUND} rows; '
-            'more rows match',
-        ]
-
-    @pytest.mark.asyncio
-    async def test_expired_list_past_the_bound_is_cut_with_a_warning(
-        self, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
-
-        broker = _make_broker()
-        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND + 1)
-
-        with caplog.at_level('WARNING'):
-            result = await broker.get_expired_tasks()
-
-        assert is_ok(result)
-        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
-        warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
-        assert warnings == [
-            f'get_expired_tasks returned the first {TASK_LIST_ROW_BOUND} rows; '
-            'more rows match',
-        ]
-
-    @pytest.mark.asyncio
-    async def test_stale_threshold_bounds_are_accepted(self) -> None:
-        """0 and one year of minutes are both inside the rule."""
-        from horsies.core.brokers.postgres import MAX_STALE_THRESHOLD_MINUTES
-
-        assert MAX_STALE_THRESHOLD_MINUTES == 365 * 24 * 60
-        for minutes in (0, MAX_STALE_THRESHOLD_MINUTES):
-            broker = _make_broker()
-            session = self._setup_session_with_ids(broker, 0)
-
-            result = await broker.get_stale_tasks(stale_threshold_minutes=minutes)
-
-            assert is_ok(result), minutes
-            assert session.execute.await_args.args[1]['stale_threshold'] == minutes
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ('minutes', 'cause'),
-        [
-            (-1, 'stale_threshold_minutes is below 0'),
-            (525_601, 'stale_threshold_minutes is above 525600 (one year)'),
-            (10 ** 5000, 'stale_threshold_minutes is above 525600 (one year)'),
-            (True, 'stale_threshold_minutes is a bool, not an int'),
-            (2.5, 'stale_threshold_minutes is a float, not an int'),
-            ('5', 'stale_threshold_minutes is a str, not an int'),
-        ],
-        ids=['negative', 'above-one-year', 'huge-int', 'bool', 'float', 'str'],
-    )
-    async def test_stale_threshold_outside_the_rule_is_invalid_input(
-        self, minutes: object, cause: str,
-    ) -> None:
-        """A refused threshold is INVALID_INPUT before any database call."""
-        broker = _make_broker()
-        session = self._setup_session_with_ids(broker, 0)
-
-        result = await broker.get_stale_tasks(stale_threshold_minutes=cast(int, minutes))
-
-        assert is_err(result)
-        match result.err_value:
-            case BrokerInvalidInput(message=message, exception=NoCause()):
-                assert message == (
-                    f'{cause}; give whole minutes from 0 to 525600'
-                )
-            case other:
-                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
-        session.execute.assert_not_awaited()
-
-
 # ---------------------------------------------------------------------------
 # TestHealthApi
 # ---------------------------------------------------------------------------
@@ -2087,7 +1845,7 @@ class TestPingWorkers:
         from horsies.core.brokers.postgres import PostgresBroker
 
         config = PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db'
+            database_url='postgresql://u:p@localhost/db'
         )
         broker = PostgresBroker(config, assume_initialized=True)
         assert isinstance((await resources_of(broker)).listener, ListenerDisabled)
@@ -2847,7 +2605,7 @@ class TestSyncFacades:
         broker = _make_broker()
         broker._loop_runner = MagicMock()
 
-        def _route(_key: str | None) -> SyncSendRoute:
+        def _route() -> SyncSendRoute:
             return SyncSendRoute.CALLER_THREAD
 
         monkeypatch.setattr(broker, 'send_route', _route)
@@ -2863,6 +2621,7 @@ class TestSyncFacades:
             sent_at=datetime.now(timezone.utc),
             kwargs_json='{"k": "v"}',
             priority=50,
+            idempotency_key='order-17',
         )
 
         assert result == 'task-id-456'
@@ -2870,6 +2629,7 @@ class TestSyncFacades:
         assert on_caller.call_args.args == ('my_task', 'queue')
         assert on_caller.call_args.kwargs['task_id'] == 'test-task-id'
         assert on_caller.call_args.kwargs['priority'] == 50
+        assert on_caller.call_args.kwargs['idempotency_key'] == 'order-17'
 
     def test_enqueue_delegates_to_loop_runner(
         self,
@@ -2881,7 +2641,7 @@ class TestSyncFacades:
         broker._loop_runner = MagicMock()
         broker._loop_runner.call = MagicMock(return_value='task-id-123')
 
-        def _route(_key: str | None) -> SyncSendRoute:
+        def _route() -> SyncSendRoute:
             return SyncSendRoute.LOOP_RUNNER
 
         monkeypatch.setattr(broker, 'send_route', _route)

@@ -399,19 +399,22 @@ mod tests {
     }
 
     /// The core writes the layout its worker reads: the dispatch reader takes
-    /// the stored text as a policy and a timeout, not as a refusal.
+    /// the stored text as a policy and a timeout, not as a refusal. The
+    /// options of an `ISOLATED` task store no cancel grace.
     #[test]
     fn the_stored_text_is_what_the_dispatch_reader_accepts() {
-        use super::super::error::TaskErrorCode;
+        use super::super::error::{TaskErrorCode, UserCode};
         use crate::worker::retry::{
-            read_stored_options, StoredOptions, StoredRetry, StoredTimeout,
+            read_stored_options, StoredCancelGrace, StoredOptions, StoredRetry, StoredTimeout,
         };
 
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
             queue_name: None,
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("STORAGE_ERROR").unwrap(),
+            )]),
             retry_policy: Some(
                 RetryPolicy::fixed(vec![60, 300], true)
                     .unwrap()
@@ -424,6 +427,7 @@ mod tests {
         match read_stored_options(Some(&json)) {
             StoredOptions::Readable {
                 timeout: StoredTimeout::Limit(limit),
+                cancel_grace: StoredCancelGrace::NotStored,
                 retry: StoredRetry::Policy(_),
             } => assert_eq!(limit, std::time::Duration::from_millis(2_000)),
             other => panic!("the dispatch reader refused the stored options: {other:?}"),

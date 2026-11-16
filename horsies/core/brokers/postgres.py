@@ -1,7 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, RowMapping
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
@@ -186,7 +186,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.task_loop_registry import is_task_loop
-from horsies.core.utils.url import to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
@@ -661,16 +661,6 @@ def _wait_inside_task_err(
     )
 
 
-def _task_list_entry(columns: list[str], row: Any) -> dict[str, Any]:
-    """One entry of the stale or expired task list, keyed by column name.
-
-    The ``id`` value is the ``uuid.UUID`` of the public API.
-    """
-    entry: dict[str, Any] = dict(zip(columns, row))
-    entry['id'] = uuid_column_value(entry['id'], column='horsies_tasks.id')
-    return entry
-
-
 def _cancel_requested() -> bool:
     """Whether the running task has a pending cancellation request."""
     task = asyncio.current_task()
@@ -722,15 +712,34 @@ async def _acquire_session_advisory_lock(
 # ---- Monitoring queries ----
 
 TASK_LIST_ROW_BOUND: Final = 10_000
-"""The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return."""
+"""The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return: the
+row bound of ``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``."""
 
 MAX_STALE_THRESHOLD_MINUTES: Final = 525_600
 """The largest ``stale_threshold_minutes`` of ``get_stale_tasks``: one year
 of 365 days."""
 
-_TASK_LIST_READ_LIMIT: Final = TASK_LIST_ROW_BOUND + 1
-"""The ``LIMIT`` of a task list read. One row more than the bound tells a
-truncated list from a complete one."""
+# (dict key, result column) of each list row, in the order of the dict: the
+# keys of the client statements that the list functions replaced.
+_STALE_TASK_KEYS: Final = (
+    ('id', 'task_id'),
+    ('worker_hostname', 'worker_hostname'),
+    ('worker_pid', 'worker_pid'),
+    ('worker_process_name', 'worker_process_name'),
+    ('last_heartbeat', 'last_heartbeat'),
+    ('started_at', 'started_at'),
+    ('task_name', 'task_name'),
+)
+_EXPIRED_TASK_KEYS: Final = (
+    ('id', 'task_id'),
+    ('task_name', 'task_name'),
+    ('queue_name', 'queue_name'),
+    ('priority', 'priority'),
+    ('sent_at', 'sent_at'),
+    ('enqueued_at', 'enqueued_at'),
+    ('good_until', 'good_until'),
+    ('expired_for', 'expired_for'),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,11 +759,44 @@ class _TruncatedTaskList:
 type _BoundedTaskList = _CompleteTaskList | _TruncatedTaskList
 
 
-def _bounded_task_list(rows: list[dict[str, Any]]) -> _BoundedTaskList:
-    """Cut a read of at most ``_TASK_LIST_READ_LIMIT`` rows to the bound. Pure."""
-    if len(rows) > TASK_LIST_ROW_BOUND:
-        return _TruncatedTaskList(rows=rows[:TASK_LIST_ROW_BOUND])
-    return _CompleteTaskList(rows=rows)
+def _task_list_dict(
+    item: RowMapping, keys: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    """One TASK row of a list function as the dict of the public API. Pure.
+
+    The ``id`` value is the ``uuid.UUID`` of the public API.
+    """
+    entry: dict[str, Any] = {key: item[column] for key, column in keys}
+    entry['id'] = uuid_column_value(entry['id'], column='task_id')
+    return entry
+
+
+def _function_task_list(
+    rows: Sequence[RowMapping],
+    keys: tuple[tuple[str, str], ...],
+) -> _BoundedTaskList:
+    """The TASK rows of a list function as dicts, and whether it cut the list. Pure.
+
+    ``keys`` maps each dict key to its result column, in dict order. The
+    last row is the LIST_END row: ``TRUNCATED`` means the function cut the
+    list at ``TASK_LIST_ROW_BOUND`` rows.
+    """
+    match rows:
+        case [*items, end]:
+            pass
+        case _:
+            raise AssertionError('the list function answered no LIST_END row')
+    assert end['row_kind'] == 'LIST_END', end['row_kind']
+    assert end['row_bound'] == TASK_LIST_ROW_BOUND, end['row_bound']
+    assert all(item['row_kind'] == 'TASK' for item in items), 'a row before LIST_END is not a TASK row'
+    dicts = [_task_list_dict(item, keys) for item in items]
+    match end['list_state']:
+        case 'COMPLETE':
+            return _CompleteTaskList(rows=dicts)
+        case 'TRUNCATED':
+            return _TruncatedTaskList(rows=dicts)
+        case other:
+            raise AssertionError(f'list state {other!r} is not COMPLETE or TRUNCATED')
 
 
 def _stale_threshold_minutes(value: object) -> Result[int, BrokerInvalidInput]:
@@ -784,28 +826,11 @@ def _stale_threshold_minutes(value: object) -> Result[int, BrokerInvalidInput]:
     ))
 
 
-GET_STALE_TASKS_SQL = text("""
-    SELECT
-        t.id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        hb.last_heartbeat,
-        t.started_at,
-        t.task_name
-    FROM horsies_tasks t
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' minutes' AS INTERVAL)
-    ORDER BY hb.last_heartbeat NULLS FIRST, t.id
-    LIMIT :row_limit
+LIST_STALE_TASKS_SQL = text("""
+    SELECT row_kind, task_id, worker_hostname, worker_pid, worker_process_name,
+           last_heartbeat, started_at, task_name, list_state, row_bound
+    FROM horsies_list_stale_tasks(CAST(:threshold_minutes AS integer))
+    ORDER BY row_position NULLS LAST
 """)
 
 # Latest snapshot per worker (includes idle workers). The retired
@@ -884,21 +909,11 @@ GET_WORKER_STATE_HISTORY_SQL = text(f"""
     LIMIT :limit
 """)
 
-GET_EXPIRED_TASKS_SQL = text("""
-    SELECT
-        id,
-        task_name,
-        queue_name,
-        priority,
-        sent_at,
-        enqueued_at,
-        good_until,
-        NOW() - good_until as expired_for
-    FROM horsies_tasks
-    WHERE status = 'PENDING'
-      AND good_until <= NOW()
-    ORDER BY good_until ASC, id
-    LIMIT :row_limit
+LIST_EXPIRED_TASKS_SQL = text("""
+    SELECT row_kind, task_id, task_name, queue_name, priority, sent_at, enqueued_at,
+           good_until, expired_for, list_state, row_bound
+    FROM horsies_list_expired_tasks()
+    ORDER BY row_position NULLS LAST
 """)
 
 # ---- Cleanup queries ----
@@ -1069,7 +1084,7 @@ class PostgresBroker:
         listener connect on first use.
         """
         engine = create_async_engine(
-            self.config.database_url.get_secret_value(),
+            sqlalchemy_url(self.config.database_url.get_secret_value()),
             **self._runtime_engine_config(),
         )
         register_identity_text_reads(engine)
@@ -1084,7 +1099,7 @@ class PostgresBroker:
             session_async_engine = engine
         else:
             session_async_engine = create_async_engine(
-                session_url, **self._session_engine_config()
+                sqlalchemy_url(session_url), **self._session_engine_config()
             )
             # The session URL must keep session state (LISTEN, session
             # advisory locks), so it keeps session settings too.
@@ -1387,7 +1402,8 @@ class PostgresBroker:
         engine_cfg['pool_size'] = 1
         engine_cfg['max_overflow'] = 0
         engine = create_async_engine(
-            self.config.database_url.get_secret_value(), **engine_cfg,
+            sqlalchemy_url(self.config.database_url.get_secret_value()),
+            **engine_cfg,
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
@@ -2467,33 +2483,29 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    GET_STALE_TASKS_SQL,
-                    {
-                        'stale_threshold': threshold,
-                        'row_limit': _TASK_LIST_READ_LIMIT,
-                    },
+                connection = await autocommit_connection(session)
+                result = await connection.execute(
+                    LIST_STALE_TASKS_SQL, {'threshold_minutes': threshold},
                 )
-                columns = list(result.keys())
-                rows = [_task_list_entry(columns, row) for row in result.fetchall()]
+                rows = result.mappings().all()
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_stale_tasks failed: {exc}',
                 exc,
             )
-        return Ok(self._rows_within_bound('get_stale_tasks', rows))
+        return Ok(self._rows_within_bound(
+            'get_stale_tasks', _function_task_list(rows, _STALE_TASK_KEYS),
+        ))
 
     def _rows_within_bound(
         self,
         operation: str,
-        rows: list[dict[str, Any]],
+        bounded: _BoundedTaskList,
     ) -> list[dict[str, Any]]:
-        """The rows of a task list read, cut to ``TASK_LIST_ROW_BOUND``.
-
-        A cut list logs a warning that names ``operation`` and the bound.
-        """
-        match _bounded_task_list(rows):
+        """The rows of a task list read; a cut list logs a warning that names
+        ``operation`` and the bound."""
+        match bounded:
             case _CompleteTaskList(rows=complete):
                 return complete
             case _TruncatedTaskList(rows=first_rows):
@@ -2938,19 +2950,18 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    GET_EXPIRED_TASKS_SQL,
-                    {'row_limit': _TASK_LIST_READ_LIMIT},
-                )
-                columns = list(result.keys())
-                rows = [_task_list_entry(columns, row) for row in result.fetchall()]
+                connection = await autocommit_connection(session)
+                result = await connection.execute(LIST_EXPIRED_TASKS_SQL)
+                rows = result.mappings().all()
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_expired_tasks failed: {exc}',
                 exc,
             )
-        return Ok(self._rows_within_bound('get_expired_tasks', rows))
+        return Ok(self._rows_within_bound(
+            'get_expired_tasks', _function_task_list(rows, _EXPIRED_TASK_KEYS),
+        ))
 
     async def mark_stale_tasks_as_failed(
         self,
@@ -3284,19 +3295,20 @@ class PostgresBroker:
 
     # ----------------- Sync API Facades -----------------
 
-    def send_route(self, idempotency_key: Optional[str]) -> SyncSendRoute:
+    def send_route(self) -> SyncSendRoute:
         """Where a sync ``enqueue`` writes its row. Pure.
 
-        ``CALLER_THREAD`` for an unkeyed send of a process that runs no task
-        bodies, once this broker's schema is initialized. A send with an
-        idempotency key, and a send before the schema setup (which the first
-        send may run), stay on the loop runner.
+        ``CALLER_THREAD`` for a send of a process that runs no task bodies,
+        once this broker's schema is initialized, with or without an
+        idempotency key: both are one ``horsies_enqueue_task`` statement in
+        autocommit. A send before the schema setup (which the first send may
+        run) stays on the loop runner.
         Task code in a worker child sends through the child's
         ``task_send_pool``, which the worker profile counts exactly, so it
         stays on the loop runner too.
         """
-        match (process_role(), idempotency_key, self._initialized):
-            case (ProcessRole.RUNS_NO_TASK_BODIES, None, True):
+        match (process_role(), self._initialized):
+            case (ProcessRole.RUNS_NO_TASK_BODIES, True):
                 return SyncSendRoute.CALLER_THREAD
             case _:
                 return SyncSendRoute.LOOP_RUNNER
@@ -3315,7 +3327,7 @@ class PostgresBroker:
                 case _ as unreachable:
                     assert_never(unreachable)
             engine = create_engine(
-                self.config.database_url.get_secret_value(),
+                sqlalchemy_url(self.config.database_url.get_secret_value()),
                 **self._runtime_engine_config(),
                 isolation_level='AUTOCOMMIT',
             )
@@ -3356,9 +3368,11 @@ class PostgresBroker:
         task_options: Optional[str],
         retention_class_key: RetentionClassKey | None,
         retain_rerun_input: Optional[bool],
+        idempotency_key: Optional[str],
     ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
-        """The unkeyed path of ``enqueue_async``, on the calling thread: the
-        same row, the same statement and the same error classification."""
+        """``enqueue_async`` on the calling thread: the same row (with the
+        key of a keyed send), the same statement and the same error
+        classification."""
         resolved_retention_class_key = resolve_retention_class_key(
             retention_class_key
         )
@@ -3378,13 +3392,12 @@ class PostgresBroker:
             task_options=task_options,
             retention_class_key=resolved_retention_class_key,
             retain_rerun_input=retain_rerun_input,
-            idempotency_key=None,
+            idempotency_key=idempotency_key,
             key_window=self.idempotency_reservation_window,
         )
         if is_err(prepared_r):
             return prepared_r
         prepared = prepared_r.ok_value
-        assert isinstance(prepared.row.key, Unkeyed), 'an unkeyed send has no key'
         try:
             outcome = self._enqueue_task_on_caller_thread(prepared.row, send_kind)
         except _DRIVER_ERRORS as exc:
@@ -3425,7 +3438,7 @@ class PostgresBroker:
             return _async_context_err(
                 'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
             )
-        match self.send_route(idempotency_key):
+        match self.send_route():
             case SyncSendRoute.CALLER_THREAD:
                 return self._enqueue_on_caller_thread(
                     task_name,
@@ -3442,6 +3455,7 @@ class PostgresBroker:
                     task_options=task_options,
                     retention_class_key=retention_class_key,
                     retain_rerun_input=retain_rerun_input,
+                    idempotency_key=idempotency_key,
                 )
             case SyncSendRoute.LOOP_RUNNER:
                 pass

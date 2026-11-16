@@ -9,10 +9,11 @@
 //! - The session URL has its own [`PoolRole::Session`] pool when it differs
 //!   from the main URL; otherwise session work uses the main pool.
 //! - Every pool: `pool_size + max_overflow` connections, `pool_timeout` as the
-//!   checkout wait, `pool_recycle` as the connection age limit, and the 1 s
-//!   idle ping when `pool_pre_ping` is on. The main pool sends unnamed
-//!   statements only in PgBouncer transaction mode; the session pool always
-//!   keeps its session.
+//!   checkout wait, `pool_recycle` as the connection age limit, the 1 s idle
+//!   ping when `pool_pre_ping` is on, and the TCP keepalives and TCP user
+//!   timeout of the config ([`PostgresConfig::socket_settings`]) on each
+//!   connection. The main pool sends unnamed statements only in PgBouncer
+//!   transaction mode; the session pool always keeps its session.
 //!
 //! Building the pools connects to nothing: a connection opens at the first
 //! checkout.
@@ -31,8 +32,8 @@ use crate::core::PostgresConfig;
 use crate::db::{
     parse_connection_url, ConnectPlan, ConnectPlanError, ConnectionAge, ConnectionEnvironment,
     CorePool, EnvironmentError, IdlePing, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
-    PoolSizingError, Reserve, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
-    DEFAULT_SOCKET_SETTINGS, WORKER_RESERVED_CONNECTIONS,
+    PoolSizingError, Reserve, SocketSettings, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
+    WORKER_RESERVED_CONNECTIONS,
 };
 use crate::manifest::PoolRecycle;
 
@@ -99,7 +100,8 @@ impl BrokerPools {
     ///
     /// Reads, per URL, the TLS files the URL names, `~/.pgpass` when no
     /// password is given, and the process user name when the URL names no
-    /// user. Connects to nothing.
+    /// user. Connects to nothing. Every pool takes the socket settings of
+    /// `config`.
     ///
     /// Errors: [`PoolSettingsError`]; nothing was built.
     pub(crate) fn open_with_environment(
@@ -107,6 +109,7 @@ impl BrokerPools {
         profile: PoolProfile,
         environment: &ConnectionEnvironment,
     ) -> Result<BrokerPools, PoolSettingsError> {
+        let socket = config.socket_settings();
         let main_shape = main_pool_shape(profile);
         let (main, main_url) = open_pool(
             &config.database_url,
@@ -121,6 +124,7 @@ impl BrokerPools {
                 cause,
             })?,
             environment,
+            &socket,
         )?;
         let session_url = config.effective_session_database_url();
         let session = match session_url == config.database_url {
@@ -139,6 +143,7 @@ impl BrokerPools {
                         cause,
                     })?,
                     environment,
+                    &socket,
                 )?;
                 SessionPool::Separate { pool, masked_url }
             }
@@ -405,17 +410,18 @@ fn connection_age(recycle: PoolRecycle) -> ConnectionAge {
     }
 }
 
-/// Parses one URL, loads its connection plan and builds the pool. Returns
-/// the pool and its URL with the password masked.
+/// Parses one URL, loads its connection plan with `socket` and builds the
+/// pool. Returns the pool and its URL with the password masked.
 fn open_pool(
     url: &str,
     plan: PoolPlan,
     environment: &ConnectionEnvironment,
+    socket: &SocketSettings,
 ) -> Result<(CorePool, MaskedUrl), PoolSettingsError> {
     let role = plan.role;
     let settings = parse_connection_url(url, environment)
         .map_err(|cause| PoolSettingsError::Url { role, cause })?;
-    let connect = ConnectPlan::load(&settings, environment, &DEFAULT_SOCKET_SETTINGS)
+    let connect = ConnectPlan::load(&settings, environment, socket)
         .map_err(|cause| PoolSettingsError::Plan { role, cause })?;
     Ok((
         CorePool::new(plan, Arc::new(connect)),
@@ -476,6 +482,7 @@ pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
+        &config.socket_settings(),
     )
     .expect("the URL of a test pool is accepted by the statement layer");
     core_pool
@@ -501,6 +508,7 @@ pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> 
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
+        &config.socket_settings(),
     )
     .expect("the URL of a test pool is accepted by the statement layer");
     core_pool
@@ -512,9 +520,9 @@ const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
 
 /// A core pool of one connection on the URL of `options` that never pings a
 /// pooled connection at checkout (Python's worker pre-ping off) and never
-/// replaces it for its age. Once a statement is prepared on the connection,
-/// the statement is its only round trip. Connects to nothing until the first
-/// checkout.
+/// replaces it for its age, with the default socket settings. Once a
+/// statement is prepared on the connection, the statement is its only round
+/// trip. Connects to nothing until the first checkout.
 #[cfg(test)]
 pub(crate) fn unpinged_single_connection_core_pool(
     options: &sqlx::postgres::PgConnectOptions,
@@ -532,6 +540,7 @@ pub(crate) fn unpinged_single_connection_core_pool(
         &test_url_of(options),
         plan,
         &ConnectionEnvironment::isolated(),
+        &crate::db::DEFAULT_SOCKET_SETTINGS,
     )
     .expect("the URL of a test pool is accepted by the statement layer");
     core_pool
@@ -540,6 +549,10 @@ pub(crate) fn unpinged_single_connection_core_pool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::socket::{
+        KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig,
+        TcpUserTimeoutMs,
+    };
     use crate::db::{CheckoutClass, CheckoutFailure};
 
     fn config() -> PostgresConfig {
@@ -727,6 +740,89 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// [`config`] with a distinct session URL, so the broker has a main and a
+    /// session pool, and the given TCP settings.
+    fn config_with_socket(
+        tcp_keepalives: TcpKeepalivesConfig,
+        tcp_user_timeout: TcpUserTimeoutConfig,
+    ) -> PostgresConfig {
+        let mut config = config();
+        config.session_database_url =
+            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
+        config.tcp_keepalives = tcp_keepalives;
+        config.tcp_user_timeout = tcp_user_timeout;
+        config
+    }
+
+    /// The pools of `config` for each profile.
+    fn pools_of_each_profile(config: &PostgresConfig) -> [BrokerPools; 2] {
+        [PoolProfile::Producer, PoolProfile::Worker].map(|profile| {
+            BrokerPools::open_with_environment(config, profile, &ConnectionEnvironment::isolated())
+                .expect("pools build without I/O")
+        })
+    }
+
+    /// The main pool and the session pool of `pools`.
+    fn main_and_session(pools: &BrokerPools) -> [&CorePool; 2] {
+        let SessionPool::Separate { pool: session, .. } = pools.session() else {
+            panic!("a distinct session URL gets its own pool");
+        };
+        [pools.main(), session]
+    }
+
+    #[test]
+    fn keepalives_off_and_the_system_user_timeout_reach_every_pool() {
+        let config = config_with_socket(
+            TcpKeepalivesConfig::Off,
+            TcpUserTimeoutConfig::SystemDefault,
+        );
+        for pools in pools_of_each_profile(&config) {
+            for pool in main_and_session(&pools) {
+                let driver = pool.connect_plan().first_attempt();
+                let role = pool.role();
+                assert!(!driver.get_keepalives(), "{role} pool");
+                assert_eq!(driver.get_tcp_user_timeout(), None, "{role} pool");
+            }
+        }
+    }
+
+    #[test]
+    fn keepalive_values_and_a_user_timeout_reach_every_pool() {
+        let config = config_with_socket(
+            TcpKeepalivesConfig::On {
+                idle_seconds: KeepaliveSeconds::try_from(45_u32).expect("in bounds"),
+                interval_seconds: KeepaliveSeconds::try_from(7_u32).expect("in bounds"),
+                probes: KeepaliveProbes::try_from(5_u32).expect("in bounds"),
+            },
+            TcpUserTimeoutConfig::After {
+                milliseconds: TcpUserTimeoutMs::try_from(1500_u32).expect("in bounds"),
+            },
+        );
+        for pools in pools_of_each_profile(&config) {
+            for pool in main_and_session(&pools) {
+                let driver = pool.connect_plan().first_attempt();
+                let role = pool.role();
+                assert!(driver.get_keepalives(), "{role} pool");
+                assert_eq!(
+                    driver.get_keepalives_idle(),
+                    Duration::from_secs(45),
+                    "{role} pool"
+                );
+                assert_eq!(
+                    driver.get_keepalives_interval(),
+                    Some(Duration::from_secs(7)),
+                    "{role} pool"
+                );
+                assert_eq!(driver.get_keepalives_retries(), Some(5), "{role} pool");
+                assert_eq!(
+                    driver.get_tcp_user_timeout(),
+                    Some(&Duration::from_millis(1500)),
+                    "{role} pool"
+                );
+            }
+        }
     }
 
     fn open_handle() -> CoreHandle {

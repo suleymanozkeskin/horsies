@@ -12,6 +12,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from tests.session_database import database_name_prefix
+from horsies.core.utils.url import sqlalchemy_url
 
 
 _SETUP_LOCK_SQL = text(
@@ -38,8 +39,11 @@ def _checked_database_name(name: str) -> str:
 async def isolated_test_database(base_url: str) -> AsyncGenerator[str]:
     '''Create one isolated database and remove it after the caller closes pools.'''
     base = make_url(base_url)
+    # The engines open the database with psycopg 3; the yielded URL is the
+    # postgresql:// form that PostgresConfig takes.
+    engine_base = make_url(sqlalchemy_url(base_url))
     admin_engine = create_async_engine(
-        base.set(database='postgres'),
+        engine_base.set(database='postgres'),
         isolation_level='AUTOCOMMIT',
     )
     prefix = isolated_database_prefix()
@@ -73,7 +77,7 @@ async def isolated_test_database(base_url: str) -> AsyncGenerator[str]:
                     f'CREATE DATABASE "{_checked_database_name(name)}"'
                 ))
                 created = True
-                guard_engine = create_async_engine(base.set(database=name))
+                guard_engine = create_async_engine(engine_base.set(database=name))
                 guard_connection = await guard_engine.connect()
                 await guard_connection.execute(text('SELECT 1'))
             finally:
