@@ -173,10 +173,13 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         };
         let child_error = match child_status {
             "FAILED" => Some(
-                serde_json::to_string(&TaskError::new(
-                    "SUBWORKFLOW_REPLAY_PROBE",
-                    "child failed for replay-guard test",
-                ))
+                serde_json::to_string(
+                    &TaskError::new(
+                        "SUBWORKFLOW_REPLAY_PROBE",
+                        "child failed for replay-guard test",
+                    )
+                    .expect("a user error code"),
+                )
                 .expect("encode"),
             ),
             _ => None,

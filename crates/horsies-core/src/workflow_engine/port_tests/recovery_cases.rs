@@ -256,8 +256,11 @@ async fn seed_parent_of_an_ended_child(
     let child_node = match child_status {
         "FAILED" => {
             child_seed.error = Some(
-                serde_json::to_string(&TaskError::new("CHILD_CRASH", "child task crashed"))
-                    .expect("encode the child error"),
+                serde_json::to_string(
+                    &TaskError::new("CHILD_CRASH", "child task crashed")
+                        .expect("a user error code"),
+                )
+                .expect("encode the child error"),
             );
             NodeSeed::task(Uuid::nil(), 0, "FAILED").result(err_text("CHILD_CRASH"))
         }
