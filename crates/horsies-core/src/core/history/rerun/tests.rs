@@ -815,6 +815,25 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     cleanup(&pool, &[source], &[]).await;
 }
 
+/// Store a valid version-1 inline envelope with `options_json` as the source's
+/// rerun input.
+async fn store_inline_input(pool: &PgPool, source: Uuid, options_json: &str) {
+    let payload = format!("{{\"input\":{PAYLOAD_INPUT},\"options\":{options_json}}}").into_bytes();
+    let digest = Sha256::digest(&payload).to_vec();
+    sqlx::query(
+        "UPDATE horsies_task_history
+         SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
+             rerun_input_digest = $2, rerun_input_inline = $3
+         WHERE task_id = $1",
+    )
+    .bind(source)
+    .bind(digest)
+    .bind(payload)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn rerun_count(pool: &PgPool, source: Uuid) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
         .bind(source)
@@ -844,6 +863,54 @@ async fn an_unknown_stored_status_is_source_corrupt() {
             .unwrap(),
         RerunOutcome::SourceCorrupt { task_id, ref detail }
             if task_id == source && detail.contains("BOGUS")
+    ));
+    assert_eq!(rerun_count(&pool, source).await, 0);
+    cleanup(&pool, &[source], &[]).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_rerun_keeps_the_execution_class_of_the_request() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    store_inline_input(&pool, source, "{\"execution\":\"SHARED_THREAD\"}").await;
+    let RerunOutcome::Enqueued { new_task_id, .. } = broker
+        .rerun_task(
+            RerunTask::new(source, None, None),
+            policy(SOURCE_CLASS, true),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("a source with a stored execution class must enqueue");
+    };
+    let execution: String = sqlx::query_scalar("SELECT execution FROM horsies_tasks WHERE id = $1")
+        .bind(new_task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(execution, "SHARED_THREAD");
+    cleanup(&pool, &[source, new_task_id], &[]).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn an_invalid_stored_execution_is_input_corrupt() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    store_inline_input(&pool, source, "{\"execution\":\"PARALLEL\"}").await;
+    assert!(matches!(
+        broker
+            .rerun_task(
+                RerunTask::new(source, None, None),
+                policy(SOURCE_CLASS, true)
+            )
+            .await
+            .unwrap(),
+        RerunOutcome::InputCorrupt { task_id, ref detail }
+            if task_id == source && detail.starts_with("stored task options: ")
     ));
     assert_eq!(rerun_count(&pool, source).await, 0);
     cleanup(&pool, &[source], &[]).await;

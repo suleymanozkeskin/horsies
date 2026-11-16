@@ -255,7 +255,9 @@ pub async fn rerun_task_in_tx(
 
     let new_task_id = mint_task_id()?;
     let root_task_id = detail.rerun_root_task_id.unwrap_or(detail.task_id);
-    let facts = prepare_enqueue_facts_with_lineage(
+    // The rerun runs with the execution class of the stored request; a stored
+    // class that does not parse is corrupt input.
+    let facts = match prepare_enqueue_facts_with_lineage(
         &detail.task_name,
         &detail.queue_name,
         detail.priority,
@@ -268,7 +270,16 @@ pub async fn rerun_task_in_tx(
         command.caller_key(),
         Some(detail.task_id),
         Some(root_task_id),
-    )?;
+    ) {
+        Ok(facts) => facts,
+        Err(EnqueuePreparationError::InvalidExecution(invalid)) => {
+            return Ok(RerunOutcome::InputCorrupt {
+                task_id: command.source_task_id,
+                detail: format!("stored task options: {}", invalid.detail),
+            });
+        }
+        Err(other) => return Err(other.into()),
+    };
 
     if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
         match claim_key_reservation(
