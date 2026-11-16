@@ -425,6 +425,7 @@ async fn run_one(
         }
         FirstAnswer::DrainDeadline => {
             drop(held);
+            shared.drain_kills.note([task_id]);
             let crashed = AttemptEnd::Crashed {
                 reason: FailureDetail::cut("the worker killed the child at the drain deadline"),
             };
@@ -566,8 +567,16 @@ async fn end_after_return(
             answer.send(end_after_kill(shared, channel, returned_end).await);
             AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
-        FirstAnswer::Wait(FrameWait::Expired) | FirstAnswer::DrainDeadline => {
+        FirstAnswer::Wait(FrameWait::Expired) => {
             drop(held);
+            answer.send(end_after_kill(shared, channel, returned_end).await);
+            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+        }
+        FirstAnswer::DrainDeadline => {
+            drop(held);
+            // The child still holds the work the task left on its loop
+            // (Python `_kill_at_deadline`: the handle still has its child).
+            shared.drain_kills.note([task_id]);
             answer.send(end_after_kill(shared, channel, returned_end).await);
             AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }

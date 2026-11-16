@@ -362,18 +362,17 @@ struct RunningChildren {
 
 impl RunningChildren {
     /// Stop the pools with `drain` (Python `SlotPool.stop`), then the
-    /// spawner thread. Logs a drain that had to kill children.
+    /// spawner thread. Logs the tasks whose children the drain deadline
+    /// killed (Python `Worker.stop`).
     async fn stop_pools(children: WorkerChildren, drain: Duration) {
         let ChildrenStopped { report } = children.stop(drain).await;
-        match report {
-            PoolStopReport::Drained => {}
-            PoolStopReport::KilledAtDrainDeadline | PoolStopReport::AbortedAfterDrain => {
-                tracing::error!(
-                    "Drain exceeded {:.0}s (hung task?); the children that still ran tasks were \
-                     killed",
-                    drain.as_secs_f64()
-                );
-            }
+        let killed = match report {
+            PoolStopReport::Drained => Vec::new(),
+            PoolStopReport::KilledAtDrainDeadline { killed }
+            | PoolStopReport::AbortedAfterDrain { killed } => killed,
+        };
+        if let Some(line) = drain_kill_line(drain, &killed) {
+            tracing::error!("{line}");
         }
         tracing::info!("Worker child processes stopped");
     }
@@ -396,6 +395,27 @@ impl RunningChildren {
     async fn stop_after_failed_start(self) {
         Self::stop_pools(self.children, Duration::ZERO).await;
         Self::stop_spawner(self.spawner).await;
+    }
+}
+
+/// Python's line for the tasks whose children the drain deadline killed
+/// (`horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
+/// (hung task?); killed tasks: %s'` with the list of the task ids), or
+/// `None` when it killed none: Python logs only a list with an id. Pure.
+fn drain_kill_line(drain: Duration, killed: &[Uuid]) -> Option<String> {
+    match killed.is_empty() {
+        true => None,
+        false => {
+            let ids: Vec<String> = killed
+                .iter()
+                .map(|task_id| format!("'{task_id}'"))
+                .collect();
+            Some(format!(
+                "Drain exceeded {:.0}s (hung task?); killed tasks: [{}]",
+                drain.as_secs_f64(),
+                ids.join(", ")
+            ))
+        }
     }
 }
 
@@ -2174,6 +2194,24 @@ mod tests {
         assert!(pools < writes);
         assert!(writes < beats);
         assert!(beats < spawner);
+    }
+
+    /// Python `Worker.stop`: the drain line names each task that the drain
+    /// deadline killed, as Python prints its list of ids; a drain that
+    /// killed none logs no line.
+    #[test]
+    fn the_drain_line_names_the_killed_tasks_as_python_does() {
+        let killed = [Uuid::from_u128(1), Uuid::from_u128(2)];
+
+        assert_eq!(
+            drain_kill_line(Duration::from_secs(30), &killed).as_deref(),
+            Some(
+                "Drain exceeded 30s (hung task?); killed tasks: \
+                 ['00000000-0000-0000-0000-000000000001', \
+                 '00000000-0000-0000-0000-000000000002']"
+            )
+        );
+        assert_eq!(drain_kill_line(Duration::from_secs(30), &[]), None);
     }
 
     /// A start attempt that does not finish in time is retryable, as in
