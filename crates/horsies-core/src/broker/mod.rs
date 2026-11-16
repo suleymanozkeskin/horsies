@@ -2,6 +2,7 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod claims;
 pub mod client_family;
 pub mod core_rows;
 #[cfg(test)]

@@ -1202,6 +1202,34 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
     }
 }
 
+/// The request of one 0004 claim pass of `WORKER` over `queue`, with no
+/// cap: one `ISOLATED` budget of 10 that every class routes to.
+pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
 /// Bound of the wait for the sentinel wake.
 const WAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Bound of the wakes read before the sentinel.
