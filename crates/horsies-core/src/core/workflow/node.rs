@@ -186,13 +186,13 @@ pub struct AnyNode {
     /// Registered task function name.
     pub task_name: String,
 
-    /// Serialized positional arguments (JSON).
+    /// The encoded input of the node's task as one JSON value.
+    ///
+    /// `None`: the node sets no static input. The node row then stores `null`,
+    /// and `args_from` and workflow context members merge into an object at
+    /// enqueue.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub args_json: Option<String>,
-
-    /// Serialized keyword arguments (JSON).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kwargs_json: Option<String>,
+    pub input_json: Option<String>,
 
     /// Indices of upstream dependencies in the spec's task list.
     pub dependencies: Vec<usize>,
@@ -251,6 +251,19 @@ pub struct AnyNode {
     pub sub_definition_key: Option<String>,
 }
 
+/// The text that a node row stores as its `input` when the node sets no
+/// static input (a task without input; `args_from` and workflow context
+/// members merge into an object at enqueue).
+pub const NO_NODE_INPUT: &str = "null";
+
+impl AnyNode {
+    /// The node row's `input`: the static input as written, or
+    /// [`NO_NODE_INPUT`] when the node sets none.
+    pub fn stored_input(&self) -> &str {
+        self.input_json.as_deref().unwrap_or(NO_NODE_INPUT)
+    }
+}
+
 /// Typed builder for a workflow task node.
 ///
 /// The phantom type `T` encodes the task's result type for compile-time
@@ -260,8 +273,7 @@ pub struct AnyNode {
 /// `WorkflowSpecBuilder::task()`.
 pub struct TaskNode<T, I = ()> {
     task_name: String,
-    args_json: Option<String>,
-    kwargs_json: Option<String>,
+    input_json: Option<String>,
     dependencies: Vec<usize>,
     args_from: HashMap<String, usize>,
     workflow_ctx_from_refs: Vec<usize>,
@@ -297,8 +309,7 @@ impl<T, I> TaskNode<T, I> {
     pub(crate) fn raw(task_name: impl Into<String>) -> Self {
         Self {
             task_name: task_name.into(),
-            args_json: None,
-            kwargs_json: None,
+            input_json: None,
             dependencies: Vec::new(),
             args_from: HashMap::new(),
             workflow_ctx_from_refs: Vec::new(),
@@ -315,30 +326,13 @@ impl<T, I> TaskNode<T, I> {
         }
     }
 
-    /// Set serialized positional arguments.
-    pub fn args_json(mut self, args_json: impl Into<String>) -> Self {
-        self.args_json = Some(args_json.into());
-        self
-    }
-
-    /// Set serialized keyword arguments.
-    pub fn kwargs_json(mut self, kwargs_json: impl Into<String>) -> Self {
-        self.kwargs_json = Some(kwargs_json.into());
-        self
-    }
-
-    /// Set serialized positional arguments.
+    /// Set the encoded input as one JSON value, stored as written.
     ///
-    /// Prefer [`TaskNode::args_json`] in new code.
-    pub fn args(self, args_json: impl Into<String>) -> Self {
-        self.args_json(args_json)
-    }
-
-    /// Set serialized keyword arguments.
-    ///
-    /// Prefer [`TaskNode::kwargs_json`] in new code.
-    pub fn kwargs(self, kwargs_json: impl Into<String>) -> Self {
-        self.kwargs_json(kwargs_json)
+    /// A node that also takes `args_from` or `workflow_ctx_from` members needs
+    /// an object input: the members merge into it at enqueue.
+    pub fn input_json(mut self, input_json: impl Into<String>) -> Self {
+        self.input_json = Some(input_json.into());
+        self
     }
 
     /// Set the task's entire explicit input value.
@@ -346,16 +340,13 @@ impl<T, I> TaskNode<T, I> {
     /// This is the whole-input path used for root tasks and other nodes where
     /// the complete input value is available when the workflow spec is built.
     ///
-    /// This replaces any prior explicit `.set(...)`, `.args_json(...)`, or
-    /// `.kwargs_json(...)` bindings on the node.
+    /// This replaces any prior explicit `.set(...)` or `.input_json(...)`
+    /// binding on the node.
     pub fn set_input(mut self, value: I) -> Result<Self, HorsiesError>
     where
         I: Serialize,
     {
-        let (args_json, kwargs_json) = serialize_explicit_input(&value)?;
-        self.args_json = args_json;
-        self.kwargs_json = kwargs_json;
-
+        self.input_json = serialize_explicit_input(&value)?;
         Ok(self)
     }
 
@@ -524,8 +515,7 @@ impl<T, I> TaskNode<T, I> {
     pub fn into_any_node(self, index: usize) -> AnyNode {
         AnyNode {
             task_name: self.task_name,
-            args_json: self.args_json,
-            kwargs_json: self.kwargs_json,
+            input_json: self.input_json,
             dependencies: self.dependencies,
             args_from: self.args_from,
             workflow_ctx_from: self.workflow_ctx_from_ids,
@@ -549,9 +539,12 @@ impl<T, I> TaskNode<T, I> {
     }
 }
 
+/// Encode a node's whole input as one JSON value.
+///
+/// `null` (a unit or `None` input) is `None`: the node sets no static input.
 pub(crate) fn serialize_explicit_input<V: Serialize>(
     value: &V,
-) -> Result<(Option<String>, Option<String>), HorsiesError> {
+) -> Result<Option<String>, HorsiesError> {
     // Strict serialization rejects non-finite floats (NaN/±Infinity) at the node
     // input boundary instead of coercing them to JSON `null` (N5, Python
     // allow_nan=False parity).
@@ -560,39 +553,34 @@ pub(crate) fn serialize_explicit_input<V: Serialize>(
     })?;
 
     Ok(match value {
-        serde_json::Value::Null => (None, None),
-        serde_json::Value::Object(_) => (None, Some(value.to_string())),
-        // A single node input whose serialized form is a JSON array (Vec, tuple,
-        // fixed array) must be carried as ONE positional element — mirror
-        // `serialize_args`. Without the wrap the worker's `decode_task_input`
-        // reads the array's elements as multiple positional args and rejects the
-        // envelope ("exactly one item when kwargs is empty"), so the node's task
-        // can never execute (C7).
-        serde_json::Value::Array(_) => {
-            let wrapped = serde_json::Value::Array(vec![value]);
-            (Some(wrapped.to_string()), None)
-        }
-        other => (Some(other.to_string()), None),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
     })
 }
 
+/// Set one field of a node's object input. No input starts an empty object;
+/// an input that is not a JSON object is refused.
 pub(crate) fn merge_kwarg_value(
-    existing_kwargs_json: Option<String>,
+    existing_input_json: Option<String>,
     field_name: &str,
     value: serde_json::Value,
 ) -> Result<Option<String>, HorsiesError> {
-    let mut map = match existing_kwargs_json {
+    let mut map = match existing_input_json {
         None => serde_json::Map::new(),
-        Some(kwargs_json) => {
-            let parsed = serde_json::from_str::<serde_json::Value>(&kwargs_json).map_err(|e| {
-                HorsiesError::new(format!("kwargs_json is not valid JSON: {}", e))
-                    .with_help("ensure the node's kwargs payload is valid JSON")
+        Some(input_json) => {
+            let parsed = serde_json::from_str::<serde_json::Value>(&input_json).map_err(|e| {
+                HorsiesError::new(format!("input_json is not valid JSON: {}", e))
+                    .with_help("ensure the node's input is valid JSON")
             })?;
             match parsed {
                 serde_json::Value::Object(map) => map,
                 _ => {
-                    return Err(HorsiesError::new("kwargs_json must be a JSON object")
-                        .with_help("field-level .set(...) requires object-shaped node kwargs"));
+                    return Err(HorsiesError::new(
+                        "cannot use field-level .set(...) on a node whose input is not a JSON object",
+                    )
+                    .with_help(
+                        "use .set_input(...) for whole-input payloads, or keep explicit values in an object input",
+                    ));
                 }
             }
         }
@@ -610,15 +598,6 @@ fn apply_field_set<T, I, F>(
 where
     F: Serialize,
 {
-    if node.args_json.is_some() {
-        return Err(HorsiesError::new(
-            "cannot use field-level .set(...) on a node that already has args_json",
-        )
-        .with_help(
-            "use .set_input(...) for whole-input payloads, or keep explicit values in kwargs only",
-        ));
-    }
-
     let value = serde_json::to_value(&value).map_err(|e| {
         HorsiesError::new(format!(
             "failed to serialize workflow field '{}' value: {}",
@@ -627,7 +606,7 @@ where
         ))
     })?;
 
-    node.kwargs_json = merge_kwarg_value(node.kwargs_json, field.name(), value)?;
+    node.input_json = merge_kwarg_value(node.input_json, field.name(), value)?;
     Ok(node)
 }
 
@@ -714,41 +693,28 @@ pub fn resolve_node_queue_priority(
 mod tests {
     use super::*;
 
-    /// Rebuild the worker envelope from serialized (args, kwargs) exactly as
-    /// `worker::execution::build_envelope_from_parts` does, so the decode path
-    /// under test is the real one.
-    fn rebuild_envelope(args: Option<String>, kwargs: Option<String>) -> Vec<u8> {
-        let args_array = match args {
-            Some(json) => match serde_json::from_str(&json).unwrap() {
-                serde_json::Value::Array(arr) => arr,
-                other => vec![other],
-            },
-            None => Vec::new(),
-        };
-        let kwargs_object = match kwargs {
-            Some(json) => match serde_json::from_str(&json).unwrap() {
-                serde_json::Value::Object(map) => map,
-                _ => panic!("kwargs is not an object"),
-            },
-            None => serde_json::Map::new(),
-        };
-        let envelope = serde_json::json!({ "args": args_array, "kwargs": kwargs_object });
-        serde_json::to_vec(&envelope).unwrap()
+    #[test]
+    fn serialize_explicit_input_stores_an_array_as_one_value() {
+        // C7: an array-valued node input is one input value, not N positional
+        // values. The node stores it as written and the task decodes it whole.
+        let input = serialize_explicit_input(&vec![1, 2, 3]).unwrap();
+        assert_eq!(input.as_deref(), Some("[1,2,3]"));
+
+        let task_input =
+            crate::worker::execution::build_task_input(input.as_deref().unwrap(), false).unwrap();
+        let decoded: Vec<i32> = crate::core::task::macros::decode_task_input(&task_input).unwrap();
+        assert_eq!(decoded, vec![1, 2, 3]);
     }
 
     #[test]
-    fn serialize_explicit_input_wraps_array() {
-        // C7: an array-valued node input must be wrapped as ONE positional
-        // element so the worker's decode reads a single arg, not N. Before the
-        // fix it was stored unwrapped ("[1,2,3]") and the node was undeliverable.
-        let (args, kwargs) = serialize_explicit_input(&vec![1, 2, 3]).unwrap();
-        assert_eq!(args.as_deref(), Some("[[1,2,3]]"));
-        assert!(kwargs.is_none());
-
-        // And it round-trips through the real decode path back to the input.
-        let bytes = rebuild_envelope(args, kwargs);
-        let decoded: Vec<i32> = crate::core::task::macros::decode_task_input(&bytes).unwrap();
-        assert_eq!(decoded, vec![1, 2, 3]);
+    fn serialize_explicit_input_maps_null_to_no_input() {
+        assert_eq!(serialize_explicit_input(&()).unwrap(), None);
+        assert_eq!(
+            serialize_explicit_input(&serde_json::json!({}))
+                .unwrap()
+                .as_deref(),
+            Some("{}")
+        );
     }
 
     #[test]
@@ -822,8 +788,7 @@ mod tests {
     fn task_node_builder_defaults() {
         let node: TaskNode<String> = TaskNode::raw("my_task");
         assert_eq!(node.task_name(), "my_task");
-        assert!(node.args_json.is_none());
-        assert!(node.kwargs_json.is_none());
+        assert!(node.input_json.is_none());
         assert!(node.dependencies.is_empty());
         assert!(node.args_from.is_empty());
         assert!(node.workflow_ctx_from_refs.is_empty());
@@ -842,16 +807,14 @@ mod tests {
     #[test]
     fn task_node_chainable_setters() {
         let node: TaskNode<i32> = TaskNode::raw("add")
-            .args_json(r#"[1, 2]"#)
-            .kwargs_json(r#"{"mode": "fast"}"#)
+            .input_json(r#"{"mode": "fast"}"#)
             .node_id("add_step")
             .queue("high")
             .priority(10)
             .allow_failed_deps(true)
             .join_quorum(2);
 
-        assert_eq!(node.args_json.as_deref(), Some(r#"[1, 2]"#));
-        assert_eq!(node.kwargs_json.as_deref(), Some(r#"{"mode": "fast"}"#));
+        assert_eq!(node.input_json.as_deref(), Some(r#"{"mode": "fast"}"#));
         assert_eq!(node.node_id.as_deref(), Some("add_step"));
         assert_eq!(node.queue.as_deref(), Some("high"));
         assert_eq!(node.priority, Some(10));
@@ -895,7 +858,7 @@ mod tests {
     fn task_node_into_any_node() {
         let dep = NodeRef { index: 0 };
         let node: TaskNode<String> = TaskNode::raw("process")
-            .args_json(r#""hello""#)
+            .input_json(r#""hello""#)
             .waits_for(dep)
             .raw_arg_from("input", dep)
             .node_id("process:1")
@@ -906,7 +869,7 @@ mod tests {
 
         let any = node.into_any_node(1);
         assert_eq!(any.task_name, "process");
-        assert_eq!(any.args_json.as_deref(), Some(r#""hello""#));
+        assert_eq!(any.input_json.as_deref(), Some(r#""hello""#));
         assert_eq!(any.dependencies, vec![0]);
         assert_eq!(any.args_from.get("input"), Some(&0));
         assert_eq!(any.node_id.as_deref(), Some("process:1"));
@@ -919,21 +882,10 @@ mod tests {
     }
 
     #[test]
-    fn task_node_compatibility_setters_delegate_to_json_variants() {
-        let node: TaskNode<String> = TaskNode::raw("process")
-            .args(r#""hello""#)
-            .kwargs(r#"{"mode":"fast"}"#);
-
-        assert_eq!(node.args_json.as_deref(), Some(r#""hello""#));
-        assert_eq!(node.kwargs_json.as_deref(), Some(r#"{"mode":"fast"}"#));
-    }
-
-    #[test]
     fn any_node_serde_round_trip() {
         let any = AnyNode {
             task_name: "fetch".to_owned(),
-            args_json: Some(r#"{"url": "https://example.com"}"#.to_owned()),
-            kwargs_json: None,
+            input_json: Some(r#"{"url": "https://example.com"}"#.to_owned()),
             dependencies: vec![],
             args_from: HashMap::new(),
             workflow_ctx_from: None,
@@ -973,8 +925,7 @@ mod tests {
     fn make_any_node(task_name: &str, is_subworkflow: bool) -> AnyNode {
         AnyNode {
             task_name: task_name.to_owned(),
-            args_json: None,
-            kwargs_json: None,
+            input_json: None,
             dependencies: vec![],
             args_from: HashMap::new(),
             workflow_ctx_from: None,

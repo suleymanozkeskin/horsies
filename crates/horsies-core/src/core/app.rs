@@ -303,9 +303,8 @@ impl Horsies {
         F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
     {
         let name_owned = name.to_owned();
-        let wrapped = Arc::new(move |args_json: Option<&str>, kwargs_json: Option<&str>| {
-            let params =
-                decode_parameterized_workflow_input::<P>(&name_owned, args_json, kwargs_json)?;
+        let wrapped = Arc::new(move |input_json: &str| {
+            let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
             builder(params)
         });
 
@@ -339,9 +338,8 @@ impl Horsies {
         F: Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
     {
         let name_owned = name.to_owned();
-        let wrapped = Arc::new(move |args_json: Option<&str>, kwargs_json: Option<&str>| {
-            let params =
-                decode_parameterized_workflow_input::<P>(&name_owned, args_json, kwargs_json)?;
+        let wrapped = Arc::new(move |input_json: &str| {
+            let params = decode_parameterized_workflow_input::<P>(&name_owned, input_json)?;
             builder(params)
         });
 
@@ -608,30 +606,17 @@ impl Horsies {
         Ok(())
     }
 
-    /// Dry-run a task's typed input deserialization for raw args/kwargs JSON,
-    /// using the same envelope path as execution, without running the task.
+    /// Dry-run a task's typed input deserialization for one encoded input,
+    /// using the same input path as execution, without running the task.
     ///
     /// Returns the structured deserialize error on mismatch. Shared by
     /// schedule validation and workflow-node validation.
     fn dry_run_task_input(
         task: &crate::core::task::fn_trait::RegisteredTask,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
     ) -> Result<(), crate::core::task::error::TaskError> {
-        let envelope = crate::worker::execution::build_envelope_from_parts(args, kwargs, false)?;
-        task.validate_input(&envelope)
-    }
-
-    /// Compact JSON string for a schedule's args/kwargs `Value`, mapping
-    /// `Null` to `None` so it follows the same "no payload" path as a
-    /// `ClaimedTaskRow` with a NULL column. Shape-preserving: a non-object
-    /// kwargs `Value` serializes to JSON and is rejected by the shared
-    /// envelope builder exactly as at execution.
-    fn payload_value_to_json(value: &serde_json::Value) -> Option<String> {
-        match value {
-            serde_json::Value::Null => None,
-            other => Some(other.to_string()),
-        }
+        let task_input = crate::worker::execution::build_task_input(input, false)?;
+        task.validate_input(&task_input)
     }
 
     /// Extract a human-readable detail from a typed-input deserialize error.
@@ -680,11 +665,8 @@ impl Horsies {
         if !node.args_from.is_empty() || injects_ctx {
             return None;
         }
-        if node.args_json.is_none() && node.kwargs_json.is_none() {
-            return None;
-        }
-        match Self::dry_run_task_input(task, node.args_json.as_deref(), node.kwargs_json.as_deref())
-        {
+        let input = node.input_json.as_deref()?;
+        match Self::dry_run_task_input(task, input) {
             Ok(()) => None,
             Err(task_error) => Some(
                 HorsiesError::new(format!(
@@ -700,7 +682,7 @@ impl Horsies {
                     Self::input_error_detail(&task_error)
                 ))
                 .with_help(
-                    "ensure the node's kwargs match the task's declared input fields \
+                    "ensure the node's input matches the task's declared input type \
                      (names and types)",
                 ),
             ),
@@ -771,14 +753,11 @@ impl Horsies {
                 );
             }
 
-            // 3. Validate args/kwargs against the task's declared input type.
+            // 3. Validate the input against the task's declared input type.
             // Only when the task is registered (existence reported above).
             if let Ok(task) = self.registry.get(&task_schedule.task_name) {
-                let args = Self::payload_value_to_json(&task_schedule.args);
-                let kwargs = Self::payload_value_to_json(&task_schedule.kwargs);
-                if let Err(task_error) =
-                    Self::dry_run_task_input(task, args.as_deref(), kwargs.as_deref())
-                {
+                let input = task_schedule.input.to_string();
+                if let Err(task_error) = Self::dry_run_task_input(task, &input) {
                     report.add(
                         HorsiesError::new(format!(
                             "schedule '{}' input does not match task '{}' declared input type",
@@ -790,8 +769,8 @@ impl Horsies {
                             Self::input_error_detail(&task_error),
                         ))
                         .with_help(
-                            "ensure the schedule's args/kwargs match the task's declared \
-                             input fields (names and types)",
+                            "ensure the schedule's input matches the task's declared \
+                             input type (names and types)",
                         ),
                     );
                 }
@@ -920,7 +899,7 @@ impl Horsies {
 
         // Phase 2.10: Workflow node missing-input validation.
         // Every non-subworkflow node that references a task with expects_input=true
-        // must have at least one of: args_json, kwargs_json, or args_from.
+        // must have a static input or args_from.
         // Catches missing root input and non-root nodes with no data source.
         //
         // This same validation also runs at start-time via
@@ -939,15 +918,13 @@ impl Horsies {
                 if !task.expects_input() {
                     continue;
                 }
-                let has_input = node.args_json.is_some()
-                    || node.kwargs_json.is_some()
-                    || !node.args_from.is_empty();
+                let has_input = node.input_json.is_some() || !node.args_from.is_empty();
                 if !has_input {
                     let type_name = task.input_type_name().unwrap_or("non-unit type");
                     report.add(
                         HorsiesError::new(format!(
                             "workflow '{}' node '{}' (task '{}') requires input `{}` \
-                             but has no args, kwargs, or args_from",
+                             but has no input or args_from",
                             registered.spec.name,
                             node.node_id.as_deref().unwrap_or("?"),
                             node.task_name,
@@ -1443,15 +1420,13 @@ where
                     if !task.expects_input() {
                         continue;
                     }
-                    let has_input = node.args_json.is_some()
-                        || node.kwargs_json.is_some()
-                        || !node.args_from.is_empty();
+                    let has_input = node.input_json.is_some() || !node.args_from.is_empty();
                     if !has_input {
                         let type_name = task.input_type_name().unwrap_or("non-unit type");
                         errors.push(
                             HorsiesError::new(format!(
                                 "workflow builder '{}' node '{}' (task '{}') requires input `{}` \
-                                 but has no args, kwargs, or args_from",
+                                 but has no input or args_from",
                                 self.name,
                                 node.node_id.as_deref().unwrap_or("?"),
                                 node.task_name,
@@ -1490,26 +1465,16 @@ where
     }
 }
 
+/// Decode a child workflow's params from the parent node's encoded input
+/// (`null` when the node sets no params).
 fn decode_parameterized_workflow_input<P>(
     workflow_name: &str,
-    args_json: Option<&str>,
-    kwargs_json: Option<&str>,
+    input_json: &str,
 ) -> Result<P, HorsiesError>
 where
     P: DeserializeOwned,
 {
-    if args_json.is_some() && kwargs_json.is_some() {
-        return Err(HorsiesError::new(format!(
-            "parameterized child workflow '{}' received both args_json and kwargs_json",
-            workflow_name,
-        ))
-        .with_help(
-            "provide either a whole params value via .set_input(...), or object fields via .set(...) / .arg_from(...), but not both",
-        ));
-    }
-
-    let raw = kwargs_json.or(args_json).unwrap_or("null");
-    serde_json::from_str(raw).map_err(|e| {
+    serde_json::from_str(input_json).map_err(|e| {
         HorsiesError::new(format!(
             "failed to decode params for workflow '{}': {}",
             workflow_name, e,
@@ -2363,8 +2328,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2396,8 +2360,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2430,8 +2393,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2475,8 +2437,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("fast".to_owned()),
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2508,8 +2469,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("nonexistent_queue".to_owned()),
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2554,8 +2514,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("high_priority".to_owned()),
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2589,8 +2548,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -2623,8 +2581,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: Some("nonexistent_queue".to_owned()),
                 enabled: false,
                 timezone: "UTC".to_owned(),
@@ -3038,8 +2995,7 @@ mod tests {
                     hours: None,
                     days: None,
                 }),
-                args: serde_json::Value::Null,
-                kwargs,
+                input: kwargs,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -3106,7 +3062,7 @@ mod tests {
             TaskNode::<()>::raw("counter")
                 .node_id("c")
                 .queue("default")
-                .kwargs(r#"{"count": "not-an-int"}"#.to_owned()),
+                .input_json(r#"{"count": "not-an-int"}"#.to_owned()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();
@@ -3130,7 +3086,7 @@ mod tests {
             TaskNode::<()>::raw("counter")
                 .node_id("c")
                 .queue("default")
-                .kwargs(r#"{"count": 7}"#.to_owned()),
+                .input_json(r#"{"count": 7}"#.to_owned()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();
@@ -3182,7 +3138,7 @@ mod tests {
             TaskNode::<()>::raw("counter_ctx")
                 .node_id("c")
                 .queue("default")
-                .kwargs(r#"{"count": "not-an-int"}"#.to_owned()),
+                .input_json(r#"{"count": "not-an-int"}"#.to_owned()),
         );
         let spec = builder.build().unwrap();
         app.register_workflow_spec(spec).unwrap();

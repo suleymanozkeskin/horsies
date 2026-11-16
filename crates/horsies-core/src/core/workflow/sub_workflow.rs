@@ -18,8 +18,7 @@ use crate::HorsiesError;
 pub struct SubWorkflowNode<P = (), T = serde_json::Value> {
     spec_name: String,
     definition_key: Option<String>,
-    args_json: Option<String>,
-    kwargs_json: Option<String>,
+    input_json: Option<String>,
     dependencies: Vec<usize>,
     args_from: HashMap<String, usize>,
     workflow_ctx_from_refs: Vec<usize>,
@@ -47,8 +46,7 @@ impl<P, T> SubWorkflowNode<P, T> {
         Self {
             spec_name: spec_name.into(),
             definition_key: None,
-            args_json: None,
-            kwargs_json: None,
+            input_json: None,
             dependencies: Vec::new(),
             args_from: HashMap::new(),
             workflow_ctx_from_refs: Vec::new(),
@@ -72,8 +70,7 @@ impl<P, T> SubWorkflowNode<P, T> {
         SubWorkflowNode::<D::Params, D::Output> {
             spec_name: D::name().to_owned(),
             definition_key: Some(D::definition_key().to_owned()),
-            args_json: None,
-            kwargs_json: None,
+            input_json: None,
             dependencies: Vec::new(),
             args_from: HashMap::new(),
             workflow_ctx_from_refs: Vec::new(),
@@ -89,43 +86,22 @@ impl<P, T> SubWorkflowNode<P, T> {
         }
     }
 
-    /// Set serialized positional arguments.
-    pub fn args_json(mut self, args_json: impl Into<String>) -> Self {
-        self.args_json = Some(args_json.into());
+    /// Set the child workflow's encoded params as one JSON value, stored as
+    /// written.
+    pub fn input_json(mut self, input_json: impl Into<String>) -> Self {
+        self.input_json = Some(input_json.into());
         self
-    }
-
-    /// Set serialized keyword arguments.
-    pub fn kwargs_json(mut self, kwargs_json: impl Into<String>) -> Self {
-        self.kwargs_json = Some(kwargs_json.into());
-        self
-    }
-
-    /// Set serialized positional arguments.
-    ///
-    /// Prefer [`SubWorkflowNode::args_json`] in new code.
-    pub fn args(self, args_json: impl Into<String>) -> Self {
-        self.args_json(args_json)
-    }
-
-    /// Set serialized keyword arguments.
-    ///
-    /// Prefer [`SubWorkflowNode::kwargs_json`] in new code.
-    pub fn kwargs(self, kwargs_json: impl Into<String>) -> Self {
-        self.kwargs_json(kwargs_json)
     }
 
     /// Set the child workflow's entire explicit params value.
     ///
-    /// This replaces any prior explicit `.set(...)`, `.args_json(...)`, or
-    /// `.kwargs_json(...)` bindings on the sub-workflow node.
+    /// This replaces any prior explicit `.set(...)` or `.input_json(...)`
+    /// binding on the sub-workflow node.
     pub fn set_input(mut self, value: P) -> Result<Self, HorsiesError>
     where
         P: Serialize,
     {
-        let (args_json, kwargs_json) = serialize_explicit_input(&value)?;
-        self.args_json = args_json;
-        self.kwargs_json = kwargs_json;
+        self.input_json = serialize_explicit_input(&value)?;
         Ok(self)
     }
 
@@ -134,13 +110,18 @@ impl<P, T> SubWorkflowNode<P, T> {
     where
         F: Serialize,
     {
-        if self.args_json.is_some() {
-            return Err(HorsiesError::new(
-                "cannot use field-level .set(...) on a sub-workflow node that already has args_json",
-            )
-            .with_help(
-                "use .set_input(...) for whole child params, or keep explicit values in kwargs only",
-            ));
+        if let Some(existing) = self.input_json.as_deref() {
+            if !matches!(
+                serde_json::from_str::<serde_json::Value>(existing),
+                Ok(serde_json::Value::Object(_))
+            ) {
+                return Err(HorsiesError::new(
+                    "cannot use field-level .set(...) on a sub-workflow node whose params are not a JSON object",
+                )
+                .with_help(
+                    "use .set_input(...) for whole child params, or keep explicit values in an object",
+                ));
+            }
         }
 
         let value = serde_json::to_value(&value).map_err(|e| {
@@ -151,7 +132,7 @@ impl<P, T> SubWorkflowNode<P, T> {
             ))
         })?;
 
-        self.kwargs_json = merge_kwarg_value(self.kwargs_json, field.name(), value)?;
+        self.input_json = merge_kwarg_value(self.input_json, field.name(), value)?;
         Ok(self)
     }
 
@@ -298,8 +279,7 @@ impl<P, T> SubWorkflowNode<P, T> {
     pub fn into_any_node(self, index: usize) -> AnyNode {
         AnyNode {
             task_name: format!("__sub_workflow:{}", self.spec_name),
-            args_json: self.args_json,
-            kwargs_json: self.kwargs_json,
+            input_json: self.input_json,
             dependencies: self.dependencies,
             args_from: self.args_from,
             workflow_ctx_from: self.workflow_ctx_from_ids,
@@ -365,11 +345,10 @@ mod tests {
     }
 
     #[test]
-    fn sub_workflow_no_args_kwargs() {
+    fn sub_workflow_no_input() {
         let node = SubWorkflowNode::new("wf");
         let any = node.into_any_node(0);
-        assert!(any.args_json.is_none());
-        assert!(any.kwargs_json.is_none());
+        assert!(any.input_json.is_none());
     }
 
     #[derive(serde::Serialize)]
@@ -385,18 +364,17 @@ mod tests {
     }
 
     #[test]
-    fn set_input_scalar_serializes_to_args_json() {
+    fn set_input_scalar_serializes_to_input_json() {
         let node = SubWorkflowNode::<String, ()>::typed("child")
             .set_input("eu".to_owned())
             .unwrap()
             .into_any_node(0);
 
-        assert_eq!(node.args_json.as_deref(), Some("\"eu\""));
-        assert!(node.kwargs_json.is_none());
+        assert_eq!(node.input_json.as_deref(), Some("\"eu\""));
     }
 
     #[test]
-    fn set_input_object_serializes_to_kwargs_json() {
+    fn set_input_object_serializes_to_input_json() {
         let node = SubWorkflowNode::<ChildParams, ()>::typed("child")
             .set_input(ChildParams {
                 source: "eu".to_owned(),
@@ -405,10 +383,8 @@ mod tests {
             .unwrap()
             .into_any_node(0);
 
-        assert!(node.args_json.is_none());
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(node.kwargs_json.as_deref().unwrap())
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(node.input_json.as_deref().unwrap()).unwrap(),
             serde_json::json!({"source":"eu","limit":10})
         );
     }
@@ -420,18 +396,16 @@ mod tests {
             .unwrap()
             .into_any_node(0);
 
-        assert!(node.args_json.is_none());
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(node.kwargs_json.as_deref().unwrap())
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(node.input_json.as_deref().unwrap()).unwrap(),
             serde_json::json!({"limit":25})
         );
     }
 
     #[test]
-    fn field_level_set_rejects_after_args_json() {
+    fn field_level_set_rejects_after_a_non_object_input() {
         let err = SubWorkflowNode::<MixedParams, ()>::typed("child")
-            .args_json("\"not-an-object\"")
+            .input_json("\"not-an-object\"")
             .set(MixedParams::field_limit(), 25)
             .unwrap_err();
 
