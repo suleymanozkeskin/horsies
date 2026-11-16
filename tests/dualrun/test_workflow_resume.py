@@ -68,7 +68,7 @@ APP = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
         broker=PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://dualrun@127.0.0.1:1/unused'),
+            database_url=SecretStr('postgresql://dualrun@127.0.0.1:1/unused'),
         ),
     ),
 )
