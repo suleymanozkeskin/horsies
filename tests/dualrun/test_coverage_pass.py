@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Dual-run of the coverage pass moving onto the 0008 coverage functions.
 
 Each pair seeds one state on two fresh baseline databases and runs
@@ -20,6 +21,17 @@ another index shape version. The snapshots must be equal and the outcomes
 must be equal, except where a created history leaf is published by its own
 creation (a decided rule): the candidate's final step then finds the
 readers current and reports ``republished=False``.
+
+The caller switch adds a second pair with the same seeds: reference = the
+Python callers before the switch (``reference/coverage_caller.py``: the
+reaper's periodic pass and the worker's startup pass on
+``partition_maintenance``), candidate = the callers after it, which run the
+pass in the core: ``ReaperMixin._run_partition_coverage`` itself, and the
+body of ``Worker._ensure_startup_coverage`` (``ensure_startup_coverage_in_core``
+with the broker's core handle) against the body of the reference
+(``ensure_startup_coverage_in_database``). The gate rule pairs hold the coverage
+gate in another session during the pass: with one connection neither side
+takes the gate and both repair; with four both find it busy.
 """
 
 from __future__ import annotations
@@ -30,21 +42,31 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final, LiteralString
 
+import psycopg
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.maintenance.coverage import (
     CoverageEnsured,
     CoverageEnsureFailed,
     CoverageOutcome,
     CoveredForever,
     CoveredUntil,
+    StartupCoverageRefused,
+    ensure_startup_coverage_in_core,
+    ensure_startup_coverage_in_database,
     maintain_partition_coverage,
 )
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.reaper import ReaperMixin
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import sqlalchemy_url
+from tests.dualrun.reference import coverage_caller
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, SideRun, dual_run
@@ -339,3 +361,242 @@ def test_a_leaf_of_another_shape_version_fails_the_pass_as_before(
     assert candidate.kind == 'FAILED'
     assert candidate.class_key == 'heartbeats'
     assert candidate.refusal_kinds == ('METADATA_MISMATCH',)
+
+
+# ---- The caller switch: the Python callers against the core ----
+
+RETENTION: Final = RetentionConfig(
+    history_leaf_horizon_days=HISTORY_HORIZON_DAYS,
+    heartbeat_leaf_horizon_hours=HEARTBEAT_HORIZON_HOURS,
+    retention_periods=(timedelta(days=7),),
+)
+"""The worker's retention config: the horizons and the declared class of the pairs above."""
+
+COVERAGE_GATE_SQL: Final[LiteralString] = (
+    "SELECT pg_try_advisory_xact_lock(hashtextextended('horsies:partition-coverage:v1', 1601))"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StartupReady:
+    """The startup pass let the boot go on, with this outcome."""
+
+    answer: Answer
+
+
+@dataclass(frozen=True, slots=True)
+class StartupRefused:
+    """The startup pass refused the boot: no heartbeat leaf covers now."""
+
+    answer: Answer
+
+
+type StartupAnswer = StartupReady | StartupRefused
+
+class GateHolder:
+    """Holds the coverage gate in a transaction of its own session, as a
+    startup pass of another worker does."""
+
+    def __init__(self, database: DualRunDatabase) -> None:
+        self._connection = psycopg.connect(database.url)
+
+    def __enter__(self) -> GateHolder:
+        match self._connection.execute(COVERAGE_GATE_SQL).fetchone():
+            case (True,):
+                return self
+            case other:
+                raise AssertionError(f'the coverage gate was not free: {other!r}')
+
+    def __exit__(self, *_exc: object) -> None:
+        self._connection.rollback()
+        self._connection.close()
+
+
+def _worker_broker(database: DualRunDatabase, connections: int) -> PostgresBroker:
+    """A broker whose engines and core pools hold ``connections`` connections."""
+    return PostgresBroker(
+        PostgresConfig(
+            database_url=SecretStr(database.url),
+            pool_size=connections,
+            max_overflow=0,
+        )
+    )
+
+
+async def _periodic_pass(
+    database: DualRunDatabase,
+    connections: int,
+    python_caller: bool,
+) -> CoverageOutcome:
+    broker = _worker_broker(database, connections)
+    try:
+        match await broker.select_resources():
+            case Err(limit):
+                raise AssertionError(f'broker resources: {limit.describe()}')
+            case Ok(resources):
+                pass
+        match python_caller:
+            case True:
+                return await coverage_caller.run_partition_coverage(
+                    ReaperMixin(), broker, resources, RETENTION
+                )
+            case False:
+                return await ReaperMixin()._run_partition_coverage(
+                    broker, resources, RETENTION
+                )
+    finally:
+        _ = await broker.close_async()
+
+
+async def _startup_pass(
+    database: DualRunDatabase,
+    connections: int,
+    python_caller: bool,
+) -> CoverageOutcome | StartupCoverageRefused:
+    broker = _worker_broker(database, connections)
+    try:
+        match await broker.select_resources():
+            case Err(limit):
+                raise AssertionError(f'broker resources: {limit.describe()}')
+            case Ok(resources):
+                pass
+        # The two method bodies, with the broker's resources and handle.
+        match python_caller:
+            case True:
+                return await ensure_startup_coverage_in_database(
+                    resources.partition_maintenance,
+                    history_horizon_days=RETENTION.history_leaf_horizon_days,
+                    heartbeat_horizon_hours=RETENTION.heartbeat_leaf_horizon_hours,
+                    declared_classes=RETENTION.registrable_classes(),
+                )
+            case False:
+                return await ensure_startup_coverage_in_core(
+                    broker._core_handle,
+                    history_horizon_days=RETENTION.history_leaf_horizon_days,
+                    heartbeat_horizon_hours=RETENTION.heartbeat_leaf_horizon_hours,
+                    declared_classes=RETENTION.registrable_classes(),
+                )
+    finally:
+        _ = await broker.close_async()
+
+
+def _periodic_side(python_caller: bool) -> OperationSide[None, CoverageOutcome]:
+    def act(database: DualRunDatabase, _seed: None) -> CoverageOutcome:
+        return asyncio.run(_periodic_pass(database, 4, python_caller))
+
+    name = 'Python reaper caller' if python_caller else 'ReaperMixin._run_partition_coverage'
+    return OperationSide(name=name, act=act)
+
+
+def _startup_side(
+    python_caller: bool, connections: int, gate_held: bool
+) -> OperationSide[None, CoverageOutcome | StartupCoverageRefused]:
+    def act(
+        database: DualRunDatabase, _seed: None
+    ) -> CoverageOutcome | StartupCoverageRefused:
+        match gate_held:
+            case True:
+                with GateHolder(database):
+                    return asyncio.run(_startup_pass(database, connections, python_caller))
+            case False:
+                return asyncio.run(_startup_pass(database, connections, python_caller))
+
+    name = 'Python startup caller' if python_caller else 'ensure_startup_coverage_in_core'
+    return OperationSide(name=name, act=act)
+
+
+def _startup_answer(
+    outcome: CoverageOutcome | StartupCoverageRefused, run_start: datetime
+) -> StartupAnswer:
+    match outcome:
+        case StartupCoverageRefused(outcome=refused):
+            return StartupRefused(answer=_answer(refused, run_start))
+        case CoverageEnsured() | CoverageEnsureFailed():
+            return StartupReady(answer=_answer(outcome, run_start))
+
+
+def _caller_pair[R](
+    make_database: MakeDatabase,
+    seed: Callable[[Connection], None],
+    reference: OperationSide[None, R],
+    candidate: OperationSide[None, R],
+) -> OperationDualRun[R, R]:
+    match dual_run(make_database, seed, reference, candidate):
+        case Ok(pair):
+            return pair
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')
+
+
+_SEEDS: Final = (
+    ('fresh install', _fresh),
+    ('damaged set', _damaged),
+    ('absent newest leaves', _newest_absent),
+    ('another shape version', _old_shape_version),
+)
+
+
+@pytest.mark.parametrize(('label', 'seed'), _SEEDS, ids=[label for label, _ in _SEEDS])
+def test_the_core_reaper_pass_covers_as_the_python_reaper_pass(
+    empty_database: MakeDatabase,
+    label: str,
+    seed: Callable[[Connection], None],
+) -> None:
+    pair = _caller_pair(empty_database, seed, _periodic_side(True), _periodic_side(False))
+
+    assert pair.diff.entries == (), f'{label}: {render_diff(pair.diff)}'
+    assert _answers(pair.candidate) == _answers(pair.reference), label
+
+
+@pytest.mark.parametrize(('label', 'seed'), _SEEDS, ids=[label for label, _ in _SEEDS])
+def test_the_core_startup_pass_covers_as_the_python_startup_pass(
+    empty_database: MakeDatabase,
+    label: str,
+    seed: Callable[[Connection], None],
+) -> None:
+    pair = _caller_pair(
+        empty_database, seed, _startup_side(True, 4, False), _startup_side(False, 4, False)
+    )
+
+    assert pair.diff.entries == (), f'{label}: {render_diff(pair.diff)}'
+    reference = _startup_answer(pair.reference.report, pair.reference.run.window.start)
+    candidate = _startup_answer(pair.candidate.report, pair.candidate.run.window.start)
+    assert candidate == reference, label
+
+
+def test_one_connection_takes_no_gate_on_both_sides(empty_database: MakeDatabase) -> None:
+    """Python's ``coverage_gate_enabled``: with one connection a startup pass
+    does not take the gate, so a gate that another session holds does not
+    stop the repair."""
+    pair = _caller_pair(
+        empty_database, _fresh, _startup_side(True, 1, True), _startup_side(False, 1, True)
+    )
+
+    assert pair.diff.entries == (), render_diff(pair.diff)
+    reference = _startup_answer(pair.reference.report, pair.reference.run.window.start)
+    candidate = _startup_answer(pair.candidate.report, pair.candidate.run.window.start)
+    match reference:
+        case StartupReady(answer=answer):
+            assert answer.kind == 'ENSURED'
+        case StartupRefused():
+            pytest.fail(f'one connection repairs the set: {reference!r}')
+    assert candidate == reference
+
+
+def test_a_held_gate_refuses_a_cold_startup_on_both_sides(empty_database: MakeDatabase) -> None:
+    """With four connections a startup pass takes the gate; another session
+    holds it, so neither side repairs, and a fresh install has no heartbeat
+    leaf: both refuse the boot at the stage ``coverage_gate_busy``."""
+    pair = _caller_pair(
+        empty_database, _fresh, _startup_side(True, 4, True), _startup_side(False, 4, True)
+    )
+
+    assert pair.diff.entries == (), render_diff(pair.diff)
+    reference = _startup_answer(pair.reference.report, pair.reference.run.window.start)
+    candidate = _startup_answer(pair.candidate.report, pair.candidate.run.window.start)
+    match reference:
+        case StartupRefused(answer=answer):
+            assert answer.stage == 'coverage_gate_busy'
+        case StartupReady():
+            pytest.fail(f'a busy gate repairs nothing: {reference!r}')
+    assert candidate == reference

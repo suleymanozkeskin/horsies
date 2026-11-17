@@ -113,6 +113,59 @@ class StopState(Enum):
     STUCK = 'stuck'
 
 
+class CancelEnd(Enum):
+    """How a ``SHARED_ASYNC`` run that passed its deadline ended in its child.
+    The child sends the second cancel only when the run is alive after its
+    cancel grace, so the stop report of the run names the value. Stored as
+    ``cancel_end`` in the ``data`` of its ``TASK_TIMEOUT`` error, by the
+    Python worker and the core worker alike."""
+
+    RETURNED_AFTER_SIGNAL = 'RETURNED_AFTER_SIGNAL'
+    """The task and the work that it started ended within the cancel grace
+    after the cancel at the deadline: the child sent no second cancel."""
+
+    DROPPED_AFTER_GRACE = 'DROPPED_AFTER_GRACE'
+    """Something of the run was alive after the cancel grace: the child sent
+    the second cancel and stopped it."""
+
+
+@dataclass(frozen=True, slots=True)
+class NoCancelSignal:
+    """An isolated or a ``SHARED_THREAD`` run: its deadline sends no
+    cancel."""
+
+
+@dataclass(frozen=True, slots=True)
+class EndedByKill:
+    """A ``SHARED_ASYNC`` run that passed its deadline and ended when the
+    worker killed its child. Its ``TASK_TIMEOUT`` data has no
+    ``cancel_end``."""
+
+
+type TimeoutCancel = NoCancelSignal | CancelEnd | EndedByKill
+"""What the attempt of a run that passed its deadline records about the
+cancel at that deadline."""
+
+
+def timeout_error_data(
+    task_id: str,
+    timeout_ms: int,
+    cancel: TimeoutCancel,
+) -> dict[str, str | int]:
+    """The ``data`` of a ``TASK_TIMEOUT`` error: ``task_id``, ``timeout_ms``,
+    and ``cancel_end`` for a ``SHARED_ASYNC`` run that its child ended.
+    Pure."""
+    data: dict[str, str | int] = {'task_id': task_id, 'timeout_ms': timeout_ms}
+    match cancel:
+        case CancelEnd():
+            data['cancel_end'] = cancel.value
+        case NoCancelSignal() | EndedByKill():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    return data
+
+
 @dataclass(frozen=True, slots=True)
 class TimedOutAtKill:
     """``TASK_TIMEOUT``. ``retry`` is where its retry runs."""

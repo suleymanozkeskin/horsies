@@ -2,13 +2,20 @@
 
 Reference: ``tests/dualrun/monitoring_detail_reference.py`` (a REPEATABLE
 READ session: live read, staged history read, absence rule, attempt rows,
-workflow link). Candidate: ``horsies.monitoring`` (one call of
-``horsies_monitoring_task_detail`` and ``horsies_monitoring_workflow_node``).
+workflow link). Candidate: one call of ``horsies_monitoring_task_detail``
+(Python's body before the monitoring switch,
+``tests/dualrun/reference/monitoring_queries.py``) and of
+``horsies_monitoring_workflow_node`` (``horsies.monitoring``).
 The seed has live tasks with and without attempts, history tasks with an
 attempt snapshot, workflow-bound tasks, absent ids of both kinds, and the
 nodes of one run: a task node per location, a sub-workflow node, a node
 whose task is in neither place, a node with a stored error and one with a
 stored value. Each read must give equal answers.
+
+The caller switch pair of the monitoring switch: on the same seed, Python's
+``get_task_detail`` against the production read, which the core runs. The
+reports must be equal; the open span of a live task may be up to
+``COUNTING_SPAN_TOLERANCE_S`` longer on the core, which reads second.
 """
 
 from __future__ import annotations
@@ -34,8 +41,10 @@ from tests.dualrun.monitoring_reads import (
     MakeDatabase,
     ReadPair,
     differing,
+    differing_reports,
     read_dual_run,
 )
+from tests.dualrun.reference import monitoring_queries as python_reads
 from tests.integration.monitoring_seeding import (
     AttemptRow,
     NodeRow,
@@ -224,7 +233,7 @@ type _Read = Callable[[PostgresBroker], Awaitable[object]]
 
 def _detail_pair(task_id: str) -> ReadPair[object]:
     async def candidate(broker: PostgresBroker) -> object:
-        return await get_task_detail(broker, uuid.UUID(task_id))
+        return await python_reads.get_task_detail(broker, uuid.UUID(task_id))
 
     async def reference_read(broker: PostgresBroker) -> object:
         return await reference.get_task_detail(broker, uuid.UUID(task_id))
@@ -304,3 +313,50 @@ def test_the_comparison_sees_a_candidate_that_reads_another_task(
     )
 
     assert differing(answers) == [pair.name]
+
+
+def _core_detail_pair(task_id: str) -> ReadPair[object]:
+    async def python_read(broker: PostgresBroker) -> object:
+        return await python_reads.get_task_detail(broker, uuid.UUID(task_id))
+
+    async def core_read(broker: PostgresBroker) -> object:
+        return await get_task_detail(broker, uuid.UUID(task_id))
+
+    return ReadPair(name=f'detail {task_id}', reference=python_read, candidate=core_read)
+
+
+def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
+    """The caller switch: Python's detail read against the production read on the core."""
+    pairs = [_core_detail_pair(task_id) for task_id in _TASK_IDS]
+
+    answers = read_dual_run(empty_database, _seed(), pairs)
+
+    assert differing_reports(answers) == {}
+    assert [_kind(each.candidate) for each in answers] == [
+        'task',
+        'task',
+        'task',
+        'task',
+        'task',
+        'task',
+        'absent WITHIN_RETAINED_HISTORY',
+        'absent NOT_CLASSIFIED',
+    ]
+
+
+def test_the_core_comparison_sees_a_candidate_that_reads_another_task(
+    empty_database: MakeDatabase,
+) -> None:
+    """The core candidate reads the RUNNING task in place of the FAILED one."""
+    pair = _core_detail_pair(_FAILED)
+
+    async def wrong(broker: PostgresBroker) -> object:
+        return await get_task_detail(broker, uuid.UUID(_RUNNING))
+
+    answers = read_dual_run(
+        empty_database,
+        _seed(),
+        [ReadPair(name=pair.name, reference=pair.reference, candidate=wrong)],
+    )
+
+    assert list(differing_reports(answers)) == [pair.name]

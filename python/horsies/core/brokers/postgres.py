@@ -33,6 +33,12 @@ from horsies._core import (
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
+    OrphanAuditFailed,
+    OrphanAuditLockBusy,
+    OrphanPageAudited,
+    PendingExpiryBoundReached,
+    PendingExpiryDrained,
+    PendingExpiryFailed,
     StaleRunningRecovered,
     StaleRunningScanFailed,
     StaleRunningScanFull,
@@ -114,7 +120,11 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+from horsies.core.types.core_failure import (
+    CoreLockNotAvailable,
+    CoreOperationFailed,
+    core_error_retryable,
+)
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
     TASK_TERMINAL_STATES,
@@ -130,18 +140,6 @@ from horsies.core.codec.validation_errors import (
     without_validation_input,
 )
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
-from horsies.core.lifecycle.commands import (
-    CancelOrphanedTasks,
-    ExpirePendingTasks,
-)
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    Applied,
-    LostClaim,
-    SourceStateConflict,
-    TaskAbsent,
-)
-from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.models.class_coverage import (
     ClassCoverage,
     ClassReadRefused,
@@ -213,9 +211,6 @@ from horsies.core.utils.wait_timeout import wait_timeout_seconds
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
 from horsies.core.logging import get_logger
-
-if TYPE_CHECKING:
-    from horsies.core.models.tasks import TaskResult, TaskError
 
 # Ensure workflow tables are registered in SQLAlchemy metadata.
 _ = (_WorkflowModel, _WorkflowTaskModel)
@@ -914,10 +909,16 @@ LIST_EXPIRED_TASKS_SQL = text("""
 
 # ---- Cleanup queries ----
 
+# The pending expiry and the orphan audit run in the core
+# (`expire_pending_tasks`, `audit_orphaned_workflow_tasks`) with the same batch
+# sizes and bound. The bounds and the cursor read stay here for the Python
+# reference of the dual-run (tests/dualrun/reference/expiry_and_orphans_caller.py).
 _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
 _ORPHAN_BATCH_SIZE = 500
+
+_ORPHAN_AUDIT_SUBJECT: Final = 'PostgresBroker.audit_orphaned_workflow_tasks'
 
 READ_ORPHAN_TASK_SCAN_STATS_SQL = text("""
 SELECT last_scan_rows, last_candidate_rows
@@ -3286,84 +3287,61 @@ class PostgresBroker:
                 assert_never(unreachable)
 
     async def expire_pending_tasks(self) -> BrokerResult[int]:
-        """Transition PENDING tasks whose good_until deadline has passed to EXPIRED.
+        """Expire PENDING tasks whose ``good_until`` deadline passed: one core
+        pass.
 
-        Only affects tasks that were never claimed. Writes a TaskResult with
-        TASK_EXPIRED outcome code so callers have a meaningful result payload.
-        No attempt row is written (the task never started).
+        The core sends ``horsies_expire_pending_tasks`` in batches of 500
+        rows, earliest deadline first. Each batch is one transaction that
+        commits alone, and only when every row it reports moved: the row goes
+        to history as EXPIRED with a ``TASK_EXPIRED`` result. No attempt row
+        is written (the task never started). Batches repeat until one is
+        short, at most 200 times; past that the rest expires on the next pass
+        and a warning is logged. Returns the number of tasks expired.
+
+        Failures, each ``CLEANUP_FAILED``; the batches before the failure
+        committed:
+        - a database failure, or a batch outside the function's contract;
+          ``retryable`` is the core's classification of the cause;
+        - the core of this process cannot run the pass (``CoreError``);
+          ``retryable`` follows ``core_error_retryable``.
+
+        A cancel of the caller does not stop the pass: the core runs it to
+        its end.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('expire_pending_tasks', loop_limit)
-            case Ok(resources):
-                pass
         try:
-            from horsies.core.models.tasks import TaskResult, TaskError, OutcomeCode
-            from horsies.core.codec.json_io import dumps_json
-            from horsies.core.codec.typed import encode_task_result
-
-            task_error = TaskError(
-                error_code=OutcomeCode.TASK_EXPIRED,
-                message='Task expired: good_until deadline passed before execution started',
+            outcome = await self._core_handle.expire_pending_tasks_async()
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'expire_pending_tasks failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
             )
-            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-            # Strict-serde phase 7: emit the wire envelope so downstream
-            # readers see ``__h_task_result__`` and the err slot decodes
-            # cleanly. Expired tasks carry no ok payload.
-            ser_r = dumps_json(encode_task_result(task_result, type(None)))
-            if is_err(ser_r):
-                return _operation_failed(
-                    BrokerErrorCode.CLEANUP_FAILED,
-                    f'expire_pending_tasks: failed to serialize TASK_EXPIRED result: {ser_r.err_value}',
-                    ser_r.err_value,
+        match outcome:
+            case PendingExpiryDrained(expired=expired):
+                return Ok(expired)
+            case PendingExpiryBoundReached(expired=expired):
+                self.logger.warning(
+                    'expire_pending_tasks reached the per-pass batch cap after '
+                    'expiring %s task(s); the remainder expires next interval',
+                    expired,
                 )
-            result_json = ser_r.ok_value
-
-            total_expired = 0
-            for _ in range(_EXPIRE_MAX_BATCHES_PER_PASS):
-                async with resources.session_factory() as session:
-                    outcomes = await apply_batch_async(
-                        await session.connection(),
-                        ExpirePendingTasks(
-                            batch_size=_EXPIRE_BATCH_SIZE,
-                            result_json=result_json,
-                            error_code=OutcomeCode.TASK_EXPIRED.value,
+                return Ok(expired)
+            case PendingExpiryFailed(message=message, retryable=retryable):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'expire_pending_tasks failed: {message}',
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.expire_pending_tasks', message, retryable,
                         ),
-                    )
-                    for outcome in outcomes:
-                        match outcome:
-                            case Applied():
-                                continue
-                            case (
-                                AlreadyApplied()
-                                | LostClaim()
-                                | SourceStateConflict()
-                                | TaskAbsent()
-                            ):
-                                raise RuntimeError(
-                                    'pending expiry operation returned '
-                                    f'{type(outcome).__name__}; discovery batches '
-                                    'report transitioned rows only'
-                                )
-                            case _ as unreachable:
-                                assert_never(unreachable)
-                    await session.commit()
-                batch_expired = len(outcomes)
-                total_expired += batch_expired
-                if batch_expired < _EXPIRE_BATCH_SIZE:
-                    return Ok(total_expired)
-            self.logger.warning(
-                'expire_pending_tasks reached the per-pass batch cap after '
-                'expiring %s task(s); the remainder expires next interval',
-                total_expired,
-            )
-            return Ok(total_expired)
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.CLEANUP_FAILED,
-                f'expire_pending_tasks failed: {exc}',
-                exc,
-            )
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def requeue_stale_claimed(
         self,
@@ -3457,63 +3435,76 @@ class PostgresBroker:
     async def audit_orphaned_workflow_tasks(
         self,
     ) -> BrokerResult[OrphanTaskAuditReport]:
-        """Scan and cancel one bounded page of orphan workflow tasks."""
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('audit_orphaned_workflow_tasks', loop_limit)
-            case Ok(resources):
-                pass
+        """Scan and cancel one bounded page of orphan workflow tasks: one core
+        call.
+
+        The core runs ``horsies_cancel_orphaned_tasks`` with a page of 500
+        rows and reads the page's cursor counts, in one transaction: the
+        scanned PENDING and CLAIMED workflow tasks that no runnable node links
+        move to history as CANCELLED. The report carries the cursor counts
+        and the time of the call.
+
+        Failures, each ``CLEANUP_FAILED``; nothing committed (after a lost
+        ``COMMIT`` reply, the outcome is unknown):
+        - another sweep holds the cursor: the page is refused at once; the
+          ``exception`` is ``CoreLockNotAvailable``, whose ``sqlstate`` is
+          ``'55P03'``;
+        - a database failure, or a page outside the function's contract;
+          ``retryable`` is the core's classification of the cause;
+        - the core of this process cannot run the page (``CoreError``);
+          ``retryable`` follows ``core_error_retryable``.
+
+        A cancel of the caller does not stop the page: the core runs it to
+        its end.
+        """
         started = time.monotonic()
         try:
-            async with resources.session_factory() as session:
-                outcomes = await apply_batch_async(
-                    await session.connection(),
-                    CancelOrphanedTasks(batch_size=_ORPHAN_BATCH_SIZE),
-                )
-                for outcome in outcomes:
-                    match outcome:
-                        case Applied():
-                            continue
-                        case (
-                            AlreadyApplied()
-                            | LostClaim()
-                            | SourceStateConflict()
-                            | TaskAbsent()
-                        ):
-                            raise RuntimeError(
-                                'orphan sweep returned '
-                                f'{type(outcome).__name__}; discovery '
-                                'batches report transitioned rows only'
-                            )
-                        case _ as unreachable:
-                            assert_never(unreachable)
-                stats = (
-                    await session.execute(READ_ORPHAN_TASK_SCAN_STATS_SQL)
-                ).one()
-                rows_selected = int(stats.last_scan_rows)
-                candidates_returned = int(stats.last_candidate_rows)
-                if rows_selected < 0 or candidates_returned < 0:
-                    raise RuntimeError(
-                        'orphan sweep returned negative cursor metrics'
-                    )
-                if candidates_returned != len(outcomes):
-                    raise RuntimeError(
-                        'orphan sweep cursor candidate count differs from '
-                        'the applied outcome count'
-                    )
-                await session.commit()
-            return Ok(OrphanTaskAuditReport(
+            outcome = await self._core_handle.audit_orphaned_workflow_tasks_async()
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'audit_orphaned_workflow_tasks failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
+            )
+        match outcome:
+            case OrphanPageAudited(
                 rows_selected=rows_selected,
                 candidates_returned=candidates_returned,
-                cancelled=len(outcomes),
-                duration_ms=int((time.monotonic() - started) * 1000),
-            ))
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.CLEANUP_FAILED,
-                f'audit_orphaned_workflow_tasks failed: {exc}',
-                exc,
-            )
+                cancelled=cancelled,
+            ):
+                return Ok(OrphanTaskAuditReport(
+                    rows_selected=rows_selected,
+                    candidates_returned=candidates_returned,
+                    cancelled=cancelled,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ))
+            case OrphanAuditLockBusy(message=message, retryable=retryable):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'audit_orphaned_workflow_tasks failed: {message}',
+                        retryable=retryable,
+                        exception=CoreLockNotAvailable(
+                            _ORPHAN_AUDIT_SUBJECT, message, retryable,
+                        ),
+                    ),
+                )
+            case OrphanAuditFailed(message=message, retryable=retryable):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'audit_orphaned_workflow_tasks failed: {message}',
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            _ORPHAN_AUDIT_SUBJECT, message, retryable,
+                        ),
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def terminate_orphaned_workflow_tasks(self) -> BrokerResult[int]:
         """Cancel one bounded page and return its applied outcome count."""

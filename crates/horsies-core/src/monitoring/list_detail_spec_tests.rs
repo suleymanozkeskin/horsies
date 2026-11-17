@@ -19,6 +19,7 @@ use super::spec_support::{
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::task::Execution;
 use crate::monitoring::{
     get_task_detail, list_tasks, task_stats, MonitoringQueryError, MonitoringQueryErrorCode,
     SortDirection, TaskAbsenceReason, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskListPage,
@@ -459,6 +460,31 @@ async fn a_node_of_another_task_does_not_link_this_task() {
 
     assert_eq!(detail.workflow_id, None);
     assert_eq!(detail.workflow_task_index, None);
+    database.drop().await;
+}
+
+/// Python `tests/unit/test_execution_class.py`, `TestMonitoringDetail`: the
+/// leaf of a live task carries its stored class; a task read from history
+/// carries none, as history does not keep the class.
+#[tokio::test]
+#[serial]
+async fn a_live_leaf_shows_its_class_and_a_history_leaf_shows_none() {
+    let database = SpecDatabase::create().await;
+    let live = LiveTask::pending("alpha_task");
+    seed_live(&database.pool, &live).await;
+    let finished = LiveTask::pending("beta_task");
+    seed_terminal(&database.pool, &finished, Ending::Completed).await;
+    let broker = database.broker();
+
+    let live_detail = detail_of(&broker, live.id).await;
+    let finished_detail = detail_of(&broker, finished.id).await;
+
+    assert_eq!(live_detail.leaf.execution, Some(Execution::Isolated));
+    assert_eq!(finished_detail.leaf.execution, None);
+    let encoded = serde_json::to_value(&live_detail.leaf).expect("the leaf encodes");
+    assert_eq!(encoded["execution"], "ISOLATED");
+    let encoded = serde_json::to_value(&finished_detail.leaf).expect("the leaf encodes");
+    assert_eq!(encoded["execution"], serde_json::Value::Null);
     database.drop().await;
 }
 
