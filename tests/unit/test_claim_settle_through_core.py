@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.claiming import ClaimMixin
 
 pytestmark = [pytest.mark.unit]
@@ -81,13 +80,15 @@ async def test_rows_without_a_workflow_task_send_nothing() -> None:
 
 @pytest.mark.asyncio
 async def test_a_failed_settle_raises_with_its_retry_rule() -> None:
+    cause = core.CoreConnectionError('settle_claimed_workflow_tasks', 'connection refused', True)
     handle = MagicMock()
     handle.settle_claimed_workflow_tasks_async = AsyncMock(
-        return_value=_record(core.SettleFailed, message='connection refused', retryable=True),
+        return_value=_record(
+            core.SettleFailed, message='connection refused', retryable=True, exception=cause,
+        ),
     )
 
-    with pytest.raises(CoreOperationFailed) as raised:
+    with pytest.raises(core.CoreConnectionError) as raised:
         await _Probe(handle)._filter_nonrunnable_workflow_tasks([_row(uuid.uuid4())])
 
-    assert raised.value.subject == 'settle_claimed_workflow_tasks'
-    assert raised.value.retryable is True
+    assert raised.value is cause

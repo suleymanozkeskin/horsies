@@ -598,9 +598,9 @@ class ReaperMixin:
         overlap with a worker's startup pass. ``resources`` is not read: the
         pass runs on the core pools, not on ``partition_maintenance``.
 
-        Returns the outcome; raises ``CoreOperationFailed`` when the pass has
-        no outcome and ``CoreError`` when the core of this process cannot run
-        it. The caller logs both and records the health.
+        Returns the outcome; raises the record's ``CoreFailure`` when the
+        pass has no outcome and ``CoreError`` when the core of this process
+        cannot run it. The caller logs both and records the health.
         """
         from horsies.core.history.maintenance.coverage import (
             CoverageSerialization,
@@ -626,9 +626,9 @@ class ReaperMixin:
         pass. ``resources`` is not read: the pass runs on the core pools, not
         on ``partition_maintenance``.
 
-        Returns the summary; raises ``CoreOperationFailed`` when the pass has
-        no report and ``CoreError`` when the core of this process cannot run
-        it. The caller logs both and records the health.
+        Returns the summary; raises the record's ``CoreFailure`` when the
+        pass has no report and ``CoreError`` when the core of this process
+        cannot run it. The caller logs both and records the health.
         """
         from horsies.core.history.maintenance.pruning import (
             prune_expired_partitions_in_core,
@@ -689,11 +689,10 @@ class ReaperMixin:
 
         Raises:
             RecoveryPassFailure: the pass failed, with its partial report and
-                a ``CoreOperationFailed`` cause.
+                the record's ``CoreFailure`` as its cause.
             CoreError: the core of this process cannot run the call.
         """
         from horsies._core import RecoveryPassFailed, RecoveryPassRecord
-        from horsies.core.types.core_failure import CoreOperationFailed
 
         record = await temp_broker._core_handle.recover_workflows_async(
             failure_limit=failure_limit,
@@ -701,11 +700,8 @@ class ReaperMixin:
         match record:
             case RecoveryPassRecord():
                 return _recovery_report_of(record)
-            case RecoveryPassFailed(report=report, message=message, retryable=retryable):
-                raise RecoveryPassFailure(
-                    _recovery_report_of(report),
-                    CoreOperationFailed('recover_workflows', message, retryable),
-                )
+            case RecoveryPassFailed(report=report, exception=exception):
+                raise RecoveryPassFailure(_recovery_report_of(report), exception)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -728,11 +724,11 @@ class ReaperMixin:
         counts as already applied, as the Python pass counted it.
 
         Raises:
-            CoreOperationFailed: the pass failed before it recovered a record.
+            CoreFailure: the pass failed before it recovered a record (the
+                record's exception).
             CoreError: the core of this process cannot run the call.
         """
         from horsies._core import Phase2RecoveryFailed, Phase2RecoveryRecord
-        from horsies.core.types.core_failure import CoreOperationFailed
         from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
 
         record = await temp_broker._core_handle.recover_workflow_phase2_async(
@@ -755,8 +751,8 @@ class ReaperMixin:
                     retained_details=tuple(record.retained_details),
                     quarantine_refusals=tuple(record.quarantine_refusals),
                 )
-            case Phase2RecoveryFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed('recover_workflow_phase2', message, retryable)
+            case Phase2RecoveryFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -775,12 +771,12 @@ class ReaperMixin:
         Returns the number of workflows expired.
 
         Raises:
-            CoreOperationFailed: the call failed; the candidates before the
-                failed one are expired, the rest wait for the next pass.
+            CoreFailure: the call failed (the record's exception); the
+                candidates before the failed one are expired, the rest wait
+                for the next pass.
             CoreError: the core of this process cannot run the call.
         """
         from horsies._core import PausedExpired, PausedExpiryFailed
-        from horsies.core.types.core_failure import CoreOperationFailed
         from horsies.core.workflows.lifecycle import PAUSED_EXPIRY_BATCH_SIZE
 
         record = await temp_broker._core_handle.expire_paused_workflows_async(
@@ -789,8 +785,8 @@ class ReaperMixin:
         match record:
             case PausedExpired(expired=expired):
                 return expired
-            case PausedExpiryFailed(message=message, retryable=retryable):
-                raise CoreOperationFailed('expire_paused_workflows', message, retryable)
+            case PausedExpiryFailed(exception=exception):
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -811,13 +807,12 @@ class ReaperMixin:
         Returns the number of workflows deleted.
 
         Raises:
-            CoreOperationFailed: the pass failed; the batches before the
-                failure stay committed (their count is in the message), and
-                the backlog resumes on the next pass.
+            CoreFailure: the pass failed (the record's exception); the
+                batches before the failure stay committed (their count is
+                logged), and the backlog resumes on the next pass.
             CoreError: the core of this process cannot run the call.
         """
         from horsies._core import WorkflowDeleteFailed, WorkflowsDeleted
-        from horsies.core.types.core_failure import CoreOperationFailed
 
         budget_ms = max(0, int((deadline_monotonic - time.monotonic()) * 1000))
         record = await temp_broker._core_handle.delete_expired_workflows_async(
@@ -826,16 +821,12 @@ class ReaperMixin:
         match record:
             case WorkflowsDeleted(deleted=deleted):
                 return deleted
-            case WorkflowDeleteFailed(
-                deleted_before=deleted_before,
-                message=message,
-                retryable=retryable,
-            ):
-                raise CoreOperationFailed(
-                    'delete_expired_workflows',
-                    f'{message} ({deleted_before} workflow(s) deleted before the failure)',
-                    retryable,
+            case WorkflowDeleteFailed(deleted_before=deleted_before, exception=exception):
+                logger.warning(
+                    'delete_expired_workflows deleted %s workflow(s) before the failure',
+                    deleted_before,
                 )
+                raise exception
             case _ as unreachable:
                 assert_never(unreachable)
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Final, assert_never
+from typing import assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -53,7 +53,6 @@ from horsies.core.lifecycle.outcomes import (
     decode_workflow_success_row,
 )
 from horsies.core.logging import get_logger
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.utils.db import SingleStatement, run_in_autocommit
 
 logger = get_logger('lifecycle')
@@ -161,10 +160,6 @@ def _log_outcome(
     )
 
 
-WORKFLOW_SUCCESS_SUBJECT: Final = 'finish_workflow_success'
-"""The subject of a ``CoreOperationFailed`` of a workflow success."""
-
-
 def _workflow_success_outcome_of(
     record: core.WorkflowSuccessApplied
     | core.AttemptAlreadyApplied
@@ -176,7 +171,8 @@ def _workflow_success_outcome_of(
     """The outcome of a workflow success record. Pure.
 
     Raises:
-        CoreOperationFailed: an ``AttemptWriteFailed`` record: the statement
+        CoreFailure: an ``AttemptWriteFailed`` record raises its
+            ``exception`` (the core's class of the cause): the statement
             wrote nothing, or it committed and its reply was lost.
         OutcomeDecodeError: a text of the record outside the Python catalogs.
     """
@@ -200,8 +196,8 @@ def _workflow_success_outcome_of(
             return source_state_conflict_of(record)
         case core.AttemptTaskAbsent():
             return task_absent_of(record)
-        case core.AttemptWriteFailed(message=message, retryable=retryable):
-            raise CoreOperationFailed(WORKFLOW_SUCCESS_SUBJECT, message, retryable)
+        case core.AttemptWriteFailed(exception=exception):
+            raise exception
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -217,9 +213,9 @@ async def finish_workflow_success_in_core(
     ``ValueError``.
 
     Raises:
-        CoreOperationFailed: the statement failed (``retryable`` is the
-            core's classification). A lost reply is an unknown outcome: a
-            second call classifies a committed success as ``AlreadyApplied``.
+        CoreFailure: the statement failed (``retryable`` is the core's
+            classification). A lost reply is an unknown outcome: a second
+            call classifies a committed success as ``AlreadyApplied``.
         CoreError: the core of this process cannot run the call.
         OutcomeDecodeError: a record outside the Python catalogs.
     """

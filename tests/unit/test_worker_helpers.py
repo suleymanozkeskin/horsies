@@ -54,7 +54,14 @@ from horsies.core.worker.claiming import (
 from tests.dualrun.reference import claim_caller
 from horsies.core.utils.db import PooledStatements
 import horsies._core as core
-from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed, TooManyPendingCalls
+from horsies._core import (
+    ClaimsReleased,
+    CoreConnectionError,
+    NotHeldRow,
+    ReleasedRow,
+    ReleaseFailed,
+    TooManyPendingCalls,
+)
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -1253,7 +1260,12 @@ class TestRequeueClaimedTask:
         worker = _make_worker()
         _ = _with_core_release(
             worker,
-            MagicMock(spec=ReleaseFailed, message='connection lost', retryable=True),
+            MagicMock(
+                spec=ReleaseFailed,
+                message='connection lost',
+                retryable=True,
+                exception=CoreConnectionError('release_claims', 'connection lost', True),
+            ),
         )
 
         with patch('horsies.core.worker.release.ReleaseClaimsRequest'):
@@ -6011,7 +6023,6 @@ from horsies.core.lifecycle.persistence import (
     CoreStatementRefused,
     FusedCompletionBatch,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Result
 from horsies.core.worker.workflow_success import FinishWorkflowSuccess
 from horsies.core.types.status import TaskStatus
@@ -6506,7 +6517,7 @@ async def test_workflow_recovery_failure_publishes_partial_health() -> None:
     report = RecoveryReport(errors=1)
     report.metrics['case_0'].errors = 1
     failure = RecoveryPassFailure(
-        report, CoreOperationFailed('recover_workflows', 'discovery failed', False),
+        report, CoreConnectionError('recover_workflows', 'discovery failed', False),
     )
     config = RecoveryConfig(
         auto_requeue_stale_claimed=False,

@@ -53,11 +53,11 @@ from horsies.core.worker.claim_plan import (
 from horsies._core import (
     ClaimedRowRecord,
     ClaimPassFailed,
+    CoreConnectionError,
     ClaimPassRecord,
     QueueStartsFailed,
     QueueStartsRecord,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.worker.claiming import ClaimMixin, ClaimPass
 from horsies.core.worker.dispatch_claim import dispatch_claim_of
 from horsies.core.worker.queue_cap_hold import StartedClaim
@@ -814,19 +814,22 @@ class TestClaimPassThroughCore:
     async def test_a_failed_pass_raises_with_the_core_classification(
         self, retryable: bool,
     ) -> None:
+        cause = CoreConnectionError('claim_pass', 'connection lost', retryable)
         handle = MagicMock()
         handle.claim_pass_async = AsyncMock(
             return_value=MagicMock(
-                spec=ClaimPassFailed, message='connection lost', retryable=retryable,
+                spec=ClaimPassFailed,
+                message='connection lost',
+                retryable=retryable,
+                exception=cause,
             ),
         )
         worker = _core_worker(handle, processes=1)
 
-        with pytest.raises(CoreOperationFailed) as raised:
+        with pytest.raises(CoreConnectionError) as raised:
             await worker._claim_rows()
 
-        assert raised.value.retryable is retryable
-        assert raised.value.subject == 'ClaimMixin._claim_rows'
+        assert raised.value is cause
 
     @pytest.mark.asyncio
     async def test_the_start_count_sends_each_started_claim_generation(
@@ -853,14 +856,16 @@ class TestClaimPassThroughCore:
 
     @pytest.mark.asyncio
     async def test_a_failed_start_count_raises_with_the_core_classification(self) -> None:
+        cause = CoreConnectionError('count_queue_starts', 'lost', True)
         handle = MagicMock()
         handle.count_queue_starts_async = AsyncMock(
-            return_value=MagicMock(spec=QueueStartsFailed, message='lost', retryable=True),
+            return_value=MagicMock(
+                spec=QueueStartsFailed, message='lost', retryable=True, exception=cause,
+            ),
         )
         worker = _core_worker(handle, processes=1)
 
-        with pytest.raises(CoreOperationFailed) as raised:
+        with pytest.raises(CoreConnectionError) as raised:
             await worker._count_queue_starts(['capped'], [])
 
-        assert raised.value.retryable is True
-        assert raised.value.subject == 'ClaimMixin._count_queue_starts'
+        assert raised.value is cause
