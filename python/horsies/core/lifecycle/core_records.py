@@ -39,7 +39,6 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
     TerminalizationOutcome,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskStatus
 
 CLAIM_GUARD: Final = 'CLAIM'
@@ -158,16 +157,16 @@ type TaskRowEndRecord = (
 """The records of the single-row expiry of a claim of the core."""
 
 
-def task_row_end_of(record: TaskRowEndRecord, subject: str) -> TerminalizationOutcome:
+def task_row_end_of(record: TaskRowEndRecord) -> TerminalizationOutcome:
     """The outcome of the single-row expiry of a claim of the core
     (``CoreChildHandle.expire_owned_claim`` and its awaitable form). Pure.
 
-    ``subject`` names the caller in the raised failure.
-
     Raises:
-        CoreOperationFailed: an ``AttemptWriteFailed`` record: the statement
-            wrote nothing, or it committed and its reply was lost (a replay of
-            the same write reports a committed one as ``AlreadyApplied``).
+        CoreFailure: an ``AttemptWriteFailed`` record raises its
+            ``exception`` (the core's class of the cause, with the subject
+            ``expire_owned_claim``): the statement wrote nothing, or it
+            committed and its reply was lost (a replay of the same write
+            reports a committed one as ``AlreadyApplied``).
         OutcomeDecodeError: a text of the record outside the Python catalogs.
     """
     match record:
@@ -189,7 +188,7 @@ def task_row_end_of(record: TaskRowEndRecord, subject: str) -> TerminalizationOu
             return source_state_conflict_of(record)
         case core.AttemptTaskAbsent():
             return task_absent_of(record)
-        case core.AttemptWriteFailed(message=message, retryable=retryable):
-            raise CoreOperationFailed(subject, message, retryable)
+        case core.AttemptWriteFailed(exception=exception):
+            raise exception
         case _ as unreachable:
             assert_never(unreachable)

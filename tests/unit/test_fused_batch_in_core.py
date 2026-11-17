@@ -25,7 +25,6 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import (
-    COMPLETE_SUCCESSES_SUBJECT,
     BatchCommitUnknown,
     BatchRolledBack,
     CoreNotSent,
@@ -167,14 +166,16 @@ async def test_a_batch_of_one_row_has_no_ordinality() -> None:
 
 @pytest.mark.asyncio
 async def test_a_batch_that_was_not_sent_is_rolled_back_with_the_core_cause() -> None:
-    handle = _handle(_failure(core.BatchNotSent, message='pool timed out', retryable=True))
+    cause = core.CoreConnectionError('complete_successes', 'pool timed out', True)
+    handle = _handle(
+        _failure(core.BatchNotSent, message='pool timed out', retryable=True, exception=cause),
+    )
 
     written = await complete_fused_batch_in_core(handle, _batch(*TASK_IDS))
 
     match written:
         case Err(BatchRolledBack(cause=CoreNotSent(error=error)) as rolled_back):
-            assert error.subject == COMPLETE_SUCCESSES_SUBJECT
-            assert error.message == 'pool timed out'
+            assert error is cause
             assert rolled_back.retryable is True
         case _:
             raise AssertionError(written)
@@ -183,13 +184,16 @@ async def test_a_batch_that_was_not_sent_is_rolled_back_with_the_core_cause() ->
 @pytest.mark.asyncio
 async def test_a_refused_batch_is_rolled_back_with_the_core_refusal() -> None:
     """The batcher writes each row of a refused batch of several alone."""
-    handle = _handle(_failure(core.BatchRefused, message='23514', retryable=False))
+    cause = core.CoreServerError('complete_successes', '23514', 'check violation', False)
+    handle = _handle(
+        _failure(core.BatchRefused, message='23514', retryable=False, exception=cause),
+    )
 
     written = await complete_fused_batch_in_core(handle, _batch(*TASK_IDS))
 
     match written:
         case Err(BatchRolledBack(cause=CoreStatementRefused(error=error)) as rolled_back):
-            assert error.message == '23514'
+            assert error is cause
             assert rolled_back.retryable is False
         case _:
             raise AssertionError(written)
@@ -197,14 +201,16 @@ async def test_a_refused_batch_is_rolled_back_with_the_core_refusal() -> None:
 
 @pytest.mark.asyncio
 async def test_a_lost_reply_is_a_commit_unknown_with_the_core_cause() -> None:
-    handle = _handle(_failure(core.BatchCommitUnknown, message='connection lost'))
+    cause = core.CoreConnectionError('complete_successes', 'connection lost', True)
+    handle = _handle(
+        _failure(core.BatchCommitUnknown, message='connection lost', exception=cause),
+    )
 
     written = await complete_fused_batch_in_core(handle, _batch(*TASK_IDS))
 
     match written:
         case Err(BatchCommitUnknown(cause=CoreOutcomeUnknown(error=error))):
-            assert error.message == 'connection lost'
-            assert error.retryable is True
+            assert error is cause
         case _:
             raise AssertionError(written)
 
