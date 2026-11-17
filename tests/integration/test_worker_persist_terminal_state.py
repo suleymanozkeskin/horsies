@@ -25,10 +25,13 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.lifecycle.outcomes import PhaseTwoStep
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.finalize import _NodeFinishOwed
 from horsies.core.worker.worker import Worker
+from horsies.core.workflows.node_finish import FactsUnknown
 from tests.dispatch_claim_support import claim_at, row_claim
 from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_command_fingerprint
@@ -901,12 +904,15 @@ async def test_success_reaper_reclaimed_no_mutation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_workflow_phase1_replay_loads_the_persisted_result(
+async def test_workflow_phase1_replay_owes_phase_two_in_the_transaction_form(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A committed locked completion replays phase 2, not phase 1."""
+    """A committed locked completion replays phase 2, not phase 1. The first
+    phase 1 hands its node facts (the node has no dependents); the replay
+    has none, so its phase 2 runs in the transaction form and reads the
+    committed result from the phase-2 record."""
     generation = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _insert_running_task(
         session,
@@ -939,19 +945,21 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
         claim=claim_at(generation),
     )
 
-    assert is_ok(first) and first.ok_value is not None
-    assert is_ok(replay) and replay.ok_value is not None
-    assert replay.ok_value.result.unwrap() == 'persisted'
-    kind = (
+    assert first == Ok(
+        _NodeFinishOwed(queue_name='default', facts=PhaseTwoStep.NO_DEPENDENTS),
+    )
+    assert replay == Ok(_NodeFinishOwed(queue_name='default', facts=FactsUnknown()))
+    stored = (
         await session.execute(
             text(
-                'SELECT terminalization_kind FROM itest_task_rows '
+                'SELECT terminalization_kind, result FROM itest_task_rows '
                 'WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
-    ).scalar_one()
-    assert kind == 'COMPLETE_LOCKED'
+    ).one()
+    assert stored.terminalization_kind == 'COMPLETE_LOCKED'
+    assert stored.result == result_json
     # The move archives the attempts and purges the live rows, so the
     # snapshot is where the one attempt now lives.
     assert len(await read_attempt_history(session, task_id)) == 1
@@ -967,7 +975,8 @@ async def test_failure_phase1_replay_after_a_lost_reply(
 ) -> None:
     """A second phase 1 of a committed failure writes nothing. A plain task
     owes no phase 2 (its wake was sent by the committed write); a workflow
-    task gets the persisted result for its phase 2."""
+    task owes its phase 2 in the transaction form (the replay has no node
+    facts)."""
     generation = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _insert_running_task(
         session,
@@ -995,8 +1004,10 @@ async def test_failure_phase1_replay_after_a_lost_reply(
 
     assert is_ok(first) and is_ok(replay)
     if is_workflow_task:
-        assert first.ok_value is not None and replay.ok_value is not None
-        assert replay.ok_value.result.unwrap_err().message == 'failed once'
+        assert first.ok_value == _NodeFinishOwed(
+            queue_name='default', facts=PhaseTwoStep.NO_DEPENDENTS,
+        )
+        assert replay.ok_value == _NodeFinishOwed(queue_name='default', facts=FactsUnknown())
     else:
         assert (first.ok_value, replay.ok_value) == (None, None)
     assert len(await read_attempt_history(session, task_id)) == 1
