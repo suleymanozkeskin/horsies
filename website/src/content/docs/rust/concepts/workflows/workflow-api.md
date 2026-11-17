@@ -349,6 +349,7 @@ Both have `is_terminal()`. The transitions are on [Workflow Semantics](/horsies/
 
 The check builds each definition without params. A function that builds a spec at run time has no registration that the check can build: register check cases for it.
 
+<!-- rust-check: alone -->
 ```rust
 use std::convert::Infallible;
 

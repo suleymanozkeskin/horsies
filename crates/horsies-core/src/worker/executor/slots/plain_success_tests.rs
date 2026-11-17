@@ -13,7 +13,6 @@ use uuid::Uuid;
 use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -36,7 +35,6 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }

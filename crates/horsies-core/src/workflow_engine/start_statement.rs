@@ -18,12 +18,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::SubWorkflowParams;
-use crate::core::{
-    AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec,
-    WorkflowSpecRegistry,
-};
+use crate::core::{AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
 use crate::workflow_engine::args_merge::{
     child_build_input, child_static_input, merge_args_from_sync, read_args_from, ArgsFromMerge,
@@ -35,8 +31,8 @@ use crate::workflow_engine::child_spec::{
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, node_task_facts, require_subworkflow_node_keys,
-    stored_queue_and_priority, stored_workflow_ctx_from, ChildSpecError, ChildSpecFailure,
+    child_workflow_depth, node_task_facts, require_subworkflow_node_keys,
+    stored_queue_and_priority, stored_workflow_ctx_from, ChildSpecError,
 };
 use crate::workflow_engine::steps::{
     run_alone, run_in_transaction, step_row_select, step_rows, ChildBuild, ChildStartSource,
@@ -137,7 +133,7 @@ pub(crate) struct StartedTree {
 
 /// The parallel arrays of `horsies_workflow_start` (and of the `TREE` kind of
 /// `horsies_workflow_child_start`), one element per workflow row, node row or
-/// failed-node record of the tree. Only [`start_arguments`] and
+/// failed-node record of the tree. Only [`client_start_arguments`] and
 /// [`child_tree_arguments`] build it.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct StartArguments {
@@ -213,46 +209,19 @@ const BUILD_FAILURE_TEXT_CHARS: usize = 200;
 /// error keeps (Python: `str(refusal)[:200]`, `core/workflows/engine.py:1152`).
 const ARGS_FROM_REFUSAL_TEXT_CHARS: usize = 200;
 
-/// Builds the arguments of a start of a spec of the Rust client: the
-/// top-level workflow `workflow_id` of `spec`, a pre-built child for every
-/// sub-workflow node without dependencies (recursively), and a failed-node
-/// record for each such node whose child cannot start. Parents come before
-/// their children; the top-level row is first. Does no I/O; it runs the
-/// registered child builders (`spec_builder`), which must have no side
-/// effects. The task queues take their retention class from `retention`.
+/// Builds the arguments of a start of a spec that a client sent as data:
+/// the top-level workflow `workflow_id` of `spec`, a pre-built child for
+/// every sub-workflow node without dependencies (recursively), and a
+/// failed-node record for each such node whose child cannot start. Parents
+/// come before their children; the top-level row is first. The children come
+/// from `source`, and every task queue takes the class that the client
+/// resolved. Does no I/O; it asks `source`, which must not write.
 ///
 /// Errors: [`WorkflowError::Validation`] for a sub-workflow node of a built
 /// child without a definition key, a node without a resolved queue or
-/// priority, a node index above `i32::MAX`, or task options that the enqueue
-/// rules refuse; [`WorkflowError::Serialization`] for a value that does not
-/// encode.
-pub(crate) async fn start_arguments(
-    spec: &WorkflowSpec,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    retention: &RetentionConfig,
-) -> Result<StartArguments, WorkflowError> {
-    tree_arguments(
-        TreeWorkflow {
-            spec: Cow::Borrowed(spec),
-            classes: QueueClasses::Config(retention),
-            workflow_id,
-            parent: None,
-            depth: 0,
-        },
-        ChildBuild::Registry {
-            registry,
-            retention,
-        },
-    )
-    .await
-}
-
-/// Builds the arguments of a start of a spec that a client sent as data, as
-/// [`start_arguments`]: the children of the sub-workflow roots come from
-/// `source`, and every task queue takes the class that the client resolved.
-///
-/// Errors: those of [`start_arguments`], and
+/// priority, a node index above `i32::MAX`, task options that the enqueue
+/// rules refuse, or a task queue that the client gave no class;
+/// [`WorkflowError::Serialization`] for a value that does not encode;
 /// [`WorkflowError::ChildSpecSource`] when `source` gave no answer for a
 /// root's child.
 pub(crate) async fn client_start_arguments(
@@ -286,7 +255,7 @@ pub(crate) struct ChildTree<'a> {
 /// Builds the `TREE` arguments of an owed child start: the child
 /// `child_workflow_id` under the node `parent_task_index` of
 /// `parent_workflow_id`, at `depth`, with its pre-built children (from
-/// `build`) and failed-node records as [`start_arguments`]. Errors as
+/// `build`) and failed-node records as [`client_start_arguments`]. Errors as
 /// [`client_start_arguments`].
 pub(crate) async fn child_tree_arguments(
     child: ChildTree<'_>,
@@ -394,19 +363,16 @@ pub(crate) struct ChildInput {
 
 /// The host build of the child of a sub-workflow node, in Python's order
 /// (`enqueue_subworkflow_task`, `core/workflows/engine.py:1019-1212`): the
-/// depth limit, then the build of `build`:
+/// depth limit, then the client's [`ChildSpecSource`], which loads the
+/// child by its definition key, merges the `args_from` members into the node
+/// input ([`merged_child_input`]) and runs the builder in the client's
+/// language.
 ///
-/// - `Registry`: the load of the registered child by its definition key, the
-///   node input merged with the `args_from` members, then the registered
-///   builder ([`registry_child`]);
-/// - `Client`: the client's [`ChildSpecSource`], which takes the same steps
-///   in the client's language.
+/// A child past the depth limit, and every node failure that the source
+/// answers, are [`ChildBuildOutcome::NodeFails`].
 ///
-/// A child past the depth limit, and every node failure of the build, are
-/// [`ChildBuildOutcome::NodeFails`].
-///
-/// Errors: those of [`registry_child`]; [`WorkflowError::ChildSpecSource`]
-/// when the client's source gave no answer.
+/// Errors: [`WorkflowError::ChildSpecSource`] when the client's source gave
+/// no answer.
 pub(crate) async fn build_child<'a>(
     node: ChildOfNode<'_>,
     input: ChildInput,
@@ -434,10 +400,6 @@ pub(crate) async fn build_child<'a>(
         sources: input.sources,
     };
     match build {
-        ChildBuild::Registry {
-            registry,
-            retention,
-        } => registry_child(&request, registry, retention),
         ChildBuild::Client(source) => match source.child_spec(request).await? {
             ClientChildSpec::Built(client) => Ok(ChildBuildOutcome::Built {
                 spec: client.spec,
@@ -453,73 +415,6 @@ pub(crate) async fn build_child<'a>(
             })),
         },
     }
-}
-
-/// The build of a child of the Rust client: the load of the registered child
-/// by its definition key, the node input with its `args_from` members merged
-/// after its static members ([`merged_child_input`]), then the registered
-/// builder ([`materialize_child_spec`]). The child's task queues take their
-/// class from `retention`.
-///
-/// No registration under the key, an `args_from` key that names a member of
-/// the static input, an input member that the builder's decode refuses
-/// ([`params_refused_error`]), a builder that fails, and the refusals of
-/// [`merged_child_input`] are [`ChildBuildOutcome::NodeFails`].
-///
-/// Errors: [`WorkflowError::Serialization`] for a value that does not
-/// encode; [`WorkflowError::Validation`] for a stored input with a number
-/// that the `args_from` merge would round. Does no I/O; it runs the
-/// registered builder.
-fn registry_child<'a>(
-    request: &ChildSpecRequest,
-    registry: &WorkflowSpecRegistry,
-    retention: &'a RetentionConfig,
-) -> Result<ChildBuildOutcome<'a>, WorkflowError> {
-    let Some(registered) = request
-        .definition_key
-        .as_deref()
-        .and_then(|key| registry.resolve_child_registration(key))
-    else {
-        return Ok(ChildBuildOutcome::NodeFails(NodeFailure::Core(
-            subworkflow_load_failed_error(
-                &request.parent_workflow_name,
-                request.task_index,
-                request.definition_key.as_deref(),
-            ),
-        )));
-    };
-    let input = match merged_child_input(request)? {
-        NodeInput::Input(input) => input,
-        NodeInput::NodeFails(error) => {
-            return Ok(ChildBuildOutcome::NodeFails(NodeFailure::Core(error)))
-        }
-    };
-    let failure = match materialize_child_spec(registered, request.params, &input.text, registry) {
-        Ok(spec) => {
-            return Ok(ChildBuildOutcome::Built {
-                spec,
-                depth: request.child_depth,
-                classes: QueueClasses::Config(retention),
-            })
-        }
-        Err(ChildSpecFailure::BuildFailed(error)) => build_failed_error(
-            request.parent_workflow_id,
-            &request.parent_workflow_name,
-            request.task_index,
-            &error,
-        ),
-        Err(ChildSpecFailure::MemberRefused { key, cause }) => params_refused_error(
-            request.parent_workflow_id,
-            request.task_index,
-            RefusedMember {
-                key: &key,
-                cause: &cause,
-            },
-            &input,
-            registry.builder_hook().as_str(),
-        ),
-    };
-    Ok(ChildBuildOutcome::NodeFails(NodeFailure::Core(failure)))
 }
 
 /// The input of the builder of a child: the node input with its
@@ -876,7 +771,7 @@ impl StartArguments {
             false => Some(node_task_facts(
                 node,
                 merged_task_options.as_deref(),
-                classes.class_key(queue)?.as_deref(),
+                Some(classes.class_key(queue)?),
             )?),
         };
         let dependencies = node
