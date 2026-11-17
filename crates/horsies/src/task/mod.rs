@@ -13,7 +13,9 @@ pub use error::{TaskError, TaskErrorCode, UnknownUserCode};
 pub use runtime::TaskRuntime;
 pub use user_code::UserErrorCode;
 
-pub(crate) use user_code::{is_free_user_code, user_code_refusals};
+pub(crate) use user_code::{
+    is_free_user_code, is_retry_code, stored_retry_code, user_code_refusals,
+};
 
 /// `#[derive(horsies::UserErrorCode)]`: one code per unit variant, its name
 /// in UPPER_SNAKE_CASE; a built-in or reserved name is a compile error.
@@ -29,5 +31,6 @@ pub use horsies_core::{
 // Registration by hand: `Horsies::register` takes a `RegisteredTask` that
 // `async_task_fn!` or `blocking_task_fn!` builds, with its options.
 pub use horsies_core::{
-    BackoffStrategy, Execution, RegisteredTask, RetryPolicy, RetryPolicyError, TaskOptions,
+    BackoffStrategy, CancelGraceMs, CancelGraceOutOfRange, Execution, RegisteredTask, RetryPolicy,
+    RetryPolicyError, TaskOptions,
 };

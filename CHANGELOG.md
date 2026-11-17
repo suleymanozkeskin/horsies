@@ -149,6 +149,39 @@ unless it starts with "Added".
   run: the child waits for it when the body returns, cancels it after the
   grace, and reports work that does not stop. `spawn` returns
   `RunSpawnRefused` outside the async body of a run.
+- **A task declares its execution class.** `#[horsies::task]` and
+  `#[horsies::blocking_task]` take `execution = isolated | shared_async |
+  shared_thread`; the default is `isolated`. An `async fn` runs `isolated`
+  or `shared_async`, a `fn` runs `isolated` or `shared_thread`; another
+  class is a compile error. A shared class without `timeout_ms` is a
+  compile error. The class is stored with the task's options of every send.
+- **Added: `cancel_grace_ms` on a `shared_async` task**, from 100 to 10,000
+  ms, default 1,000: the time from the cancel signal at the deadline to the
+  drop of the body. On another class it is a compile error.
+- **`auto_retry_for` is checked at compile time.** A built-in name
+  (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...) is stored as the built-in code;
+  any other entry must be a code of the task's code type `E`, else the
+  task does not compile. Before, every entry was stored as a user code, so
+  a built-in name never matched. `retry_policy` and `auto_retry_for` go
+  together, with at least one code, as in Python: one without the other is
+  a compile error (before, codes without a policy were dropped).
+- **A task function returns `Result<T, TaskError<E>>`.** `TaskError`
+  without its code type is a compile error; a task with no codes of its own
+  uses `TaskError<std::convert::Infallible>`. `register` refuses a code
+  type whose `CODES` holds a built-in or reserved name (`HRS-212`), which
+  only a hand-written `UserErrorCode` impl can have.
+- **The module that `#[horsies::task]` generates changes.** `register`
+  returns `TaskFunction<A, T, E>`; `send`, `schedule` and `with_options`
+  return `Result<TaskHandle<T, E>, TaskSendError>`; `schedule` takes
+  `WholeSeconds`; `handle(&runtime)` returns
+  `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>`. The generated
+  `Input` struct derives serde through `horsies`, so it needs no `serde`
+  name in the user's crate.
+- **Field tokens use the key that serde reads.** In `params::<name>()` and
+  `#[derive(WorkflowInput)]` a raw identifier `r#type` is the key `type`
+  (before: `r#type`). `#[derive(WorkflowInput)]` makes no token for a
+  `#[serde(skip)]` or `#[serde(skip_deserializing)]` field, and refuses a
+  `#[serde(flatten)]` field at compile time.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,

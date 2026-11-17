@@ -84,6 +84,58 @@ pub(crate) const fn is_free_user_code(text: &str) -> bool {
     true
 }
 
+/// Whether `text` is the name of a built-in code (Python `BuiltInTaskCode`):
+/// a member of one of the four built-in families. A `const fn` over the
+/// core's catalogs.
+pub(crate) const fn is_built_in_code(text: &str) -> bool {
+    let mut family = 0;
+    while family < BUILT_IN_FAMILIES.len() {
+        let members = BUILT_IN_FAMILIES[family];
+        let mut member = 0;
+        while member < members.len() {
+            if same_text(members[member].value, text) {
+                return true;
+            }
+            member += 1;
+        }
+        family += 1;
+    }
+    false
+}
+
+/// Whether `text` may stand in `auto_retry_for` of a task whose code type
+/// has `user_codes`: a built-in code, or one of `user_codes`. The task
+/// attribute asserts it for each entry at compile time.
+pub(crate) const fn is_retry_code(text: &str, user_codes: &[&str]) -> bool {
+    if is_built_in_code(text) {
+        return true;
+    }
+    let mut index = 0;
+    while index < user_codes.len() {
+        if same_text(user_codes[index], text) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// The stored retry code of an `auto_retry_for` entry: the built-in code
+/// of that name, else the user code. The task attribute asserted at
+/// compile time that `text` is one of the two, and `E::CODES` holds only
+/// user codes (`user_code_refusals`, checked before the registration), so a
+/// text that is neither is a defect.
+pub(crate) fn stored_retry_code(text: &str) -> horsies_core::TaskErrorCode {
+    match horsies_core::BuiltInTaskCode::parse(text) {
+        Some(code) => horsies_core::TaskErrorCode::BuiltIn(code),
+        None => {
+            horsies_core::TaskErrorCode::User(UserCode::parse(text).unwrap_or_else(|refused| {
+                panic!("auto_retry_for code {text:?} is not a retry code: {refused}")
+            }))
+        }
+    }
+}
+
 const fn same_text(left: &str, right: &str) -> bool {
     let (left, right) = (left.as_bytes(), right.as_bytes());
     if left.len() != right.len() {
@@ -199,6 +251,27 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_retry_code_is_a_built_in_code_or_a_code_of_the_type() {
+        assert!(is_retry_code("TASK_TIMEOUT", &[]));
+        assert!(is_retry_code("WORKER_CRASHED", &["FINE"]));
+        assert!(is_retry_code("FINE", HandWritten::CODES));
+        assert!(!is_retry_code("RATE_LIMITED", HandWritten::CODES));
+        assert!(!is_retry_code("WORKFLOW_STOPPED", &[]));
+    }
+
+    #[test]
+    fn the_stored_retry_code_keeps_built_in_and_user_codes_apart() {
+        assert_eq!(
+            stored_retry_code("TASK_TIMEOUT"),
+            horsies_core::TaskErrorCode::BuiltIn(BuiltInTaskCode::from(OutcomeCode::TaskTimeout))
+        );
+        assert_eq!(
+            stored_retry_code("RATE_LIMITED"),
+            horsies_core::TaskErrorCode::User(UserCode::parse("RATE_LIMITED").unwrap())
+        );
     }
 
     #[test]
