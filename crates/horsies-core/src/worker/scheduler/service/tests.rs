@@ -715,6 +715,8 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
         )]),
         retry_policy: Some(crate::core::RetryPolicy::fixed(vec![60, 120], true).unwrap()),
         timeout_ms: Some(5_000),
+        execution: crate::core::task::Execution::Isolated,
+        cancel_grace_ms: None,
     };
     let facts = ScheduleSendFacts {
         queue_name: "default".to_owned(),

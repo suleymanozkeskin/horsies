@@ -5625,6 +5625,8 @@ mod enqueue_task_options_tests {
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         let text = options.serialize_retry_options().expect("options are set");
 
