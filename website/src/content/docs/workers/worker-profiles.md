@@ -100,6 +100,102 @@ io_profile = WorkerProfile(
 )
 ```
 
+### Run Shared Tasks
+
+A worker runs `SHARED_ASYNC` tasks on shared async children and `SHARED_THREAD` tasks on shared thread children. What runs where, the timeouts and the rules for task authors are on [Shared Async Tasks](/horsies/workers/shared-async-tasks/) and [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
+
+```python
+import asyncio
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Execution,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedAsyncChildren,
+    TaskError,
+    TaskResult,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        'io': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_async=SharedAsyncChildren(count=4, seats=25),
+        ),
+    },
+))
+
+
+@app.task(
+    'fetch_quote',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=10_000,
+    cancel_grace_ms=2_000,
+)
+async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+    await asyncio.sleep(0.1)
+    return TaskResult(ok=symbol)
+```
+
+```bash
+horsies worker myapp.instance:app --profile io
+```
+
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats.
+
+```python
+import hashlib
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Execution,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedThreadChildren,
+    TaskError,
+    TaskResult,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        'files': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_thread=SharedThreadChildren(count=2, seats=4),
+        ),
+    },
+))
+
+
+@app.task('digest_file', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
+def digest_file(*, path: str) -> TaskResult[str, TaskError]:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for block in iter(lambda: source.read(1 << 20), b''):
+            digest.update(block)
+    return TaskResult(ok=digest.hexdigest())
+```
+
+```bash
+horsies worker myapp.instance:app --profile files
+```
+
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. The fields are in [`SharedAsyncChildren`](#sharedasyncchildren) and [`SharedThreadChildren`](#sharedthreadchildren).
+
 ## Connection Pools and the Default Executor
 
 A profile sizes three kinds of connection pools:

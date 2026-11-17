@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Final, cast
+from typing import Any, Final, assert_never, cast
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -87,7 +87,13 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.workflows.node_finish import NODE_FINISH_FUNCTION
+from horsies.core.models.workflow.enums import WorkflowStatus
+from horsies.core.workflows.node_finish import (
+    NODE_FINISH_FUNCTION,
+    CapacityWake,
+    _Dependents,
+    _parameters as _node_finish_parameters,
+)
 from horsies.core.workflows.steps import (
     NODE_FINISH_FUNCTION_SQL,
     NodeFinishDisposition,
@@ -195,10 +201,10 @@ _INSERT_CLAIMED_EXPIRED_SQL = text(f"""
     {_SEEDED_IDS}
 """)
 
-# A one-node RUNNING workflow per seeded workflow task: the workflow row and
-# its node, which links the task of the same index. The node needs no
-# dependents and no sub-workflow (downstream_subworkflow NONE); the workflow's
-# output is node 0, so phase 2 completes the workflow.
+# A RUNNING workflow per seeded workflow task: the workflow row and its node 0,
+# which links the task of the same index. No sub-workflow node is below node 0
+# (downstream_subworkflow NONE). The workflow's output is node 0; with no other
+# node, phase 2 completes the workflow.
 _INSERT_WORKFLOWS_SQL = text("""
     INSERT INTO horsies_workflows (
         id, name, definition_key, status, on_error, output_task_index,
@@ -217,8 +223,7 @@ _INSERT_WORKFLOWS_SQL = text("""
         ) AS w
 """)
 
-_INSERT_WORKFLOW_NODES_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (
+_NODE_COLUMNS: Final = """
         id, workflow_id, task_index, node_id, task_name, input, queue_name,
         priority, dependencies, args_from, workflow_ctx_from,
         allow_failed_deps, join_type, min_success, task_options, max_retries,
@@ -226,10 +231,13 @@ _INSERT_WORKFLOW_NODES_SQL = text("""
         status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
         sub_definition_key, sub_workflow_params, sub_workflow_summary,
         result, error, created_at, started_at, completed_at
-    )
+"""
+
+_INSERT_WORKFLOW_NODES_SQL = text(f"""
+    INSERT INTO horsies_workflow_tasks ({_NODE_COLUMNS})
     SELECT
-        r.node_id, r.workflow_id, 0, 'node_0', 'perf.task', '{}', 'default',
-        100, '{}', NULL, NULL,
+        r.node_id, r.workflow_id, 0, 'node_0', 'perf.task', '{{}}', 'default',
+        100, '{{}}', NULL, NULL,
         FALSE, 'all', NULL, NULL, 0,
         'ISOLATED', NULL, 'forever', 'NONE',
         'RUNNING', r.task_id, FALSE, NULL, NULL,
@@ -242,6 +250,38 @@ _INSERT_WORKFLOW_NODES_SQL = text("""
                 CAST(:workflow_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS workflow_id,
                 CAST(:id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS task_id
         ) AS r
+""")
+
+# The dependent of node 0, for the scenario whose phase 2 reads the dependents:
+# node 1, PENDING and without a task row, joins on node 0 alone (join all, no
+# args_from). Phase 2 promotes it: the node goes ENQUEUED and its task row is
+# minted. The workflow then has a live node and stays RUNNING.
+_INSERT_DEPENDENT_NODES_SQL = text(f"""
+    INSERT INTO horsies_workflow_tasks ({_NODE_COLUMNS})
+    SELECT
+        r.node_id, r.workflow_id, 1, 'node_1', 'perf.task', '{{}}', 'default',
+        100, '{{0}}', NULL, NULL,
+        FALSE, 'all', NULL, NULL, 0,
+        'ISOLATED', NULL, 'forever', 'NONE',
+        'PENDING', NULL, FALSE, NULL, NULL,
+        NULL, NULL, NULL,
+        NULL, NULL, NOW(), NULL, NULL
+    FROM generate_series(1, CAST(:count AS integer)) AS g,
+        LATERAL (
+            SELECT
+                CAST(:node_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS node_id,
+                CAST(:workflow_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS workflow_id
+        ) AS r
+""")
+
+# A promotion mints the task row of a dependent node with an id from the
+# database clock, outside every seeded range. The delete finds it through the
+# link of its node, before the node rows go with their workflow.
+_DELETE_LINKED_LIVE_TASKS_SQL = text("""
+    DELETE FROM horsies_tasks t
+    USING horsies_workflow_tasks n
+    WHERE n.workflow_id BETWEEN CAST(:lower AS uuid) AND CAST(:upper AS uuid)
+      AND t.id = n.task_id
 """)
 
 # The delete of a workflow row cascades to its node rows and their phase-2
@@ -279,6 +319,7 @@ class RowKind(Enum):
     TASK = 'task'
     WORKFLOW = 'workflow'
     WORKFLOW_NODE = 'workflow-node'
+    DEPENDENT_NODE = 'dependent-node'
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,11 +374,13 @@ class SeedIds:
 @dataclass(frozen=True, slots=True)
 class SeedRows:
     """The rows that one role of one scenario seeds. Row g of each kind
-    belongs together: workflow g holds node g, which links task g."""
+    belongs together: workflow g holds node g, which links task g, and, in a
+    scenario that seeds one, dependent node g of node g."""
 
     tasks: SeedIds
     workflows: SeedIds
     nodes: SeedIds
+    dependent_nodes: SeedIds
 
 
 def seed_ids(scenario_name: str, role: Role, kind: RowKind) -> SeedIds:
@@ -362,6 +405,7 @@ def seed_rows(scenario_name: str, role: Role) -> SeedRows:
         tasks=seed_ids(scenario_name, role, RowKind.TASK),
         workflows=seed_ids(scenario_name, role, RowKind.WORKFLOW),
         nodes=seed_ids(scenario_name, role, RowKind.WORKFLOW_NODE),
+        dependent_nodes=seed_ids(scenario_name, role, RowKind.DEPENDENT_NODE),
     )
 
 
@@ -562,8 +606,30 @@ def seed_workflow_success_tasks(
     connection.commit()
 
 
+def seed_workflow_dependent_tasks(
+    connection: Connection,
+    rows: SeedRows,
+    count: int,
+) -> None:
+    """Two-node RUNNING workflows: node 0 links a RUNNING task, and node 1,
+    PENDING, depends on node 0."""
+    seed_workflow_success_tasks(connection, rows, count)
+    connection.execute(
+        _INSERT_DEPENDENT_NODES_SQL,
+        {
+            'count': count,
+            'workflow_id_prefix': rows.workflows.prefix,
+            'node_id_prefix': rows.dependent_nodes.prefix,
+        },
+    )
+    connection.commit()
+
+
 def delete_workflow_seeded(connection: Connection, rows: SeedRows) -> None:
-    """Delete the workflow rows of ``rows`` with their nodes, then its task rows."""
+    """Delete the live task rows that the nodes of ``rows`` link (the task
+    rows that a promotion minted among them), the workflow rows with their
+    nodes, then the task rows of ``rows``."""
+    connection.execute(_DELETE_LINKED_LIVE_TASKS_SQL, rows.workflows.bounds())
     connection.execute(_DELETE_WORKFLOWS_SQL, rows.workflows.bounds())
     connection.commit()
     delete_seeded(connection, rows)
@@ -884,65 +950,100 @@ _WORKFLOW_RESULT: TaskResult[int, Any] = TaskResult(ok=1)
 _WORKFLOW_RESULT_JSON = dumps_json(encode_task_result(_WORKFLOW_RESULT, int)).unwrap()
 
 
-def _workflow_success_applied(rows: Sequence[Mapping[str, Any]]) -> int:
-    operation = 'workflow success operation'
-    match decode_workflow_success_row(_one_row(rows, operation)):
-        case SuccessApplied(phase_two=PhaseTwoOwed(step=PhaseTwoStep.NO_DEPENDENTS)):
-            return 1
-        case other:
-            raise RuntimeError(
-                f'{operation} returned {other!r} for a seeded workflow task'
-            )
+def _workflow_success_applied(step: PhaseTwoStep) -> RowCheck:
+    """The check of phase 1: one APPLIED row that owes the phase 2 of
+    ``step``, the step of the seeded graph."""
+
+    def check(rows: Sequence[Mapping[str, Any]]) -> int:
+        operation = 'workflow success operation'
+        match decode_workflow_success_row(_one_row(rows, operation)):
+            case SuccessApplied(phase_two=PhaseTwoOwed(step=owed)) if owed is step:
+                return 1
+            case other:
+                raise RuntimeError(
+                    f'{operation} returned {other!r} for a seeded workflow task; '
+                    f'expected the phase 2 of {step.value}'
+                )
+
+    return check
 
 
-def _workflow_success_invocation(task_id: str) -> Invocation:
+def _workflow_success_invocation(step: PhaseTwoStep) -> InvocationFactory:
     """Phase 1 of a workflow task's success: the attempt row, the move and
     the phase-2 record."""
-    return Invocation(
-        statement=_FINISH_WORKFLOW_SUCCESS_SQL,
-        parameters={
-            'task_id': task_id,
-            'worker_id': WORKER_ID,
-            'claimed_at': CLAIMED_AT,
-            'result': _WORKFLOW_RESULT_JSON,
-        },
-        operation='workflow success operation',
-        check=_workflow_success_applied,
-    )
 
-
-def _run_workflow_success(connection: Connection, task_id: str) -> int:
-    """Phase 1 and phase 2 of a one-node workflow's success, each its own
-    write transaction.
-
-    Phase 2 is ``horsies_workflow_node_finish(task, TRUE, 'READ')``: the node
-    write from the phase-2 record, the capacity wake and the completion check,
-    which completes the workflow.
-    """
-    transitioned = _execute_invocation(
-        connection,
-        _workflow_success_invocation(task_id),
-    )
-    connection.commit()
-    rows = connection.execute(
-        NODE_FINISH_FUNCTION_SQL,
-        {'task_id': task_id, 'wake': True, 'dependents': 'READ'},
-    ).fetchall()
-    outcome = require_no_child_starts(
-        decode_step_rows(rows, NODE_FINISH_FUNCTION, NodeFinishDisposition),
-        NODE_FINISH_FUNCTION,
-    )
-    if (
-        outcome.disposition is not NodeFinishDisposition.APPLIED
-        or outcome.workflow_status != 'COMPLETED'
-    ):
-        connection.rollback()
-        raise RuntimeError(
-            f'workflow node finish returned {outcome.disposition.value} with '
-            f'workflow status {outcome.workflow_status!r} for a seeded workflow'
+    def build(task_id: str) -> Invocation:
+        return Invocation(
+            statement=_FINISH_WORKFLOW_SUCCESS_SQL,
+            parameters={
+                'task_id': task_id,
+                'worker_id': WORKER_ID,
+                'claimed_at': CLAIMED_AT,
+                'result': _WORKFLOW_RESULT_JSON,
+            },
+            operation='workflow success operation',
+            check=_workflow_success_applied(step),
         )
-    connection.commit()
-    return transitioned
+
+    return build
+
+
+def _node_finish_parameters_for(step: PhaseTwoStep, task_id: str) -> dict[str, object]:
+    """The parameters that ``finish_node`` sends in its one-statement form for
+    ``step``, with the capacity wake of the worker's phase 2. Pure."""
+    match step:
+        case PhaseTwoStep.NO_DEPENDENTS:
+            dependents = _Dependents.NONE
+        case PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW:
+            dependents = _Dependents.READ
+        case PhaseTwoStep.SUBWORKFLOW_REACHABLE:
+            raise AssertionError(
+                'no scenario seeds a sub-workflow node; its phase 2 is the '
+                'transaction form'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    return _node_finish_parameters(task_id, dependents, CapacityWake.SEND)
+
+
+def _run_workflow_success(
+    step: PhaseTwoStep,
+    *,
+    workflow_status: WorkflowStatus,
+) -> Callable[[Connection, str], int]:
+    """Phase 1 and phase 2 of a workflow task's success, each its own write
+    transaction. Phase 1 reports ``step``; phase 2 is
+    ``horsies_workflow_node_finish`` with the dependents argument of that step
+    (``finish_node``): the node write from the phase-2 record, the capacity
+    wake, the promotion of the dependents and the completion check, after
+    which the workflow is ``workflow_status``."""
+    phase_one = _workflow_success_invocation(step)
+
+    def run(connection: Connection, task_id: str) -> int:
+        transitioned = _execute_invocation(connection, phase_one(task_id))
+        connection.commit()
+        rows = connection.execute(
+            NODE_FINISH_FUNCTION_SQL,
+            _node_finish_parameters_for(step, task_id),
+        ).fetchall()
+        outcome = require_no_child_starts(
+            decode_step_rows(rows, NODE_FINISH_FUNCTION, NodeFinishDisposition),
+            NODE_FINISH_FUNCTION,
+        )
+        if (
+            outcome.disposition is not NodeFinishDisposition.APPLIED
+            or outcome.workflow_status != workflow_status.value
+        ):
+            connection.rollback()
+            raise RuntimeError(
+                f'workflow node finish returned {outcome.disposition.value} with '
+                f'workflow status {outcome.workflow_status!r} for a seeded '
+                f'workflow; expected APPLIED with {workflow_status.value!r}'
+            )
+        connection.commit()
+        return transitioned
+
+    return run
 
 
 # The batch bound is imported rather than restated: a round number here would
@@ -953,6 +1054,10 @@ PRODUCTION_EXPIRE_BATCH_SIZE = _EXPIRE_BATCH_SIZE
 _PENDING_EXPIRY = _pending_expiry_invocation(PRODUCTION_EXPIRE_BATCH_SIZE)
 _FUSED_SMALL = _fused_invocation(payload_of(200))
 _FUSED_LARGE = _fused_invocation(payload_of(1024 * 1024))
+_WORKFLOW_SUCCESS = _workflow_success_invocation(PhaseTwoStep.NO_DEPENDENTS)
+_WORKFLOW_SUCCESS_WITH_DEPENDENT = _workflow_success_invocation(
+    PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW,
+)
 
 SCENARIOS: tuple[Scenario, ...] = (
     SingleRowScenario(
@@ -1035,17 +1140,42 @@ SCENARIOS: tuple[Scenario, ...] = (
         name='workflow-success-phase2',
         description=(
             'one-node workflow success: phase 1 (attempt row, move, phase-2 '
-            'record), then phase 2 (node write, capacity wake, workflow '
-            'completion)'
+            'record), then phase 2 with no dependents read (node write, '
+            'capacity wake, workflow completion)'
         ),
         p50_budget=SINGLE_ROW_P50,
         p99_budget=Budget(fraction=0.15, floor_ms=2.0),
         payload_bytes=len(_WORKFLOW_RESULT_JSON.encode('utf-8')),
         seed=seed_workflow_success_tasks,
         cleanup=delete_workflow_seeded,
-        baseline=_run_workflow_success,
+        baseline=_run_workflow_success(
+            PhaseTwoStep.NO_DEPENDENTS,
+            workflow_status=WorkflowStatus.COMPLETED,
+        ),
         candidate=None,
-        baseline_invocation=_workflow_success_invocation,
+        baseline_invocation=_WORKFLOW_SUCCESS,
+        candidate_invocation=None,
+        exact_client_statements_per_operation=2,
+        exact_write_transactions_per_operation=2,
+    ),
+    SingleRowScenario(
+        name='workflow-success-phase2-dependent',
+        description=(
+            'two-node workflow success: phase 1 (attempt row, move, phase-2 '
+            'record), then phase 2 with the dependents read (node write, '
+            'capacity wake, promotion of the dependent node with its task row)'
+        ),
+        p50_budget=SINGLE_ROW_P50,
+        p99_budget=Budget(fraction=0.15, floor_ms=2.0),
+        payload_bytes=len(_WORKFLOW_RESULT_JSON.encode('utf-8')),
+        seed=seed_workflow_dependent_tasks,
+        cleanup=delete_workflow_seeded,
+        baseline=_run_workflow_success(
+            PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW,
+            workflow_status=WorkflowStatus.RUNNING,
+        ),
+        candidate=None,
+        baseline_invocation=_WORKFLOW_SUCCESS_WITH_DEPENDENT,
         candidate_invocation=None,
         exact_client_statements_per_operation=2,
         exact_write_transactions_per_operation=2,

@@ -183,8 +183,8 @@ impl<I, F> Copy for InputField<I, F> {}
 ///
 /// The node's input text (`AnyNode::input_json`) is required in both cases:
 /// the node row stores it, and a child with a `spec_builder` receives it. For
-/// `NotGiven` it is the client's encoding of an empty params input (`null`
-/// for a Rust `()`, `{}` from Python).
+/// `NotGiven` it is `{}` from every client, Python's stored form of no
+/// params.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubWorkflowParams {

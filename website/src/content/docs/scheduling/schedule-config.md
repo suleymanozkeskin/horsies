@@ -110,11 +110,13 @@ TaskSchedule(
 )
 ```
 
-The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
+The kwargs are encoded once per scheduler start (see [Validation](/horsies/scheduling/scheduler-overview/#validation)). A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire.
 
 ### Task Options
 
-`TaskSchedule` has no task options. A scheduled run stores the options that the task declares on `@app.task()` (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` of the task does. See [Scheduler Overview](../scheduler-overview#task-options).
+`TaskSchedule` has no task options. A scheduled run stores the options that the task declares on `@app.task()` (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` of the task does. See [Task Options](/horsies/scheduling/scheduler-overview/#task-options).
+
+`@app.task()` encodes the options once, when the task is defined. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_EXEC_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
 
 ### Queue Override
 
@@ -148,7 +150,7 @@ TaskSchedule(
 )
 ```
 
-Uses Python `zoneinfo`. Common values:
+`timezone` is an IANA name that Python `zoneinfo` reads. Common values:
 
 - `"UTC"` - Coordinated Universal Time
 - `"America/New_York"` - US Eastern
@@ -169,9 +171,6 @@ TaskSchedule(
 )
 ```
 
-If scheduler was down 3 hours, 3 tasks are enqueued on restart (bounded by
-`max_catch_up_runs`).
-
 Use for:
 
 - Data synchronization (must process all intervals)
@@ -182,10 +181,7 @@ Avoid for:
 - Notifications (users don't want 24 emails at once)
 - Status updates (only latest matters)
 
-When `catch_up_missed=False` (default), missed runs are dropped: after
-downtime the scheduler fires at most one run — the most recent due slot —
-logs a warning with the number of skipped slots, and resumes at the next
-future slot.
+What happens with each setting is on [Catch-Up Logic](/horsies/scheduling/scheduler-overview/#catch-up-logic).
 
 ## Disabling Schedules
 
@@ -213,26 +209,11 @@ ScheduleConfig(
 
 ## Configuration Changes
 
-When schedule configuration changes:
-
-1. Scheduler detects via `config_hash`
-2. Recalculates `next_run_at` from the database time; `run_count`, `last_run_at` and `last_task_id` stay
-3. Logs warning about configuration change
-
-This prevents issues when:
-
-- Pattern changes (e.g., hourly to daily)
-- Timezone changes
-- Time changes within pattern
+A changed schedule takes a new `next_run_at` at the next scheduler start. See [Configuration Changes](/horsies/scheduling/scheduler-overview/#configuration-changes).
 
 ## Validation
 
-At scheduler startup, validates:
-
-1. **Task exists**: `task_name` must be registered
-2. **Queue valid**: `queue_name` must match configured queue (CUSTOM mode)
-3. **Arguments complete**: Required task parameters must be provided
-4. **Arguments encodable**: `kwargs` must encode against the task's types and fit `payload.reject_bytes`
+The scheduler validates each schedule at startup. The rules are on [Validation](/horsies/scheduling/scheduler-overview/#validation).
 
 <!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
