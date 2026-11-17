@@ -5333,3 +5333,9 @@ mod task_complete_tests;
 
 #[cfg(test)]
 mod promotion_branch_tests;
+
+#[cfg(test)]
+mod subworkflow_branch_tests;
+
+#[cfg(test)]
+mod completion_branch_tests;

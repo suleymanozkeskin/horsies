@@ -6,6 +6,7 @@
 mod support;
 
 mod claim_filter;
+mod completion_branches;
 mod completion_edges;
 mod completion_path;
 mod dataflow;

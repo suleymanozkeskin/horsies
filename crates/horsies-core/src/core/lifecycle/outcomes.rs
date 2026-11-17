@@ -48,6 +48,9 @@ pub enum GuardKind {
     WorkflowLinkAbsent,
     WorkflowLinkState,
     ForeignTerminalization,
+    /// The task belongs to a workflow, live or finished, and the operation
+    /// acts on plain tasks only (`horsies_cancel_task`).
+    WorkflowTask,
 }
 
 impl GuardKind {
@@ -60,6 +63,7 @@ impl GuardKind {
             Self::WorkflowLinkAbsent => "WORKFLOW_LINK_ABSENT",
             Self::WorkflowLinkState => "WORKFLOW_LINK_STATE",
             Self::ForeignTerminalization => "FOREIGN_TERMINALIZATION",
+            Self::WorkflowTask => "WORKFLOW_TASK",
         }
     }
 
@@ -72,6 +76,7 @@ impl GuardKind {
             "WORKFLOW_LINK_ABSENT" => Some(Self::WorkflowLinkAbsent),
             "WORKFLOW_LINK_STATE" => Some(Self::WorkflowLinkState),
             "FOREIGN_TERMINALIZATION" => Some(Self::ForeignTerminalization),
+            "WORKFLOW_TASK" => Some(Self::WorkflowTask),
             _ => None,
         }
     }
@@ -155,6 +160,14 @@ pub struct ObservedForeignTerminalization {
     pub terminal_at: Option<DateTime<Utc>>,
 }
 
+/// The task belongs to a workflow, live or finished, and the operation acts
+/// on plain tasks only. `observed_status` is the task's status: the live
+/// status, or the history status of a finished task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedWorkflowTask {
+    pub observed_status: TaskStatus,
+}
+
 /// The typed diagnostic variant carried by a conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardEvidence {
@@ -165,6 +178,7 @@ pub enum GuardEvidence {
     WorkflowState(ObservedWorkflowState),
     WorkflowLink(ObservedWorkflowLink),
     ForeignTerminalization(ObservedForeignTerminalization),
+    WorkflowTask(ObservedWorkflowTask),
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +523,19 @@ fn decode_evidence(
                 },
             ))
         }
+        GuardKind::WorkflowTask => {
+            require_payload(raw, guard_kind, &[])?;
+            let Some(observed_status) = observed.status else {
+                return Err(OutcomeDecodeError(
+                    "a workflow-task refusal without an observed status. The \
+                     refusal names the status of the task it refused."
+                        .to_owned(),
+                ));
+            };
+            Ok(GuardEvidence::WorkflowTask(ObservedWorkflowTask {
+                observed_status,
+            }))
+        }
     }
 }
 
@@ -802,6 +829,50 @@ mod tests {
         raw.observed_guard = Some(serde_json::json!({"why": "not"}));
         let err = decode_raw(raw).unwrap_err();
         assert!(err.to_string().contains("must not send a payload"));
+    }
+
+    /// Python `outcomes._decode_evidence`, `GuardKind.WORKFLOW_TASK`: the
+    /// refusal of a workflow task by `horsies_cancel_task`, live (no kind)
+    /// or finished (the history kind and time).
+    #[test]
+    fn a_workflow_task_refusal_decodes_the_status_of_the_task() {
+        let mut live = base_raw("SOURCE_STATE_CONFLICT");
+        live.observed_status = Some("PENDING".to_owned());
+        live.guard_kind = Some("WORKFLOW_TASK".to_owned());
+        let mut finished = live.clone();
+        finished.observed_status = Some("FAILED".to_owned());
+        finished.terminal_at = Some(Utc::now());
+        finished.terminalization_kind = Some("FAIL_RUNNING".to_owned());
+
+        for (raw, status) in [(live, TaskStatus::Pending), (finished, TaskStatus::Failed)] {
+            let TerminalizationOutcome::SourceStateConflict { evidence, .. } =
+                decode_raw(raw).unwrap()
+            else {
+                panic!("expected conflict");
+            };
+            assert_eq!(
+                evidence,
+                GuardEvidence::WorkflowTask(ObservedWorkflowTask {
+                    observed_status: status
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_workflow_task_refusal_without_a_status_or_with_a_payload_fails_closed() {
+        let mut raw = base_raw("SOURCE_STATE_CONFLICT");
+        raw.guard_kind = Some("WORKFLOW_TASK".to_owned());
+        let err = decode_raw(raw.clone()).unwrap_err();
+        assert!(
+            err.to_string().contains("without an observed status"),
+            "{err}"
+        );
+
+        raw.observed_status = Some("PENDING".to_owned());
+        raw.observed_guard = Some(serde_json::json!({"node_status": "READY"}));
+        let err = decode_raw(raw).unwrap_err();
+        assert!(err.to_string().contains("must not send a payload"), "{err}");
     }
 
     #[test]

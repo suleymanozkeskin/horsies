@@ -9,14 +9,12 @@ use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::names::TASK_DETAIL_FUNCTION;
 use crate::core::lifecycle::{
     PriorLockedRead, TerminalizationCommand, TerminalizationOutcome, WorkerOwned,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::{TaskStatus, WorkflowStatus};
 
-use super::task_actions::cancel_task_in_tx;
 use super::*;
 
 #[derive(Clone)]
@@ -454,31 +452,6 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
 }
 
 #[tokio::test]
-#[serial]
-async fn unpublished_staged_detail_reports_a_live_miss_as_not_found() {
-    let pool = migrated_pool().await;
-    clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
-    let task = TaskSeed::running();
-    seed_task(&pool, &task).await;
-    complete_task(&pool, task.id).await;
-
-    let mut transaction = pool.begin().await.expect("W3 DDL transaction");
-    sqlx::query(&format!("DROP FUNCTION {TASK_DETAIL_FUNCTION}(uuid)"))
-        .execute(transaction.as_mut())
-        .await
-        .expect("hide staged detail in W3 transaction");
-    let result = cancel_task_in_tx(&mut transaction, task.id, false).await;
-    let error = result.expect_err("unpublished history must be absent");
-    assert_eq!(error.code, TaskActionErrorCode::TaskNotFound);
-    transaction.rollback().await.expect("restore staged detail");
-
-    let restored = cancel_task_action(&broker, task.id, false).await;
-    assert_eq!(restored.status_code(), 409);
-    clean_w3(&pool).await;
-}
-
-#[tokio::test]
 async fn task_and_workflow_database_failures_are_service_unavailable() {
     let pool = PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(250))
@@ -598,11 +571,12 @@ const LOCK_WAIT_POLLS: usize = 250;
 const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Python `test_task_lock_order.py` (a monitoring cancel against a
-/// finalize): the cancel takes the task advisory lock before the row lock,
-/// the order of every move function. While another transaction holds the
-/// advisory lock, the cancel waits for it and holds no row lock, so the
-/// holder can still lock the row. With the row lock first, the holder's
-/// `FOR UPDATE NOWAIT` fails with 55P03 and a finalize deadlocks (40P01).
+/// finalize): the cancel (`horsies_cancel_task`) takes the task advisory
+/// lock before the row lock, the order of every move function. While
+/// another transaction holds the advisory lock, the cancel waits for it and
+/// holds no row lock, so the holder can still lock the row. With the row
+/// lock first, the holder's `FOR UPDATE NOWAIT` fails with 55P03 and a
+/// finalize deadlocks (40P01).
 #[tokio::test]
 #[serial]
 async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
@@ -628,7 +602,7 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
         let waiting: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity
              WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'
-               AND query LIKE '%pg_advisory_xact_lock(hashtextextended($1::text, $2))%'",
+               AND query LIKE '%horsies_cancel_task(%'",
         )
         .fetch_one(&pool)
         .await

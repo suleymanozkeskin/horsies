@@ -26,6 +26,7 @@ use super::identity::keys::{
 use super::identity::uuid7::{uuid7_birth_at, MonotonicUuid7Generator};
 use super::names::{MAX_RETENTION_CLASS_KEY_LENGTH, POSTGRES_IDENTIFIER_LIMIT};
 use super::rerun::input_envelope::{decode_input_envelope, encode_input_envelope_v1};
+use crate::core::codec::MAX_JSON_DEPTH;
 
 fn vectors() -> Value {
     serde_json::from_str(include_str!(concat!(
@@ -321,6 +322,37 @@ fn archive_decoders_fail_closed_and_bounds_are_inclusive() {
     ));
     assert!(store_inline_rerun_input(&vec![0; RERUN_INPUT_INLINE_MAX_BYTES]).is_ok());
     assert!(store_inline_rerun_input(&vec![0; RERUN_INPUT_INLINE_MAX_BYTES + 1]).is_err());
+}
+
+/// A stored result reads under the strict read rule of a stored text:
+/// `MAX_JSON_DEPTH` nested levels read; one level more and a repeated key are
+/// a corrupt result, as a payload that does not parse.
+#[test]
+fn a_stored_result_reads_under_the_strict_read_rule() {
+    let decode = |payload: &[u8]| {
+        decode_result_envelope(
+            ARCHIVE_VERSION_1,
+            JSON_UTF8_CODEC,
+            JSON_CONTENT_TYPE,
+            payload,
+            &Sha256::digest(payload),
+        )
+    };
+    let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+
+    assert!(decode(nested(MAX_JSON_DEPTH).as_bytes()).is_ok());
+    for refused in [nested(MAX_JSON_DEPTH + 1), "{\"x\":1,\"x\":2}".to_owned()] {
+        assert!(
+            matches!(
+                decode(refused.as_bytes()),
+                Err(ArchiveDecodeError::Corrupt {
+                    domain: ArchiveDomain::Result,
+                    detail,
+                }) if detail == "JSONDecodeError"
+            ),
+            "{refused:.40}"
+        );
+    }
 }
 
 #[test]

@@ -148,6 +148,10 @@ const RELEASE_CLAIMS_REQUEST_PARAMETERS: &[StubParameter] = &[
 const RELEASE_CLAIMS_PARAMETERS: &[StubParameter] =
     &[positional("request", "ReleaseClaimsRequest")];
 const REQUEUE_STALE_CLAIMED_PARAMETERS: &[StubParameter] = &[positional("stale_after_ms", "int")];
+const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("include_running", "bool"),
+];
 const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_result", "bool"),
@@ -163,8 +167,22 @@ const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailu
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
+const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
+     CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 12] = [
+const CORE_HANDLE_METHODS: [StubFunction; 15] = [
+    StubFunction {
+        name: "close",
+        parameters: &[],
+        returns: TypeText::Plain("HandleClosed"),
+        doc: "Close the handle's core pools. Writes in flight end within the close bound; the ones that\ndo not are logged with their count. A handle that never connected starts nothing.",
+    },
+    StubFunction {
+        name: "close_async",
+        parameters: &[],
+        returns: TypeText::FutureOf("HandleClosed"),
+        doc: "The awaitable form of the method above.",
+    },
     StubFunction {
         name: "ping_database",
         parameters: &[],
@@ -224,6 +242,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 12] = [
         parameters: RELEASE_CLAIMS_PARAMETERS,
         returns: TypeText::FutureOf(RELEASE_CLAIMS_OUTCOME),
         doc: "Release the claims of one request. Writes, in one statement.",
+    },
+    StubFunction {
+        name: "cancel_task_async",
+        parameters: CANCEL_TASK_PARAMETERS,
+        returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
+        doc: "Cancel one plain task; a RUNNING task only with include_running. Writes, in one\nstatement. An outcome that contradicts the function raises PanicException.",
     },
     StubFunction {
         name: "task_info",
@@ -351,7 +375,7 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 23] = [
+const RECORD_CLASSES: [StubClass; 30] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -371,6 +395,13 @@ const RECORD_CLASSES: [StubClass; 23] = [
         doc: "The round trip of one database ping.",
         constructor: Constructor::NoConstructor,
         properties: &[property("latency_ms", "float")],
+        methods: &[],
+    },
+    StubClass {
+        name: "HandleClosed",
+        doc: "The close of a handle ended: its core pools are closed, or it never connected. The next\noperation on the handle opens new core pools.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
         methods: &[],
     },
     StubClass {
@@ -585,6 +616,70 @@ const RECORD_CLASSES: [StubClass; 23] = [
         properties: &[property("message", "str"), property("retryable", "bool")],
         methods: &[],
     },
+    StubClass {
+        name: "TaskCancelledRecord",
+        doc: "The plain task moved to history as CANCELLED; was_status is the status it left.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "was_status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelRefusedWorkflowTask",
+        doc: "The task belongs to a workflow, live or finished. Nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "current_status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelRefusedStatus",
+        doc: "The task's status does not admit the cancel: a terminal status (an earlier cancel\nincluded), or RUNNING without the opt-in. Nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "current_status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelTaskAbsent",
+        doc: "Neither the live table nor history holds the task. Nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelFailed",
+        doc: "The connect, the client family check or the statement failed. The statement wrote\nnothing, or it committed and its reply was lost.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelStoredDataInvalid",
+        doc: "Stored task data does not parse. The cancel refused the task; nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
+        methods: &[],
+    },
 ];
 
 const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
@@ -595,8 +690,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 32] = {
-    let mut classes = [HANDLE_CLASSES[0]; 32];
+const CLASSES: [StubClass; 39] = {
+    let mut classes = [HANDLE_CLASSES[0]; 39];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];
