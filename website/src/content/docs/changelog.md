@@ -703,9 +703,10 @@ unless it starts with "Added".
 - **`WorkflowSpecBuilder::build` decodes each node's input with the input
   type of its task or child workflow**, with each `args_from` member as a
   result and the workflow context when the task takes it: a top-level
-  member that binds to no field is `HRS-019`, a missing field `HRS-020`, a
-  value of another type `HRS-031`, and a key inside a member's value that
-  binds to no field `HRS-031`, as in Python. A member of the node's own input binds to no
+  member that binds to no field is `HRS-019`, a top-level missing field
+  `HRS-020`, a value of another type `HRS-031`, and a key that binds to no
+  field or a missing field inside a member's value `HRS-031`, as in Python.
+  A member of the node's own input binds to no
   field when the decoded value does not write it back, at any depth, so
   an input type without `deny_unknown_fields` refuses it too; the error
   names its key path (`options.retries`, `parcels[0].weight`). A member

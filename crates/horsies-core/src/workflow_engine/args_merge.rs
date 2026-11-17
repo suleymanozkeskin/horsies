@@ -81,6 +81,138 @@ pub(crate) fn input_object(
     }
 }
 
+/// The stored input of a sub-workflow node, read as Python reads it before
+/// the child build (`_input_kwargs`, `core/workflows/child_build.py`;
+/// `enqueue_subworkflow_task`, `core/workflows/engine.py:1094-1108`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChildStaticInput<'a> {
+    /// An object: the stored text, whose members are the static members.
+    Members(&'a str),
+    /// An empty text, or a value that is not an object: no static members.
+    /// Python reads them as `{}`.
+    NoMembers,
+}
+
+/// A stored node input that Python refuses before the child build: the node
+/// fails with `Corrupt kwargs JSON for subworkflow task <index>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaticInputCorrupt {
+    /// Why the text is refused, for the log.
+    pub(crate) cause: String,
+}
+
+/// Read the stored input `text` of a sub-workflow node: an empty text has no
+/// static members; any other text must pass the strict read rule
+/// (`crate::core::codec::check_json_text`, Python `loads_json`) and must not
+/// be `null`; an object gives its members, any other value none.
+///
+/// Errors: [`StaticInputCorrupt`] for a text that the strict read refuses,
+/// and for `null`. Pure.
+pub(crate) fn child_static_input(text: &str) -> Result<ChildStaticInput<'_>, StaticInputCorrupt> {
+    if text.is_empty() {
+        return Ok(ChildStaticInput::NoMembers);
+    }
+    crate::core::codec::check_json_text(text).map_err(|error| StaticInputCorrupt {
+        cause: error.to_string(),
+    })?;
+    // The text passed the strict read, so its first character after the
+    // whitespace names the kind of its value.
+    match text
+        .trim_start_matches(JSON_WHITESPACE)
+        .as_bytes()
+        .first()
+        .copied()
+    {
+        Some(b'{') => Ok(ChildStaticInput::Members(text)),
+        Some(b'n') => Err(StaticInputCorrupt {
+            cause: "the text reads as null".to_owned(),
+        }),
+        Some(_) | None => Ok(ChildStaticInput::NoMembers),
+    }
+}
+
+/// The whitespace characters of the JSON grammar.
+const JSON_WHITESPACE: [char; 4] = [' ', '\t', '\n', '\r'];
+
+/// The stored `args_from` text of a sub-workflow node (the CHILD_START row
+/// gives a `jsonb` string as its text, any other value as its JSON text),
+/// read as Python reads it (`_args_from_map`, `core/workflows/child_build.py`;
+/// `enqueue_subworkflow_task`, `core/workflows/engine.py:1128-1155`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ArgsFromRead {
+    /// No `args_from` members: no text, an empty text, or a value that is
+    /// not an object.
+    NoMembers,
+    /// An object whose every value is a JSON integer: the key to index map,
+    /// in text order.
+    Indexes(serde_json::Map<String, serde_json::Value>),
+    /// The text breaks the strict read rule, or reads as `null`: the node
+    /// fails with `Corrupt args_from JSON for subworkflow task <index>`.
+    Corrupt { cause: String },
+    /// An object with a value that is not a JSON integer: the node fails
+    /// with `args_from has non-int values for subworkflow task <index>`.
+    /// Python's `isinstance(value, int)` also takes `true` and `false`; this
+    /// read refuses them, as `horsies_workflow_task_node_refusal` does for a
+    /// task node.
+    NotIndexes,
+}
+
+/// Read the stored `args_from` text of a sub-workflow node ([`ArgsFromRead`]).
+/// An integer is a number literal with no fraction and no exponent, whatever
+/// its size; an index outside the `integer` range names no node, so the merge
+/// leaves its member out. Pure.
+pub(crate) fn read_args_from(text: Option<&str>) -> ArgsFromRead {
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return ArgsFromRead::NoMembers;
+    };
+    let value: serde_json::Value = match crate::core::codec::from_json_str(text) {
+        Ok(value) => value,
+        Err(error) => {
+            return ArgsFromRead::Corrupt {
+                cause: error.to_string(),
+            }
+        }
+    };
+    let map = match value {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => {
+            return ArgsFromRead::Corrupt {
+                cause: "the text reads as null".to_owned(),
+            }
+        }
+        serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_)
+        | serde_json::Value::Array(_) => return ArgsFromRead::NoMembers,
+    };
+    // The literal of each value: serde_json reads an integer above the u64
+    // range as a float, so the kind is read from the text.
+    let literals: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        match crate::core::codec::from_json_str(text) {
+            Ok(literals) => literals,
+            Err(error) => {
+                return ArgsFromRead::Corrupt {
+                    cause: error.to_string(),
+                }
+            }
+        };
+    match literals
+        .values()
+        .all(|literal| is_integer_literal(literal.get()))
+    {
+        true => ArgsFromRead::Indexes(map),
+        false => ArgsFromRead::NotIndexes,
+    }
+}
+
+/// Whether `literal`, the text of one JSON value, is an integer number: an
+/// optional minus sign, then digits only. Pure.
+fn is_integer_literal(literal: &str) -> bool {
+    let trimmed = literal.trim_matches(JSON_WHITESPACE);
+    let digits = trimmed.strip_prefix('-').unwrap_or(trimmed);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// The node input after the `args_from` merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArgsFromMerge {
@@ -193,7 +325,17 @@ fn insert_args_from_entries(
     dep_results: &HashMap<i32, DepResult>,
 ) -> Result<(), WorkflowError> {
     for (kwarg_name, dep_idx_value) in args_from_map {
-        let dep_idx = dep_idx_value.as_i64().unwrap_or(-1) as i32;
+        // An index outside the `integer` range names no node row ([`read_args_from`] took any integer).
+        let Some(dep_idx) = dep_idx_value
+            .as_i64()
+            .and_then(|index| i32::try_from(index).ok())
+        else {
+            tracing::debug!(
+                kwarg = %kwarg_name,
+                "args_from names an index outside the integer range; the kwarg is left out",
+            );
+            continue;
+        };
         // No row in the read: the child start reads terminal dependencies only (its `SOURCE` rows), so a
         // dependency that is not terminal is absent here too; an index with no node row is left out the same way.
         let Some(dep) = dep_results.get(&dep_idx) else {

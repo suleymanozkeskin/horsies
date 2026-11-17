@@ -253,9 +253,9 @@ impl OwedChildStarts {
 /// gets a new id (`Uuid::new_v4()`) and its tree as [`child_tree_arguments`]
 /// builds it. Does no I/O; it runs the child's builder.
 ///
-/// Errors: [`WorkflowError::Serialization`] for an `args_from` text that does
-/// not parse or a value that does not encode; [`WorkflowError::Validation`]
-/// for a stored input that the `args_from` merge refuses, and for a child
+/// Errors: [`WorkflowError::Serialization`] for a value that does not
+/// encode; [`WorkflowError::Validation`] for a stored input with a number
+/// that the `args_from` merge would round, and for a child
 /// spec that the tree arguments refuse (as [`child_tree_arguments`]);
 /// [`WorkflowError::ChildSpecSource`] when the client's source gave no
 /// answer.
