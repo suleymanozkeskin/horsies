@@ -514,7 +514,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 38] = [
+const CORE_HANDLE_METHODS: [StubFunction; 40] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -1032,7 +1032,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 78] = [
+const RECORD_CLASSES: [StubClass; 79] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
