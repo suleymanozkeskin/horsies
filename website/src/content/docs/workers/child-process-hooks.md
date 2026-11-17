@@ -129,6 +129,26 @@ async def loop_check() -> TaskResult[bool, TaskError]:
 - Work that a hook starts and leaves running, such as a background task of a client, belongs to no task.
 - Isolated children do not run these hooks.
 
+A long-lived client opened in the hook belongs to no task, so its background work does not hold a task open:
+
+<!-- check: skip partial -- the client module is the reader's own -->
+```python
+import httpx
+
+clients: dict[str, httpx.AsyncClient] = {}
+
+
+@app.on_shared_async_child_start
+async def open_http_client() -> None:
+    clients['http'] = httpx.AsyncClient(timeout=5.0)
+
+
+@app.task('get_status', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def get_status(*, url: str) -> TaskResult[int, TaskError]:
+    response = await clients['http'].get(url)
+    return TaskResult(ok=response.status_code)
+```
+
 ## API Reference
 
 ### `@app.on_child_process_start`
