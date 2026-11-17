@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{Duration, Timelike, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -13,7 +13,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::commands::{
     open_end_anchor, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf,
     EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
@@ -221,11 +220,11 @@ impl LoaderPublication for FailFirstStagedPublisher {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A copy of the installed test template (`crate::test_support`) with a
+/// sqlx pool for the history functions that still take a sqlx connection.
 struct TestDatabase {
     pool: PgPool,
-    database_name: String,
-    admin_options: PgConnectOptions,
+    database: crate::test_support::TestDatabase,
 }
 
 impl TestDatabase {
@@ -234,74 +233,26 @@ impl TestDatabase {
     }
 
     async fn create_with_connections(max_connections: u32) -> Self {
-        let base = database_url();
-        let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
-        let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("core_p3_{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect to postgres admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create P3 test database");
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .connect_with(base_options.database(&database_name))
+            .connect(database.url())
             .await
             .expect("connect to P3 test database");
-        run_horsies_migrations(&pool)
-            .await
-            .expect("migrate P3 test database");
-        Self {
-            pool,
-            database_name,
-            admin_options,
-        }
+        Self { pool, database }
+    }
+
+    fn url(&self) -> &str {
+        self.database.url()
     }
 
     async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect for P3 database cleanup");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.database_name)
-        .execute(&mut admin)
-        .await
-        .expect("terminate P3 test database sessions");
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\"",
-            self.database_name
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("drop P3 test database");
+        self.database.drop().await;
     }
 }
 
 mod pruning_ports;
-
-fn database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let contents = std::fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
 
 mod read_round_trips;
 
@@ -609,9 +560,8 @@ async fn proxied_pool(
     delay_ms: usize,
     max_connections: u32,
 ) -> (SqlStatementProxy, PgPool) {
-    let backend = PgConnectOptions::from_str(&database_url())
+    let backend = PgConnectOptions::from_str(database.url())
         .expect("invalid test database URL")
-        .database(&database.database_name)
         .ssl_mode(PgSslMode::Disable);
     let proxy = SqlStatementProxy::start(&backend, delay_ms).await;
     let pool = PgPoolOptions::new()
@@ -638,9 +588,8 @@ async fn pausing_proxied_pool(
     database: &TestDatabase,
     pattern: &str,
 ) -> (SqlStatementProxy, PgPool, StatementPause) {
-    let backend = PgConnectOptions::from_str(&database_url())
+    let backend = PgConnectOptions::from_str(database.url())
         .expect("invalid test database URL")
-        .database(&database.database_name)
         .ssl_mode(PgSslMode::Disable);
     let pause = StatementPause::new(Arc::<str>::from(pattern));
     let proxy = SqlStatementProxy::start_with_pause(&backend, 0, Some(pause.clone())).await;

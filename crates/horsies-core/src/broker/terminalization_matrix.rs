@@ -7,16 +7,14 @@
 //! (e) the revert-proof properties. This module is the behavioral safety
 //! net that must be green before any call site moves.
 //!
-//! Each test process owns a UUID-named disposable database. Within that
-//! process, global discovery batches (pending expiry, orphan sweep) are
-//! pre-drained before seeding so one serial test cannot affect another.
+//! Each test owns a copy of the test template (`crate::test_support`).
+//! Global discovery batches (pending expiry, orphan sweep) are still
+//! pre-drained before seeding.
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
-use std::str::FromStr;
-use tokio::sync::OnceCell;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -124,340 +122,73 @@ fn relation_rows_examined(plan: &serde_json::Value, relation: &str) -> f64 {
     }
 }
 
-fn test_db_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let root = std::path::Path::new(manifest_dir)
-        .ancestors()
-        .find(|p| p.join(".env").exists());
-    let pw = root
-        .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-        .and_then(|c| {
-            c.lines()
-                .filter_map(|l| l.trim().split_once('='))
-                .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                .map(|(_, v)| v.trim().to_owned())
-        })
-        .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{pw}@localhost:5432/horsies-core")
-}
-
-struct P5TestDatabase {
-    name: String,
-    url: String,
-    _anchor: PgPool,
-}
-
+/// A copy of the test template with one coverage pass, owned by one test:
+/// dropped by [`IsolatedTerminalizationTestDatabase::drop`], or at the end of
+/// the test (`crate::test_support`).
 struct IsolatedTerminalizationTestDatabase {
-    admin: PgConnection,
+    database: crate::test_support::TestDatabase,
     pool: PgPool,
-    name: String,
-}
-
-const ISOLATED_TERMINALIZATION_DATABASE_PREFIX: &str = "core_term_iso_";
-
-enum IsolatedTerminalizationDatabaseDrop {
-    InactiveOnly,
-    OwnedForced,
-}
-
-async fn lock_isolated_terminalization_database_setup(admin: &mut PgConnection) {
-    sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_terminalization_database_setup'))")
-        .execute(admin)
-        .await
-        .expect("lock isolated terminalization database setup");
-}
-
-async fn unlock_isolated_terminalization_database_setup(admin: &mut PgConnection) {
-    let unlocked: bool = sqlx::query_scalar(
-        "SELECT pg_advisory_unlock(hashtext('horsies_terminalization_database_setup'))",
-    )
-    .fetch_one(admin)
-    .await
-    .expect("unlock isolated terminalization database setup");
-    assert!(
-        unlocked,
-        "isolated terminalization database setup lock was held"
-    );
-}
-
-async fn drop_isolated_terminalization_database(
-    admin: &mut PgConnection,
-    name: &str,
-    mode: IsolatedTerminalizationDatabaseDrop,
-) {
-    let suffix = name
-        .strip_prefix(ISOLATED_TERMINALIZATION_DATABASE_PREFIX)
-        .expect("database query must enforce the generated prefix");
-    assert!(
-        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "refuse to drop non-generated terminalization database {name:?}"
-    );
-    let statement = match mode {
-        IsolatedTerminalizationDatabaseDrop::InactiveOnly => {
-            format!("DROP DATABASE \"{name}\"")
-        }
-        IsolatedTerminalizationDatabaseDrop::OwnedForced => {
-            format!("DROP DATABASE \"{name}\" WITH (FORCE)")
-        }
-    };
-    sqlx::query(&statement)
-        .execute(admin)
-        .await
-        .expect("drop generated terminalization database");
-}
-
-async fn drop_inactive_isolated_terminalization_databases(admin: &mut PgConnection) {
-    let stale_databases: Vec<String> = sqlx::query_scalar(
-        "SELECT d.datname
-         FROM pg_database d
-         WHERE left(d.datname, length($1)) = $1
-           AND NOT EXISTS (
-               SELECT 1 FROM pg_stat_activity a
-               WHERE a.datname = d.datname
-           )
-         ORDER BY d.datname",
-    )
-    .bind(ISOLATED_TERMINALIZATION_DATABASE_PREFIX)
-    .fetch_all(&mut *admin)
-    .await
-    .expect("list inactive isolated terminalization databases");
-    for stale_database in stale_databases {
-        drop_isolated_terminalization_database(
-            admin,
-            &stale_database,
-            IsolatedTerminalizationDatabaseDrop::InactiveOnly,
-        )
-        .await;
-    }
 }
 
 impl IsolatedTerminalizationTestDatabase {
-    async fn create_empty() -> Self {
-        let base_options = PgConnectOptions::from_str(&test_db_url())
-            .expect("invalid terminalization database URL");
-        let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
-            .await
-            .expect("connect to terminalization admin database");
-        lock_isolated_terminalization_database_setup(&mut admin).await;
-        drop_inactive_isolated_terminalization_databases(&mut admin).await;
-        let name = format!(
-            "{ISOLATED_TERMINALIZATION_DATABASE_PREFIX}{}",
-            Uuid::new_v4().simple()
-        );
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create isolated terminalization database");
+    async fn create() -> Self {
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&name))
+            .connect(database.url())
             .await
             .expect("connect isolated terminalization database");
-        unlock_isolated_terminalization_database_setup(&mut admin).await;
-        Self { admin, pool, name }
+        run_coverage_pass(&pool).await;
+        Self { database, pool }
     }
 
-    async fn create() -> Self {
-        let database = Self::create_empty().await;
-        let pool = &database.pool;
-        crate::broker::migrations::install_schema(
-            pool,
-            crate::broker::client_family::ClientFamily::Rust,
-        )
-        .await
-        .expect("migrate isolated terminalization database");
-        let mut transaction = pool.begin().await.expect("coverage transaction");
-        let coverage =
-            ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-                .await
-                .expect("partition coverage");
-        assert!(
-            matches!(coverage, CoverageOutcome::Ensured(_)),
-            "{coverage:?}"
-        );
-        transaction.commit().await.expect("commit coverage");
-        database
-    }
-
-    async fn drop(mut self) {
-        lock_isolated_terminalization_database_setup(&mut self.admin).await;
+    async fn drop(self) {
         self.pool.close().await;
-        drop_isolated_terminalization_database(
-            &mut self.admin,
-            &self.name,
-            IsolatedTerminalizationDatabaseDrop::OwnedForced,
-        )
-        .await;
-        unlock_isolated_terminalization_database_setup(&mut self.admin).await;
+        self.database.drop().await;
     }
 }
 
-static P5_DATABASE: OnceCell<P5TestDatabase> = OnceCell::const_new();
-
-pub(crate) async fn migrated_pool() -> PgPool {
-    let database = P5_DATABASE
-        .get_or_init(|| async {
-            let base_options =
-                PgConnectOptions::from_str(&test_db_url()).expect("invalid P5 database URL");
-            let admin_options = base_options.clone().database("postgres");
-            let database_name = format!("core_p5_matrix_{}", Uuid::new_v4().simple());
-            let mut admin = PgConnection::connect_with(&admin_options)
-                .await
-                .expect("connect to P5 admin database");
-            sqlx::query("SELECT pg_advisory_lock(hashtext('core_p5_matrix_setup'))")
-                .execute(&mut admin)
-                .await
-                .expect("lock P5 database setup");
-            let stale_databases: Vec<String> = sqlx::query_scalar(
-                "SELECT d.datname
-                 FROM pg_database d
-                 WHERE left(d.datname, length('core_p5_matrix_')) =
-                       'core_p5_matrix_'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM pg_stat_activity a
-                       WHERE a.datname = d.datname
-                   )
-                 ORDER BY d.datname",
-            )
-            .fetch_all(&mut admin)
-            .await
-            .expect("list inactive P5 databases");
-            for stale_database in stale_databases {
-                let suffix = stale_database
-                    .strip_prefix("core_p5_matrix_")
-                    .expect("query enforces P5 database prefix");
-                assert!(
-                    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                    "refuse to drop non-generated P5 database {stale_database:?}"
-                );
-                sqlx::query(&format!("DROP DATABASE \"{stale_database}\""))
-                    .execute(&mut admin)
-                    .await
-                    .expect("drop inactive P5 database");
-            }
-            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-                .execute(&mut admin)
-                .await
-                .expect("create P5 database");
-            let generated_options = base_options.database(&database_name);
-            let database_url = crate::broker::pools::test_url_of(&generated_options);
-            let anchor = PgPoolOptions::new()
-                .min_connections(1)
-                .max_connections(1)
-                .max_lifetime(None)
-                .idle_timeout(None)
-                .connect_with(generated_options)
-                .await
-                .expect("connect P5 database");
-            let unlocked: bool =
-                sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p5_matrix_setup'))")
-                    .fetch_one(&mut admin)
-                    .await
-                    .expect("unlock P5 database setup");
-            assert!(unlocked, "P5 database setup lock was held");
-            crate::broker::migrations::install_schema(
-                &anchor,
-                crate::broker::client_family::ClientFamily::Rust,
-            )
-            .await
-            .expect("migrate P5 database");
-            let mut transaction = anchor.begin().await.expect("coverage transaction");
-            let coverage =
-                ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-                    .await
-                    .expect("partition coverage");
-            assert!(
-                matches!(coverage, CoverageOutcome::Ensured(_)),
-                "{coverage:?}"
-            );
-            transaction.commit().await.expect("commit coverage");
-            P5TestDatabase {
-                url: database_url,
-                name: database_name,
-                _anchor: anchor,
-            }
-        })
-        .await;
-    let base_options = PgConnectOptions::from_str(&test_db_url())
-        .expect("invalid P5 database URL")
-        .database(&database.name);
-    PgPoolOptions::new()
-        .max_connections(5)
-        .connect_with(base_options)
+/// One coverage pass (history leaves for two days, heartbeat leaves for two
+/// hours) with the reader publication.
+async fn run_coverage_pass(pool: &PgPool) {
+    let mut transaction = pool.begin().await.expect("coverage transaction");
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
         .await
-        .expect("connect current P5 test runtime")
-}
-
-#[tokio::test]
-#[serial]
-async fn isolated_terminalization_setup_removes_an_inactive_generated_database() {
-    let base_options =
-        PgConnectOptions::from_str(&test_db_url()).expect("invalid terminalization database URL");
-    let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
-        .await
-        .expect("connect to terminalization admin database");
-    lock_isolated_terminalization_database_setup(&mut admin).await;
-    let stale_name = format!(
-        "{ISOLATED_TERMINALIZATION_DATABASE_PREFIX}{}",
-        Uuid::new_v4().simple()
+        .expect("partition coverage");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
     );
-    sqlx::query(&format!("CREATE DATABASE \"{stale_name}\""))
-        .execute(&mut admin)
-        .await
-        .expect("create inactive generated database");
-    unlock_isolated_terminalization_database_setup(&mut admin).await;
-    drop(admin);
-
-    let mut database = IsolatedTerminalizationTestDatabase::create().await;
-    let stale_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(&stale_name)
-            .fetch_one(&mut database.admin)
-            .await
-            .expect("check inactive generated database cleanup");
-    assert!(!stale_exists);
-    database.drop().await;
+    transaction.commit().await.expect("commit coverage");
 }
 
-#[tokio::test]
-#[serial]
-async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
-    let database = IsolatedTerminalizationTestDatabase::create().await;
-    let database_name = database.name.clone();
-    let base_options =
-        PgConnectOptions::from_str(&test_db_url()).expect("invalid terminalization database URL");
-    let remaining_session =
-        PgConnection::connect_with(&base_options.clone().database(&database_name))
-            .await
-            .expect("connect remaining isolated terminalization session");
-
-    database.drop().await;
-    drop(remaining_session);
-
-    let mut admin = PgConnection::connect_with(&base_options.database("postgres"))
+/// The database of the running test (`crate::test_support::database_of_this_test`):
+/// a copy of the test template, with one coverage pass at the first call in
+/// the test, as a sqlx pool for the tests of the sqlx broker paths. Every
+/// call in one test gets the same database; it is dropped when the test's
+/// runtime shuts down.
+pub(crate) async fn migrated_pool() -> PgPool {
+    let database = crate::test_support::database_of_this_test().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database.url())
         .await
-        .expect("connect to terminalization admin database");
-    let database_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(database_name)
-            .fetch_one(&mut admin)
-            .await
-            .expect("check owned generated database cleanup");
-    assert!(!database_exists);
+        .expect("connect the database of this test");
+    let _covered = database
+        .setup()
+        .get_or_init(|| run_coverage_pass(&pool))
+        .await;
+    pool
 }
 
-/// The URL of the P5 database, accepted by sqlx and by the core's URL parser.
+/// The URL of the database of the running test ([`migrated_pool`]), accepted
+/// by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
-    let pool = migrated_pool().await;
-    drop(pool);
-    P5_DATABASE
-        .get()
-        .expect("migrated_pool initializes the P5 database")
-        .url
-        .clone()
+    migrated_pool().await.close().await;
+    crate::test_support::database_of_this_test()
+        .await
+        .url()
+        .to_owned()
 }
 
 struct Seed {

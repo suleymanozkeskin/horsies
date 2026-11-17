@@ -31,6 +31,7 @@ use crate::worker::executor::protocol::{
     ShortageErrno,
 };
 use crate::worker::executor::supervisor::{BootFailureCause, Spawner};
+use crate::worker::retry::MIN_TASK_TIMEOUT_MS;
 use crate::worker::runner_beats::LiveDispatches;
 
 /// The kill wait of the pools of these tests, in place of 30 s.
@@ -38,6 +39,13 @@ const SHORT_KILL_WAIT: Duration = Duration::from_millis(500);
 /// Longer than the kill wait and the grace of a lost channel: the slot has
 /// passed the kill wait by then.
 const PAST_THE_KILL_WAIT: Duration = Duration::from_millis(1_500);
+/// The deadline of the tasks that a deadline ends: the shortest timeout a
+/// task can have (Python `MIN_TASK_TIMEOUT_MS`).
+const SHORT_DEADLINE_MS: u64 = MIN_TASK_TIMEOUT_MS;
+/// Past the deadline, then past the kill wait: the slot whose child the
+/// deadline killed has passed the kill wait by then.
+const PAST_THE_DEADLINE_KILL_WAIT: Duration =
+    PAST_THE_KILL_WAIT.saturating_add(Duration::from_millis(SHORT_DEADLINE_MS));
 
 fn isolated(script: &str, exit_not_seen: ExitNotSeen) -> IsolatedPoolConfig {
     IsolatedPoolConfig {
@@ -212,7 +220,11 @@ async fn a_deadline_kill_with_no_exit_seen_ends_unknown() {
     );
     let child = serving(&held.board, 0).await;
 
-    let end = answer_within(held.submit(&task(1, ExecutionClass::Isolated), deadline(300))).await;
+    let end = answer_within(held.submit(
+        &task(1, ExecutionClass::Isolated),
+        deadline(SHORT_DEADLINE_MS),
+    ))
+    .await;
 
     assert_eq!(end, AttemptEnd::EndUnknown { pid: child });
     held.stop().await;
@@ -267,9 +279,12 @@ async fn a_lost_channel_waits_for_the_exit_with_recovery_off() {
 async fn a_deadline_kill_waits_for_the_late_exit_with_recovery_off() {
     let held = HeldPool::start(&after_one_run("exec sleep 60"), ExitNotSeen::WaitForExit);
     let _ = serving(&held.board, 0).await;
-    let mut answer = held.submit(&task(1, ExecutionClass::Isolated), deadline(300));
+    let mut answer = held.submit(
+        &task(1, ExecutionClass::Isolated),
+        deadline(SHORT_DEADLINE_MS),
+    );
 
-    tokio::time::sleep(PAST_THE_KILL_WAIT).await;
+    tokio::time::sleep(PAST_THE_DEADLINE_KILL_WAIT).await;
     still_waiting(&mut answer);
     held.source.release();
     let end = answer_within(answer).await;
@@ -277,7 +292,7 @@ async fn a_deadline_kill_waits_for_the_late_exit_with_recovery_off() {
     assert_eq!(
         end,
         AttemptEnd::TimedOut {
-            timeout: timeout_ms(300),
+            timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
         }
     );
@@ -311,8 +326,11 @@ async fn a_loss_after_a_return_ends_with_the_return_once_the_late_exit_is_seen()
 async fn a_stop_before_the_late_exit_ends_the_attempt_unknown() {
     let held = HeldPool::start(&after_one_run("exec sleep 60"), ExitNotSeen::WaitForExit);
     let child = serving(&held.board, 0).await;
-    let mut answer = held.submit(&task(1, ExecutionClass::Isolated), deadline(300));
-    tokio::time::sleep(PAST_THE_KILL_WAIT).await;
+    let mut answer = held.submit(
+        &task(1, ExecutionClass::Isolated),
+        deadline(SHORT_DEADLINE_MS),
+    );
+    tokio::time::sleep(PAST_THE_DEADLINE_KILL_WAIT).await;
     still_waiting(&mut answer);
 
     let HeldPool {
@@ -459,7 +477,12 @@ async fn a_thread_child_killed_past_its_deadlines_with_no_exit_seen_ends_unknown
     );
     let child = serving(&held.board, 0).await;
 
-    let end = answer_within(submit_shared(&held.pool, &late, thread_work(100))).await;
+    let end = answer_within(submit_shared(
+        &held.pool,
+        &late,
+        thread_work(SHORT_DEADLINE_MS),
+    ))
+    .await;
 
     assert_eq!(end, AttemptEnd::EndUnknown { pid: child });
     held.stop().await;
@@ -513,10 +536,10 @@ async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off
         LiveDispatches::default(),
     );
     let first_child = serving(&held.board, 0).await;
-    let mut answer = submit_shared(&held.pool, &frozen, thread_work(100));
+    let mut answer = submit_shared(&held.pool, &frozen, thread_work(SHORT_DEADLINE_MS));
 
-    // The backstop comes 100 ms plus its margin after the send; the slot
-    // then boots a new child while a task waits for the late exit.
+    // The backstop comes the deadline plus its margin after the send; the
+    // slot then boots a new child while a task waits for the late exit.
     until(
         "the backstop killed the child",
         Duration::from_secs(40),
@@ -530,7 +553,7 @@ async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off
     assert_eq!(
         end,
         AttemptEnd::TimedOut {
-            timeout: timeout_ms(100),
+            timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
         }
     );

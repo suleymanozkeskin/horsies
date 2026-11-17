@@ -8,12 +8,10 @@
 //! `horsies/core/baseline/install.py` (`ClientFamily`, `RecordedFamily`,
 //! `_INSERT_FAMILY_SQL`).
 
-use sqlx::PgPool;
-
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::error::BrokerError;
 use crate::broker::pools::PoolSettingsError;
-use crate::db::{StatementFailure, Transience};
+use crate::db::{ParameterType, StatementFailure, Transience, TypedStatement};
 
 /// The client library that installed a database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,29 +127,23 @@ pub(crate) enum FamilyCheckError {
 
 pub(crate) const READ_FAMILY_SQL: &str = "SELECT family FROM horsies_client_family";
 
-const INSERT_FAMILY_SQL: &str = "INSERT INTO horsies_client_family (only_row, family, recorded_at)
-     VALUES (TRUE, $1, NOW())
-     ON CONFLICT (only_row) DO NOTHING";
+/// Writes `$1` as the family row when the table has none (Python
+/// `_INSERT_FAMILY_SQL`). The schema install runs it.
+pub(crate) static RECORD_CLIENT_FAMILY: TypedStatement = TypedStatement::new(
+    "record_client_family",
+    "INSERT INTO horsies_client_family (only_row, family, recorded_at)
+     VALUES (TRUE, $1, now())
+     ON CONFLICT (only_row) DO NOTHING",
+    &[ParameterType::Text],
+);
 
-/// Read the recorded family.
+/// The recorded family of the stored `family` value (none: no row).
 ///
 /// # Panics
 ///
 /// A stored value outside the two names: the CHECK
 /// `horsies_client_family_family_known` makes it impossible, so it is a
 /// broken schema, not a family (Python raises here too).
-pub(crate) async fn read_recorded_family(pool: &PgPool) -> Result<RecordedFamily, BrokerError> {
-    let stored: Option<String> = sqlx::query_scalar(READ_FAMILY_SQL)
-        .fetch_optional(pool)
-        .await?;
-    Ok(recorded_family_from(stored))
-}
-
-/// The recorded family of the stored `family` value (none: no row).
-///
-/// # Panics
-///
-/// A stored value outside the two names, as [`read_recorded_family`].
 pub(crate) fn recorded_family_from(stored: Option<String>) -> RecordedFamily {
     match stored {
         None => RecordedFamily::NotRecorded,
@@ -174,23 +166,6 @@ pub(crate) fn admit_family(
             own,
         }),
     }
-}
-
-/// Record `own` as the family of an installed database, then check it: the
-/// insert does nothing when a row exists, and the row read back must name
-/// `own`. Called by the install after the migrations.
-pub(crate) async fn record_client_family(
-    pool: &PgPool,
-    own: ClientFamily,
-) -> Result<(), BrokerError> {
-    if let RecordedFamily::Recorded(stored) = read_recorded_family(pool).await? {
-        return Ok(admit_family(RecordedFamily::Recorded(stored), own)?);
-    }
-    sqlx::query(INSERT_FAMILY_SQL)
-        .bind(own.as_str())
-        .execute(pool)
-        .await?;
-    Ok(admit_family(read_recorded_family(pool).await?, own)?)
 }
 
 #[cfg(test)]

@@ -270,10 +270,9 @@ pub fn send_error_from_enqueue(
             owner_task_id: *owner_task_id,
         },
         BrokerError::Database(_)
-        | BrokerError::Migration(_)
+        | BrokerError::SchemaRefused(_)
         | BrokerError::InvalidWorkflowNodeStatus
         | BrokerError::IncompleteTaskHistoryCutover
-        | BrokerError::SchemaVersionMismatch { .. }
         | BrokerError::InvalidStatus(_)
         | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
