@@ -140,4 +140,11 @@ MONITORING_AND_WEB_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('class_report_async',),
     ),
+    DualRunOperation(
+        name='worker ping',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.ping_workers_async',
+        reference_path='tests.dualrun.reference.broker_monitoring:ping_workers_async',
+        mode=PoolMode(),
+        core_methods=('ping_workers_async',),
+    ),
 )

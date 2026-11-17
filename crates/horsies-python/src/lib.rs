@@ -251,6 +251,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
     module.add_class::<operations::task_lists::TaskListComplete>()?;
     module.add_class::<operations::task_lists::TaskListTruncated>()?;
+    module.add_class::<operations::worker_ping::WorkerPongRecord>()?;
+    module.add_class::<operations::worker_ping::WorkerPongsRecord>()?;
     module.add_class::<operations::worker_reads::ResourceShortageRecord>()?;
     module.add_class::<operations::worker_reads::DownSlotRecord>()?;
     module.add_class::<operations::worker_reads::AllSlotsServingRecord>()?;

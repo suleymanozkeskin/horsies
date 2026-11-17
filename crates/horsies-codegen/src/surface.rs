@@ -347,6 +347,11 @@ const MONITORING_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[
 const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
 const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
 const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
+const PING_WORKERS_PARAMETERS: &[StubParameter] = &[
+    keyword("target_worker_id", "str | None"),
+    keyword("timeout_seconds", "float"),
+    keyword("min_responses", "int | None"),
+];
 const WORKER_STATE_PARAMETERS: &[StubParameter] = &[positional("worker_id", "str")];
 const WORKER_STATE_HISTORY_PARAMETERS: &[StubParameter] = &[
     positional("worker_id", "str"),
@@ -727,7 +732,7 @@ const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFa
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 17] = [
+const MONITORING_HANDLE_METHODS: [StubFunction; 18] = [
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -800,6 +805,13 @@ const MONITORING_HANDLE_METHODS: [StubFunction; 17] = [
         returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
         doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
+    StubFunction {
+        name: "ping_workers_async",
+        parameters: PING_WORKERS_PARAMETERS,
+        returns: TypeText::FutureOf("WorkerPongsRecord | BrokerFailure"),
+        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row.",
+    },
+
     StubFunction {
         name: "worker_states_async",
         parameters: &[],
@@ -1795,7 +1807,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 31] = [
+const MONITORING_CLASSES: [StubClass; 33] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1899,6 +1911,28 @@ const MONITORING_CLASSES: [StubClass; 31] = [
         ],
         methods: &[],
     },
+    StubClass {
+        name: "WorkerPongRecord",
+        doc: "One worker's reply to a ping, with the measured round trip.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("worker_id", "str"),
+            property("hostname", "str"),
+            property("pid", "int"),
+            property("round_trip_ms", "float"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerPongsRecord",
+        doc: "The distinct workers that replied within the window, in reply order.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("pongs", "list[WorkerPongRecord]"),
+        ],
+        methods: &[],
+    },
+
     StubClass {
         name: "ResourceShortageRecord",
         doc: "The cause of a down slot that ran short of an OS resource.",

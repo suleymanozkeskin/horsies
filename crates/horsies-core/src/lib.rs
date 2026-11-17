@@ -80,6 +80,8 @@ pub use crate::broker::{
     WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+// The bounded limit of a result wait; a client checks it before the read.
+pub use crate::broker::wait_limit::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
 // partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`,
 // `PostgresBroker::prune_expired_partitions`)
@@ -159,9 +161,9 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, worker_history_limit_refused, ClassBudget, ClassBudgets,
-    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
-    MAX_BOOT_FAILURE_DETAIL_CHARS,
+    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
+    worker_history_limit_refused, ClassBudget, ClassBudgets, ClearableBootCause, DownSlot,
+    DownSlots, ShortageErrno, SlotHealth, MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report
@@ -176,7 +178,7 @@ pub use crate::broker::task_lists::{
     TASK_LIST_BOUND,
 };
 
-pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};
+pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure, RecordedFamily};
 pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
@@ -187,8 +189,17 @@ pub use crate::core::history::rerun::{
 // client's adapters implement `CallerTransaction`; the core's own
 // `db::Transaction` implements it too.
 pub use crate::core::history::rerun::{
-    positional_sql, CallerColumn, CallerRow, CallerRowRefused, CallerStatement,
-    CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError, StatementValue,
+    named_bind, named_bind_sql, positional_sql, CallerColumn, CallerRow, CallerRowRefused,
+    CallerStatement, CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError,
+    StatementValue,
+};
+// The rerun as three pure steps for a transaction that the caller owns
+// (the Python bridge's `rerun_read`, `prepare_rerun_write`,
+// `decode_rerun_write`).
+pub use crate::core::history::identity::keys::IdempotencyKeyError;
+pub use crate::core::history::rerun::{
+    decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRefusal,
+    RerunRowError, RerunWrite, RerunWriteOutcome,
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{

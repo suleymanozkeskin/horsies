@@ -1,4 +1,4 @@
-"""The worker state reads and the class reads through the core handle.
+"""The worker state reads, the class reads and the worker ping through the core handle.
 
 The core answers with one record class per type and per union member; the
 broker builds the frozen dataclasses of ``horsies.core.models.health`` and
@@ -37,6 +37,8 @@ from horsies._core import (
     StreamWithoutCapacityRecord,
     TooManyPendingCalls,
     WorkerClassLoadRecord,
+    WorkerPongRecord,
+    WorkerPongsRecord,
     WorkerStateAbsent,
     WorkerStateRecord,
     WorkerStatesRecord,
@@ -45,6 +47,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     BrokerInvalidInput,
+    BrokerListenerDisabled,
     BrokerOperationFailed,
     BrokerResult,
 )
@@ -72,6 +75,7 @@ from horsies.core.models.health import (
     ClassBudgets,
     DownSlot,
     SlotsDown,
+    WorkerPong,
     WorkerStateSnapshot,
 )
 from horsies.core.models.tasks import Execution
@@ -548,3 +552,119 @@ class TestFailures:
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):
             await call(broker)
+
+
+class TestWorkerPing:
+    @pytest.mark.asyncio
+    async def test_the_pongs_become_worker_pongs_and_the_arguments_pass_as_given(self) -> None:
+        broker = _broker_answering(
+            'ping_workers_async',
+            _record(
+                WorkerPongsRecord,
+                pongs=[
+                    _record(
+                        WorkerPongRecord,
+                        worker_id='w1',
+                        hostname='host-1',
+                        pid=101,
+                        round_trip_ms=1.25,
+                    ),
+                ],
+            ),
+        )
+
+        result = await broker.ping_workers_async(
+            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+        )
+
+        assert result == Ok(
+            [WorkerPong(worker_id='w1', hostname='host-1', pid=101, round_trip_ms=1.25)],
+        )
+        handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+        handle.ping_workers_async.assert_awaited_once_with(
+            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('timeout_seconds', 'min_responses', 'message'),
+        [
+            (0, None, 'timeout_seconds must be positive, got 0'),
+            (-1.5, None, 'timeout_seconds must be positive, got -1.5'),
+            (float('nan'), None, 'timeout_seconds must be positive, got nan'),
+            (1.0, 0, 'min_responses must be >= 1 when set, got 0'),
+        ],
+        ids=['zero', 'negative', 'nan', 'no-replies'],
+    )
+    async def test_a_refused_argument_is_invalid_input_before_any_core_call(
+        self, timeout_seconds: float, min_responses: int | None, message: str,
+    ) -> None:
+        """The handle refuses with Python's text; no database is reachable here."""
+        broker = cast(PostgresBroker, _make_broker())
+
+        result = await broker.ping_workers_async(
+            timeout_seconds=timeout_seconds, min_responses=min_responses,
+        )
+
+        assert result == Err(BrokerInvalidInput(message=message, exception=NoCause()))
+
+    @pytest.mark.asyncio
+    async def test_a_broker_without_a_listener_is_listener_disabled(self) -> None:
+        message = 'ping_workers needs a listener: this broker has no listener'
+        broker = _broker_answering(
+            'ping_workers_async',
+            _record(BrokerFailure, code='LISTENER_DISABLED', message=message, retryable=False),
+        )
+
+        result = await broker.ping_workers_async()
+
+        assert result == Err(BrokerListenerDisabled(message=message))
+
+    @pytest.mark.parametrize('retryable', [True, False])
+    @pytest.mark.asyncio
+    async def test_a_ping_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
+        message = 'ping_workers ping notify failed: connection refused'
+        broker = _broker_answering(
+            'ping_workers_async',
+            _record(
+                BrokerFailure, code='WORKER_PING_FAILED', message=message, retryable=retryable,
+            ),
+        )
+
+        result = await broker.ping_workers_async()
+
+        match result:
+            case Err(BrokerOperationFailed() as error):
+                assert error.code is BrokerErrorCode.WORKER_PING_FAILED
+                assert error.message == message
+                assert error.retryable is retryable
+                assert isinstance(error.exception, CoreOperationFailed)
+                assert error.exception.subject == 'PostgresBroker.ping_workers_async'
+            case _:
+                raise AssertionError(f'expected WORKER_PING_FAILED, got {result!r}')
+
+    @pytest.mark.asyncio
+    async def test_a_core_boundary_error_is_a_ping_failure(self) -> None:
+        raised = TooManyPendingCalls('CoreHandle.ping_workers_async', 65_536)
+        broker = _broker_answering('ping_workers_async', raised)
+
+        result = await broker.ping_workers_async()
+
+        match result:
+            case Err(BrokerOperationFailed() as error):
+                assert error.code is BrokerErrorCode.WORKER_PING_FAILED
+                assert error.exception is raised
+                assert error.retryable is True
+                assert error.message.startswith('ping_workers failed: ')
+            case _:
+                raise AssertionError(f'expected WORKER_PING_FAILED, got {result!r}')
+
+    @pytest.mark.asyncio
+    async def test_another_code_from_the_core_is_a_defect(self) -> None:
+        broker = _broker_answering(
+            'ping_workers_async',
+            _record(BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+        )
+
+        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+            await broker.ping_workers_async()

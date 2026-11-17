@@ -170,6 +170,7 @@ pub struct CallerStatement {
     name: &'static str,
     statement: &'static TypedStatement,
     sql: String,
+    named_sql: String,
     parameters: Vec<StatementValue>,
     columns: &'static [CallerColumn],
 }
@@ -229,10 +230,12 @@ impl CallerStatement {
             }
         }
         let sql = positional_sql(statement)?;
+        let named_sql = named_bind_sql(statement)?;
         Ok(Self {
             name: statement.name(),
             statement,
             sql,
+            named_sql,
             parameters,
             columns,
         })
@@ -246,6 +249,18 @@ impl CallerStatement {
     /// The positional SQL text, with a cast on each parameter.
     pub fn sql(&self) -> &str {
         &self.sql
+    }
+
+    /// The SQL text for a driver with named binds (SQLAlchemy `text()`):
+    /// each `$n` is `CAST(:p<n> AS <type>)` ([`named_bind_sql`]); the value of
+    /// `:p<n>` is `parameters()[n - 1]` ([`named_bind`]).
+    pub fn named_sql(&self) -> &str {
+        &self.named_sql
+    }
+
+    /// The frozen statement, for the statement log of the core's own path.
+    pub(crate) fn typed_statement(&self) -> &'static TypedStatement {
+        self.statement
     }
 
     /// One value per parameter: `$1` is the first.
@@ -265,15 +280,57 @@ impl CallerStatement {
 /// Errors: [`CallerStatementRefused::UndeclaredParameter`] for a `$n` past
 /// the declared parameters, or `$0`.
 pub fn positional_sql(statement: &TypedStatement) -> Result<String, CallerStatementRefused> {
+    render_parameters(
+        statement,
+        |position, parameter, cast_follows| match cast_follows {
+            true => format!("${position}"),
+            false => format!("${position}::{}", parameter.sql_name()),
+        },
+    )
+}
+
+/// The name of the bind of parameter `$position` in [`named_bind_sql`]:
+/// `p1` for `$1`.
+pub fn named_bind(position: usize) -> String {
+    format!("p{position}")
+}
+
+/// The text of `statement` for a driver with named binds (SQLAlchemy
+/// `text()`): each `$n` outside quoted literals becomes
+/// `CAST(:p<n> AS <type>)`, so the driver infers no type. A cast that the
+/// text writes after `$n` stays and applies to the cast value. Pure.
+///
+/// Errors: as [`positional_sql`].
+pub fn named_bind_sql(statement: &TypedStatement) -> Result<String, CallerStatementRefused> {
+    render_parameters(statement, |position, parameter, _cast_follows| {
+        format!(
+            "CAST(:{} AS {})",
+            named_bind(position),
+            parameter.sql_name()
+        )
+    })
+}
+
+/// The text of `statement` with each `$n` outside quoted literals replaced
+/// by `placeholder(n, declared type, whether "::" follows)`. Pure.
+///
+/// Errors: [`CallerStatementRefused::UndeclaredParameter`] for a `$n` past
+/// the declared parameters, or `$0`.
+fn render_parameters(
+    statement: &TypedStatement,
+    placeholder: impl Fn(usize, ParameterType, bool) -> String,
+) -> Result<String, CallerStatementRefused> {
     let sql = statement.sql();
     let declared = statement.parameter_types();
-    let mut text = String::with_capacity(sql.len() + declared.len() * 14);
+    let mut text = String::with_capacity(sql.len() + declared.len() * 24);
     let mut in_literal = false;
     let mut chars = sql.char_indices().peekable();
     while let Some((index, character)) = chars.next() {
-        text.push(character);
         match (in_literal, character) {
-            (true, '\'') | (false, '\'') => in_literal = !in_literal,
+            (true, '\'') | (false, '\'') => {
+                in_literal = !in_literal;
+                text.push(character);
+            }
             (false, '$') => {
                 let start = index + 1;
                 let mut end = start;
@@ -281,11 +338,11 @@ pub fn positional_sql(statement: &TypedStatement) -> Result<String, CallerStatem
                     if !digit.is_ascii_digit() {
                         break;
                     }
-                    text.push(digit);
                     end = at + 1;
                     let _digit = chars.next();
                 }
                 if end == start {
+                    text.push(character);
                     continue;
                 }
                 let position: usize = sql[start..end]
@@ -298,12 +355,13 @@ pub fn positional_sql(statement: &TypedStatement) -> Result<String, CallerStatem
                         statement: statement.name(),
                         position,
                     })?;
-                if !sql[end..].starts_with("::") {
-                    text.push_str("::");
-                    text.push_str(parameter.sql_name());
-                }
+                text.push_str(&placeholder(
+                    position,
+                    *parameter,
+                    sql[end..].starts_with("::"),
+                ));
             }
-            (true, _) | (false, _) => {}
+            (true, _) | (false, _) => text.push(character),
         }
     }
     Ok(text)
@@ -575,6 +633,23 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    /// The named-bind text casts each bind; a cast already written stays
+    /// after it, and a `$n` in a quoted literal stays as it is.
+    #[test]
+    fn the_named_text_binds_and_casts_each_parameter() {
+        assert_eq!(
+            named_bind_sql(&READ),
+            Ok(
+                "SELECT outcome, task_id FROM some_function(CAST(:p1 AS uuid), \
+                 CAST(:p2 AS text), 'a $3 in a literal', CAST(:p3 AS int8)::bigint)"
+                    .to_owned()
+            )
+        );
+        assert_eq!(named_bind(3), "p3");
+        let built = CallerStatement::new(&READ, read_values(), &COLUMNS).expect("the values fit");
+        assert!(built.named_sql().contains("CAST(:p1 AS uuid)"));
     }
 
     /// The first statement of a rerun renders with a cast on both of its
