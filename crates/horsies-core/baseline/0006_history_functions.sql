@@ -905,6 +905,11 @@ $$;
 -- session-scoped advisory lock horsies_task_history_leaf_lock_key(class_key, lower_anchor) with a try-lock, and
 -- the leaf is inspected again under the lock. After the call the session holds the lock exactly when the outcome
 -- is DETACHABLE or DETACH_INTERRUPTED; every other outcome leaves no lock behind.
+-- A DETACHED leaf (it has no parent and nothing pins it, for example after a detach out of band) gets its detach
+-- recorded in the caller's transaction, without the leaf lock: horsies_record_leaf_detached and, when the published
+-- manifest names the leaf, the reader publication (horsies_publish_history_readers). The leaf is then inspected
+-- again, and that state is the outcome. So the catalog records every detach that a pruning pass finds, the readers
+-- no longer name the leaf, and horsies_drop_detached_leaf is not refused with REFERENCED_BY_MANIFEST.
 -- Outcomes: BUSY (another session holds the leaf lock: maintenance, or a move into the leaf that has not ended), or a
 -- state of horsies_inspect_history_leaf.
 -- The caller then runs, alone on the same connection in autocommit:
@@ -915,8 +920,11 @@ $$;
 -- - then horsies_record_leaf_detached in a transaction (with the reader publication when it says so), then RESET
 --   of both timeouts and pg_advisory_unlock of the key in one simple query. A cancel, or a failure whose lock state
 --   is not clear, closes the connection instead: a session lock does not end with a transaction.
--- Refusals: as horsies_inspect_history_leaf. A raise after the lock was taken releases it before it propagates.
--- Lock order: the session leaf lock, then (the caller's statement) the relation locks of the detach.
+-- Refusals: as horsies_inspect_history_leaf; for a DETACHED leaf that the manifest names, 25000
+-- invalid_transaction_state from the reader publication under another isolation than READ COMMITTED (nothing is
+-- recorded). A raise after the lock was taken releases it before it propagates.
+-- Lock order: the catalog row, then the publication lock (the record of a DETACHED leaf); the session leaf lock,
+-- then (the caller's statement) the relation locks of the detach.
 -- Returns: one row: the outcome and the inspection columns.
 -- Replaces: history/partitions/manager.py:763-876 (detach_expired_leaf up to the DETACH) and :969-1044
 -- (finalize_interrupted_detach up to the FINALIZE): two inspections and the lock, about 12 statements.
@@ -926,9 +934,18 @@ CREATE FUNCTION horsies_begin_leaf_detach(p_leaf_name text) RETURNS TABLE(outcom
 #variable_conflict use_column
 DECLARE
     v_inspection record;
+    v_recorded record;
     v_key bigint;
 BEGIN
     SELECT * INTO STRICT v_inspection FROM horsies_inspect_history_leaf(p_leaf_name);
+    IF v_inspection.state = 'DETACHED' THEN
+        -- A detach out of band has no record: the manifest would keep naming the leaf, and its drop be refused.
+        SELECT * INTO STRICT v_recorded FROM horsies_record_leaf_detached(p_leaf_name);
+        IF v_recorded.manifest_names_leaf THEN
+            PERFORM 1 FROM horsies_publish_history_readers();
+        END IF;
+        SELECT * INTO STRICT v_inspection FROM horsies_inspect_history_leaf(p_leaf_name);
+    END IF;
     IF v_inspection.state NOT IN ('DETACHABLE', 'DETACH_INTERRUPTED') THEN
         RETURN QUERY SELECT v_inspection.state, v_inspection.class_key, v_inspection.class_kind,
             v_inspection.parent_name, v_inspection.lower_anchor, v_inspection.upper_anchor,
