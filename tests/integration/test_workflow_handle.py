@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
 import pytest
+import pytest_asyncio
+from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode
 from horsies.core.models.workflow import (
     TaskNode,
@@ -28,20 +32,46 @@ from horsies.core.models.workflow import (
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
 )
-from horsies.core.codec.json_io import SerializationError
-from horsies.core.types.result import is_ok, is_err
+from horsies.core.codec.json_io import SerializationError, dumps_json
+from horsies.core.codec.typed import encode_task_error
+from horsies.core.types.core_failure import CoreOperationFailed
+from horsies.core.types.result import Err, Ok, is_ok, is_err
+from horsies.core.workflows.functions import EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL
 from horsies.core.workflows.lifecycle import expire_paused_workflows
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.worker.worker import Worker
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from tests.integration.conftest import finish_task
-from tests.broker_resources_support import current_resources, listener_of, replaced_resources
+from tests.broker_resources_support import current_resources, listener_of
 
 
 # =============================================================================
 # Shared helpers
 # =============================================================================
+
+
+UNREACHABLE_DATABASE_URL = 'postgresql://postgres:none@127.0.0.1:1/none'
+"""A port where no server listens: each core call fails at the connect."""
+
+
+@pytest_asyncio.fixture
+async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """A broker whose core cannot reach its database: a handle on it gets
+    the core's retryable database failure for each call."""
+    broken = PostgresBroker(
+        PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
+        assume_initialized=True,
+    )
+    yield broken
+    _ = await broken.close_async()
+
+
+async def _execute(session: AsyncSession, statement: str) -> None:
+    """Run ``statement`` and commit, so that the core's connections see it."""
+    _ = await session.execute(text(statement))
+    await session.commit()
 
 
 async def _workflow_completed_at(
@@ -2216,23 +2246,66 @@ class TestResumeCommitSplit:
     async def test_recovery_db_error_returns_resume_recovery_failed(
         self,
         clean_workflow_tables: None,
+        session: AsyncSession,
         broker: PostgresBroker,
         app: Horsies,
+        db_url: str,
     ) -> None:
-        """The resume committed: the workflow is RUNNING."""
-        handle = await self._paused_workflow(broker, app, 'resume_recovery_err')
-        db_exc = OperationalError('recovery pass', {}, Exception('connection lost'))
+        """The resume committed: the workflow is RUNNING.
 
-        with patch(
-            'horsies.core.workflows.recovery.recover_stuck_workflow_tree',
-            new=AsyncMock(side_effect=db_exc),
-        ):
-            resume_r = await handle.resume_async()
+        The resume and the recovery pass of its tree run in the core. A
+        deferred constraint trigger on the status change PAUSED -> RUNNING
+        runs at the resume's COMMIT and sets the session's search_path to a
+        schema with no table. The setting outlives the commit, so the next
+        statement on that connection, the tree read of the recovery pass,
+        fails. The resume runs on a broker whose core pool holds one
+        connection, which the resume and the recovery pass both take (the
+        core's ``a_database_error_after_the_resume_commit_is_resume_recovery_failed``).
+        """
+        handle = await self._paused_workflow(broker, app, 'resume_recovery_err')
+        await _execute(
+            session,
+            """
+            CREATE FUNCTION it_lose_search_path() RETURNS trigger
+            LANGUAGE plpgsql AS $body$
+            BEGIN
+                PERFORM set_config('search_path', 'it_no_tables', false);
+                RETURN NULL;
+            END
+            $body$
+            """,
+        )
+        await _execute(
+            session,
+            f"""
+            CREATE CONSTRAINT TRIGGER it_lose_search_path
+            AFTER UPDATE ON horsies_workflows
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW
+            WHEN (
+                NEW.id = '{handle.workflow_id}'::uuid
+                AND OLD.status = 'PAUSED' AND NEW.status = 'RUNNING'
+            )
+            EXECUTE FUNCTION it_lose_search_path()
+            """,
+        )
+        one_connection = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(db_url), pool_size=1, max_overflow=0),
+            assume_initialized=True,
+        )
+        try:
+            resume_r = await WorkflowHandle(
+                workflow_id=handle.workflow_id, broker=one_connection,
+            ).resume_async()
+        finally:
+            _ = await one_connection.close_async()
+            await _execute(session, 'DROP TRIGGER it_lose_search_path ON horsies_workflows')
+            await _execute(session, 'DROP FUNCTION it_lose_search_path()')
 
         assert is_err(resume_r)
         err = resume_r.err_value
         assert isinstance(err, HandleResumeRecoveryFailed)
-        assert err.exception is db_exc
+        assert isinstance(err.exception, CoreOperationFailed)
         assert err.workflow_id == handle.workflow_id
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -2241,24 +2314,50 @@ class TestResumeCommitSplit:
     async def test_db_error_before_the_commit_returns_db_operation_failed(
         self,
         clean_workflow_tables: None,
+        session: AsyncSession,
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """The resume transaction rolled back: the workflow stays PAUSED."""
-        handle = await self._paused_workflow(broker, app, 'resume_commit_err')
-        db_exc = OperationalError('child start', {}, Exception('connection lost'))
+        """The resume transaction rolled back: the workflow stays PAUSED.
 
-        # The resume statement ran in the transaction; the next statement fails.
-        with patch(
-            'horsies.core.workflows.steps.run_child_starts',
-            new=AsyncMock(side_effect=db_exc),
-        ):
+        The resume runs in the core, in one transaction. A trigger refuses
+        the status change PAUSED -> RUNNING with a retryable SQLSTATE
+        (57P01, admin_shutdown), so the resume fails at its first write and
+        before its commit (the core's
+        ``a_database_error_before_the_resume_commit_keeps_the_workflow_paused``).
+        """
+        handle = await self._paused_workflow(broker, app, 'resume_commit_err')
+        await _execute(
+            session,
+            f"""
+            CREATE FUNCTION it_refuse_resume() RETURNS trigger
+            LANGUAGE plpgsql AS $body$
+            BEGIN
+                IF NEW.id = '{handle.workflow_id}'::uuid
+                   AND OLD.status = 'PAUSED' AND NEW.status = 'RUNNING' THEN
+                    RAISE EXCEPTION 'resume refused by the test' USING ERRCODE = '57P01';
+                END IF;
+                RETURN NEW;
+            END
+            $body$
+            """,
+        )
+        await _execute(
+            session,
+            'CREATE TRIGGER it_refuse_resume AFTER UPDATE ON horsies_workflows '
+            'FOR EACH ROW EXECUTE FUNCTION it_refuse_resume()',
+        )
+        try:
             resume_r = await handle.resume_async()
+        finally:
+            await _execute(session, 'DROP TRIGGER it_refuse_resume ON horsies_workflows')
+            await _execute(session, 'DROP FUNCTION it_refuse_resume()')
 
         assert is_err(resume_r)
         err = resume_r.err_value
         assert isinstance(err, HandleDbOperationFailed)
-        assert err.exception is db_exc
+        assert isinstance(err.exception, CoreOperationFailed)
+        assert 'resume refused by the test' in err.message
         assert err.retryable is True
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -2308,62 +2407,55 @@ class TestUnknownStoredWorkflowStatus:
 class TestWorkflowHandleInfraErrors:
     """Tests for infrastructure error handling in WorkflowHandle methods."""
 
+    async def _started_on_an_unreachable_database(
+        self,
+        broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
+        app: Horsies,
+        name: str,
+    ) -> WorkflowHandle[Any]:
+        """A workflow started on ``broker``, and a handle of it on a broker
+        whose core cannot reach the database. The handle's reads and writes
+        run in the core; each fails at the connect."""
+        task_a = make_simple_task(app, f'{name}_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a])
+        started = await start_ok(spec, broker)
+        return WorkflowHandle(workflow_id=started.workflow_id, broker=unreachable_broker)
+
     async def test_status_db_error_returns_err_db_operation_failed(
         self,
         clean_workflow_tables: None,
         broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
         """status_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
-        task_a = make_simple_task(app, 'status_db_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='status_db_err', tasks=[node_a],
+        handle = await self._started_on_an_unreachable_database(
+            broker, unreachable_broker, app, 'status_db_err',
         )
-        handle = await start_ok(spec, broker)
 
-        # Patch session.execute to raise OperationalError
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = OperationalError(
-            'connection lost', {}, Exception('test'),
-        )
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-
-        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
-            status_r = await handle.status_async()
+        status_r = await handle.status_async()
 
         assert is_err(status_r)
         assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert status_r.err_value.workflow_id
+        assert status_r.err_value.workflow_id == handle.workflow_id
         assert status_r.err_value.retryable is True
 
     async def test_get_db_error_returns_taskresult_broker_error(
         self,
         clean_workflow_tables: None,
         broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """get_async() returns TaskResult(err=BROKER_ERROR) when status_async fails."""
-        task_a = make_simple_task(app, 'get_db_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='get_db_err', tasks=[node_a],
+        """get_async() returns TaskResult(err=BROKER_ERROR) when the read of
+        the wait fails."""
+        handle = await self._started_on_an_unreachable_database(
+            broker, unreachable_broker, app, 'get_db_err',
         )
-        handle = await start_ok(spec, broker)
 
-        # Patch session to raise on execute
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = OperationalError(
-            'connection lost', {}, Exception('test'),
-        )
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-
-        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
-            result = await handle.get_async(timeout_ms=500)
+        result = await handle.get_async(timeout_ms=500)
 
         assert result.is_err()
         assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
@@ -2371,62 +2463,47 @@ class TestWorkflowHandleInfraErrors:
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
         clean_workflow_tables: None,
+        session: AsyncSession,
         broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """cancel_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
-        task_a = make_simple_task(app, 'cancel_db_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='cancel_db_err', tasks=[node_a],
+        """cancel_async() returns Err(DB_OPERATION_FAILED) on DB failure, and
+        the workflow is not cancelled."""
+        handle = await self._started_on_an_unreachable_database(
+            broker, unreachable_broker, app, 'cancel_db_err',
         )
-        handle = await start_ok(spec, broker)
 
-        mock_connection = AsyncMock()
-        mock_connection.execute.side_effect = OperationalError(
-            'connection lost', {}, Exception('test'),
-        )
-        mock_session = AsyncMock()
-        mock_session.connection = AsyncMock(return_value=mock_connection)
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-
-        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
-            cancel_r = await handle.cancel_async()
+        cancel_r = await handle.cancel_async()
 
         assert is_err(cancel_r)
         assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
         assert cancel_r.err_value.retryable is True
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
+                {'wf_id': handle.workflow_id},
+            )
+        ).scalar_one()
+        assert status == 'RUNNING'
 
     async def test_results_db_error_returns_err_db_operation_failed(
         self,
         clean_workflow_tables: None,
         broker: PostgresBroker,
+        unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
         """results_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
-        task_a = make_simple_task(app, 'results_db_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        spec = make_workflow_spec(
-            broker=broker, name='results_db_err', tasks=[node_a],
+        handle = await self._started_on_an_unreachable_database(
+            broker, unreachable_broker, app, 'results_db_err',
         )
-        handle = await start_ok(spec, broker)
 
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = OperationalError(
-            'connection lost', {}, Exception('test'),
-        )
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-
-        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
-            results_r = await handle.results_async()
+        results_r = await handle.results_async()
 
         assert is_err(results_r)
         assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
-        assert results_r.err_value.workflow_id
+        assert results_r.err_value.workflow_id == handle.workflow_id
 
     async def test_handle_methods_do_not_leak_db_exceptions(
         self,
@@ -2530,17 +2607,20 @@ class TestListenerFallbackContract:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """Programming error from listener.listen must propagate, not degrade to polling."""
+        """A programming error of the wait must propagate, not degrade to a
+        BROKER_ERROR answer. The wait and its listener run in the core
+        (``CoreHandle.wait_workflow_result_async``); get_async folds only the
+        core boundary errors (``CoreError``) and the failure records."""
         task_a = make_simple_task(app, 'listen_prog_err_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='listen_prog_err', tasks=[node_a], output=node_a,
         )
         handle = await start_ok(spec, broker)
+        core_handle = MagicMock()
+        core_handle.wait_workflow_result_async = AsyncMock(side_effect=TypeError('test bug'))
 
-        with patch.object(
-            listener_of(broker), 'listen', new=AsyncMock(side_effect=TypeError('test bug')),
-        ):
+        with patch.object(broker, '_core_handle', core_handle):
             with pytest.raises(TypeError, match='test bug'):
                 await handle.get_async(timeout_ms=1000)
 
@@ -2581,46 +2661,84 @@ async def _paused_workflow(
     return handle.workflow_id
 
 
-async def _expire_at_one_now(
+async def _set_paused_for(
+    session: AsyncSession, paused_for: dict[str, timedelta],
+) -> None:
+    """Set ``updated_at`` of each workflow to ``now()`` minus its value, sent
+    as microseconds, and commit."""
+    for workflow_id, paused in paused_for.items():
+        _ = await session.execute(
+            text(
+                'UPDATE horsies_workflows SET updated_at = now()'
+                " - CAST(:paused_us AS bigint) * interval '1 microsecond'"
+                ' WHERE id = CAST(:wf_id AS uuid)'
+            ),
+            {
+                'paused_us': paused // timedelta(microseconds=1),
+                'wf_id': workflow_id,
+            },
+        )
+    await session.commit()
+
+
+async def _statuses(session: AsyncSession, workflow_ids: list[str]) -> dict[str, str]:
+    """The stored status of each workflow, read in a new snapshot."""
+    await session.commit()
+    statuses: dict[str, str] = {}
+    for workflow_id in workflow_ids:
+        statuses[workflow_id] = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = CAST(:wf_id AS uuid)'),
+                {'wf_id': workflow_id},
+            )
+        ).scalar_one()
+    return statuses
+
+
+class _Reaper(ReaperMixin):
+    """The reaper mixin alone: its paused expiry runs in the core."""
+
+
+def _expiry_error_json(older_than: timedelta) -> str:
+    """A stored error for a paused expiry; the age tests read only the status."""
+    match dumps_json(
+        encode_task_error(
+            TaskError(
+                error_code=OutcomeCode.WORKFLOW_EXPIRED,
+                message=f'paused_workflow_auto_cancel_after elapsed: {older_than}',
+            ),
+        ),
+    ):
+        case Ok(error_json):
+            return error_json
+        case Err(refused):
+            raise AssertionError(refused)
+
+
+async def _expire_each_at_one_now(
     broker: PostgresBroker,
     *,
     older_than: timedelta,
     paused_for: dict[str, timedelta],
-    daylight_start_in_last_day: bool,
-) -> tuple[int, dict[str, str]]:
-    """Run ``expire_paused_workflows`` with the setup and every statement of
-    it in one transaction on one connection, then roll the transaction back.
+) -> tuple[list[str], dict[str, str]]:
+    """Set ``updated_at`` of each workflow, then call
+    ``horsies_workflow_expire_paused`` for it with the age in microseconds,
+    as the core's paused expiry does, all in one transaction on one
+    connection; then roll the transaction back.
 
-    ``now()`` is the start of that transaction for all of them, so the
-    distance of each workflow to the age is exact. ``paused_for`` sets
-    ``updated_at`` to ``now()`` minus the value, sent as microseconds. With
-    ``daylight_start_in_last_day`` the session time zone is
-    ``_zone_with_daylight_start_before(now())``, checked before the call.
+    ``now()`` is the start of that transaction for every statement, so the
+    distance of each workflow to the age is exact.
 
-    Returns the expired count and the status of each workflow, read before
-    the rollback.
+    Returns the outcome of each call and the status of each workflow, read
+    before the rollback.
     """
     engine = current_resources(broker).engine
+    age_us = older_than // timedelta(microseconds=1)
     async with engine.connect() as connection:
         transaction = await connection.begin()
         try:
-            if daylight_start_in_last_day:
-                now = (await connection.execute(text('SELECT now()'))).scalar_one()
-                await connection.execute(
-                    text("SELECT set_config('TimeZone', :zone, true)"),
-                    {'zone': _zone_with_daylight_start_before(now)},
-                )
-                one_day_is_23_hours = (
-                    await connection.execute(
-                        text(
-                            "SELECT now() - interval '1 day'"
-                            " = now() - interval '23 hours'"
-                        ),
-                    )
-                ).scalar_one()
-                assert one_day_is_23_hours is True
             for workflow_id, paused in paused_for.items():
-                await connection.execute(
+                _ = await connection.execute(
                     text(
                         'UPDATE horsies_workflows SET updated_at = now()'
                         " - CAST(:paused_us AS bigint) * interval '1 microsecond'"
@@ -2631,14 +2749,20 @@ async def _expire_at_one_now(
                         'wf_id': workflow_id,
                     },
                 )
-            sessions = async_sessionmaker(
-                bind=connection,
-                join_transaction_mode='create_savepoint',
-                expire_on_commit=False,
-            )
-            expired = await expire_paused_workflows(
-                sessions, older_than=older_than, batch_size=10,
-            )
+            outcomes: list[str] = []
+            for workflow_id in paused_for:
+                outcomes.append(
+                    (
+                        await connection.execute(
+                            EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL,
+                            {
+                                'wf_id': workflow_id,
+                                'age_us': age_us,
+                                'error': _expiry_error_json(older_than),
+                            },
+                        )
+                    ).one().outcome,
+                )
             statuses: dict[str, str] = {}
             for workflow_id in paused_for:
                 statuses[workflow_id] = (
@@ -2650,7 +2774,7 @@ async def _expire_at_one_now(
                         {'wf_id': workflow_id},
                     )
                 ).scalar_one()
-            return expired, statuses
+            return outcomes, statuses
         finally:
             await transaction.rollback()
 
@@ -2658,7 +2782,15 @@ async def _expire_at_one_now(
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestPausedExpiryAge:
-    """The paused age goes to the database as exact microseconds."""
+    """The paused age goes to the database as exact microseconds.
+
+    The reaper's paused expiry runs in the core
+    (``ReaperMixin._expire_paused_workflows``,
+    ``CoreHandle.expire_paused_workflows_async``): it sends
+    ``older_than // timedelta(microseconds=1)`` (pinned in
+    ``test_reaper_workflow_core_calls``), reads the candidates and calls
+    ``horsies_workflow_expire_paused`` for each, in autocommit.
+    """
 
     async def test_an_age_of_one_day_is_24_hours_across_a_daylight_saving_change(
         self,
@@ -2666,22 +2798,49 @@ class TestPausedExpiryAge:
         session: AsyncSession,
         broker: PostgresBroker,
         app: Horsies,
+        db_url: str,
     ) -> None:
+        """The core's sessions take the database's TimeZone, set here to a
+        zone whose daylight time began 12 hours ago: in it ``interval '1
+        day'`` before now is 23 hours. The core's expiry, on a broker whose
+        connections open after the setting, expires the workflow paused for
+        24.5 hours and keeps the one paused for 23.5 hours. The margins of 30
+        minutes hold over the time between the setup and the expiry."""
         kept = await _paused_workflow(session, broker, app, 'expiry_dst_kept')
         expired = await _paused_workflow(session, broker, app, 'expiry_dst_expired')
-
-        count, statuses = await _expire_at_one_now(
-            broker,
-            older_than=timedelta(days=1),
-            paused_for={
+        await _set_paused_for(
+            session,
+            {
                 kept: timedelta(hours=23, minutes=30),
                 expired: timedelta(hours=24, minutes=30),
             },
-            daylight_start_in_last_day=True,
         )
+        now = (await session.execute(text('SELECT now()'))).scalar_one()
+        database = (await session.execute(text('SELECT current_database()'))).scalar_one()
+        await session.commit()
+        zone = _zone_with_daylight_start_before(now)
+        await _execute(session, f"ALTER DATABASE \"{database}\" SET TimeZone = '{zone}'")
+        zoned = PostgresBroker(PostgresConfig(database_url=SecretStr(db_url)), assume_initialized=True)
+        try:
+            # A session that opens now takes the zone: one day before now is
+            # 23 hours in it.
+            async with await psycopg.AsyncConnection.connect(db_url) as fresh:
+                cursor = await fresh.execute(
+                    "SELECT now() - interval '1 day' = now() - interval '23 hours'",
+                )
+                assert await cursor.fetchone() == (True,)
+            count = await _Reaper()._expire_paused_workflows(  # pyright: ignore[reportPrivateUsage]
+                zoned, older_than=timedelta(days=1),
+            )
+        finally:
+            _ = await zoned.close_async()
+            await _execute(session, f'ALTER DATABASE "{database}" RESET TimeZone')
 
         assert count == 1
-        assert statuses == {kept: 'PAUSED', expired: 'EXPIRED'}
+        assert await _statuses(session, [kept, expired]) == {
+            kept: 'PAUSED',
+            expired: 'EXPIRED',
+        }
 
     async def test_an_age_below_one_millisecond_is_exact(
         self,
@@ -2690,18 +2849,21 @@ class TestPausedExpiryAge:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
+        """An age of 500 microseconds keeps the workflow paused for 400 and
+        expires the one paused for 600. Two transactions of the core never
+        share one ``now()``, so the test calls the function of the core's
+        expiry in one transaction with the setup."""
         kept = await _paused_workflow(session, broker, app, 'expiry_us_kept')
         expired = await _paused_workflow(session, broker, app, 'expiry_us_expired')
 
-        count, statuses = await _expire_at_one_now(
+        outcomes, statuses = await _expire_each_at_one_now(
             broker,
             older_than=timedelta(microseconds=500),
             paused_for={
                 kept: timedelta(microseconds=400),
                 expired: timedelta(microseconds=600),
             },
-            daylight_start_in_last_day=False,
         )
 
-        assert count == 1
+        assert outcomes == ['NOT_EXPIRED', 'EXPIRED']
         assert statuses == {kept: 'PAUSED', expired: 'EXPIRED'}
