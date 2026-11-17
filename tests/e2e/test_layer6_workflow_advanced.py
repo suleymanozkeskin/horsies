@@ -510,7 +510,7 @@ async def test_success_policy_multiple_cases(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
     """T6.9: Recovery finalizes stuck workflows with correct results/errors."""
-    from horsies.core.workflows.recovery import recover_stuck_workflows
+    from horsies.core.workflows.recovery import recover_stuck_workflows_global
     from sqlalchemy import text
 
     with run_worker(
@@ -545,10 +545,10 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
             await session.commit()
 
         # Run recovery
-        async with current_resources(broker).session_factory() as session:
-            recovered = await recover_stuck_workflows(session)
-            assert recovered >= 1, 'Should recover at least one workflow'
-            await session.commit()
+        report = await recover_stuck_workflows_global(
+            current_resources(broker).session_factory, broker,
+        )
+        assert report.recovered >= 1, 'Should recover at least one workflow'
 
         # Verify workflow is back to COMPLETED
         wf_status = await get_workflow_status(
@@ -563,7 +563,7 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_recovery_preserves_failed_state(broker: PostgresBroker) -> None:
     """T6.9b: Recovery re-finalizes a failed workflow stuck in RUNNING."""
-    from horsies.core.workflows.recovery import recover_stuck_workflows
+    from horsies.core.workflows.recovery import recover_stuck_workflows_global
     from sqlalchemy import text
 
     with run_worker(
@@ -598,10 +598,10 @@ async def test_recovery_preserves_failed_state(broker: PostgresBroker) -> None:
         assert wf_status == 'RUNNING'
 
         # Run recovery
-        async with current_resources(broker).session_factory() as session:
-            recovered = await recover_stuck_workflows(session)
-            assert recovered >= 1, 'Should recover at least one workflow'
-            await session.commit()
+        report = await recover_stuck_workflows_global(
+            current_resources(broker).session_factory, broker,
+        )
+        assert report.recovered >= 1, 'Should recover at least one workflow'
 
         # Verify workflow is back to FAILED (not COMPLETED)
         wf_status = await get_workflow_status(

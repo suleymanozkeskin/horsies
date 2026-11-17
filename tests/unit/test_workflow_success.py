@@ -13,7 +13,7 @@ from horsies.core.history.terminalization.move import (
     FINISH_WORKFLOW_SUCCESS_FUNCTION,
 )
 from horsies.core.lifecycle.commands import CompleteLockedTask
-from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
@@ -211,11 +211,11 @@ class TestCommand:
     def test_the_success_of_a_locked_completion_carries_the_full_fence(self) -> None:
         completion = CompleteLockedTask(
             task_id=TASK_ID,
-            fence=PriorLockedRead(worker_id='w-1'),
+            fence=OwnedClaim(worker_id='w-1', claimed_at=NOW),
             result_json='{"ok": 1}',
         )
 
-        assert success_for(completion, claimed_at=NOW) == FinishWorkflowSuccess(
+        assert success_for(completion) == FinishWorkflowSuccess(
             task_id=TASK_ID,
             fence=OwnedClaim(worker_id='w-1', claimed_at=NOW),
             result_json='{"ok": 1}',

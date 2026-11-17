@@ -23,7 +23,7 @@ from typing import get_args
 
 import pytest
 
-from horsies.core.lifecycle.commands import TerminalizationCommand
+from horsies.core.lifecycle.commands import TerminalizationCommand, fence_of
 from horsies.core.lifecycle.operations import (
     EQUIVALENCE_CLASSES,
     TerminalizationKind,
@@ -32,8 +32,9 @@ from horsies.core.lifecycle.operations import (
     is_already_applied,
     kind_of,
 )
-from tests.lifecycle_matrix import MATRIX
+from tests.lifecycle_matrix import MATRIX, TerminalWriter
 from tests.unit.test_lifecycle_commands import (
+    FENCE_TYPE_OF,
     ONE_OF_EACH,
     WRITERS_WITHOUT_A_COMMAND,
 )
@@ -189,6 +190,23 @@ class TestEveryCommandHasADatabaseIdentity:
         for writer_id, kind in KIND_OF_WRITER_WITHOUT_A_COMMAND.items():
             function = baseline_function(FUNCTION_OF_WRITER[writer_id])
             assert f"'{kind.value}'" in function, writer_id
+
+
+class TestEachCommandCarriesTheFenceOfItsWriter:
+    @pytest.mark.parametrize(
+        'row',
+        [row for row in MATRIX if row.writer_id in COMMAND_BY_WRITER],
+        ids=lambda row: row.writer_id,
+    )
+    def test_the_fence_type_is_the_writer_fence(self, row: TerminalWriter) -> None:
+        """Per writer, not per set: a command whose fence lacks part of the
+        ownership its writer compares cannot hide behind another command of
+        the same model. The finalize decisions carry the full claim, as
+        their attempt writers compare the worker and the generation."""
+        command = _command_by_name()[COMMAND_BY_WRITER[row.writer_id]]
+        fence = fence_of(command)
+        fence_type = None if fence is None else type(fence).__name__
+        assert fence_type == FENCE_TYPE_OF[row.fence], row.writer_id
 
 
 class TestEquivalenceClasses:

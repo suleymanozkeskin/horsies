@@ -42,7 +42,7 @@ from .commands import (
     FailLockedTask,
     TerminalizationCommand,
 )
-from .fences import OwnedClaim, PriorLockedRead
+from .fences import OwnedClaim
 
 _WORKFLOW_STOPPED = 'WORKFLOW_STOPPED'
 _WORKER_FAILURE_FALLBACK = 'Worker failure'
@@ -149,6 +149,12 @@ class FinalizeContext:
     queue_name: str
     result_json: str
     orphan_self_heal_enabled: bool
+
+
+def _owned_claim(context: FinalizeContext) -> OwnedClaim:
+    """The fence of every command that ends the row: this worker at the claim
+    generation that this dispatch was handed. Pure."""
+    return OwnedClaim(worker_id=context.worker_id, claimed_at=context.claimed_at)
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +271,7 @@ def terminalization_for_refused_retry(
     return ApplyTerminalization(
         FailLockedTask(
             task_id=context.task_id,
-            fence=PriorLockedRead(worker_id=context.worker_id),
+            fence=_owned_claim(context),
             result_json=context.result_json,
             error_code=_error_code_of(error),
             failed_reason=None,
@@ -307,10 +313,7 @@ def _classify_abort(
             return ApplyTerminalization(
                 CancelOwnedOrphan(
                     task_id=context.task_id,
-                    fence=OwnedClaim(
-                        worker_id=context.worker_id,
-                        claimed_at=context.claimed_at,
-                    ),
+                    fence=_owned_claim(context),
                 )
             )
         case _ as unreachable:
@@ -326,14 +329,12 @@ def _success_command(context: FinalizeContext) -> TerminalizationCommand:
     if context.is_workflow_task:
         return CompleteLockedTask(
             task_id=context.task_id,
-            fence=PriorLockedRead(worker_id=context.worker_id),
+            fence=_owned_claim(context),
             result_json=context.result_json,
         )
     return CompleteTaskFused(
         task_id=context.task_id,
-        fence=OwnedClaim(
-            worker_id=context.worker_id, claimed_at=context.claimed_at,
-        ),
+        fence=_owned_claim(context),
         result_json=context.result_json,
     )
 
@@ -355,7 +356,7 @@ def _worker_failure_command(
     )
     return FailLockedTask(
         task_id=context.task_id,
-        fence=PriorLockedRead(worker_id=context.worker_id),
+        fence=_owned_claim(context),
         result_json=serialize_error_payload(TaskResult(err=error)),
         error_code=OperationalErrorCode.BROKER_ERROR.value,
         failed_reason=message,
@@ -379,7 +380,7 @@ def _undecodable_command(
     )
     return FailLockedTask(
         task_id=context.task_id,
-        fence=PriorLockedRead(worker_id=context.worker_id),
+        fence=_owned_claim(context),
         result_json=serialize_error_payload(TaskResult(err=error)),
         error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
         failed_reason=None,

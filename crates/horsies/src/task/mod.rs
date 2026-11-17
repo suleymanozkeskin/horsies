@@ -3,13 +3,19 @@
 //! error code enum, the body adapters that the core's child host calls, and
 //! `TaskRuntime`.
 
+pub(crate) mod body;
 mod error;
+mod macros;
+mod runtime;
 mod user_code;
 
 pub use error::{TaskError, TaskErrorCode, UnknownUserCode};
+pub use runtime::TaskRuntime;
 pub use user_code::UserErrorCode;
 
-pub(crate) use user_code::{is_free_user_code, user_code_refusals};
+pub(crate) use user_code::{
+    is_free_user_code, is_retry_code, stored_retry_code, user_code_refusals,
+};
 
 /// `#[derive(horsies::UserErrorCode)]`: one code per unit variant, its name
 /// in UPPER_SNAKE_CASE; a built-in or reserved name is a compile error.
@@ -20,4 +26,11 @@ pub use horsies_core::core::task::error::ExceptionRecord;
 pub use horsies_core::{
     BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
     SubWorkflowFailure,
+};
+
+// Registration by hand: `Horsies::register` takes a `RegisteredTask` that
+// `async_task_fn!` or `blocking_task_fn!` builds, with its options.
+pub use horsies_core::{
+    BackoffStrategy, CancelGraceMs, CancelGraceOutOfRange, Execution, RegisteredTask, RetryPolicy,
+    RetryPolicyError, TaskOptions,
 };

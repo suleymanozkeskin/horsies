@@ -44,7 +44,7 @@ from horsies.core.lifecycle.commands import (
     CompleteTaskFused,
     FailLockedTask,
 )
-from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -215,7 +215,7 @@ class TestSuccess:
         decision = classify(ResultProduced(), _context(is_workflow_task=True))
         assert _command(decision) == CompleteLockedTask(
             task_id='t1',
-            fence=PriorLockedRead(worker_id='w1'),
+            fence=OwnedClaim(worker_id='w1', claimed_at=_GENERATION),
             result_json=_RESULT,
         )
 
@@ -241,7 +241,7 @@ class TestFailures:
         decision = terminalization_for_refused_retry(error, _context())
         assert decision.command == FailLockedTask(
             task_id='t1',
-            fence=PriorLockedRead(worker_id='w1'),
+            fence=OwnedClaim(worker_id='w1', claimed_at=_GENERATION),
             result_json=_RESULT,
             error_code='TASK_EXCEPTION',
             failed_reason=None,
@@ -289,6 +289,57 @@ class TestFailures:
         command = decision.command
         assert isinstance(command, FailLockedTask)
         assert command.error_code == 'MY_OWN_CODE'
+
+
+class TestEveryRowEndingCommandCarriesTheDispatchedClaim:
+    """A command that ends the row carries the worker and the generation of
+    this dispatch, so its writer refuses a row that a later claim holds."""
+
+    _DISPATCHED = _GENERATION + timedelta(microseconds=1)
+
+    @pytest.mark.parametrize(
+        ('report', 'is_workflow_task'),
+        [
+            (ResultProduced(), False),
+            (ResultProduced(), True),
+            (WorkerLevelFailure(detail='pool died'), False),
+            (WorkerLevelFailure(detail='pool died'), True),
+            (ResultUndecodable(detail='corrupt'), False),
+            (AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED), True),
+        ],
+        ids=[
+            'plain-success',
+            'workflow-success',
+            'plain-worker-failure',
+            'workflow-worker-failure',
+            'undecodable',
+            'orphan',
+        ],
+    )
+    def test_a_classified_command(
+        self,
+        report: ChildReport,
+        is_workflow_task: bool,
+    ) -> None:
+        context = _context(
+            claimed_at=self._DISPATCHED,
+            is_workflow_task=is_workflow_task,
+        )
+        command = _command(classify(report, context))
+        assert isinstance(
+            command,
+            CompleteTaskFused | CompleteLockedTask | FailLockedTask | CancelOwnedOrphan,
+        )
+        assert command.fence == OwnedClaim(worker_id='w1', claimed_at=self._DISPATCHED)
+
+    def test_a_refused_retry(self) -> None:
+        error = TaskError(error_code='MY_OWN_CODE', message='x', data={})
+        decision = terminalization_for_refused_retry(
+            error, _context(claimed_at=self._DISPATCHED),
+        )
+        command = decision.command
+        assert isinstance(command, FailLockedTask)
+        assert command.fence == OwnedClaim(worker_id='w1', claimed_at=self._DISPATCHED)
 
 
 class TestDecisionsAreDataOnly:

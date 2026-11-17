@@ -286,10 +286,13 @@ async def test_outputless_child_propagates_as_none_output(
 @pytest.mark.asyncio
 async def test_recovery_isolates_poison_child_and_continues(
     session: AsyncSession,
+    broker: PostgresBroker,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from horsies.core.workflows import engine as engine_mod
-    from horsies.core.workflows.recovery import recover_stuck_workflows
+    """A case 1.6 candidate that raises rolls back alone; the next candidate
+    of the pass advances its parent."""
+    from horsies.core.workflows import recovery as recovery_mod
+    from tests.broker_resources_support import current_resources
 
     poison_parent_id = await _insert_workflow(session, status='RUNNING')
     poison_child_id = await _insert_workflow(
@@ -322,19 +325,23 @@ async def test_recovery_isolates_poison_child_and_continues(
     )
     await session.commit()
 
-    real_on_subworkflow_complete = engine_mod.on_subworkflow_complete
+    real_run_in_transaction = recovery_mod.run_in_transaction
 
-    async def _poison_first_child(*args: Any, **kwargs: Any) -> None:
-        if args[1] == poison_child_id:
+    async def _poison_first_child(*args: Any, **kwargs: Any) -> Any:
+        parameters = args[3]
+        if parameters.get('child_workflow_id') == poison_child_id:
             raise RuntimeError(
                 "reserved key '__h_task_result__' in user-originated data",
             )
-        await real_on_subworkflow_complete(*args, **kwargs)
+        return await real_run_in_transaction(*args, **kwargs)
 
-    monkeypatch.setattr(engine_mod, 'on_subworkflow_complete', _poison_first_child)
+    monkeypatch.setattr(recovery_mod, 'run_in_transaction', _poison_first_child)
     try:
-        recovered = await recover_stuck_workflows(session)
-        assert recovered == 1
+        report = await recovery_mod.recover_stuck_workflows_global(
+            current_resources(broker).session_factory,
+            broker,
+        )
+        assert report.recovered == 1
         assert await _statuses(session, poison_parent_id) == ('RUNNING', 'RUNNING')
         assert await _statuses(session, ok_parent_id) == (
             'COMPLETED',

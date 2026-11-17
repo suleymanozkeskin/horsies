@@ -194,6 +194,26 @@ async fn the_smallest_age_expires_a_paused_workflow() {
     db.drop().await;
 }
 
+/// The longest age the config takes (`PausedWorkflowAge::MAX_DAYS`) runs
+/// the candidate read without a timestamp or interval range error: an hour
+/// old pause is not a candidate, and nothing is expired.
+#[tokio::test]
+#[serial]
+async fn the_longest_age_reads_its_candidates_without_a_range_error() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = paused_an_hour_ago(&db.pool, "longest_paused_age").await;
+
+    let age = PausedWorkflowAge::parse(chrono::Duration::days(PausedWorkflowAge::MAX_DAYS))
+        .expect("the longest age");
+    let expired = expire_paused_workflows(&broker(&db.pool), age, 1)
+        .await
+        .expect("paused expiry with the longest age");
+
+    assert_eq!(expired, 0);
+    assert_eq!(status(&db.pool, workflow_id).await, WorkflowStatus::Paused);
+    db.drop().await;
+}
+
 /// `TestWorkflowHandleGet.test_get_timeout`
 #[tokio::test]
 #[serial]

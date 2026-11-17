@@ -6,8 +6,6 @@ selection. It is the claim-ownership predicate layered on top.
 
 Which fence a transition needs follows from where it runs, not from preference:
 
-- a caller whose generation fence lives in a preceding locked read carries
-  only the worker in the write itself;
 - a caller acting on a deadline needs the worker but not the generation, since
   the outcome is correct for whichever generation holds an expired row;
 - a caller acting on one claim it was handed needs the full owner pair;
@@ -29,18 +27,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-
-
-@dataclass(frozen=True, slots=True)
-class PriorLockedRead:
-    """Worker ownership in the statement; the generation fence is upstream.
-
-    The caller held the row with a locking read that carried the claim
-    generation, and passes the worker to the write. Splitting the fence this
-    way is a property of the two-statement shape, not a weaker guard.
-    """
-
-    worker_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +85,7 @@ class OwnedClaimBatch:
 
 
 type TerminalFence = (
-    PriorLockedRead
-    | WorkerOwned
+    WorkerOwned
     | OwnedClaim
     | OwnedClaimBatch
 )

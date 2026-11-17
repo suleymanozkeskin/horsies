@@ -318,10 +318,18 @@ held up by a stalled consumer.
 
 | Setting | Default | Controls |
 |---|---|---|
-| `paused_workflow_auto_cancel_after` | `None` | age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`) |
+| `paused_workflow_auto_cancel_after` | `None` | age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); a positive duration of at most 365,000 days |
 
 `None` disables the sweep, so no deployment changes behaviour without
-declaring the rule. This lives here rather than under recovery because
+declaring the rule.
+
+The age is at most 365,000 days (`timedelta(days=365_000)`, 1,000 years of
+365 days). The expiry selects the workflows whose last update is before
+`now()` minus the age, and PostgreSQL's lowest timestamp is
+4714-11-24 BC. With this bound, `now()` minus the age stays inside the
+timestamp range for any `now()` from year 1 AD on, so the sweep cannot
+fail on the age. A longer age is refused when the config is built, with
+`CONFIG_INVALID_RETENTION` (HRS-216). This lives here rather than under recovery because
 expiring a workflow that has sat paused past a declared age is a policy
 about how long a record stays actionable — data lifecycle, not a
 response to a crash.

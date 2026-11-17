@@ -1357,7 +1357,6 @@ class FinalizeMixin:
             case (CompleteLockedTask() as completion, ResultProduced()):
                 return await self._finish_workflow_success(
                     completion,
-                    claim=claim,
                     child=_Phase1Input(ok, result_json_str, failed_reason),
                 )
             case (
@@ -1388,7 +1387,6 @@ class FinalizeMixin:
         self,
         completion: CompleteLockedTask,
         *,
-        claim: DispatchClaim,
         child: _Phase1Input,
     ) -> Result[_NodeFinishOwed | None, _FinalizeError]:
         """Phase 1 of a workflow task's success: one statement.
@@ -1407,7 +1405,7 @@ class FinalizeMixin:
         try:
             outcome = await finish_workflow_success_in_core(
                 self.core_handle,
-                success_for(completion, claimed_at=claim.claimed_at),
+                success_for(completion),
             )
         except Exception as exc:
             return Err(
@@ -1593,7 +1591,6 @@ class FinalizeMixin:
                 self.core_handle,
                 finish_for(
                     failure,
-                    claimed_at=claim.claimed_at,
                     retry=retry,
                     attempt=_attempt_failure_of(report),
                 ),

@@ -25,6 +25,7 @@ pub mod log_targets;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
+pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -80,13 +81,15 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
-// partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`)
-pub use crate::broker::CoveragePassError;
+// partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`,
+// `PostgresBroker::prune_expired_partitions`)
+pub use crate::broker::{CoveragePassError, PrunePassError};
 pub use crate::core::history::errors::HistoryError;
 pub use crate::core::history::maintenance::coverage::{
     CoverageEnsureFailed, CoverageEnsured, CoverageOutcome, CoverageRequest, CoverageSerialization,
     HistoryCoverage,
 };
+pub use crate::core::history::maintenance::pruning::{PrunePass, PruneReach};
 pub use crate::core::history::periods::RetentionDays;
 
 // The baseline SQL files, which horsies._core hands to the Python install.
@@ -175,6 +178,13 @@ pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+};
+// One core statement in a transaction that the caller owns: the Rust
+// client's adapters implement `CallerTransaction`; the core's own
+// `db::Transaction` implements it too.
+pub use crate::core::history::rerun::{
+    positional_sql, CallerColumn, CallerRow, CallerRowRefused, CallerStatement,
+    CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError, StatementValue,
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{

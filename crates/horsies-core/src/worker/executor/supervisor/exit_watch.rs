@@ -9,6 +9,10 @@
 //!   `WNOHANG` every [`POLLED_EXIT_INTERVAL`].
 //!
 //! The watch only reports; the spawner thread reaps with `waitpid`.
+//!
+//! A wait can also watch one more descriptor for input: the socket of the
+//! preload process (Linux only), so the spawner thread reads its frames in
+//! the same wait as the exits.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -43,6 +47,8 @@ pub(super) struct Wake {
     pub(super) exited: Vec<ProcessId>,
     /// The request waker fired.
     pub(super) woken: bool,
+    /// The extra descriptor of the wait has input, or its peer closed.
+    pub(super) extra_ready: bool,
 }
 
 /// The milliseconds of a wait, at most `c_int::MAX`.
@@ -82,11 +88,12 @@ impl ExitWatch {
         }
     }
 
-    /// Wait up to `timeout` for the waker or the exit of a child that has a
-    /// pidfd.
+    /// Wait up to `timeout` for the waker, input on `extra`, or the exit of
+    /// a child that has a pidfd.
     pub(super) fn wait<'a>(
         &mut self,
         children: impl Iterator<Item = (ProcessId, &'a ChildWatch)>,
+        extra: Option<RawFd>,
         timeout: Duration,
     ) -> io::Result<Wake> {
         let mut fds = vec![libc::pollfd {
@@ -94,6 +101,18 @@ impl ExitWatch {
             events: libc::POLLIN,
             revents: 0,
         }];
+        // The extra descriptor, when given, is the second entry.
+        let children_from = match extra {
+            Some(fd) => {
+                fds.push(libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                2
+            }
+            None => 1,
+        };
         let mut pids = Vec::new();
         for (pid, watch) in children {
             if let ChildWatch::PidFd(fd) = watch {
@@ -120,7 +139,8 @@ impl ExitWatch {
             }
             _ => Ok(Wake {
                 woken: fds[0].revents != 0,
-                exited: fds[1..]
+                extra_ready: children_from == 2 && fds[1].revents != 0,
+                exited: fds[children_from..]
                     .iter()
                     .zip(pids)
                     .filter(|(fd, _)| fd.revents != 0)
@@ -211,11 +231,19 @@ impl ExitWatch {
     }
 
     /// Wait up to `timeout` for the waker or the exit of a watched child.
+    ///
+    /// Panics: on an `extra` descriptor. Only the preload process gives
+    /// one, and it runs only on Linux.
     pub(super) fn wait<'a>(
         &mut self,
         _children: impl Iterator<Item = (ProcessId, &'a ChildWatch)>,
+        extra: Option<RawFd>,
         timeout: Duration,
     ) -> io::Result<Wake> {
+        assert!(
+            extra.is_none(),
+            "the spawner waits on a preload socket only on Linux"
+        );
         // SAFETY: an all-zero kevent array is a valid value.
         let mut events: [libc::kevent; KQUEUE_EVENTS] = unsafe { std::mem::zeroed() };
         // SAFETY: an all-zero timespec is a valid value.
@@ -289,11 +317,18 @@ impl ExitWatch {
         (ChildWatch::Polled, None)
     }
 
+    /// Panics: on an `extra` descriptor. Only the preload process gives
+    /// one, and it runs only on Linux.
     pub(super) fn wait<'a>(
         &mut self,
         _children: impl Iterator<Item = (ProcessId, &'a ChildWatch)>,
+        extra: Option<RawFd>,
         timeout: Duration,
     ) -> io::Result<Wake> {
+        assert!(
+            extra.is_none(),
+            "the spawner waits on a preload socket only on Linux"
+        );
         let mut fds = [libc::pollfd {
             fd: self.waker_fd,
             events: libc::POLLIN,
@@ -311,6 +346,7 @@ impl ExitWatch {
             }
             _ => Ok(Wake {
                 woken: fds[0].revents != 0,
+                extra_ready: false,
                 exited: Vec::new(),
             }),
         }

@@ -39,7 +39,7 @@ let config = AppConfig {
 |---|---|---|---|
 | `worker_state_retention_hours` | `Option<u32>` | `Some(168)` | Worker-state rows. `None` disables deletion. Range: 1–8,760 hours |
 | `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` | Terminal workflow and workflow-task rows. `None` disables deletion. Range: 1–43,800 hours |
-| `paused_workflow_auto_cancel_after` | `Option<chrono::Duration>` | `None` | Expire paused workflows after this age. The value must be positive |
+| `paused_workflow_auto_cancel_after` | `Option<PausedWorkflowAge>` | `None` | Expire paused workflows after this age. The value must be positive, in whole microseconds, and at most `PausedWorkflowAge::MAX_DAYS` (365,000 days); `PausedWorkflowAge::parse` and the config reader refuse any other value with `PausedAgeRefused` |
 | `history_leaf_horizon_days` | `u32` | `3` | Future daily history leaves. Range: 2–14 days |
 | `heartbeat_leaf_horizon_hours` | `u32` | `6` | Future hourly heartbeat leaves and the heartbeat class window. Range: 2–48 hours |
 | `retention_classes` | `Vec<RetentionClassConfig>` | empty | Extra finite task-history classes |

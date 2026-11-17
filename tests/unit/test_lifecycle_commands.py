@@ -41,10 +41,9 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.fences import (
     OwnedClaim,
     OwnedClaimBatch,
-    PriorLockedRead,
     WorkerOwned,
 )
-from tests.lifecycle_matrix import MATRIX
+from tests.lifecycle_matrix import MATRIX, Fence
 
 pytestmark = [pytest.mark.unit]
 
@@ -53,13 +52,12 @@ _LATER_GENERATION = _GENERATION + timedelta(seconds=1)
 _RESULT = '{"ok": null}'
 _OWNED = OwnedClaim(worker_id='w1', claimed_at=_GENERATION)
 _BATCH = OwnedClaimBatch(worker_id='w1', claim_generations=(('t1', _GENERATION),))
-_LOCKED_READ = PriorLockedRead(worker_id='w1')
 _WORKER = WorkerOwned(worker_id='w1')
 
 # One instance of every variant. Anything missing here fails the count check
 # below rather than silently going unexercised by the dispatch tests.
 ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
-    CompleteLockedTask(task_id='t1', fence=_LOCKED_READ, result_json=_RESULT),
+    CompleteLockedTask(task_id='t1', fence=_OWNED, result_json=_RESULT),
     CompleteTaskFused(
         task_id='t1',
         fence=_OWNED,
@@ -67,7 +65,7 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
     ),
     FailLockedTask(
         task_id='t1',
-        fence=_LOCKED_READ,
+        fence=_OWNED,
         result_json=_RESULT,
         error_code='TASK_EXCEPTION',
         failed_reason=None,
@@ -92,6 +90,16 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
     CancelOwnedNodes(fence=_BATCH),
     CancelNodesOfCancelledWorkflow(workflow_ids=('wf1',)),
 )
+
+
+FENCE_TYPE_OF: Final[dict[Fence, str | None]] = {
+    Fence.WORKER: 'WorkerOwned',
+    Fence.WORKER_AND_GENERATION: 'OwnedClaim',
+    Fence.WORKER_AND_GENERATION_PAIRWISE: 'OwnedClaimBatch',
+    Fence.NONE: None,
+}
+"""The client fence type of each ownership model the writers declare; one
+type per model."""
 
 
 WRITERS_WITHOUT_A_COMMAND: Final = frozenset({'T01', 'T13'})
@@ -287,18 +295,9 @@ class TestFenceCoverageMatchesTheWriters:
     """Every ownership model the writers use has exactly one fence type."""
 
     def test_fence_kinds_used_match_the_writer_fence_kinds(self) -> None:
-        from tests.lifecycle_matrix import Fence
-
         used = {
             type(fence_of(c)).__name__ if fence_of(c) is not None else None
             for c in ONE_OF_EACH
         }
-        expected = {
-            Fence.PRIOR_LOCKED_SELECT: 'PriorLockedRead',
-            Fence.WORKER: 'WorkerOwned',
-            Fence.WORKER_AND_GENERATION: 'OwnedClaim',
-            Fence.WORKER_AND_GENERATION_PAIRWISE: 'OwnedClaimBatch',
-            Fence.NONE: None,
-        }
-        from_matrix = {expected[row.fence] for row in MATRIX}
+        from_matrix = {FENCE_TYPE_OF[row.fence] for row in MATRIX}
         assert used == from_matrix

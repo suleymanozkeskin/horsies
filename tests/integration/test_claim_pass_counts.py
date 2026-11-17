@@ -33,6 +33,9 @@ from horsies.core.worker.sql import (
 from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import current_resources
+from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
+from tests.dualrun.operations.table import Implementation
+from tests.dualrun.reference import claim_caller
 
 pytestmark = [pytest.mark.integration]
 
@@ -160,12 +163,25 @@ class TestClaimPassCounts:
         self,
         clean_workflow_tables: None,
         broker: PostgresBroker,
+        implementation: ImplementationRun,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression for the claim-pass round-trip count. History: the
         per-count pass over Q=3 capped queues ran 11 statements (3 locks +
         2 worker counts + 3 queue counts + 3 claims); the merged accounting cut
         it to 7; TIER 1 (horsies_claim) collapses lock acquisition, counts and
-        the windowed claim into ONE statement."""
+        the windowed claim into ONE statement.
+
+        The count reads the statements of the Python claim (kept as the
+        dual-run reference) on the SQLAlchemy engine; the core's claim pass
+        sends its one statement on its own pool. The core run of
+        ``--dual-run=broker`` is skipped."""
+        match implementation:
+            case DualRunCase(implementation=Implementation.CORE):
+                pytest.skip('the count reads the Python claim statement on SQLAlchemy')
+            case DualRunCase() | SingleRun():
+                pass
+        monkeypatch.setattr(ClaimMixin, '_claim_rows', claim_caller.claim_rows)
         queues = [f'cnt_q_{i}' for i in range(3)]
         cfg = WorkerConfig(
             dsn='unused', psycopg_dsn='unused', queues=queues,

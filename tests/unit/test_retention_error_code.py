@@ -160,6 +160,12 @@ class TestEveryRefusalCarriesTheCode:
                 ),
                 id='listed-period-twice',
             ),
+            pytest.param(
+                lambda: RetentionConfig(
+                    paused_workflow_auto_cancel_after=timedelta(days=365_001)
+                ),
+                id='paused-age-above-maximum',
+            ),
         ],
     )
     def test_refusal_carries_the_retention_code(self, build: object) -> None:

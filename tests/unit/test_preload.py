@@ -1018,3 +1018,24 @@ print(fork_refusal(-1))
 
     def test_a_socket_is_refused(self) -> None:
         assert 'sockets' in self._refusal('kept = socket.socket()')
+
+    def test_an_os_thread_that_python_did_not_start_is_refused(self) -> None:
+        # A thread started through _thread is not in threading.enumerate().
+        setup = (
+            'import _thread, os\n'
+            '_thread.start_new_thread(time.sleep, (5,))\n'
+            'while len(os.listdir("/proc/self/task")) < 2:\n'
+            '    time.sleep(0.01)'
+        )
+        assert 'OS threads run in this process' in self._refusal(setup)
+
+    def test_importing_the_core_starts_no_thread_and_opens_no_socket(self) -> None:
+        # Executor risk 2: the preload imports horsies, and so horsies._core.
+        assert self._refusal('import horsies, horsies._core') == 'None'
+
+    def test_a_core_that_started_in_this_process_is_refused(self) -> None:
+        setup = (
+            'import horsies.core.worker.preload_main as preload_main\n'
+            "preload_main.core_state = lambda: 'running'"
+        )
+        assert self._refusal(setup) == 'the core of horsies._core is running in this process'

@@ -2034,6 +2034,19 @@ class TestRunWorkerCoroutine:
             captured_coro.append(coro)
             raise KeyboardInterrupt  # Break out of worker_command
 
+        # The schema install is the first core call of the process, so the
+        # panic rule must be set before it.
+        events: list[str] = []
+
+        async def record_schema_install(*_args: Any, **_kwargs: Any) -> Any:
+            events.append('schema install')
+            return Ok(None)
+
+        def record_panic_rule(rule: str) -> None:
+            events.append(f'panic rule {rule}')
+
+        schema_broker.ensure_schema_initialized.side_effect = record_schema_install
+
         with (
             _patched_brokers([schema_broker], [broker]) as (
                 schema_cls,
@@ -2042,6 +2055,7 @@ class TestRunWorkerCoroutine:
             ),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
+            panic_rule.side_effect = record_panic_rule
             worker_command(args)
 
             # Act — now run the captured coroutine
@@ -2055,6 +2069,7 @@ class TestRunWorkerCoroutine:
             for config in _broker_configs(schema_cls, worker_cls)
         ] == [(9, 0), (9, 0)]
         panic_rule.assert_called_once_with('ABORT_PROCESS')
+        assert events == ['panic rule ABORT_PROCESS', 'schema install']
         schema_broker.ensure_schema_initialized.assert_awaited_once()
         schema_broker.close_async.assert_awaited_once()
         mock_worker_cls.assert_called_once()
