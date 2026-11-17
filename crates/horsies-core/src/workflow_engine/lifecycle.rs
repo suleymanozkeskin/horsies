@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::steps::{
     self, advance_parents, run_alone, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
@@ -405,11 +406,36 @@ pub async fn resume_workflow(
     _payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
+    resume_with(
+        broker,
+        workflow_id,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
+    )
+    .await
+}
+
+/// [`resume_workflow`] of a client that builds its children through
+/// `source` (the Python client's `build_with`). Outcomes and panics as
+/// [`resume_workflow`]; a child build that `source` did not run is
+/// `DB_OPERATION_FAILED`, retryable, and nothing committed.
+pub(crate) async fn resume_client_workflow(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+    source: &dyn ChildSpecSource,
+) -> HandleResult<bool> {
+    resume_with(broker, workflow_id, ChildBuild::Client(source)).await
+}
+
+/// The body of [`resume_workflow`] with the children built by `build`.
+async fn resume_with(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+    build: ChildBuild<'_>,
+) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    let build = ChildBuild::Registry {
-        registry,
-        retention,
-    };
     let committed = steps::resume(broker, workflow_id, build)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))?;
@@ -434,14 +460,9 @@ pub async fn resume_workflow(
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
     // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree (Python
     // `core/workflows/lifecycle.py:1234-1262`).
-    crate::workflow_engine::recovery::recover_stuck_workflow_tree(
-        broker,
-        registry,
-        workflow_id,
-        retention,
-    )
-    .await
-    .map_err(|error| resume_recovery_failed(workflow_id, &error))?;
+    crate::workflow_engine::recovery::recover_workflow_tree(broker, build, workflow_id)
+        .await
+        .map_err(|error| resume_recovery_failed(workflow_id, &error))?;
     Ok(true)
 }
 
