@@ -133,10 +133,11 @@ pub use crate::worker::finalize_batch::{
 // cancel signal of their run with `run_cancel_signal`. A result wait reads
 // `process_role` first: a process that runs task bodies refuses it.
 pub use crate::worker::executor::child_host::{
-    child_mode, child_producer, process_role, run_cancel_signal, run_child_host, spawn_in_run,
-    wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError, ChildHookFailure, ChildHostExit,
-    ChildMode, ChildProducer, ChildStartFuture, ChildStartHook, ProcessRole, RunCancelSignal,
-    RunSignalRefused, RunSpawnRefused, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    child_command, child_mode, child_producer, process_role, run_cancel_signal, run_child_host,
+    spawn_in_run, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError, ChildHookFailure,
+    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook,
+    ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, CHILD_MODE_ARGUMENT,
+    CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the
@@ -144,6 +145,8 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+// The worker connection check of a client's live check (`check --live`).
+pub use crate::worker::connection_fit::check_worker_connections;
 pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
 pub use crate::worker::run_end::{
     run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,
@@ -204,6 +207,7 @@ pub use crate::core::history::rerun::{
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 // The child spec source of a client that keeps its workflow DSL in its own
 // language, and the spec data it sends.
+pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
 pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 pub use crate::workflow_engine::child_spec::{
     ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,

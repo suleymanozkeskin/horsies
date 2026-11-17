@@ -201,6 +201,7 @@ export default defineConfig({
 								{ label: 'Defining Tasks', slug: 'tasks/defining-tasks' },
 								{ label: 'Sending Tasks', slug: 'tasks/sending-tasks' },
 								{ label: 'Error Handling', slug: 'tasks/error-handling' },
+								{ label: 'Error Types', slug: 'tasks/error-types' },
 								{ label: 'Retrieving Results', slug: 'tasks/retrieving-results' },
 							],
 						},

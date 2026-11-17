@@ -341,7 +341,8 @@ unless it starts with "Added".
   were `ARGUMENT_TYPE_MISMATCH` and `RETURN_TYPE_MISMATCH`, with the value
   in `data.actual_value`.
 - **`async_task_fn!` and `blocking_task_fn!` take a function that returns
-  `Result<T, TaskError<E>>`.** `async_task_fn_kwargs!` and
+  `Result<T, TaskError<E>>`**, and an input type that is `Serialize` and
+  `DeserializeOwned`: the check reads a schedule's input back with it. `async_task_fn_kwargs!` and
   `blocking_task_fn_kwargs!` are removed: an object input is one input
   value, so `async_task_fn!` covers it. The registered task records the
   module of the call site, the `module` of the exception record of a panic.
@@ -454,6 +455,49 @@ unless it starts with "Added".
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
   `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
   `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+- **Task bodies run in child processes of the worker.** The worker starts
+  the user's binary again in child mode (`--horsies-child <fd> <pid>`) for
+  every execution class, as the Python worker starts Python children.
+  `main` builds the app and calls `horsies::cli::run(app)`, or, in a binary
+  that owns its `main`, calls `horsies::child_mode()` first and
+  `app.serve_child(args)` in a child. Every line of `main` before the
+  hand-over runs in each child too.
+- **Added: `horsies::cli::run(app)`.** It serves child mode first, then
+  `worker --profile <name> [--loglevel LEVEL]`, `scheduler [--loglevel
+  LEVEL]` and `check [--live] [--loglevel LEVEL]`, with Python's exit
+  codes: 0 on an operator stop and on a passing check, 1 on any other end,
+  2 for an argument error. The old flags `-q/--queues`,
+  `-c/--concurrency`, `--max-claim-batch`, `--max-claim-per-worker`,
+  `--coalesce-notifies`, and the scheduler's `--check-interval` and
+  `--dry-run`, are refused by name with what replaces each. Inside a tokio
+  runtime `run` refuses to start, because it blocks its thread.
+- **Added: `Horsies::on_child_start(hook)`.** An async hook that each worker
+  child runs once on its runtime, after its pool connected and before its
+  first task; the hooks of a child run in registration order, at most
+  10 s together. A hook that fails, panics or runs longer ends the child
+  with exit code 173 and stops the worker with `CHILD_HOOK_FAILED`.
+- **`WorkerConfig`, `run_worker_with`, `Worker` and `WorkerError` are
+  removed.** `Horsies::run_worker(WorkerStart::profile(name))` runs a named
+  profile of `AppConfig.worker_profiles` until `SIGTERM` or `SIGINT`, and
+  returns `WorkerStopped` or a closed `WorkerRunError`: `CheckRefused`,
+  `ManifestBound`, `ChildCommandRefused`, `ProfileRefused`,
+  `ConnectionSettingsRefused`, `RuntimeUnavailable`, `BootFailed { cause }`
+  and `Failed { cause }`, with Python's causes (`SCHEMA_REFUSED`,
+  `CHILD_HOOK_FAILED`, `POOL_FAILED`, ...).
+- **`spawn_scheduler` is removed; `run_scheduler` refuses schedule input
+  that does not read back.** `Horsies::scheduler()` checks each enabled
+  schedule (its task, its queue, its input decoded and read back with the
+  task's input type, a member that the type does not read, the input size)
+  before any connection, and returns a `PreparedScheduler` with `run()` and
+  `stop_handle()`. `run_scheduler()` runs it until `SIGTERM` or `SIGINT`.
+  Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
+  section that is missing or switched off is refused.
+- **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
+  The report holds the refusals of the first phase that refused: the task
+  options of a task registered by hand, then the schedules (not for a
+  worker). `check_live` adds a connect with one `SELECT 1` and the
+  connection fit of each worker profile. `validate_schedules` and
+  `validate_task_runtime_policies` are part of `check`.
 - **The workflow DSL is the client's, and it builds a spec as data.**
   `WorkflowSpecBuilder`, `WorkflowSpec`, `TaskNode`, `SubWorkflowNode`,
   `NodeKey`, `NodeRef`, `TypedNodeRef`, `InputField`, `JoinType`,

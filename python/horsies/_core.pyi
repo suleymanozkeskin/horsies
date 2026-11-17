@@ -167,6 +167,17 @@ class CoreHandle:
         the child spec source. A build that raised KeyboardInterrupt or SystemExit raises it
         again. With no child spec source it raises RuntimeError.
         """
+    def finish_workflow_node_async(self, request: NodeFinishRequest) -> asyncio.Future[NodeFinished | NodeFinishFailed]:
+        """Phase 2 of one finished workflow task. Writes; the child starts it owes build their
+        children through the child spec source. A build that raised KeyboardInterrupt or
+        SystemExit raises it again. With no child spec source it raises RuntimeError.
+        """
+    def advance_workflow_parents_async(self, child_workflow_ids: list[uuid.UUID]) -> asyncio.Future[ParentsAdvanced | ParentAdvanceStopped]:
+        """Advance the parent nodes above child_workflow_ids, one transaction per level. Writes; the
+        child starts a level owes build their children through the child spec source. A build
+        that raised KeyboardInterrupt or SystemExit raises it again. With no child spec source
+        it raises RuntimeError.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -1957,6 +1968,64 @@ class WorkflowIdTaken:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def existing_name(self) -> str: ...
+
+
+@final
+class NodeFinishRequest:
+    """One frozen phase 2. Another facts or wake value raises ValueError."""
+    def __init__(self, *, task_id: uuid.UUID, facts: Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN'], wake: Literal['SEND', 'NONE']) -> None: ...
+
+
+@final
+class NodeFinished:
+    """The phase 2 committed, or found nothing to write. A SOURCE_* disposition kept the
+    phase-2 record and wrote nothing. parent_advances are the child workflows whose parent
+    nodes advance after the commit.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def disposition(self) -> Literal['APPLIED', 'APPLIED_WORKFLOW_ENDED', 'ALREADY_APPLIED', 'PENDING_ABSENT', 'SOURCE_ABSENT', 'SOURCE_STATE_CONFLICT', 'SOURCE_VERSION_CONFLICT', 'SOURCE_DIGEST_MISMATCH']: ...
+    @property
+    def workflow_status(self) -> str | None: ...
+    @property
+    def parent_advances(self) -> list[uuid.UUID]: ...
+
+
+@final
+class NodeFinishFailed:
+    """The phase 2 failed: the client family check, a statement, a child build that did not
+    run, a child tree that the core refuses, or a row outside the function's contract (not
+    retryable). Nothing committed, or the outcome is unknown.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class ParentsAdvanced:
+    """Every parent advance committed."""
+    @property
+    def child_workflow_ids(self) -> list[uuid.UUID]: ...
+
+
+@final
+class ParentAdvanceStopped:
+    """The parent advance stopped at the level of failed_child_workflow_id; the levels before
+    it committed. still_owed holds every advance a retry runs, the failed level first.
+    """
+    @property
+    def failed_child_workflow_id(self) -> uuid.UUID: ...
+    @property
+    def still_owed(self) -> list[uuid.UUID]: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
 
 
 @final

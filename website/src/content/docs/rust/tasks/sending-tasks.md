@@ -107,7 +107,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 - `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written.
 
-The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-errors-tasksendresult).
+The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 
 ### Retry a Failed Send
 
