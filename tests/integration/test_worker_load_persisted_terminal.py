@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Integration tests for Worker._load_persisted_terminal().
 
 Covers the phase-2 replay method that reads what a terminal task owes: a
@@ -16,11 +17,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from horsies.core.app import Horsies
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
-from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -43,30 +41,6 @@ pytestmark = [pytest.mark.integration]
 # ---------------------------------------------------------------------------
 
 
-_TEST_APP: Horsies | None = None
-
-
-def _test_app() -> Horsies:
-    """Lazy-built Horsies app registering ``load_result_test``.
-    Production workers wire ``_app`` via ``_locate_app(cfg.app_locator)``;
-    these tests bypass that and build ``Worker`` directly.
-    """
-    global _TEST_APP
-    if _TEST_APP is None:
-        cfg = AppConfig(
-            broker=PostgresConfig(
-                database_url='postgresql://u:p@localhost/db',
-            )
-        )
-        _TEST_APP = Horsies(cfg)
-
-        @_TEST_APP.task(task_name='load_result_test')
-        def _load_result_test() -> TaskResult[JsonValue, TaskError]:
-            return TaskResult(ok=None)
-
-    return _TEST_APP
-
-
 def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -75,9 +49,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
-    worker._app = _test_app()
-    return worker
+    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
 
 
 async def _insert_task(

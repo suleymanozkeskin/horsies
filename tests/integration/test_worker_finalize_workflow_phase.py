@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Integration tests for Worker._finalize_workflow_phase().
 
 Phase 2 of a workflow task is ``horsies_workflow_node_finish``
