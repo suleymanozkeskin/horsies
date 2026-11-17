@@ -16,7 +16,9 @@ The refusals that the database decides before it changes a row (the live
 status check, the batch bounds, the id-keyed batch arrays) are Rust database
 tests of the core crate, in
 ``crates/horsies-core/src/sql_tests/terminalization_functions.rs``. The tests
-here read each outcome through the Python lifecycle.
+that called the writer of COMPLETE_LOCKED with their own SQL and only decoded
+its outcome with ``decode_outcome_row`` are there too. The tests here read
+each outcome through the Python lifecycle.
 """
 
 from __future__ import annotations
@@ -353,13 +355,6 @@ async def _locked(
     )
 
 
-async def _workflow_task(session: AsyncSession) -> str:
-    """A RUNNING workflow task of ``WORKER`` with its RUNNING node."""
-    task_id = await _seed(session, is_workflow_task=True)
-    _ = await _link_workflow_task(session, task_id, node_status='RUNNING')
-    return task_id
-
-
 def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused:
     return CompleteTaskFused(
         task_id=task_id,
@@ -369,32 +364,6 @@ def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused
 
 
 class TestAppliedTransitions:
-    async def test_locked_completion_applies_and_stamps_its_kind(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _workflow_task(session)
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.COMPLETE_LOCKED
-        assert outcome.terminal_at is not None
-
-    async def test_applied_reports_the_image_it_matched(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Not decoration: the pre-transition image is what the guard saw."""
-        task_id = await _workflow_task(session)
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.observed.status is TaskStatus.RUNNING
-        assert outcome.observed.worker_id == WORKER
-        assert outcome.observed.claimed_at == GENERATION
-
     async def test_fused_completion_writes_its_attempt_row(
         self,
         session: AsyncSession,
@@ -413,28 +382,6 @@ class TestAppliedTransitions:
         assert await read_attempt_history(session, task_id) == [
             (1, 'COMPLETED', None),
         ]
-
-    async def test_transition_leaves_the_row_terminal_and_attributed(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _workflow_task(session)
-        await _locked(session, task_id)
-        await session.commit()
-
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, terminal_at, terminalization_kind, result
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'COMPLETED'
-        assert row.terminal_at is not None
-        assert row.terminalization_kind == 'COMPLETE_LOCKED'
-        assert row.result == '{"ok": 1}'
 
     async def test_completion_clears_an_earlier_attempts_failure_summary_fused(
         self,
@@ -456,25 +403,6 @@ class TestAppliedTransitions:
         outcome = await apply_async(await session.connection(), _fused(task_id))
         await session.commit()
         assert isinstance(outcome, Applied)
-
-        await _assert_completed_after_attempt_one(session, task_id)
-
-    async def test_completion_clears_an_earlier_attempts_failure_summary_locked(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The same invariant for the writer of COMPLETE_LOCKED, phase 1 of a
-        workflow task's success: it records the completion as attempt two
-        too."""
-        task_id = await _workflow_task(session)
-        await _requeued_after_failed_attempt(
-            session, task_id, failed_reason='attempt one crashed',
-        )
-
-        outcome = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.COMPLETE_LOCKED
 
         await _assert_completed_after_attempt_one(session, task_id)
 
@@ -506,19 +434,6 @@ async def _assert_completed_after_attempt_one(
 
 
 class TestAlreadyApplied:
-    async def test_replay_of_the_same_operation(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _workflow_task(session)
-        await _locked(session, task_id)
-        await session.commit()
-
-        replay = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.COMPLETE_LOCKED
-
     async def test_the_other_completion_operation_counts_as_the_same_work(
         self,
         session: AsyncSession,
@@ -533,42 +448,8 @@ class TestAlreadyApplied:
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.COMPLETE_FUSED
 
-    async def test_a_foreign_kind_is_a_conflict_not_a_replay(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Someone else ended this task, and the caller has to hear that.
-
-        Reported as already-applied, a workflow cancellation's row would let a
-        completion replay assume work it never did.
-        """
-        task_id = await _seed(session)
-        await _force_terminal(
-            session, task_id, status='CANCELLED', kind='CANCEL_ADMIN',
-        )
-
-        outcome = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        evidence = outcome.evidence
-        assert isinstance(evidence, ObservedForeignTerminalization)
-        assert evidence.observed_status is TaskStatus.CANCELLED
-        assert evidence.committed_kind is TerminalizationKind.CANCEL_ADMIN
-        assert evidence.terminal_at is not None
-
 
 class TestRefusals:
-    async def test_another_worker_holds_the_claim(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, worker_id='someone-else')
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, LostClaim)
-        assert outcome.observed.worker_id == 'someone-else'
-
     async def test_the_claim_generation_moved_on(
         self,
         session: AsyncSession,
@@ -587,58 +468,6 @@ class TestRefusals:
 
         assert isinstance(outcome, LostClaim)
         assert outcome.observed.claimed_at == GENERATION
-
-    async def test_a_requeued_row_reports_a_lost_claim(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """PENDING with the claim cleared is the requeue case.
-
-        Fenced commands classify it as a lost claim rather than a state
-        conflict: the generation that held it is gone, which is precisely what
-        the caller must act on.
-        """
-        task_id = await _seed(
-            session, status='PENDING', worker_id='someone-else', claimed_at=None,
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET claimed_by_worker_id = NULL
-                WHERE id = :id
-            """),
-            {'id': task_id},
-        )
-        await session.commit()
-
-        outcome = await _locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, LostClaim)
-        assert outcome.observed.status is TaskStatus.PENDING
-
-    async def test_the_source_status_is_wrong(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Owned by this worker at this generation, but not yet running."""
-        task_id = await _seed(session, status='CLAIMED')
-        outcome = await _locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.evidence == ObservedClaim(
-            worker_id=WORKER, claimed_at=GENERATION,
-        )
-
-    async def test_a_task_that_does_not_exist(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Absence is an outcome, not an empty result."""
-        outcome = await _locked(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
 
 
 STALE_AFTER_MS = 60_000
