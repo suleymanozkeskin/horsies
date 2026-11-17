@@ -20,6 +20,7 @@ import pytest
 
 from horsies._core import (
     BrokerFailure,
+    CoreConnectionError,
     TaskListComplete,
     TaskListTruncated,
     TooManyPendingCalls,
@@ -30,7 +31,6 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidInput,
     BrokerOperationFailed,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 from tests.unit.test_broker_postgres import _make_broker  # pyright: ignore[reportPrivateUsage]
@@ -148,10 +148,15 @@ class TestAnswers:
     @pytest.mark.asyncio
     async def test_a_read_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
         message = 'get_expired_tasks failed: connection refused'
+        cause = CoreConnectionError('get_expired_tasks', 'connection refused', retryable)
         broker = _broker_answering(
             'expired_tasks_async',
             _record(
-                BrokerFailure, code='MONITORING_QUERY_FAILED', message=message, retryable=retryable,
+                BrokerFailure,
+                code='MONITORING_QUERY_FAILED',
+                message=message,
+                retryable=retryable,
+                exception=cause,
             ),
         )
 
@@ -162,8 +167,7 @@ class TestAnswers:
                 assert error.code is BrokerErrorCode.MONITORING_QUERY_FAILED
                 assert error.message == message
                 assert error.retryable is retryable
-                assert isinstance(error.exception, CoreOperationFailed)
-                assert error.exception.subject == 'PostgresBroker.get_expired_tasks'
+                assert error.exception is cause
             case _:
                 raise AssertionError(f'expected MONITORING_QUERY_FAILED, got {result!r}')
 

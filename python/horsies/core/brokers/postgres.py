@@ -23,6 +23,7 @@ from horsies._core import (
     ClassCoverageRecord,
     ClassReportRecord,
     CoreError,
+    CoreFailure,
     TaskListComplete,
     TaskListTruncated,
     WorkerStateAbsent,
@@ -141,11 +142,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.core_failure import (
-    CoreLockNotAvailable,
-    CoreOperationFailed,
-    core_error_retryable,
-)
+from horsies.core.types.core_failure import core_error_retryable
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
     TASK_TERMINAL_STATES,
@@ -609,8 +606,9 @@ def _monitoring_read_failed(
     - ``INVALID_INPUT``: ``BrokerInvalidInput`` with the core's text. Nothing
       ran.
     - ``MONITORING_QUERY_FAILED``: ``BrokerOperationFailed`` with the core's
-      text and retryable flag; ``exception`` is a ``CoreOperationFailed``.
-      Nothing changed: a read writes nothing.
+      text and retryable flag; ``exception`` is the core's exception of the
+      cause (a ``CoreFailure`` leaf class). Nothing changed: a read writes
+      nothing.
 
     Another code contradicts the read's catalog: ``AssertionError``.
     """
@@ -618,16 +616,17 @@ def _monitoring_read_failed(
         case BrokerFailure(code='INVALID_INPUT', message=message):
             return Err(BrokerInvalidInput(message=message, exception=NoCause()))
         case BrokerFailure(
-            code='MONITORING_QUERY_FAILED', message=message, retryable=retryable,
+            code='MONITORING_QUERY_FAILED',
+            message=message,
+            retryable=retryable,
+            exception=exception,
         ):
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.MONITORING_QUERY_FAILED,
                     message=message,
                     retryable=retryable,
-                    exception=CoreOperationFailed(
-                        f'PostgresBroker.{operation}', message, retryable,
-                    ),
+                    exception=exception,
                 ),
             )
         case BrokerFailure(code=code):
@@ -763,8 +762,6 @@ _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
 _ORPHAN_BATCH_SIZE = 500
-
-_ORPHAN_AUDIT_SUBJECT: Final = 'PostgresBroker.audit_orphaned_workflow_tasks'
 
 READ_ORPHAN_TASK_SCAN_STATS_SQL = text("""
 SELECT last_scan_rows, last_candidate_rows
@@ -967,8 +964,9 @@ def _task_info_result(
       that does not read, for example a history result whose digest
       differs; not retryable.
 
-    Each failure's ``exception`` is a ``CoreOperationFailed``. Another code
-    contradicts the core's catalog of the read: ``AssertionError``.
+    Each failure's ``exception`` is the core's exception of the cause (a
+    ``CoreFailure`` leaf class). Another code contradicts the core's catalog
+    of the read: ``AssertionError``.
     """
     match outcome:
         case TaskInfoRecord() as record:
@@ -976,25 +974,26 @@ def _task_info_result(
         case TaskInfoNotFound():
             return Ok(None)
         case BrokerFailure(
-            code='TASK_INFO_QUERY_FAILED', message=message, retryable=retryable,
+            code='TASK_INFO_QUERY_FAILED',
+            message=message,
+            retryable=retryable,
+            exception=exception,
         ):
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
                     message=f'get_task_info failed for {task_id}: {message}',
                     retryable=retryable,
-                    exception=CoreOperationFailed(
-                        'PostgresBroker.get_task_info_async', message, retryable,
-                    ),
+                    exception=exception,
                 ),
             )
-        case BrokerFailure(code='INVALID_JSON_PAYLOAD', message=message):
+        case BrokerFailure(
+            code='INVALID_JSON_PAYLOAD', message=message, exception=exception,
+        ):
             return Err(
                 BrokerInvalidJsonPayload(
                     message=f'get_task_info failed for {task_id}: {message}',
-                    exception=CoreOperationFailed(
-                        'PostgresBroker.get_task_info_async', message, False,
-                    ),
+                    exception=exception,
                 ),
             )
         case BrokerFailure(code=code):
@@ -1157,17 +1156,15 @@ def _refusal_cause(cause_text: str | None) -> SerializationError | NoCause:
             return SerializationError(cause_text)
 
 
-def _enqueue_result(
-    subject: str, outcome: CoreSendOutcome,
-) -> Result[UUID, BrokerEnqueueError]:
+def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, BrokerEnqueueError]:
     """The result of one core send. Pure.
 
     - ``Enqueued``: ``Ok`` with the sent id, or the id that holds the key
       for a key replay.
     - ``SendValidationFailed``: ``INVALID_INPUT`` or
       ``INVALID_TASK_OPTIONS``, with the JSON reader's error as the cause.
-    - ``SendEnqueueFailed``: ``ENQUEUE_FAILED`` with a
-      ``CoreOperationFailed``.
+    - ``SendEnqueueFailed``: ``ENQUEUE_FAILED`` with the core's exception of
+      the cause.
     - ``SendPayloadMismatch``: ``PAYLOAD_MISMATCH``.
     - ``SendKeyConflict``: ``IDEMPOTENCY_KEY_CONFLICT`` with the owner.
 
@@ -1192,11 +1189,13 @@ def _enqueue_result(
             ))
         case SendValidationFailed(code=code):
             raise AssertionError(f'the core send refused with the code {code}')
-        case SendEnqueueFailed(message=message, retryable=retryable):
+        case SendEnqueueFailed(
+            message=message, retryable=retryable, exception=exception,
+        ):
             return Err(BrokerEnqueueFailed(
                 message=message,
                 retryable=retryable,
-                exception=CoreOperationFailed(subject, message, retryable),
+                exception=exception,
             ))
         case SendPayloadMismatch(message=message):
             return Err(BrokerPayloadMismatch(message=message))
@@ -1958,9 +1957,11 @@ class PostgresBroker:
         (``tests/dualrun/reference/install_caller.py``) runs it.
 
         Raises:
-            CoreOperationFailed: the core reported ``SCHEMA_INIT_FAILED``;
-                ``retryable`` is the core's classification of the cause. The
-                broker keeps nothing, so the next call installs again.
+            CoreFailure: the core reported ``SCHEMA_INIT_FAILED``; the
+                exception is the core's exception of the cause, with the
+                core's classification as ``retryable`` where the cause may
+                clear. The broker keeps nothing, so the next call installs
+                again.
             CoreError: the core of this process cannot run the call.
         """
         if self._initialized:
@@ -1968,10 +1969,8 @@ class PostgresBroker:
         match await self._core_handle.install_schema_async():
             case SchemaInstalled() | SchemaInstallNotRun():
                 self._initialized = True
-            case BrokerFailure(code='SCHEMA_INIT_FAILED', message=message, retryable=retryable):
-                raise CoreOperationFailed(
-                    'PostgresBroker.ensure_schema_initialized', message, retryable,
-                )
+            case BrokerFailure(code='SCHEMA_INIT_FAILED', exception=exception):
+                raise exception
             case BrokerFailure(code=code):
                 raise AssertionError(f'the core schema install answered the code {code}')
             case _ as unreachable:
@@ -1988,7 +1987,7 @@ class PostgresBroker:
 
         Returns ``Ok(None)`` on success. On failure ``BrokerOperationFailed``
         with ``SCHEMA_INIT_FAILED`` and its cause: the core reported the
-        install failed (``exception`` is a ``CoreOperationFailed``), for
+        install failed (``exception`` is the core's ``CoreFailure``), for
         example a database of the other client family or one this build
         cannot install into (not retryable), or the core of this process
         cannot run the call (``exception`` is the ``CoreError``). The install
@@ -1997,7 +1996,7 @@ class PostgresBroker:
         """
         try:
             await self._ensure_initialized()
-        except (CoreOperationFailed, CoreError) as exc:
+        except (CoreFailure, CoreError) as exc:
             return _operation_failed(
                 BrokerErrorCode.SCHEMA_INIT_FAILED,
                 f'Schema initialization failed: {exc}',
@@ -2181,7 +2180,7 @@ class PostgresBroker:
             outcome = await self._core_handle.enqueue_async(request)
         except CoreError as exc:
             return _enqueue_core_error(task_name, exc)
-        return _enqueue_result('PostgresBroker.enqueue_async', outcome)
+        return _enqueue_result(outcome)
 
     def _build_raw_result_record(
         self,
@@ -2477,7 +2476,7 @@ class PostgresBroker:
           from 0 to ``MAX_TASK_TIMEOUT_MS``. Nothing ran.
         - ``Err(BrokerOperationFailed(TASK_INFO_QUERY_FAILED))``: the
           connect, the install or a read failed (``retryable`` is the core's
-          classification, ``exception`` a ``CoreOperationFailed``), or the
+          classification, ``exception`` the core's exception of the cause), or the
           core of this process cannot run the call (``exception`` is the
           ``CoreError``).
         """
@@ -2574,8 +2573,8 @@ class PostgresBroker:
         - ``BrokerFailure(TASK_INFO_QUERY_FAILED)``: ``BrokerOperationFailed``,
           logged on ``horsies.broker``.
 
-        Each failure's ``exception`` is a ``CoreOperationFailed``. Another
-        code contradicts the core's catalog of the read, for example
+        Each failure's ``exception`` is the core's exception of the cause.
+        Another code contradicts the core's catalog of the read, for example
         ``INVALID_INPUT`` for a limit that the check above admitted:
         ``AssertionError``.
         """
@@ -2600,15 +2599,15 @@ class PostgresBroker:
                 ))
             case RawResultAbsent():
                 return Ok(None)
-            case BrokerFailure(code='INVALID_JSON_PAYLOAD', message=message):
-                return Err(BrokerInvalidJsonPayload(
-                    message=message,
-                    exception=CoreOperationFailed(
-                        'PostgresBroker.get_raw_result_record_async', message, False,
-                    ),
-                ))
             case BrokerFailure(
-                code='TASK_INFO_QUERY_FAILED', message=message, retryable=retryable,
+                code='INVALID_JSON_PAYLOAD', message=message, exception=exception,
+            ):
+                return Err(BrokerInvalidJsonPayload(message=message, exception=exception))
+            case BrokerFailure(
+                code='TASK_INFO_QUERY_FAILED',
+                message=message,
+                retryable=retryable,
+                exception=exception,
             ):
                 self.logger.error(
                     'Broker error while retrieving raw task result record for task %s: %s',
@@ -2620,9 +2619,7 @@ class PostgresBroker:
                         code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
                         message=f'Broker error while retrieving task {task_id}: {message}',
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            'PostgresBroker.get_raw_result_record_async', message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case BrokerFailure(code=code):
@@ -2774,8 +2771,8 @@ class PostgresBroker:
 
         Failures, each ``DB_PING_FAILED``; nothing changed:
         - the connect or the statement failed; ``retryable`` is the core's
-          classification of the cause, and ``exception`` a
-          ``CoreOperationFailed``;
+          classification of the cause, and ``exception`` the core's
+          exception of the cause;
         - the core of this process cannot run the call (``CoreError``: it
           stopped, did not start, or has too many calls in flight); the
           ``exception`` is that error, and ``retryable`` follows
@@ -2795,15 +2792,18 @@ class PostgresBroker:
         match outcome:
             case DatabasePingRecord(latency_ms=latency_ms):
                 return Ok(DatabasePing(latency_ms=latency_ms))
-            case BrokerFailure(code='DB_PING_FAILED', message=message, retryable=retryable):
+            case BrokerFailure(
+                code='DB_PING_FAILED',
+                message=message,
+                retryable=retryable,
+                exception=exception,
+            ):
                 return Err(
                     BrokerOperationFailed(
                         code=BrokerErrorCode.DB_PING_FAILED,
                         message=f'ping_database failed: {message}',
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            'PostgresBroker.ping_database_async', message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case BrokerFailure(code=code):
@@ -2881,16 +2881,17 @@ class PostgresBroker:
             case BrokerFailure(code='LISTENER_DISABLED', message=message):
                 return Err(BrokerListenerDisabled(message=message))
             case BrokerFailure(
-                code='WORKER_PING_FAILED', message=message, retryable=retryable,
+                code='WORKER_PING_FAILED',
+                message=message,
+                retryable=retryable,
+                exception=exception,
             ):
                 return Err(
                     BrokerOperationFailed(
                         code=BrokerErrorCode.WORKER_PING_FAILED,
                         message=message,
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            'PostgresBroker.ping_workers_async', message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case BrokerFailure(code=code):
@@ -3113,15 +3114,15 @@ class PostgresBroker:
                     scan_batch,
                 )
                 return Ok(recovered)
-            case StaleRunningScanFailed(message=message, retryable=retryable):
+            case StaleRunningScanFailed(
+                message=message, retryable=retryable, exception=exception,
+            ):
                 return Err(
                     BrokerOperationFailed(
                         code=BrokerErrorCode.CLEANUP_FAILED,
                         message=f'mark_stale_tasks_as_failed failed: {message}',
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            'PostgresBroker.mark_stale_tasks_as_failed', message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case _ as unreachable:
@@ -3170,15 +3171,15 @@ class PostgresBroker:
                     expired,
                 )
                 return Ok(expired)
-            case PendingExpiryFailed(message=message, retryable=retryable):
+            case PendingExpiryFailed(
+                message=message, retryable=retryable, exception=exception,
+            ):
                 return Err(
                     BrokerOperationFailed(
                         code=BrokerErrorCode.CLEANUP_FAILED,
                         message=f'expire_pending_tasks failed: {message}',
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            'PostgresBroker.expire_pending_tasks', message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case _ as unreachable:
@@ -3256,6 +3257,7 @@ class PostgresBroker:
                 requeued_before=requeued_before,
                 message=message,
                 retryable=retryable,
+                exception=exception,
             ):
                 return Err(
                     BrokerOperationFailed(
@@ -3265,9 +3267,7 @@ class PostgresBroker:
                             f'{requeued_before} task(s): {message}'
                         ),
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            'PostgresBroker.requeue_stale_claimed', message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case _ as unreachable:
@@ -3288,7 +3288,7 @@ class PostgresBroker:
         Failures, each ``CLEANUP_FAILED``; nothing committed (after a lost
         ``COMMIT`` reply, the outcome is unknown):
         - another sweep holds the cursor: the page is refused at once; the
-          ``exception`` is ``CoreLockNotAvailable``, whose ``sqlstate`` is
+          ``exception`` is ``CoreServerError``, whose ``sqlstate`` is
           ``'55P03'``;
         - a database failure, or a page outside the function's contract;
           ``retryable`` is the core's classification of the cause;
@@ -3322,26 +3322,20 @@ class PostgresBroker:
                     cancelled=cancelled,
                     duration_ms=int((time.monotonic() - started) * 1000),
                 ))
-            case OrphanAuditLockBusy(message=message, retryable=retryable):
-                return Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.CLEANUP_FAILED,
-                        message=f'audit_orphaned_workflow_tasks failed: {message}',
-                        retryable=retryable,
-                        exception=CoreLockNotAvailable(
-                            _ORPHAN_AUDIT_SUBJECT, message, retryable,
-                        ),
-                    ),
+            case (
+                OrphanAuditLockBusy(
+                    message=message, retryable=retryable, exception=exception,
                 )
-            case OrphanAuditFailed(message=message, retryable=retryable):
+                | OrphanAuditFailed(
+                    message=message, retryable=retryable, exception=exception,
+                )
+            ):
                 return Err(
                     BrokerOperationFailed(
                         code=BrokerErrorCode.CLEANUP_FAILED,
                         message=f'audit_orphaned_workflow_tasks failed: {message}',
                         retryable=retryable,
-                        exception=CoreOperationFailed(
-                            _ORPHAN_AUDIT_SUBJECT, message, retryable,
-                        ),
+                        exception=exception,
                     ),
                 )
             case _ as unreachable:
@@ -3522,7 +3516,7 @@ class PostgresBroker:
             outcome = self._core_handle.enqueue(request)
         except CoreError as exc:
             return _enqueue_core_error(task_name, exc)
-        return _enqueue_result('PostgresBroker.enqueue', outcome)
+        return _enqueue_result(outcome)
 
     async def _history_task_info(
         self,

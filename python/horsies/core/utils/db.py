@@ -50,8 +50,13 @@ from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.sqltypes import NullType
 
 from horsies.core.logging import get_logger
-from horsies._core import CoreError
-from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+from horsies._core import (
+    CoreContractViolation,
+    CoreDatabaseError,
+    CoreError,
+    CorePreconditionFailed,
+)
+from horsies.core.types.core_failure import core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 
 if TYPE_CHECKING:
@@ -264,15 +269,18 @@ def is_dbapi_disconnect(exc: DBAPIError) -> bool:
 def is_retryable_connection_error(exc: BaseException) -> bool:
     """Check whether an exception is a transient connection error worth retrying.
 
-    A ``CoreOperationFailed`` carries the core's classification of its
-    cause; a ``CoreError`` is retryable when its condition clears in this
-    process (``core_error_retryable``).
+    A core failure class carries the core's classification of its cause
+    (``retryable``); a contract violation never clears. A ``CoreError`` is
+    retryable when its condition clears in this process
+    (``core_error_retryable``).
     """
     match exc:
         case OperationalError() | InterfaceError() | SAOperationalError():
             return True
-        case CoreOperationFailed(retryable=retryable):
+        case CoreDatabaseError(retryable=retryable) | CorePreconditionFailed(retryable=retryable):
             return retryable
+        case CoreContractViolation():
+            return False
         case CoreError() as core_error:
             return core_error_retryable(core_error)
         # Engine pool checkout timeout ("QueuePool limit reached"): transient
