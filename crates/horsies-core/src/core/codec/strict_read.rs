@@ -23,8 +23,14 @@
 //! `super::user_value`): at most [`MAX_VALUE_JSON_DEPTH`] levels, and no key
 //! that only the engine writes.
 //!
-//! The functions read the text and build no value. Error texts name a byte
-//! offset, never a value: the text is task input.
+//! The functions read the text and build no value. Error texts never name a
+//! value of the text: the text is task input. Three refusals have the text of
+//! Python's reader (`python/horsies/core/codec/json_value.py:156, 180, 294`),
+//! so the public messages that carry them are the same in both clients: a
+//! non-standard constant, a number outside finite binary64 and a lone
+//! surrogate. Python's text for them names no byte offset, so neither does
+//! the core's; the variant keeps the offset. The other refusals name the byte
+//! offset where the text breaks the rule.
 
 use std::collections::HashSet;
 
@@ -50,17 +56,23 @@ pub enum StrictJsonError {
     /// The text breaks the JSON grammar at this byte.
     #[error("JSON parse failed at byte {offset}: {reason}")]
     Syntax { offset: usize, reason: SyntaxReason },
-    /// `NaN`, `Infinity` or `-Infinity` at this byte.
-    #[error("JSON parse failed at byte {offset}: NaN and Infinity are not JSON")]
-    NonStandardConstant { offset: usize },
+    /// `NaN`, `Infinity` or `-Infinity` at this byte. Python's text
+    /// (`_reject_nonstandard_json_constant`).
+    #[error("Non-standard JSON constant is not allowed: {constant}")]
+    NonStandardConstant {
+        offset: usize,
+        constant: JsonConstant,
+    },
     /// An integer with more than [`MAX_INT_DIGITS`] digits.
     #[error("JSON integer at byte {offset} has more than {MAX_INT_DIGITS} digits")]
     IntegerTooLong { offset: usize },
-    /// A float that binary64 cannot hold as a finite value.
-    #[error("JSON number at byte {offset} is not a finite binary64 float")]
+    /// A float that binary64 cannot hold as a finite value, starting at this
+    /// byte. Python's text (`_parse_finite_float`).
+    #[error("JSON number is outside the finite binary64 range")]
     NonFiniteFloat { offset: usize },
-    /// A `\u` escape that leaves a lone UTF-16 surrogate.
-    #[error("JSON string at byte {offset} holds a lone UTF-16 surrogate")]
+    /// A `\u` escape that leaves a lone UTF-16 surrogate, in the string that
+    /// starts at this byte. Python's text (`_reject_lone_surrogate`).
+    #[error("JSON string holds a lone surrogate")]
     LoneSurrogate { offset: usize },
     /// Arrays and objects nested deeper than the bound of the text kind:
     /// [`MAX_JSON_DEPTH`] for a stored text, [`MAX_VALUE_JSON_DEPTH`] for a
@@ -74,6 +86,33 @@ pub enum StrictJsonError {
     /// An object repeats the key that starts at this byte.
     #[error("JSON object repeats the key at byte {offset}")]
     DuplicateKey { offset: usize },
+}
+
+/// A constant that Python's `json.loads` reads by default and the strict rule
+/// refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonConstant {
+    Nan,
+    Infinity,
+    NegativeInfinity,
+}
+
+impl JsonConstant {
+    /// The constant as a JSON text writes it, which is the name that
+    /// Python's `parse_constant` hook gets.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nan => "NaN",
+            Self::Infinity => "Infinity",
+            Self::NegativeInfinity => "-Infinity",
+        }
+    }
+}
+
+impl std::fmt::Display for JsonConstant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The grammar rule that a refused text breaks.
@@ -181,6 +220,13 @@ impl Reader<'_> {
         }
     }
 
+    fn non_standard_constant(&self, constant: JsonConstant) -> StrictJsonError {
+        StrictJsonError::NonStandardConstant {
+            offset: self.pos,
+            constant,
+        }
+    }
+
     fn rest_starts_with(&self, literal: &[u8]) -> bool {
         self.bytes[self.pos..].starts_with(literal)
     }
@@ -202,13 +248,13 @@ impl Reader<'_> {
             Some(b'f') => self.literal(b"false"),
             Some(b'n') => self.literal(b"null"),
             Some(b'N') if self.rest_starts_with(b"NaN") => {
-                Err(StrictJsonError::NonStandardConstant { offset: self.pos })
+                Err(self.non_standard_constant(JsonConstant::Nan))
             }
             Some(b'I') if self.rest_starts_with(b"Infinity") => {
-                Err(StrictJsonError::NonStandardConstant { offset: self.pos })
+                Err(self.non_standard_constant(JsonConstant::Infinity))
             }
             Some(b'-') if self.rest_starts_with(b"-Infinity") => {
-                Err(StrictJsonError::NonStandardConstant { offset: self.pos })
+                Err(self.non_standard_constant(JsonConstant::NegativeInfinity))
             }
             Some(b'-' | b'0'..=b'9') => self.number(),
             Some(_) => Err(self.syntax(SyntaxReason::UnexpectedCharacter)),
@@ -587,7 +633,27 @@ mod tests {
     fn each_refusal_names_its_rule() {
         let cases: &[(&str, StrictJsonError)] = &[
             ("", StrictJsonError::Empty),
-            ("[NaN]", StrictJsonError::NonStandardConstant { offset: 1 }),
+            (
+                "[NaN]",
+                StrictJsonError::NonStandardConstant {
+                    offset: 1,
+                    constant: JsonConstant::Nan,
+                },
+            ),
+            (
+                "{\"a\":Infinity}",
+                StrictJsonError::NonStandardConstant {
+                    offset: 5,
+                    constant: JsonConstant::Infinity,
+                },
+            ),
+            (
+                "[1,-Infinity]",
+                StrictJsonError::NonStandardConstant {
+                    offset: 3,
+                    constant: JsonConstant::NegativeInfinity,
+                },
+            ),
             ("[1e400]", StrictJsonError::NonFiniteFloat { offset: 1 }),
             ("\"\\ud800\"", StrictJsonError::LoneSurrogate { offset: 0 }),
             (
@@ -611,6 +677,38 @@ mod tests {
         ];
         for (text, expected) in cases {
             assert_eq!(check_json_text(text).as_ref(), Err(expected), "{text:?}");
+        }
+    }
+
+    /// The refusals that Python's reader words itself have Python's text
+    /// (`python/horsies/core/codec/json_value.py:156, 180, 294`), with no
+    /// byte offset, as Python's text has none.
+    #[test]
+    fn the_refusals_that_python_words_have_python_s_text() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "{\"x\":NaN}",
+                "Non-standard JSON constant is not allowed: NaN",
+            ),
+            (
+                "{\"x\":Infinity}",
+                "Non-standard JSON constant is not allowed: Infinity",
+            ),
+            (
+                "[-Infinity]",
+                "Non-standard JSON constant is not allowed: -Infinity",
+            ),
+            (
+                "{\"x\":1e9999}",
+                "JSON number is outside the finite binary64 range",
+            ),
+            ("-1e400", "JSON number is outside the finite binary64 range"),
+            ("{\"x\":\"\\ud800\"}", "JSON string holds a lone surrogate"),
+            ("\"\\udc00\"", "JSON string holds a lone surrogate"),
+        ];
+        for (text, expected) in cases {
+            let refused = check_json_text(text).expect_err(text);
+            assert_eq!(refused.to_string(), *expected, "{text:?}");
         }
     }
 
