@@ -27,6 +27,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 
 use crate::broker::pools::PoolSettingsError;
@@ -39,6 +40,7 @@ use crate::db::{
 };
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::supervisor::{ChildId, KillOutcome, SpawnerHandle, WorkerKillMark};
+use crate::worker::thread_dispatch::with_starter_dispatch;
 
 /// Exit code of the worker process when it failed closed because its runner
 /// heartbeats stopped. No other horsies process uses it. The core parent
@@ -573,18 +575,25 @@ pub fn launch_runner_beats(
         live: live.clone(),
         fail_closed_stop,
     };
+    // The watchdog thread and the writer log to the dispatcher of their
+    // starter.
     let watch = std::thread::Builder::new()
         .name(WATCH_THREAD_NAME.to_owned())
-        .spawn(move || run_watch(&context, &stop_received))?;
-    let writer = tokio::spawn(run_beats(
-        pool,
-        sender,
-        interval,
-        stale_running,
-        live,
-        coverage,
-        cancel,
-    ));
+        .spawn(with_starter_dispatch(move || {
+            run_watch(&context, &stop_received);
+        }))?;
+    let writer = tokio::spawn(
+        run_beats(
+            pool,
+            sender,
+            interval,
+            stale_running,
+            live,
+            coverage,
+            cancel,
+        )
+        .with_current_subscriber(),
+    );
     Ok((RunnerBeatWatch { stop_watch, watch }, writer))
 }
 

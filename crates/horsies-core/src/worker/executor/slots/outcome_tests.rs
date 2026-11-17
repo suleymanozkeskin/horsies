@@ -25,6 +25,7 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::registry::BuilderHookName;
 use crate::core::task::error::{OperationalErrorCode, TaskErrorCode};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
+use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
 use crate::worker::retry::read_stored_options;
 
@@ -83,13 +84,18 @@ fn dispatched(task_id: Uuid, generation: DateTime<Utc>) -> ClaimedTask {
 /// that is not linked then writes nothing (`settle_tests` covers the
 /// self-heal).
 fn writer(pool: &PgPool) -> OutcomeWriter {
+    writer_with_payload(pool, PayloadPolicy::default())
+}
+
+/// The writer of [`writer`] with the payload policy `payload`.
+fn writer_with_payload(pool: &PgPool, payload: PayloadPolicy) -> OutcomeWriter {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let successes = super::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
         Arc::new(WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER)),
         WORKER.to_owned(),
-        PayloadPolicy::default(),
+        payload,
         RetentionConfig::default(),
         successes,
         OrphanSelfHeal::Off,
@@ -318,5 +324,52 @@ async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serializa
         .expect("read the live row");
     assert_eq!(live, None);
     assert!(!phase_two_record_waits(&pool, task_id).await);
+    remove_history(&pool, task_id).await;
+}
+
+/// Python `test_worker_helpers.py::TestFinalizeResultPayloadWarn::test_oversized_result_warns`:
+/// a result over `payload.warn_bytes` gives one warning that names the task
+/// and the result payload, and the result is still written. The warning is
+/// logged once per task name and process, so the task name is this test's
+/// own.
+#[tokio::test]
+#[serial]
+async fn an_oversized_result_is_logged_once_and_written() {
+    let pool = migrated_pool().await;
+    let task_id = Uuid::new_v4();
+    let generation = seed_running(&pool, task_id).await;
+    let task_name = format!("big_result_task_{}", task_id.simple());
+    let mut task = dispatched(task_id, generation);
+    task.task_name = task_name.clone();
+    let envelope = format!(
+        r#"{{"__h_task_result__":true,"ok":{{"big":"{}"}},"err":null}}"#,
+        "x".repeat(1024)
+    );
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+
+    let settled = writer_with_payload(
+        &pool,
+        PayloadPolicy {
+            warn_bytes: Some(64),
+            reject_bytes: None,
+        },
+    )
+    .settle(
+        &task,
+        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(envelope))),
+    )
+    .await;
+
+    assert_eq!(settled, Settlement::Written);
+    let warnings: Vec<CapturedEvent> =
+        capture.lines_starting(tracing::Level::WARN, "payload size guardrail");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].field("task_name"), Some(task_name.as_str()));
+    assert_eq!(warnings[0].field("kind"), Some("result"));
+    let (status, ..) = history_result(&pool, task_id)
+        .await
+        .expect("the task moved to history");
+    assert_eq!(status, "COMPLETED");
     remove_history(&pool, task_id).await;
 }
