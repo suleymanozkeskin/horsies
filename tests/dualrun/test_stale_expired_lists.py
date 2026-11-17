@@ -1,12 +1,19 @@
 """Dual-run of the stale and expired list switch: the client statements against the list functions.
 
 Reference: ``tests/dualrun/reference/monitoring_lists.py`` (the client
-statements of #1075, with the 10,000-row bound). Candidate: ``PostgresBroker``
-(``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``). Both
-read one seeded database, so the rows compare as they are; ``expired_for``
-is measured at each statement's own time, so it compares within the time
-between the two reads. Every seeded runner beat is at or after its task's
-start, as the start writes the first beat with the RUNNING row.
+statements of #1075, with the 10,000-row bound). Candidate: Python's broker
+reads on ``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``
+before the monitoring switch (``tests/dualrun/reference/broker_monitoring.py``).
+Both read one seeded database, so the rows compare as they are;
+``expired_for`` is measured at each statement's own time, so it compares
+within the time between the two reads. Every seeded runner beat is at or
+after its task's start, as the start writes the first beat with the RUNNING
+row.
+
+The caller switch pair of the monitoring switch: on the same seeds, Python's
+broker reads against ``PostgresBroker.get_stale_tasks`` and
+``get_expired_tasks``, which the core runs. The rows must be equal, with
+``expired_for`` within the read gap.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
 from tests.dualrun.databases import DualRunDatabase
+from tests.dualrun.reference import broker_monitoring as python_reads
 from tests.dualrun.reference import monitoring_lists as reference
 from tests.dualrun.seeds import SeedCoverage, cover
 
@@ -135,17 +143,29 @@ async def _install(database: DualRunDatabase) -> None:
         await broker.close_async()
 
 
-async def _candidate(database: DualRunDatabase, thresholds: tuple[int, ...]) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
+type _Lists = tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]
+
+
+async def _lists(database: DualRunDatabase, thresholds: tuple[int, ...], *, on_core: bool) -> _Lists:
+    """The stale lists and the expired list: Python's reads, or the broker's on the core."""
     broker = _broker(database)
     try:
         stale: list[list[dict[str, Any]]] = []
         for threshold in thresholds:
-            match await broker.get_stale_tasks(stale_threshold_minutes=threshold):
+            read = (
+                await broker.get_stale_tasks(stale_threshold_minutes=threshold)
+                if on_core
+                else await python_reads.get_stale_tasks(broker, stale_threshold_minutes=threshold)
+            )
+            match read:
                 case Ok(rows):
                     stale.append(rows)
                 case Err(error):
                     raise AssertionError(f'the stale list failed: {error!r}')
-        match await broker.get_expired_tasks():
+        expired_read = (
+            await broker.get_expired_tasks() if on_core else await python_reads.get_expired_tasks(broker)
+        )
+        match expired_read:
             case Ok(rows):
                 expired = rows
             case Err(error):
@@ -179,7 +199,7 @@ def _dual_run(
         seed(connection)
         reference_stale = [reference.stale_tasks(connection, threshold) for threshold in thresholds]
         reference_expired = reference.expired_tasks(connection)
-    candidate_stale, candidate_expired = asyncio.run(_candidate(database, thresholds))
+    candidate_stale, candidate_expired = asyncio.run(_lists(database, thresholds, on_core=False))
     return reference_stale, reference_expired, candidate_stale, candidate_expired
 
 
@@ -238,6 +258,69 @@ def test_the_comparison_sees_a_candidate_that_reads_another_threshold(
     """The reference reads 4 minutes and the candidate 10; the lists must differ."""
     database = empty_database()
     reference_stale, _, _, _ = _dual_run(database, _mixed_seed, (4,))
-    candidate_stale, _ = asyncio.run(_candidate(database, (10,)))
+    candidate_stale, _ = asyncio.run(_lists(database, (10,), on_core=False))
 
     assert candidate_stale != reference_stale
+
+
+def _caller_dual_run(
+    database: DualRunDatabase,
+    seed: Callable[[psycopg.Connection[tuple[object, ...]]], None],
+    thresholds: tuple[int, ...],
+) -> tuple[_Lists, _Lists]:
+    """Install, cover, seed; Python's reads, then the broker's on the core."""
+    asyncio.run(_install(database))
+    cover(database.url, SeedCoverage.HISTORY_AND_BEATS)
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        seed(connection)
+    python_lists = asyncio.run(_lists(database, thresholds, on_core=False))
+    core_lists = asyncio.run(_lists(database, thresholds, on_core=True))
+    return python_lists, core_lists
+
+
+def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
+    """The caller switch: Python's broker reads against the broker's reads on the core."""
+    thresholds = (0, 1, 4, 10, 60, 525_600)
+
+    (python_stale, python_expired), (core_stale, core_expired) = _caller_dual_run(
+        empty_database(), _mixed_seed, thresholds
+    )
+
+    assert core_stale == python_stale
+    assert [len(rows) for rows in core_stale] == [7, 7, 6, 4, 0, 0]
+    assert [list(row) for row in core_stale[0]] == [list(row) for row in python_stale[0]]
+    assert _without_expired_for(core_expired) == _without_expired_for(python_expired)
+    assert [list(row) for row in core_expired] == [list(row) for row in python_expired]
+    assert len(core_expired) == 4
+    _assert_expired_for_close(python_expired, core_expired)
+
+
+def test_the_core_cuts_a_list_past_the_bound_at_the_rows_python_cut(
+    empty_database: MakeDatabase,
+) -> None:
+    def seed(connection: psycopg.Connection[tuple[object, ...]]) -> None:
+        _seed_running(
+            connection, 'lists.stale', count=reference.ROW_BOUND + 1,
+            started_minutes=50, beat_minutes=30, beats=1,
+        )
+        _seed_expired(connection, 'lists.expired', count=reference.ROW_BOUND + 1, deadline_in_minutes=-2)
+
+    (python_stale, python_expired), (core_stale, core_expired) = _caller_dual_run(
+        empty_database(), seed, (10,)
+    )
+
+    assert [len(rows) for rows in core_stale] == [reference.ROW_BOUND]
+    assert core_stale == python_stale
+    assert len(core_expired) == reference.ROW_BOUND
+    assert _without_expired_for(core_expired) == _without_expired_for(python_expired)
+
+
+def test_the_core_comparison_sees_a_candidate_that_reads_another_threshold(
+    empty_database: MakeDatabase,
+) -> None:
+    """Python reads 4 minutes and the core 10; the lists must differ."""
+    database = empty_database()
+    (python_stale, _), _ = _caller_dual_run(database, _mixed_seed, (4,))
+    core_stale, _ = asyncio.run(_lists(database, (10,), on_core=True))
+
+    assert core_stale != python_stale

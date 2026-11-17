@@ -299,6 +299,7 @@ const TASK_FACETS_QUERY_PARAMETERS: &[StubParameter] = &[
 ];
 const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
 const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
+const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
 const MONITORING_TASK_FACETS_PARAMETERS: &[StubParameter] =
     &[positional("query", "TaskFacetsQuery")];
 
@@ -625,10 +626,11 @@ const CORE_HANDLE_METHODS: [StubFunction; 32] = [
 ];
 
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
+const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 3] = [
+const MONITORING_HANDLE_METHODS: [StubFunction; 5] = [
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -646,6 +648,18 @@ const MONITORING_HANDLE_METHODS: [StubFunction; 3] = [
         parameters: MONITORING_TASK_FACETS_PARAMETERS,
         returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
         doc: "The facets of one scope: the JSON text of the core's Facets. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "stale_tasks_async",
+        parameters: STALE_TASKS_PARAMETERS,
+        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
+        doc: "The RUNNING tasks whose latest runner beat, or their start, is older than the\nthreshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is\nINVALID_INPUT before any core call. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "expired_tasks_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
+        doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
 ];
 
@@ -1612,7 +1626,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 7] = [
+const MONITORING_CLASSES: [StubClass; 9] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1675,6 +1689,23 @@ const MONITORING_CLASSES: [StubClass; 7] = [
                 name: "reason",
                 annotation: TypeText::WireValuesOf(<TaskAbsenceReason as CodeEnum>::CATALOG),
             },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskListComplete",
+        doc: "Every matching row of a task list: one dict per row, with the task id as uuid.UUID.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[dict[str, object]]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskListTruncated",
+        doc: "The first bound matching rows of a task list; more rows match.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows", "list[dict[str, object]]"),
+            property("bound", "int"),
         ],
         methods: &[],
     },

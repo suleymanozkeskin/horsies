@@ -238,6 +238,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::MonitoringJson>()?;
     module.add_class::<operations::monitoring_reads::MonitoringFailed>()?;
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
+    module.add_class::<operations::task_lists::TaskListComplete>()?;
+    module.add_class::<operations::task_lists::TaskListTruncated>()?;
     module.add_class::<operations::monitoring_window::MonitoringWindowRecord>()?;
     module.add_class::<operations::monitoring_window::WindowRefusedRecord>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowPaused>()?;
