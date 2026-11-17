@@ -384,6 +384,7 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
     "StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed";
 const ENSURE_PARTITION_COVERAGE_OUTCOME: &str =
     "CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed";
+const PRUNE_EXPIRED_PARTITIONS_OUTCOME: &str = "PrunePassRecord | PruneFailed";
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 const EXPIRE_PENDING_TASKS_OUTCOME: &str =
@@ -474,7 +475,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 32] = [
+const CORE_HANDLE_METHODS: [StubFunction; 33] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -594,6 +595,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 32] = [
         parameters: ENSURE_PARTITION_COVERAGE_PARAMETERS,
         returns: TypeText::FutureOf(ENSURE_PARTITION_COVERAGE_OUTCOME),
         doc: "One partition coverage pass on the session-work pool. Writes (DDL and catalog rows);\neach leaf commits alone.",
+    },
+    StubFunction {
+        name: "prune_expired_partitions_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(PRUNE_EXPIRED_PARTITIONS_OUTCOME),
+        doc: "One pruning pass on the session-work pool. Writes (DDL and catalog rows); each leaf's\ndetach and drop commit alone.",
     },
     StubFunction {
         name: "cancel_task_async",
@@ -2139,8 +2146,8 @@ const WORKFLOW_CLASSES: [StubClass; 10] = [
     },
 ];
 
-/// The classes of the history switch: the coverage pass.
-const HISTORY_CLASSES: [StubClass; 6] = [
+/// The classes of the history switch: the coverage pass and the pruning pass.
+const HISTORY_CLASSES: [StubClass; 8] = [
     StubClass {
         name: "CoverageRequest",
         doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
@@ -2196,6 +2203,27 @@ const HISTORY_CLASSES: [StubClass; 6] = [
     StubClass {
         name: "CoverageFailed",
         doc: "The pass has no outcome: the connect, the client family check, a probe, the coverage\ngate, the class registration or the final publication failed, or a row broke its\nfunction's contract.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PrunePassRecord",
+        doc: "One pruning pass: the finalized leaves, the counts of the swept leaves left detached and\ndropped, the refusals and errors (one entry per leaf), and whether a per-pass bound left\nexpired leaves for the next pass.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("finalized_leaves", "list[str]"),
+            property("detached", "int"),
+            property("dropped", "int"),
+            property("refusals", "list[str]"),
+            property("errors", "list[str]"),
+            property("reach", "Literal['WITHIN_BOUNDS', 'TRUNCATED']"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "PruneFailed",
+        doc: "The pass has no report: the connect, the client family check or the candidate read\nfailed, or a candidate row broke its function's contract. Nothing was detached or dropped.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str"), property("retryable", "bool")],
         methods: &[],

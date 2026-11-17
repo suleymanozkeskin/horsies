@@ -44,6 +44,7 @@ use crate::operations::monitoring_reads::{
     TaskListQuery, TaskStatsQuery, WorkflowRunsQuery,
 };
 use crate::operations::paused_expiry::expire_paused_workflows_operation;
+use crate::operations::pruning::prune_expired_partitions_operation;
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::result::{raw_result_record_operation, result_wait_bound};
@@ -484,6 +485,23 @@ impl CoreHandle {
             "CoreHandle.ensure_partition_coverage_async",
             CallKind::Write,
             ensure_partition_coverage_operation(self.connection(), request.get().pass()),
+        )
+    }
+
+    /// One pruning pass on the session-work pool
+    /// (`PostgresBroker::prune_expired_partitions`): `PrunePassRecord` or
+    /// `PruneFailed`. Writes (DDL and catalog rows); each leaf's detach and
+    /// drop commit alone, at most 64 acted leaves, and a cancelled await
+    /// leaves the pass running to its end. Awaitable only: its caller, the
+    /// reaper, runs on the worker's event loop.
+    fn prune_expired_partitions_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.prune_expired_partitions_async",
+            CallKind::Write,
+            prune_expired_partitions_operation(self.connection()),
         )
     }
 

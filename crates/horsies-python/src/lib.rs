@@ -176,6 +176,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::coverage::CoverageEnsuredRecord>()?;
     module.add_class::<operations::coverage::CoverageEnsureFailedRecord>()?;
     module.add_class::<operations::coverage::CoverageFailed>()?;
+    module.add_class::<operations::pruning::PrunePassRecord>()?;
+    module.add_class::<operations::pruning::PruneFailed>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
