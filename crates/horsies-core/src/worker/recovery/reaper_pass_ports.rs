@@ -564,7 +564,8 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
     let pool = migrated_pool().await;
     sqlx::raw_sql(
         "CREATE TABLE expiry_batch_marker (written boolean NOT NULL);
-         CREATE OR REPLACE FUNCTION horsies_expire_pending_tasks(
+         DROP FUNCTION horsies_expire_pending_tasks(integer, text, text);
+         CREATE FUNCTION horsies_expire_pending_tasks(
              p_batch_size integer, p_result text, p_error_code text
          ) RETURNS SETOF horsies_terminalization_outcome
          LANGUAGE plpgsql AS $$
@@ -676,7 +677,8 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
 async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_nothing() {
     let pool = migrated_pool().await;
     sqlx::raw_sql(
-        "CREATE OR REPLACE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer)
+        "DROP FUNCTION horsies_cancel_orphaned_tasks(integer);
+         CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer)
          RETURNS SETOF horsies_terminalization_outcome
          LANGUAGE plpgsql AS $$
          BEGIN
