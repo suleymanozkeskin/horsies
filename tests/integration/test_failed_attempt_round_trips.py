@@ -28,7 +28,7 @@ from horsies.core.models.tasks import OutcomeCode, TaskError, TaskResult
 from horsies.core.types.result import Ok
 from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.runtime import _TimeoutSettled
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.shared_stop import NoCancelSignal, RetryPlacement
 from tests.integration.autocommit_support import (
     QUEUE,
     TASK_NAME,
@@ -244,6 +244,7 @@ async def test_a_timeout_is_one_statement(
             TIMEOUT_MS,
             claim,
             retry=RetryPlacement.SAME_CLASS,
+            cancel=NoCancelSignal(),
         )
         assert settled == _TimeoutSettled()
 

@@ -41,7 +41,7 @@ from horsies.core.worker.runtime import (
     _TimeoutWriteFailed,
 )
 from horsies.core.worker.shared_finalize import timeout_retry_write
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.shared_stop import NoCancelSignal, RetryPlacement
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.claiming import (
@@ -1516,6 +1516,7 @@ class TestAwaitSlotOutcome:
                     1500,
                     RetryPlacement.SAME_CLASS,
                     replace(CLAIM, claimed_at=claimed_at),
+                    NoCancelSignal(),
                 )
             case Ok():
                 raise AssertionError(result)

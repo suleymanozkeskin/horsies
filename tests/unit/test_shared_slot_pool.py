@@ -108,6 +108,7 @@ from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedLoopKill,
     BlockedTheLoop,
+    CancelEnd,
     LoopHeldBy,
     LoopHolderUnknown,
     NoNamedKill,
@@ -476,6 +477,7 @@ class TestDeadline:
 
         assert await _outcome(late) == SeatDeadlineEnded(
             retry=RetryPlacement.SAME_CLASS,
+            cancel=CancelEnd.RETURNED_AFTER_SIGNAL,
         )
         assert isinstance(await _outcome(neighbour), SeatTaskFinished)
 
@@ -490,6 +492,7 @@ class TestDeadline:
 
         assert await _outcome(handle) == SeatDeadlineEnded(
             retry=RetryPlacement.SAME_CLASS,
+            cancel=CancelEnd.RETURNED_AFTER_SIGNAL,
         )
 
     async def test_a_refusal_has_no_deadline_in_the_child(
@@ -678,6 +681,7 @@ class TestTheStopOfARun:
 
         assert await _outcome(handle) == SeatDeadlineEnded(
             retry=RetryPlacement.SAME_CLASS,
+            cancel=CancelEnd.DROPPED_AFTER_GRACE,
         )
         replacement = await _value(pool.submit_shared(_request('pid')))
         assert replacement != first_pid
@@ -1260,20 +1264,39 @@ class TestStopReportOrder:
 
     @pytest.mark.asyncio(loop_scope='function')
     @pytest.mark.parametrize(
-        ('deadline', 'retry'),
+        ('deadline', 'retry', 'cancel_end'),
         [
-            (DeadlineReported(), RetryPlacement.SAME_CLASS),
-            (SecondCancelReported(), RetryPlacement.SAME_CLASS),
-            (StuckReported(), RetryPlacement.ISOLATED),
+            (
+                DeadlineNotReported(),
+                RetryPlacement.SAME_CLASS,
+                CancelEnd.RETURNED_AFTER_SIGNAL,
+            ),
+            (
+                DeadlineReported(),
+                RetryPlacement.SAME_CLASS,
+                CancelEnd.RETURNED_AFTER_SIGNAL,
+            ),
+            (
+                SecondCancelReported(),
+                RetryPlacement.SAME_CLASS,
+                CancelEnd.DROPPED_AFTER_GRACE,
+            ),
+            (
+                StuckReported(),
+                RetryPlacement.ISOLATED,
+                CancelEnd.DROPPED_AFTER_GRACE,
+            ),
         ],
     )
     async def test_a_run_that_ends_after_its_deadline_retries_by_its_stop(
         self,
         deadline: DeadlineReport,
         retry: RetryPlacement,
+        cancel_end: CancelEnd,
     ) -> None:
         """A stuck run that ends with no kill was still named stuck: its
-        retry runs isolated."""
+        retry runs isolated. The second cancel names how the run ended after
+        its cancel: without it, within the grace."""
         pool, runs, _child = self._run_at(deadline)
         handle = runs.get(1).handle  # type: ignore[union-attr]
         frame = SharedResultFrame(
@@ -1284,7 +1307,10 @@ class TestStopReportOrder:
         )
 
         assert pool._end_run(runs, frame) is True
-        assert handle.outcome.result() == SeatDeadlineEnded(retry=retry)
+        assert handle.outcome.result() == SeatDeadlineEnded(
+            retry=retry,
+            cancel=cancel_end,
+        )
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_leftover_cancel_closes_the_child_and_kills_nothing(self) -> None:
