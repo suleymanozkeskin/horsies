@@ -319,31 +319,6 @@ async def task_name_for(session: AsyncSession, task_id: str) -> str:
     return str(row[0]) if row else ''
 
 
-async def complete_task(
-    session: AsyncSession,
-    broker: PostgresBroker,
-    workflow_id: str,
-    task_index: int,
-    result: TaskResult[Any, TaskError],
-) -> None:
-    """Simulate task completion by looking up task_id and calling on_workflow_task_complete."""
-    from horsies.core.workflows.engine import on_workflow_task_complete
-
-    res = await session.execute(
-        text("""
-            SELECT task_id, task_name FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
-        {'wf_id': workflow_id, 'idx': task_index},
-    )
-    row = res.fetchone()
-    if row and row[0]:
-        await on_workflow_task_complete(
-            session, row[0], result, broker, task_name=str(row[1]),
-        )
-        await session.commit()
-
-
 FINISH_WORKER_ID = 'worker-integration-finish'
 """The worker that ``finish_task`` claims a node's task for."""
 
