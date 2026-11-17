@@ -216,7 +216,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.task_loop_registry import is_task_loop
-from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
@@ -1393,7 +1393,7 @@ class PostgresBroker:
             case False:
                 listener = ListenerEnabled(
                     listener=PostgresListener(
-                        to_psycopg_url(session_url),
+                        session_url,
                         tcp_user_timeout_ms=self.config.tcp_user_timeout_ms,
                     ),
                 )
@@ -1739,9 +1739,7 @@ class PostgresBroker:
         async with resources.partition_maintenance.connect() as connection:
             await connection.execute(text('SELECT 1'))
         try:
-            await probe_session_capability(
-                to_psycopg_url(self.config.effective_session_database_url)
-            )
+            await probe_session_capability(self.config.effective_session_database_url)
         except (asyncio.TimeoutError, psycopg.Error) as exc:
             raise ConfigurationError(
                 message='broker session capability check failed',
@@ -1834,7 +1832,7 @@ class PostgresBroker:
         readers and this client's family gets no lock and no write.
         """
         connection = await psycopg.AsyncConnection.connect(
-            to_psycopg_url(self.config.effective_session_database_url),
+            self.config.effective_session_database_url,
             autocommit=True,
         )
         try:
@@ -1931,7 +1929,7 @@ class PostgresBroker:
         lock until the context ends. The wait for the lock has no bound.
         """
         connection = await psycopg.AsyncConnection.connect(
-            to_psycopg_url(self.config.effective_session_database_url),
+            self.config.effective_session_database_url,
             autocommit=True,
         )
         key = self._schema_advisory_key()

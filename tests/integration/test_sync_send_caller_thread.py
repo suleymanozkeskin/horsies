@@ -56,7 +56,6 @@ from tests.integration.conftest import DB_URL
 pytestmark = [pytest.mark.integration]
 
 TASK_NAME: Final = 'caller_thread_echo'
-PLAIN_URL: Final = DB_URL
 SENDER_THREADS: Final = 8
 SENDS_PER_THREAD: Final = 25
 THREAD_JOIN_BOUND_S: Final = 60.0
@@ -121,7 +120,7 @@ def _echo_app(*, pool_pre_ping: bool) -> EchoApp:
 def _close_and_clean(echo_app: EchoApp) -> None:
     closed = echo_app.broker.close()
     assert closed.is_ok(), closed
-    with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
+    with psycopg.connect(DB_URL, autocommit=True) as connection:
         _ = connection.execute('DELETE FROM horsies_tasks WHERE task_name = %s', (TASK_NAME,))
 
 
@@ -161,7 +160,7 @@ def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> uuid.UUID:
 
 
 def _rows(task_ids: list[uuid.UUID]) -> int:
-    with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
+    with psycopg.connect(DB_URL, autocommit=True) as connection:
         row = connection.execute(
             'SELECT count(*) FROM horsies_tasks WHERE id = ANY(%s::uuid[])',
             (task_ids,),
@@ -178,7 +177,7 @@ def _sync_send_backend(broker: PostgresBroker) -> int:
 
 
 def _terminate_and_wait(pid: int) -> None:
-    with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
+    with psycopg.connect(DB_URL, autocommit=True) as connection:
         row = connection.execute('SELECT pg_terminate_backend(%s)', (pid,)).fetchone()
         assert row is not None and row[0] is True, pid
         _wait_until_gone(connection, pid)
@@ -359,5 +358,5 @@ def test_close_gives_the_sync_send_connections_back(schema_ready: None) -> None:
 
     _close_and_clean(opened)
 
-    with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
+    with psycopg.connect(DB_URL, autocommit=True) as connection:
         _wait_until_gone(connection, pid)
