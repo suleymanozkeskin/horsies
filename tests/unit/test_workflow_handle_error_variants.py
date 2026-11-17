@@ -38,7 +38,6 @@ from horsies.core.models.workflow.handle_types import (
     HandleWorkflowNotFound,
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.types.core_failure import CoreOperationFailed
 from tests.dualrun.reference.web_routes import actions as actions_module
 from tests.dualrun.reference.web_routes.actions import (
     RESUME_RECOVERY_WARNING,
@@ -52,6 +51,10 @@ MESSAGE_MARKER = 'message-marker-7d2e'
 CAUSE_MARKER = 'cause-marker-7d2e'
 WORKFLOW_ID = '3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f'
 UNKNOWN_STATUS = 'NOT_A_WORKFLOW_STATUS'
+_UNKNOWN_STATUS_CAUSE = core.CoreContractViolation(
+    'workflow_status', f'invalid workflow status: {UNKNOWN_STATUS}',
+)
+"""The exception of a stored workflow status that does not parse."""
 
 
 def _every_variant(cause: BaseException) -> list[HandleOperationError]:
@@ -182,6 +185,7 @@ class TestStoredWorkflowStatus:
                 code='STORED_DATA_INVALID',
                 message=f'invalid workflow status: {UNKNOWN_STATUS}',
                 retryable=False,
+                exception=_UNKNOWN_STATUS_CAUSE,
             ),
         )
 
@@ -190,7 +194,7 @@ class TestStoredWorkflowStatus:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, HandleStoredDataInvalid)
-        assert isinstance(err.exception, CoreOperationFailed)
+        assert err.exception is _UNKNOWN_STATUS_CAUSE
         assert err.workflow_id == WORKFLOW_ID
         assert UNKNOWN_STATUS in err.message
 
@@ -257,11 +261,13 @@ class TestCancelOutcome:
 
     @pytest.mark.asyncio
     async def test_a_failure_record_is_db_operation_failed(self) -> None:
+        cause = core.CoreConnectionError('cancel_workflow', CAUSE_MARKER, True)
         handle = _handle_with_core_answer(_cancel_record(
             core.HandleFailed,
             code='DB_OPERATION_FAILED',
             message=CAUSE_MARKER,
             retryable=True,
+            exception=cause,
         ))
 
         result = await handle.cancel_async()
@@ -269,8 +275,7 @@ class TestCancelOutcome:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, HandleDbOperationFailed)
-        assert isinstance(err.exception, CoreOperationFailed)
-        assert err.exception.subject == 'cancel_workflow'
+        assert err.exception is cause
         assert err.retryable is True
         assert CAUSE_MARKER in err.message
 
@@ -302,6 +307,7 @@ def _wait_failures() -> list[tuple[Any, object]]:
                 code='DB_OPERATION_FAILED',
                 message=CAUSE_MARKER,
                 retryable=True,
+                exception=core.CoreConnectionError('wait_workflow_result', CAUSE_MARKER, True),
             ),
             OperationalErrorCode.BROKER_ERROR,
         ),
@@ -311,6 +317,7 @@ def _wait_failures() -> list[tuple[Any, object]]:
                 code='STORED_DATA_INVALID',
                 message=CAUSE_MARKER,
                 retryable=False,
+                exception=core.CoreContractViolation('wait_workflow_result', CAUSE_MARKER),
             ),
             OperationalErrorCode.BROKER_ERROR,
         ),

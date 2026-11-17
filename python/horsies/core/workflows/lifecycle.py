@@ -306,7 +306,7 @@ async def start_workflow_async(
         WorkflowStarted,
         WorkflowStartRequest,
     )
-    from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+    from horsies.core.types.core_failure import core_error_retryable
     from horsies.core.workflows.spec_data import workflow_spec_json
     from horsies.core.workflows.start_tree import top_node_rows
 
@@ -415,15 +415,13 @@ async def start_workflow_async(
                 workflow_id=wf_id,
                 existing_workflow_name=existing_name,
             ))
-        case WorkflowStartFailed(message=message, retryable=retryable):
+        case WorkflowStartFailed(message=message, retryable=retryable, exception=exception):
             return Err(WorkflowStartEnqueueFailed(
                 message=message,
                 retryable=retryable,
                 workflow_name=spec.name,
                 workflow_id=wf_id,
-                exception=CoreOperationFailed(
-                    'start_workflow_async', message, retryable,
-                ),
+                exception=exception,
             ))
         case _ as unreachable:
             assert_never(unreachable)
@@ -732,7 +730,6 @@ async def resume_workflow(
         WorkflowResumed,
         WorkflowResumeRecoveryFailed,
     )
-    from horsies.core.types.core_failure import CoreOperationFailed
     from horsies.core.workflows.handle_records import (
         WorkflowOperation,
         core_call_error,
@@ -759,11 +756,11 @@ async def resume_workflow(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=workflow_id,
             ))
-        case WorkflowResumeRecoveryFailed(message=message):
+        case WorkflowResumeRecoveryFailed(message=message, exception=exception):
             return Err(HandleResumeRecoveryFailed(
                 message=message,
                 workflow_id=workflow_id,
-                exception=CoreOperationFailed(WorkflowOperation.RESUME.value, message, False),
+                exception=exception,
             ))
         case HandleFailed():
             return Err(handle_failed_error(record, workflow_id, WorkflowOperation.RESUME))
