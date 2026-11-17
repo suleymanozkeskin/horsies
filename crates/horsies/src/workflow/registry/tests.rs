@@ -434,6 +434,48 @@ fn the_compare_skips_the_args_from_members() {
     ));
 }
 
+/// The params of the decode tests: two members.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct CountAndLabel {
+    count: i64,
+    label: String,
+}
+
+/// A member whose value does not fit its field is refused by its key, with
+/// its key path and the decode's text, never the value; `build_with` does
+/// not run.
+#[test]
+fn a_params_member_that_does_not_decode_is_refused_by_its_key() {
+    match decode_params::<CountAndLabel>(r#"{"count":"seven","label":"a"}"#, &[]) {
+        Err(ParamsBuildRefused::Member { key, cause }) => {
+            assert_eq!(key, "count");
+            assert_eq!(cause, "count: invalid type: <input>, expected i64");
+        }
+        other => panic!("expected a member refusal, got {other:?}"),
+    }
+}
+
+/// The decode reads the members in the order of the text: of two refused
+/// members, the first in the text is named, not the first in key order.
+#[test]
+fn the_first_refused_member_in_the_text_is_named() {
+    match decode_params::<CountAndLabel>(r#"{"label":5,"count":"seven"}"#, &[]) {
+        Err(ParamsBuildRefused::Member { key, .. }) => assert_eq!(key, "label"),
+        other => panic!("expected a member refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn params_that_fit_decode() {
+    assert_eq!(
+        decode_params::<CountAndLabel>(r#"{"count":7,"label":"a"}"#, &[]).ok(),
+        Some(CountAndLabel {
+            count: 7,
+            label: "a".to_owned(),
+        })
+    );
+}
+
 /// A params field with no member: `build_with` does not run, and the node
 /// stores `WORKFLOW_ENQUEUE_FAILED` with Python's prefix, the decode's text
 /// (no exception class) and Python's suffix, and the workflow id and the
@@ -530,6 +572,69 @@ fn a_check_case_that_its_builder_refuses_is_reported() {
     assert_eq!(
         codes(&registry.check_findings()),
         vec![Some(ErrorCode::WorkflowCheckCaseInvalid)]
+    );
+}
+
+/// The finding of a refused check case keeps the builder's error in a
+/// note: its code and its text.
+#[test]
+fn a_refused_check_case_keeps_the_code_and_the_text_of_its_error() {
+    let registry = registry();
+    registry.add_check_cases(vec![CheckCase {
+        builder_name: "config_err".to_owned(),
+        build: Arc::new(|| -> Result<WorkflowSpec, HorsiesError> {
+            Err(HorsiesError::new("bad config").with_code(ErrorCode::BrokerInvalidUrl))
+        }),
+    }]);
+    let findings = registry.check_findings();
+    assert_eq!(
+        codes(&findings),
+        vec![Some(ErrorCode::WorkflowCheckCaseInvalid)]
+    );
+    let text = findings[0].to_string();
+    assert!(text.contains("config_err"), "{text}");
+    assert!(text.contains("HRS-203"), "{text}");
+    assert!(text.contains("bad config"), "{text}");
+}
+
+/// Python's builder check requires a definition key
+/// (`WorkflowSpec._require_definition_key`): the spec of a check case with
+/// no key or a blank one is reported with `HRS-016`, naming the workflow,
+/// and is not checked further.
+#[test]
+fn a_check_case_without_a_definition_key_is_reported() {
+    let registry = registry();
+    registry.add_check_cases(vec![
+        CheckCase {
+            builder_name: "keyless".to_owned(),
+            build: Arc::new(|| -> Result<WorkflowSpec, HorsiesError> {
+                let mut builder = WorkflowSpecBuilder::new("keyless");
+                builder.task(task_node::<u32, ()>("tick"));
+                builder.build()
+            }),
+        },
+        CheckCase {
+            builder_name: "blank".to_owned(),
+            build: Arc::new(|| spec_with::<Plain>("blank_key", " ", None)),
+        },
+    ]);
+    let findings = registry.check_findings();
+    assert_eq!(
+        codes(&findings),
+        vec![
+            Some(ErrorCode::WorkflowNoDefinitionKey),
+            Some(ErrorCode::WorkflowNoDefinitionKey),
+        ]
+    );
+    assert!(
+        findings[0].to_string().contains("'keyless'"),
+        "{}",
+        findings[0]
+    );
+    assert!(
+        findings[1].to_string().contains("'blank_key'"),
+        "{}",
+        findings[1]
     );
 }
 

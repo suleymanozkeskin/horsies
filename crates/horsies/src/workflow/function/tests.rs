@@ -139,6 +139,30 @@ fn the_check_builds_each_case() {
     assert_eq!(findings[0].code, Some(ErrorCode::WorkflowCheckCaseInvalid));
 }
 
+/// Python `_check_workflow_builders`: the check runs each case with the
+/// sends of the process suppressed, and leaves the suppression as it was.
+#[test]
+fn the_check_runs_each_case_with_the_sends_suppressed() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let app = app();
+    let suppression = app.send_suppression();
+    let seen = Arc::new(AtomicBool::new(false));
+    let seen_in_case = Arc::clone(&seen);
+    app.check_workflow_builder("suppressed", move |_case: &u32| {
+        seen_in_case.store(suppression.is_active(), Ordering::Relaxed);
+        Daily::build()
+    })
+    .case(0)
+    .register()
+    .unwrap();
+    assert!(!app.are_sends_suppressed());
+    let findings = app.workflow_check_findings();
+    assert!(findings.is_empty(), "{findings:?}");
+    assert!(seen.load(Ordering::Relaxed));
+    assert!(!app.are_sends_suppressed());
+}
+
 #[tokio::test]
 async fn a_spec_without_a_definition_key_is_refused_before_any_io() {
     let app = app();

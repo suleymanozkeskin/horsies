@@ -82,6 +82,7 @@ fn a_chain_builds_with_auto_node_ids() {
     assert_eq!(spec.nodes[1].dependencies, vec![0]);
     assert_eq!(spec.nodes[1].args_from.get("total"), Some(&0));
     assert!(matches!(spec.output, SpecOutput::Node { index: 1, .. }));
+    assert_eq!(spec.on_error(), OnError::Fail);
     spec.check_output_type::<String>().unwrap();
 }
 
@@ -106,7 +107,10 @@ fn more_nodes_than_the_limit_are_refused() {
     for _ in 0..=MAX_WORKFLOW_NODES {
         builder.task(charge());
     }
-    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowTooManyNodes));
+    let refused = refusal(builder);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowTooManyNodes));
+    assert_eq!(ErrorCode::WorkflowTooManyNodes.as_code_str(), "HRS-038");
+    assert!(refused.message.contains("10001 nodes"), "{refused}");
 }
 
 #[test]
@@ -117,6 +121,24 @@ fn an_invalid_node_id_is_refused() {
     let mut builder = WorkflowSpecBuilder::new("ids");
     builder.task(charge().node_id("x".repeat(MAX_NODE_ID_LENGTH + 1)));
     assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidNodeId));
+    let mut builder = WorkflowSpecBuilder::new("ids");
+    builder.task(charge().node_id("step-1:sub_task.v2"));
+    let spec = builder.build().unwrap();
+    assert_eq!(
+        spec.node_ids().collect::<Vec<_>>(),
+        vec!["step-1:sub_task.v2"]
+    );
+}
+
+/// A refusal of the first gate stops the build: the second gate does not
+/// run, so its refusals are not reported.
+#[test]
+fn a_refusal_of_the_first_gate_stops_the_second_gate() {
+    let mut builder = WorkflowSpecBuilder::new("gates");
+    builder.task(charge().node_id("has space").priority(0));
+    let refused = refusal(builder);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidNodeId));
+    assert!(refused.notes.is_empty(), "{refused}");
 }
 
 #[test]
@@ -203,6 +225,11 @@ fn a_quorum_outside_its_bounds_is_refused() {
     let charged = builder.task(charge());
     builder.task(charge().waits_for(charged).join_quorum(2));
     assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
+    // A quorum node with no dependency can never meet its quorum.
+    let mut builder = WorkflowSpecBuilder::new("join");
+    builder.task(charge());
+    builder.task(charge().join_quorum(1));
+    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidJoin));
 }
 
 #[test]
@@ -254,9 +281,13 @@ fn a_success_policy_without_a_case_or_a_required_node_is_refused() {
     builder.success_policy(SuccessPolicy::new(vec![SuccessCase::new(
         Vec::<NodeRef>::new(),
     )]));
-    assert_eq!(
-        code_of(builder),
-        Some(ErrorCode::WorkflowInvalidSuccessPolicy)
+    let refused = refusal(builder);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidSuccessPolicy));
+    assert!(
+        refused
+            .message
+            .contains("SuccessCase[0] has no required node"),
+        "{refused}"
     );
 }
 
@@ -538,6 +569,8 @@ fn the_output_type_is_checked() {
     let mut builder = WorkflowSpecBuilder::new("no output");
     builder.task(charge());
     let spec = builder.build().unwrap();
+    assert!(matches!(spec.output, SpecOutput::NoOutput));
+    assert_eq!(spec.success_policy, None);
     spec.check_output_type::<OutputlessResults>().unwrap();
     assert_eq!(
         spec.check_output_type::<f64>().unwrap_err().code,
@@ -555,10 +588,34 @@ fn a_key_of_another_builder_is_none() {
     assert!(spec.key(foreign).is_none());
 }
 
+/// Python `test_workflow_models.py::TestSlugify` (spaces, valid
+/// characters, invalid characters, mixed input, empty result, the node id
+/// pattern), and a letter outside ASCII, which Python's
+/// `[^A-Za-z0-9_\-:.]` removes.
 #[test]
 fn slugify_keeps_the_node_id_characters() {
-    assert_eq!(slugify("daily report"), "daily_report");
-    assert_eq!(slugify("a/b*c"), "abc");
-    assert_eq!(slugify("***"), "_");
-    assert_eq!(slugify("v1.2:x-y"), "v1.2:x-y");
+    let cases = [
+        ("daily report", "daily_report"),
+        ("a/b*c", "abc"),
+        ("***", "_"),
+        ("v1.2:x-y", "v1.2:x-y"),
+        ("Hello World", "Hello_World"),
+        ("My Workflow Name", "My_Workflow_Name"),
+        ("task:v2.0", "task:v2.0"),
+        ("my-task-name", "my-task-name"),
+        ("prefix.suffix", "prefix.suffix"),
+        ("Hello!World", "HelloWorld"),
+        ("test@#$%chars", "testchars"),
+        ("parentheses(removed)", "parenthesesremoved"),
+        ("My App: v2.0!", "My_App:_v2.0"),
+        ("Company Name (Inc.)", "Company_Name_Inc."),
+        ("my flow/v2.0", "my_flowv2.0"),
+        ("!@#$%", "_"),
+        ("", "_"),
+        ("caf\u{e9}", "caf"),
+    ];
+    for (name, slug) in cases {
+        assert_eq!(slugify(name), slug, "{name:?}");
+        assert!(is_valid_node_id(&slugify(name)), "{name:?}");
+    }
 }
