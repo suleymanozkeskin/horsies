@@ -183,8 +183,6 @@ impl CandidateFailure {
             Self::Error(
                 WorkflowError::Serialization(_)
                 | WorkflowError::WorkflowNotFound { .. }
-                | WorkflowError::WorkflowTimeout { .. }
-                | WorkflowError::WorkflowError(_)
                 | WorkflowError::InvalidStatus(_)
                 | WorkflowError::Validation(_)
                 | WorkflowError::StepContract(_),
@@ -200,8 +198,6 @@ impl CandidateFailure {
             Self::Error(WorkflowError::Broker(_)) => "Broker",
             Self::Error(WorkflowError::Serialization(_)) => "Serialization",
             Self::Error(WorkflowError::WorkflowNotFound { .. }) => "WorkflowNotFound",
-            Self::Error(WorkflowError::WorkflowTimeout { .. }) => "WorkflowTimeout",
-            Self::Error(WorkflowError::WorkflowError(_)) => "WorkflowError",
             Self::Error(WorkflowError::InvalidStatus(_)) => "InvalidStatus",
             Self::Error(WorkflowError::Validation(_)) => "Validation",
             Self::Error(WorkflowError::StepContract(_)) => "StepContract",
