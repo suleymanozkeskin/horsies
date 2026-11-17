@@ -34,8 +34,6 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
-use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::registry::BuilderHookName;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
@@ -383,9 +381,7 @@ fn writer(pool: &PgPool) -> OutcomeWriter {
     let successes = test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
