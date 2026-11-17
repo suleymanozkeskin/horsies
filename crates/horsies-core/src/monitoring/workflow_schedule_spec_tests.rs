@@ -344,9 +344,11 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
     seed_run(&database.pool, &run).await;
-    let mut task = LiveTask::pending("alpha_task");
+    // The second run fails: attempt 1 is the earlier failure that was
+    // retried, and the end writes attempt 2.
+    let mut task = LiveTask::pending("alpha_task").with_retry_count(1);
     task.is_workflow_task = true;
-    let empty = || AttemptText {
+    let empty = AttemptText {
         error_code: None,
         error_message: None,
         failed_reason: None,
@@ -365,7 +367,7 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
         &database.pool,
         &task,
         Ending::failed("TASK_EXCEPTION"),
-        &[(2, false, empty()), (1, true, empty())],
+        &[(1, true, empty)],
     )
     .await;
 

@@ -2280,82 +2280,156 @@ mod cap_tests {
         assert_eq!(failed_count(&pool, &ids).await, 3);
     }
 
+    /// The session settings that send the plan of each statement inside a function to the client as a notice,
+    /// with its buffers, for the running transaction.
+    const AUTO_EXPLAIN_SETTINGS: &str = "LOAD 'auto_explain';
+         SET LOCAL auto_explain.log_min_duration = 0;
+         SET LOCAL auto_explain.log_nested_statements = on;
+         SET LOCAL auto_explain.log_analyze = on;
+         SET LOCAL auto_explain.log_buffers = on;
+         SET LOCAL auto_explain.log_format = 'json';
+         SET LOCAL client_min_messages = log;";
+
+    /// The text before the JSON plan in an `auto_explain` message.
+    const PLAN_MARKER: &str = "plan:\n";
+
+    /// A text that only the page statement of `horsies_workflow_recovery_audit_page` has.
+    const AUDIT_PAGE_STATEMENT_MARKER: &str = "cursor_row AS MATERIALIZED";
+
+    /// The workflow-task indexes that a node probe of the audit may read.
+    const WORKFLOW_TASK_INDEXES: [&str; 4] = [
+        "idx_horsies_workflow_tasks_workflow",
+        "uq_horsies_workflow_task_index",
+        "idx_horsies_workflow_tasks_wf_status_index",
+        "idx_horsies_workflow_tasks_nonterminal",
+    ];
+
+    /// The shared buffers (hit plus read) of a plan, counted at its root node.
+    fn plan_shared_buffers(plan: &serde_json::Value) -> u64 {
+        ["Shared Hit Blocks", "Shared Read Blocks"]
+            .into_iter()
+            .map(|field| plan[field].as_u64().unwrap_or(0))
+            .sum()
+    }
+
+    /// One audit page of 200 rows: `horsies_workflow_recovery_audit_page` on `client`, inside the transaction
+    /// that the caller opened with [`AUTO_EXPLAIN_SETTINGS`]. Returns the completion ids of the page and the
+    /// root plan node of the page statement inside the function. A plain `EXPLAIN` of the call shows a
+    /// Function Scan only; `auto_explain` with `log_nested_statements` sends the plan of each statement inside
+    /// the function as a notice, which `notices` collects.
+    async fn audit_page_with_plan(
+        client: &tokio_postgres::Client,
+        notices: &std::sync::Mutex<Vec<String>>,
+    ) -> (Vec<Uuid>, serde_json::Value) {
+        notices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        let row = client
+            .query_one(
+                "SELECT outcome, completion_ids
+                 FROM horsies_workflow_recovery_audit_page(200, $1, 30000)",
+                &[&Uuid::new_v4()],
+            )
+            .await
+            .expect("one audit page");
+        let outcome: String = row.get("outcome");
+        assert_eq!(outcome, "PAGE");
+        let completion_ids: Vec<Uuid> = row.get("completion_ids");
+        let messages = notices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let plans: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|message| message.split_once(PLAN_MARKER))
+            .map(|(_, plan)| {
+                serde_json::from_str::<serde_json::Value>(plan)
+                    .expect("an auto_explain plan is JSON")
+            })
+            .filter(|document| {
+                document["Query Text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(AUDIT_PAGE_STATEMENT_MARKER))
+            })
+            .collect();
+        assert_eq!(
+            plans.len(),
+            1,
+            "one plan of the page statement: {messages:?}"
+        );
+        (completion_ids, plans[0]["Plan"].clone())
+    }
+
+    /// The node probes of the audit page read through the partial index of live nodes, for wide and narrow
+    /// workflows: 200 RUNNING workflows, one of them with 1,001 nodes, all nodes COMPLETED except nodes 0 and
+    /// 1000, which are COMPLETED in the first round and RUNNING in the second. The page statement runs with a
+    /// generic plan (the function's `plan_cache_mode`), and examines at most two node rows per workflow.
     #[tokio::test]
     #[serial]
-    #[ignore = "waits on #1291"]
     async fn generic_audit_uses_partial_index_for_wide_and_narrow_workflows() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::raw_sql("DELETE FROM horsies_workflow_tasks; DELETE FROM horsies_workflows;
-            UPDATE horsies_recovery_scan_cursors SET last_created_at=NULL,last_id=NULL,
-                cycle_upper_created_at=NULL,cycle_upper_id=NULL,claim_token=NULL,claim_expires_at=NULL;
-            INSERT INTO horsies_workflows(id,name,status,on_error,depth,root_workflow_id,sent_at,created_at,updated_at)
-                SELECT md5('partial-'||n)::uuid,'partial_index','RUNNING','fail',0,md5('partial-'||n)::uuid,NOW(),NOW(),NOW()
-                FROM generate_series(1,200) n;
-            INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,created_at)
-                SELECT 'NONE', gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','null','default',100,'{}',FALSE,'all','COMPLETED',FALSE,0,'ISOLATED','standard_30d',NOW()
-                FROM generate_series(1,200) n CROSS JOIN LATERAL generate_series(0,CASE WHEN n=200 THEN 1000 ELSE 0 END) i;
-            ANALYZE horsies_workflows, horsies_workflow_tasks;
-            SET LOCAL plan_cache_mode=force_generic_plan;")
-            .execute(tx.as_mut()).await.unwrap();
-        sqlx::raw_sql(&format!(
-            "PREPARE partial_audit(bigint,uuid,bigint) AS {GLOBAL_WORKFLOW_AUDIT_SQL}"
-        ))
-        .execute(tx.as_mut())
-        .await
-        .unwrap();
-        for status in ["COMPLETED", "RUNNING"] {
-            sqlx::query("UPDATE horsies_workflow_tasks SET status=$1 WHERE task_index IN (0,1000)")
-                .bind(status)
-                .execute(tx.as_mut())
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let (client, notices) = crate::test_support::connect_collecting_notices(&url).await;
+        client
+            .batch_execute(
+                "BEGIN;
+                 DELETE FROM horsies_workflow_tasks; DELETE FROM horsies_workflows;
+                 UPDATE horsies_recovery_scan_cursors SET last_created_at = NULL, last_id = NULL,
+                     cycle_upper_created_at = NULL, cycle_upper_id = NULL,
+                     claim_token = NULL, claim_expires_at = NULL;
+                 INSERT INTO horsies_workflows (
+                     id, name, status, on_error, depth, root_workflow_id, sent_at, created_at, updated_at
+                 )
+                 SELECT md5('partial-' || n)::uuid, 'partial_index', 'RUNNING', 'fail', 0,
+                        md5('partial-' || n)::uuid, NOW(), NOW(), NOW()
+                 FROM generate_series(1, 200) n;
+                 INSERT INTO horsies_workflow_tasks (
+                     downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name,
+                     priority, dependencies, allow_failed_deps, join_type, status, is_subworkflow,
+                     max_retries, execution, retention_class_key, created_at
+                 )
+                 SELECT 'NONE', gen_random_uuid(), md5('partial-' || n)::uuid, i, 'partial_index', 'null',
+                        'default', 100, '{}', FALSE, 'all', 'COMPLETED', FALSE, 0, 'ISOLATED',
+                        'standard_30d', NOW()
+                 FROM generate_series(1, 200) n
+                 CROSS JOIN LATERAL generate_series(0, CASE WHEN n = 200 THEN 1000 ELSE 0 END) i;
+                 ANALYZE horsies_workflows, horsies_workflow_tasks;",
+            )
+            .await
+            .expect("seed 200 RUNNING workflows, one of 1,001 nodes");
+        client
+            .batch_execute(AUTO_EXPLAIN_SETTINGS)
+            .await
+            .expect("send the nested plans as notices");
+        for (node_status, expected_completions) in [("COMPLETED", 200), ("RUNNING", 0)] {
+            client
+                .batch_execute(&format!(
+                    "SAVEPOINT audit_probe;
+                     UPDATE horsies_workflow_tasks SET status = '{node_status}'
+                     WHERE task_index IN (0, 1000);
+                     ANALYZE horsies_workflow_tasks;"
+                ))
                 .await
-                .unwrap();
-            sqlx::query("ANALYZE horsies_workflow_tasks")
-                .execute(tx.as_mut())
-                .await
-                .unwrap();
-            sqlx::query("SAVEPOINT partial_audit_probe")
-                .execute(tx.as_mut())
-                .await
-                .unwrap();
-            let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE partial_audit(200,'00000000-0000-4000-8000-000000000001',30000)")
-                .fetch_one(tx.as_mut()).await.unwrap();
+                .expect("set the status of nodes 0 and 1000");
+
+            let (completion_ids, plan) = audit_page_with_plan(&client, &notices).await;
+
+            assert_eq!(completion_ids.len(), expected_completions, "{node_status}");
             assert!(
                 plan.to_string()
                     .contains("idx_horsies_workflow_tasks_nonterminal"),
-                "{plan}"
+                "{node_status}: {plan}"
             );
             assert!(
                 relation_rows_examined(&plan, "horsies_workflow_tasks") <= 400.0,
-                "{plan}"
+                "{node_status}: {plan}"
             );
-            sqlx::query("ROLLBACK TO SAVEPOINT partial_audit_probe")
-                .execute(tx.as_mut())
+            client
+                .batch_execute("ROLLBACK TO SAVEPOINT audit_probe")
                 .await
-                .unwrap();
-            let result = sqlx::query(
-                "EXECUTE partial_audit(200,'00000000-0000-4000-8000-000000000001',30000)",
-            )
-            .fetch_one(tx.as_mut())
-            .await
-            .unwrap();
-            let ids: Vec<Uuid> = sqlx::Row::get(&result, "completion_ids");
-            let expected = match status {
-                "COMPLETED" => 200,
-                "RUNNING" => 0,
-                _ => unreachable!(),
-            };
-            assert_eq!(ids.len(), expected);
-            sqlx::query("ROLLBACK TO SAVEPOINT partial_audit_probe")
-                .execute(tx.as_mut())
-                .await
-                .unwrap();
+                .expect("undo the round");
         }
-        sqlx::query("DEALLOCATE partial_audit")
-            .execute(tx.as_mut())
-            .await
-            .unwrap();
-        tx.rollback().await.unwrap();
+        client.batch_execute("ROLLBACK").await.expect("rollback");
     }
 
     #[tokio::test]
@@ -2454,8 +2528,46 @@ mod cap_tests {
         assert_eq!(report.metrics.case4.rows_selected, 200);
         assert_eq!(report.metrics.case4.candidates_returned, 0);
 
-        // The plan of the audit page is inside `horsies_workflow_recovery_audit_page`, where EXPLAIN of the
-        // calling statement does not reach it; its bounds are checked by #1291.
+        // The next page, with the plan of the page statement inside the function. The transaction rolls back,
+        // so the cursor stays where the audit left it.
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let (client, notices) = crate::test_support::connect_collecting_notices(&url).await;
+        client.batch_execute("BEGIN").await.expect("begin");
+        client
+            .batch_execute(AUTO_EXPLAIN_SETTINGS)
+            .await
+            .expect("send the nested plans as notices");
+        let (completion_ids, plan) = audit_page_with_plan(&client, &notices).await;
+        client.batch_execute("ROLLBACK").await.expect("rollback");
+        assert!(completion_ids.is_empty(), "{completion_ids:?}");
+        let rendered = plan.to_string();
+        assert!(
+            rendered.contains("idx_horsies_workflows_running_recovery_scan"),
+            "the audit page must read the running-workflow scan index: {plan}",
+        );
+        assert!(
+            WORKFLOW_TASK_INDEXES
+                .iter()
+                .any(|index| rendered.contains(index)),
+            "the audit page must probe nodes through a workflow-task index: {plan}",
+        );
+        assert!(
+            !plan_has_sequential_scan(&plan, "horsies_workflows")
+                && !plan_has_sequential_scan(&plan, "horsies_workflow_tasks"),
+            "the audit page must not scan complete workflow tables: {plan}",
+        );
+        assert!(
+            plan_shared_buffers(&plan) <= 10_000,
+            "the audit page must stay within its buffer budget: {plan}",
+        );
+        assert!(
+            relation_rows_examined(&plan, "horsies_workflows") <= 201.0,
+            "the audit page must examine no more than one page and its upper bound: {plan}",
+        );
+        assert!(
+            relation_rows_examined(&plan, "horsies_workflow_tasks") <= 400.0,
+            "the audit page must use at most two node probes per workflow: {plan}",
+        );
 
         let selected_workflow = Uuid::parse_str("10000000-0000-7000-8000-000000000004").unwrap();
         for tree_sql in [

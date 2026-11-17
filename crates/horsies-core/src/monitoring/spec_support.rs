@@ -6,31 +6,41 @@
 //! database, so each test here runs on a migrated database of its own.
 //!
 //! Live rows name every column of the baseline task row. Terminal rows reach
-//! history through the terminal writes (`broker::terminalization`), as
-//! production writes them; a test changes a history fact afterwards only
-//! where the move cannot write it (an error code on a COMPLETED row, a
-//! status that is not a task status, an aged terminal time).
+//! history through the terminal writes of a run
+//! (`test_support::terminal_writes`), as production writes them; a test
+//! changes a history fact afterwards only where the move cannot write it (an
+//! error code on a COMPLETED row, a status that is not a task status, an aged
+//! terminal time).
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::attempt_writes::{AttemptFailure, AttemptFailureKind};
 use crate::broker::PostgresBroker;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::pages::HistoryWindow;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::lifecycle::{
-    CallerHoldsRowLock, PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
-};
+use crate::core::lifecycle::TerminalizationOutcome;
 use crate::monitoring::resolve_monitoring_window;
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::test_support::TestDatabase;
-use crate::TaskStatus;
 
 /// The worker that moves a row when the seed names none: the move fences on
 /// the claim holder, and the history row then drops the worker again.
 const MOVING_WORKER: &str = "monitoring-spec-mover";
+
+/// The host of a RUNNING row whose seed names none. The end of a completed or
+/// failed task writes its attempt row from the process facts of the live row,
+/// which the attempt table holds NOT NULL.
+const RUNNING_HOST: &str = "host-1";
+
+/// The stored result of a seeded success.
+const COMPLETED_RESULT: &str = r#"{"ok": true}"#;
+
+/// The stored result of a seeded failure.
+const FAILED_RESULT: &str = r#"{"err": {"error_code": "SEEDED"}}"#;
 
 /// A copy of the installed test template (`crate::test_support`) with
 /// history coverage and published readers, and a sqlx pool for the seeds and
@@ -179,7 +189,8 @@ impl LiveTask {
     }
 }
 
-/// Insert one live row. Every baseline column is named.
+/// Insert one live row. Every baseline column is named. A RUNNING row
+/// carries the pid and process name that its start writes.
 pub(super) async fn seed_live(pool: &PgPool, task: &LiveTask) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -201,7 +212,8 @@ pub(super) async fn seed_live(pool: &PgPool, task: &LiveTask) {
             CASE WHEN $4 = 'CLAIMED' THEN NOW() + interval '1 hour' END,
             CASE WHEN $7::bigint IS NULL THEN NULL ELSE NOW() - make_interval(secs => $7) END,
             NULL, NULL,
-            NULL, $10, NULL,
+            CASE WHEN $4 = 'RUNNING' THEN 4242 END, $10,
+            CASE WHEN $4 = 'RUNNING' THEN 'monitoring-spec-process' END,
             $8, 3, NULL, $11, $9,
             NOW(), FALSE, NULL, NULL
         )",
@@ -225,19 +237,29 @@ pub(super) async fn seed_live(pool: &PgPool, task: &LiveTask) {
 /// How a seeded task ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Ending {
-    /// COMPLETED.
+    /// COMPLETED. The end writes a COMPLETED attempt row.
     Completed,
-    /// FAILED with this stored error code.
-    Failed { error_code: Option<String> },
+    /// FAILED with this stored error code and failed reason. The end writes a
+    /// FAILED attempt row with the same code and reason, and
+    /// `attempt_message`.
+    Failed {
+        error_code: Option<String>,
+        failed_reason: Option<String>,
+        attempt_message: Option<String>,
+    },
     /// CANCELLED by an operator before it started (error code
-    /// `TASK_CANCELLED`).
+    /// `TASK_CANCELLED`). The end writes no attempt row.
     Cancelled,
 }
 
 impl Ending {
+    /// FAILED with `error_code`, the failed reason `seeded failure` and no
+    /// attempt message.
     pub(super) fn failed(error_code: &str) -> Self {
         Self::Failed {
             error_code: Some(error_code.to_owned()),
+            failed_reason: Some("seeded failure".to_owned()),
+            attempt_message: None,
         }
     }
 }
@@ -250,7 +272,8 @@ fn assert_applied(outcome: &[TerminalizationOutcome], task_id: Uuid) {
 }
 
 /// Seed `task` RUNNING under its worker, or under [`MOVING_WORKER`] when it
-/// names none, and return the worker that holds it.
+/// names none, on its host, or on [`RUNNING_HOST`] when it names none, and
+/// return the worker that holds it.
 async fn seed_running(pool: &PgPool, task: &LiveTask) -> String {
     let worker = task
         .worker
@@ -259,63 +282,92 @@ async fn seed_running(pool: &PgPool, task: &LiveTask) -> String {
     let mut running = task.clone();
     running.status = LiveStatus::Running;
     running.worker = Some(worker.clone());
+    running.worker_hostname = Some(
+        running
+            .worker_hostname
+            .clone()
+            .unwrap_or_else(|| RUNNING_HOST.to_owned()),
+    );
     running.started_seconds_ago = Some(running.started_seconds_ago.unwrap_or(30));
     seed_live(pool, &running).await;
     worker
 }
 
+/// Insert the earlier attempt rows of `task_id`.
+async fn seed_attempts(pool: &PgPool, task_id: Uuid, attempts: &[(i32, bool, AttemptText)]) {
+    for (attempt, will_retry, text) in attempts {
+        seed_attempt(pool, task_id, *attempt, *will_retry, text).await;
+    }
+}
+
 /// Seed `task` live and move it to history through the terminal write of
-/// `ending`. A completed or failed task runs under its worker first; a
-/// task with no worker runs under [`MOVING_WORKER`], and its history row
-/// then names no worker. A cancelled task is cancelled from PENDING.
+/// `ending` that a run writes. A completed or failed task runs under its
+/// worker first; a task with no worker runs under [`MOVING_WORKER`], and its
+/// history row then names no worker. A cancelled task is cancelled from
+/// PENDING.
 pub(super) async fn seed_terminal(pool: &PgPool, task: &LiveTask, ending: Ending) {
     seed_terminal_with_attempts(pool, task, ending, &[]).await;
 }
 
-/// [`seed_terminal`], with attempt rows written between the live seed and
-/// the move, so the move folds them into the attempt snapshot. Each entry
-/// is `(attempt, will_retry, text)`.
+/// [`seed_terminal`], with earlier attempt rows written between the live
+/// seed and the move, so the move folds them into the attempt snapshot. The
+/// end of a completed or failed task writes attempt `retry_count + 1`
+/// itself. Each entry is `(attempt, will_retry, text)`.
 pub(super) async fn seed_terminal_with_attempts(
     pool: &PgPool,
     task: &LiveTask,
     ending: Ending,
     attempts: &[(i32, bool, AttemptText)],
 ) {
-    let command = match &ending {
+    let outcome = match &ending {
         Ending::Cancelled => {
             let mut pending = task.clone();
             pending.status = LiveStatus::Pending;
             pending.started_seconds_ago = None;
             seed_live(pool, &pending).await;
-            TerminalizationCommand::CancelLockedTask {
-                task_id: task.id,
-                fence: CallerHoldsRowLock,
-                permitted_source_statuses: vec![TaskStatus::Pending],
+            seed_attempts(pool, task.id, attempts).await;
+            terminal_writes::cancel_live_task(pool, task.id, false).await
+        }
+        Ending::Completed => {
+            let worker = seed_running(pool, task).await;
+            seed_attempts(pool, task.id, attempts).await;
+            match task.is_workflow_task {
+                false => {
+                    terminal_writes::complete_plain_task(pool, task.id, &worker, COMPLETED_RESULT)
+                        .await
+                }
+                true => {
+                    terminal_writes::complete_workflow_task(
+                        pool,
+                        task.id,
+                        &worker,
+                        COMPLETED_RESULT,
+                    )
+                    .await
+                }
             }
         }
-        Ending::Completed => TerminalizationCommand::CompleteLockedTask {
-            task_id: task.id,
-            fence: PriorLockedRead {
-                worker_id: seed_running(pool, task).await,
-            },
-            result_json: r#"{"ok": true}"#.to_owned(),
-        },
-        Ending::Failed { error_code } => TerminalizationCommand::FailLockedTask {
-            task_id: task.id,
-            fence: PriorLockedRead {
-                worker_id: seed_running(pool, task).await,
-            },
-            result_json: r#"{"err": {"error_code": "SEEDED"}}"#.to_owned(),
-            error_code: error_code.clone(),
-            failed_reason: Some("seeded failure".to_owned()),
-        },
-    };
-    for (attempt, will_retry, text) in attempts {
-        seed_attempt(pool, task.id, *attempt, *will_retry, text).await;
+        Ending::Failed {
+            error_code,
+            failed_reason,
+            attempt_message,
+        } => {
+            let worker = seed_running(pool, task).await;
+            seed_attempts(pool, task.id, attempts).await;
+            let failure = TerminalFailure {
+                result_json: FAILED_RESULT.to_owned(),
+                error_code: error_code.clone(),
+                failed_reason: failed_reason.clone(),
+                attempt: AttemptFailure {
+                    kind: AttemptFailureKind::Failed,
+                    error_message: attempt_message.clone(),
+                    failed_reason: failed_reason.clone(),
+                },
+            };
+            terminal_writes::fail_running_task(pool, task.id, &worker, &failure).await
+        }
     }
-    let outcome = terminalize(pool, &command)
-        .await
-        .expect("run the terminal write");
+    .expect("run the terminal write");
     assert_applied(&outcome, task.id);
     let moved_by_placeholder = match ending {
         Ending::Cancelled => false,

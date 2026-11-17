@@ -714,6 +714,24 @@ pub enum SchedulePattern {
     Cron(CronSchedule),
 }
 
+impl SchedulePattern {
+    /// Check the bounds and the rules of the pattern: interval units,
+    /// hourly and monthly ranges, unique weekly days, cron terms. A daily
+    /// time is a valid time of day by its type. Pure.
+    ///
+    /// Errors: the first broken rule, as text.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            SchedulePattern::Interval(interval) => interval.validate(),
+            SchedulePattern::Hourly(hourly) => hourly.validate(),
+            SchedulePattern::Weekly(weekly) => weekly.validate(),
+            SchedulePattern::Monthly(monthly) => monthly.validate(),
+            SchedulePattern::Cron(cron) => cron.validate(),
+            SchedulePattern::Daily(_) => Ok(()),
+        }
+    }
+}
+
 /// Definition of a scheduled task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -898,15 +916,7 @@ impl ScheduleConfig {
 
         // Validate individual schedule patterns, timezones and catch-up bounds
         for schedule in &self.schedules {
-            let pattern_check = match &schedule.pattern {
-                SchedulePattern::Interval(interval) => interval.validate(),
-                SchedulePattern::Hourly(hourly) => hourly.validate(),
-                SchedulePattern::Weekly(weekly) => weekly.validate(),
-                SchedulePattern::Monthly(monthly) => monthly.validate(),
-                SchedulePattern::Cron(cron) => cron.validate(),
-                SchedulePattern::Daily(_) => Ok(()), // NaiveTime handles its own bounds
-            };
-            if let Err(pattern_error) = pattern_check {
+            if let Err(pattern_error) = schedule.pattern.validate() {
                 errors.push(format!("schedule '{}': {}", schedule.name, pattern_error));
             }
 

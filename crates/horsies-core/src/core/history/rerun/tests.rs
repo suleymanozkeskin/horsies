@@ -21,15 +21,13 @@ use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::lifecycle::{
-    CallerHoldsRowLock, PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
-    WorkerOwned,
-};
+use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
 use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
 use crate::db::{
     CheckoutClass, IsolationLevel, ParameterType, RollbackOutcome, SqlScript, StatementBound,
     StatementFailure, TypedStatement,
 };
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 mod ports;
 
@@ -163,6 +161,7 @@ async fn seed_source(
              id, task_name, queue_name, priority, input, task_options, execution,
              status, sent_at, enqueued_at, started_at, claimed_at,
              claimed_by_worker_id, claim_expires_at, good_until, is_workflow_task,
+             worker_pid, worker_hostname, worker_process_name,
              retry_count, max_retries,
              command_fingerprint_version, command_fingerprint,
              retention_class_key, rerun_of_task_id,
@@ -172,6 +171,9 @@ async fn seed_source(
              $1, 'p8.rerun', 'default', 50, $2, $3, 'ISOLATED',
              $4, NOW(), NOW(), $5, $6, $7,
              CASE WHEN $4 = 'CLAIMED' THEN NOW() + interval '1 hour' END, $8, $9,
+             CASE WHEN $4 = 'RUNNING' THEN 81 END,
+             CASE WHEN $4 = 'RUNNING' THEN 'p8-host' END,
+             CASE WHEN $4 = 'RUNNING' THEN 'p8-process' END,
              0, 3, CASE WHEN $9 THEN NULL ELSE 1 END,
              CASE WHEN $9 THEN NULL ELSE $10 END, $11, $12, $13, TRUE,
              NOW(), NOW()
@@ -231,54 +233,66 @@ async fn seed_source(
         None
     };
 
-    sqlx::query(
-        "INSERT INTO horsies_task_attempts (
-             task_id, attempt, outcome, will_retry, started_at, finished_at,
-             error_code, error_message, failed_reason, worker_id,
-             worker_hostname, worker_pid, worker_process_name
-         ) VALUES ($1, 1, 'FAILED', FALSE, NOW() - interval '1 second', NOW(),
-                   'P8', 'p8 attempt', 'p8 failure', $2, 'p8-host', 81,
-                   'p8-process')",
-    )
-    .bind(task_id)
-    .bind(WORKER)
-    .execute(pool)
-    .await
-    .unwrap();
+    // The cancel and the expiry write no attempt row: the attempt they
+    // archive is an earlier one. The failure and the success write the row of
+    // their own attempt.
+    match kind {
+        TerminalSource::Cancelled | TerminalSource::Expired => {
+            sqlx::query(
+                "INSERT INTO horsies_task_attempts (
+                     task_id, attempt, outcome, will_retry, started_at, finished_at,
+                     error_code, error_message, failed_reason, worker_id,
+                     worker_hostname, worker_pid, worker_process_name
+                 ) VALUES ($1, 1, 'FAILED', FALSE, NOW() - interval '1 second', NOW(),
+                           'P8', 'p8 attempt', 'p8 failure', $2, 'p8-host', 81,
+                           'p8-process')",
+            )
+            .bind(task_id)
+            .bind(WORKER)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        TerminalSource::Failed | TerminalSource::Completed => {}
+    }
 
     let result_json = terminal_result(kind);
-    let command = match kind {
-        TerminalSource::Failed => TerminalizationCommand::FailLockedTask {
+    let outcomes = match (kind, workflow_task) {
+        (TerminalSource::Failed, _) => terminal_writes::fail_running_task(
+            pool,
             task_id,
-            fence: PriorLockedRead {
-                worker_id: WORKER.to_owned(),
+            WORKER,
+            &TerminalFailure::of_task(&result_json, Some("P8"), Some("p8 failure")),
+        )
+        .await
+        .unwrap(),
+        (TerminalSource::Cancelled, _) => terminal_writes::cancel_live_task(pool, task_id, false)
+            .await
+            .unwrap(),
+        (TerminalSource::Expired, _) => terminalize(
+            pool,
+            &TerminalizationCommand::ExpireOwnedClaim {
+                task_id,
+                fence: WorkerOwned {
+                    worker_id: WORKER.to_owned(),
+                },
+                result_json,
+                error_code: "TASK_EXPIRED".to_owned(),
             },
-            result_json,
-            error_code: Some("P8".to_owned()),
-            failed_reason: Some("p8 failure".to_owned()),
-        },
-        TerminalSource::Cancelled => TerminalizationCommand::CancelLockedTask {
-            task_id,
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-        TerminalSource::Expired => TerminalizationCommand::ExpireOwnedClaim {
-            task_id,
-            fence: WorkerOwned {
-                worker_id: WORKER.to_owned(),
-            },
-            result_json,
-            error_code: "TASK_EXPIRED".to_owned(),
-        },
-        TerminalSource::Completed => TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: WORKER.to_owned(),
-            },
-            result_json,
-        },
+        )
+        .await
+        .unwrap(),
+        (TerminalSource::Completed, false) => {
+            terminal_writes::complete_plain_task(pool, task_id, WORKER, &result_json)
+                .await
+                .unwrap()
+        }
+        (TerminalSource::Completed, true) => {
+            terminal_writes::complete_workflow_task(pool, task_id, WORKER, &result_json)
+                .await
+                .unwrap()
+        }
     };
-    let outcomes = terminalize(pool, &command).await.unwrap();
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied { .. }]

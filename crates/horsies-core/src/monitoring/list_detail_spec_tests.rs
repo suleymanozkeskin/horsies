@@ -13,9 +13,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::spec_support::{
-    seed_live, seed_node, seed_run, seed_terminal, seed_terminal_with_attempts, set_history_status,
-    set_history_times, window, AttemptText, Ending, LiveTask, NodeKind, NodeSeed, RunSeed,
-    SpecDatabase,
+    seed_live, seed_node, seed_run, seed_terminal, set_history_status, set_history_times, window,
+    Ending, LiveTask, NodeKind, NodeSeed, RunSeed, SpecDatabase,
 };
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
@@ -493,23 +492,18 @@ async fn the_detail_reports_the_deadline_and_the_workflow_membership() {
 async fn empty_and_blank_attempt_texts_read_as_absent() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
-    let blank = AttemptText {
-        error_code: Some(String::new()),
-        error_message: Some("   ".to_owned()),
-        failed_reason: Some(String::new()),
-    };
-    seed_terminal_with_attempts(
+    // The failure writes the leaf's empty failed reason and its only attempt
+    // row: the same empty code and reason, and a blank message.
+    seed_terminal(
         &database.pool,
         &task,
-        Ending::failed("TASK_EXCEPTION"),
-        &[(1, false, blank)],
+        Ending::Failed {
+            error_code: Some(String::new()),
+            failed_reason: Some(String::new()),
+            attempt_message: Some("   ".to_owned()),
+        },
     )
     .await;
-    sqlx::query("UPDATE horsies_task_history SET final_failed_reason = '' WHERE task_id = $1")
-        .bind(task.id)
-        .execute(&database.pool)
-        .await
-        .expect("store an empty failed reason");
 
     let detail = detail_of(&database.broker(), task.id).await;
 

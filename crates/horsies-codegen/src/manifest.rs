@@ -1,5 +1,6 @@
 //! Render a manifest of horsies-core as a module of `_catalog`
-//! (`manifest.py`, `worker_manifest.py`): one frozen dataclass per manifest
+//! (`manifest.py`, `worker_manifest.py`, `scheduler_manifest.py`): one
+//! frozen dataclass per manifest
 //! type, the integer bounds the core's parser enforces, and the dump
 //! function that gives the manifest's JSON text.
 
@@ -15,6 +16,9 @@ pub const MANIFEST_MODULE_FILE: &str = "manifest.py";
 
 /// The file name of the worker manifest module, inside `_catalog`.
 pub const WORKER_MANIFEST_MODULE_FILE: &str = "worker_manifest.py";
+
+/// The file name of the scheduler manifest module, inside `_catalog`.
+pub const SCHEDULER_MANIFEST_MODULE_FILE: &str = "scheduler_manifest.py";
 
 /// The decorator of every generated dataclass. `kw_only` lets a tag field
 /// with a default come before the fields without one.
@@ -244,7 +248,9 @@ fn snake_case(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::manifest_schema::{PythonItem, PRODUCER_MANIFEST, WORKER_MANIFEST};
+    use horsies_core::manifest_schema::{
+        PythonItem, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
+    };
 
     use super::*;
 
@@ -384,5 +390,27 @@ mod tests {
         assert!(rendered.contains("\ndef dump_worker_manifest(manifest: WorkerManifest) -> str:\n"));
         assert!(rendered.contains("    profiles: dict[str, WorkerProfileManifest]\n"));
         assert!(rendered.contains("JSON text that\nthe worker of the core takes."));
+    }
+
+    #[test]
+    fn the_scheduler_manifest_module_has_every_type_bound_and_the_dump() {
+        let rendered = render_manifest_module(&SCHEDULER_MANIFEST);
+        assert!(rendered.starts_with(GENERATED_HEADER));
+        for manifest_type in SCHEDULER_MANIFEST.types {
+            let defined = match manifest_type.shape {
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
+                    format!("\ntype {} = ", manifest_type.python_name)
+                }
+            };
+            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+        }
+        for bound in SCHEDULER_MANIFEST.int_bounds() {
+            assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
+        }
+        assert!(rendered
+            .contains("\ndef dump_scheduler_manifest(manifest: SchedulerManifest) -> str:\n"));
+        assert!(rendered.contains("    schedules: tuple[ScheduleManifest, ...]\n"));
+        assert!(rendered.contains("    pattern_json: str\n"));
     }
 }
