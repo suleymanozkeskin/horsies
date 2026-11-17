@@ -20,9 +20,9 @@ use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, elapsed_s, get_task_detail, get_workflow_node,
     get_workflow_run, list_schedules, list_tasks, list_workflow_names, list_workflow_runs,
     pause_workflow_action, resolve_monitoring_window, resume_workflow_action, task_breakdown,
-    task_facets, task_stats, CancelTaskBody, LivenessReport, TaskBreakdownQuery, TaskFacetsQuery,
-    TaskFilters, TaskListQuery, TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo,
-    WorkerStateInfo, WorkflowRunsQuery,
+    task_facets, task_stats, CancelTaskBody, LivenessReport, TaskAbsenceReason, TaskBreakdownQuery,
+    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskListQuery,
+    TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
 };
 use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
 
@@ -362,11 +362,29 @@ async fn read_task(
     Path(task_id): Path<String>,
 ) -> Result<Json<crate::monitoring::TaskDetail>, ApiError> {
     let task_id = parse_path_uuid("task_id", &task_id)?;
-    get_task_detail(&state.broker, task_id)
+    match get_task_detail(&state.broker, task_id)
         .await
         .map_err(|error| query_failed("Task detail", error))?
-        .map(Json)
-        .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "Task not found."))
+    {
+        TaskDetailRead::Found(detail) => Ok(Json(detail)),
+        TaskDetailRead::NotFound(TaskDetailNotFound { reason, .. }) => Err(ApiError::detail(
+            StatusCode::NOT_FOUND,
+            task_not_found_text(reason),
+        )),
+    }
+}
+
+/// The 404 detail text for a task id that no table holds (Python
+/// `python/horsies/web/routes/tasks.py`, `task_not_found_text`).
+pub(super) fn task_not_found_text(reason: TaskAbsenceReason) -> &'static str {
+    match reason {
+        TaskAbsenceReason::PredatesRetainedHistory => {
+            "Task not found. Its id is older than the retained task history."
+        }
+        TaskAbsenceReason::WithinRetainedHistory | TaskAbsenceReason::NotClassified => {
+            "Task not found."
+        }
+    }
 }
 
 async fn read_workflow_names(State(state): State<WebState>) -> Result<Json<Vec<String>>, ApiError> {
@@ -505,7 +523,7 @@ async fn read_schedules(
 
 /// Pending streams per (queue, class) with their oldest wait and coverage,
 /// and the budget load of each live worker (Python `read_class_report`,
-/// `horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
+/// `python/horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
 async fn read_class_report(
     State(state): State<WebState>,
 ) -> Result<Json<ClassReportInfo>, ApiError> {
@@ -517,11 +535,11 @@ async fn read_class_report(
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
 /// fleet check counts the same workers as live (Python
-/// `STALE_SNAPSHOT_THRESHOLD_S`, `horsies/web/routes/workers.py:31-35`).
+/// `STALE_SNAPSHOT_THRESHOLD_S`, `python/horsies/web/routes/workers.py:31-35`).
 const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
 
 /// One entry of the worker list (Python `read_workers`,
-/// `horsies/web/routes/workers.py:96-133`).
+/// `python/horsies/web/routes/workers.py:96-133`).
 ///
 /// The snapshot age, the staleness and the uptime are measured to `read_at`,
 /// the database clock of the list statement: `snapshot_at` and

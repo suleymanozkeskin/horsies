@@ -1,6 +1,6 @@
 """Workflow pause, before ``horsies_workflow_pause``.
 
-``horsies/core/workflows/lifecycle.py`` (``pause_workflow`` with
+``python/horsies/core/workflows/lifecycle.py`` (``pause_workflow`` with
 ``cascade_pause_to_children``) sent, in one session transaction: the root
 RUNNING to PAUSED; on no row, the existence read; else, breadth first, the
 RUNNING children of each paused workflow and their pause; the abandon of

@@ -15,6 +15,7 @@ use crate::core::config::socket::{
     KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig, TcpUserTimeoutMs,
 };
 use crate::core::config::{PostgresConfig, PostgresConfigError};
+use crate::core::task::error::OutcomeCode;
 
 const T1: &str = "0190f5a2-7b1c-7d3e-8f00-000000000001";
 const T2: &str = "0190f5a2-7b1c-7d3e-8f00-000000000002";
@@ -627,7 +628,6 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::Plain,
             claimed_at: claim_time(),
             work: IsolatedWork::Run,
             input: TaskInputText::new(r#"{"a":1,"b":2}"#.to_owned()),
@@ -635,7 +635,7 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","task_kind":"plain","#,
+                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00.123456Z","work":{"kind":"run"}}"#,
             ),
             br#"{"a":1,"b":2}"#,
@@ -650,7 +650,6 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::WorkflowTask,
             claimed_at: whole_second_claim_time(),
             work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(
                 RefusalReason::new("timeout_ms is below 1000".to_owned()).unwrap(),
@@ -660,7 +659,7 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","task_kind":"workflow_task","#,
+                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","work":{"kind":"refusal","#,
                 r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}}}"#,
             ),
@@ -677,7 +676,6 @@ fn the_shared_run_frame_carries_the_seat_work() {
             task_id: task_id(T5),
             task_name: "app.tasks.fetch".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::Plain,
             claimed_at: whole_second_claim_time(),
             work,
             input: TaskInputText::new("{}".to_owned()),
@@ -688,7 +686,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
             concat!(
                 r#"{{"kind":"shared_run","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","task_kind":"plain","#,
+                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","work":{}}}"#,
             ),
             work
@@ -884,6 +882,103 @@ fn every_stop_reason_round_trips() {
     }
 }
 
+/// The run end of a result frame whose end object is `end`, or the refusal
+/// of the frame.
+fn run_end_of(end: &str) -> Result<RunEnd, MalformedFrame> {
+    let meta = format!(
+        r#"{{"kind":"result","task_id":"{T1}","end":{end},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
+    );
+    match decode_child_bytes(&framed(&meta, b"")) {
+        Ok(ChildFrame::Result(frame)) => Ok(frame.end),
+        Ok(other) => panic!("expected a result frame, got {other:?}"),
+        Err(ChildFrameRefusal::Malformed(malformed)) => Err(malformed),
+        Err(other) => panic!("expected a malformed frame, got {other:?}"),
+    }
+}
+
+/// Python `test_lifecycle_classification.py::TestSentinelParsing::test_every_child_sentinel_parses`:
+/// each stop reason reads from its wire spelling, the one place that
+/// compares the text. `NODE_NOT_LINKED` is the version-2 spelling of
+/// Python's `WORKFLOW_CHECK_FAILED`.
+#[test]
+fn each_stop_reason_reads_from_its_wire_spelling() {
+    for (spelling, reason) in [
+        ("CLAIM_LOST", StopReason::ClaimLost),
+        ("OWNERSHIP_UNCONFIRMED", StopReason::OwnershipUnconfirmed),
+        ("WORKFLOW_STOPPED", StopReason::WorkflowStopped),
+        ("TASK_EXPIRED", StopReason::TaskExpired),
+        ("NODE_NOT_LINKED", StopReason::NodeNotLinked),
+    ] {
+        let end = format!(r#"{{"kind":"stopped_before_running","reason":"{spelling}"}}"#);
+        assert_eq!(
+            run_end_of(&end),
+            Ok(RunEnd::StoppedBeforeRunning(reason)),
+            "{spelling}"
+        );
+    }
+}
+
+/// Python `TestSentinelParsing::test_expired_sentinel_matches_the_code_the_child_writes`:
+/// the expired stop travels as the spelling of the `TASK_EXPIRED` outcome
+/// code, both ways, not as a parallel spelling.
+#[test]
+fn the_expired_stop_reason_is_spelled_as_the_task_expired_code() {
+    let spelling = OutcomeCode::TaskExpired.to_string();
+    let end = format!(r#"{{"kind":"stopped_before_running","reason":"{spelling}"}}"#);
+    assert_eq!(
+        run_end_of(&end),
+        Ok(RunEnd::StoppedBeforeRunning(StopReason::TaskExpired))
+    );
+    let frame = ChildFrame::Result(ResultFrame {
+        task_id: task_id(T1),
+        end: RunEnd::StoppedBeforeRunning(StopReason::TaskExpired),
+        rss: RssReading::Unreadable,
+        task_loop: NoLeftWork::NoTaskLoop,
+    });
+    let (meta, _body) = split(&encode_child_frame(&frame).unwrap().to_bytes());
+    let meta = String::from_utf8(meta).unwrap();
+    let reason = format!(r#""reason":"{spelling}""#);
+    assert!(meta.contains(&reason), "{meta}");
+}
+
+/// Python `TestSentinelParsing::test_prose_is_not_a_sentinel`: the text of a
+/// worker failure travels in its own end and stays text, also when it spells
+/// a stop reason. A stop end whose reason is no stop reason is refused; it
+/// is never read as a worker failure.
+#[test]
+fn a_worker_failure_keeps_its_text_and_an_unknown_stop_reason_is_refused() {
+    for detail in ["Worker process crashed (no heartbeat)", "CLAIM_LOST"] {
+        let frame = ChildFrame::Result(ResultFrame {
+            task_id: task_id(T1),
+            end: RunEnd::WorkerFailure(FailureDetail::new(detail.to_owned()).unwrap()),
+            rss: RssReading::Unreadable,
+            task_loop: NoLeftWork::NoTaskLoop,
+        });
+        let bytes = encode_child_frame(&frame).unwrap().to_bytes();
+        assert_eq!(decode_child_bytes(&bytes).unwrap(), frame, "{detail}");
+    }
+    assert_eq!(
+        run_end_of(r#"{"kind":"stopped_before_running","reason":"Worker process crashed"}"#),
+        Err(MalformedFrame::BrokenRule {
+            field: "end.reason".to_owned(),
+            rule: "is not a known stop reason",
+        })
+    );
+}
+
+/// Python `TestSentinelParsing::test_absent_reason_is_not_a_sentinel`: a stop
+/// end without its reason is refused, so no stop reaches the worker without
+/// one.
+#[test]
+fn a_stop_without_its_reason_is_refused() {
+    assert_eq!(
+        run_end_of(r#"{"kind":"stopped_before_running"}"#),
+        Err(MalformedFrame::MissingField {
+            field: "end.reason".to_owned(),
+        })
+    );
+}
+
 /// The claim generation keeps every digit, so the child fences on the exact
 /// value the claim returned.
 #[test]
@@ -893,7 +988,6 @@ fn the_claim_generation_round_trips_exactly() {
         task_id: task_id(T5),
         task_name: "t".to_owned(),
         worker_id: "w".to_owned(),
-        task_kind: TaskKind::Plain,
         claimed_at,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
@@ -911,7 +1005,7 @@ fn a_claim_generation_with_an_offset_is_read() {
     let run = framed(
         concat!(
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-            r#""task_name":"t","worker_id":"w","task_kind":"plain","#,
+            r#""task_name":"t","worker_id":"w","#,
             r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","work":{"kind":"run"}}"#,
         ),
         b"{}",
@@ -1011,7 +1105,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","task_kind":"plain","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -1087,7 +1181,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","task_kind":"plain","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),

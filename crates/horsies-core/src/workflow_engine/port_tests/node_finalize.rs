@@ -16,10 +16,11 @@ use uuid::Uuid;
 
 use super::support::{
     broker, execute, finish_phase1, history_row, node, ok, poison_success_policy, seed_node,
-    seed_node_task, seed_workflow, shared_pool, spec, start, task_node, workflow_status,
-    IsolatedDatabase, LiveStatus, NodeSeed, Notifications, WorkflowSeed, WORKER,
+    seed_node_task, seed_workflow, shared_pool, spec, start, start_claimed_task, task_node,
+    workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, Notifications, WorkflowSeed, WORKER,
 };
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
+use crate::broker::claims::{StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::lifecycle_tests::support::{
     database_options, unpinged_single_connection_pool, WireProxy,
@@ -31,8 +32,8 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOutcome};
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{
-    confirm_ownership_and_set_running, finalize_workflow_phase, persist_terminal_state,
-    FinalizeError, FinalizeOutcome, FinalizeStage, OwnershipOutcome, PhaseTwoForm,
+    finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
+    PhaseTwoForm,
 };
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
@@ -403,7 +404,6 @@ enum WorkflowEnd {
 /// the end left it.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #998"]
 async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
     let pool = shared_pool().await;
     for end in [WorkflowEnd::Cancelled, WorkflowEnd::Failed] {
@@ -505,65 +505,23 @@ async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
         .expect("read the live task status")
 }
 
-/// The start check of the worker for a claimed workflow task.
-async fn start_check(
-    pool: &PgPool,
-    task_id: Uuid,
-    claimed_at: DateTime<Utc>,
-    orphan_self_heal: bool,
-) -> OwnershipOutcome {
-    confirm_ownership_and_set_running(
-        &broker(pool),
-        task_id,
-        WORKER,
-        WORKER_PID,
-        WORKER_HOSTNAME,
-        true,
-        claimed_at,
-        orphan_self_heal,
-    )
-    .await
-}
-
 /// `test_workflow_node_handoff.py::test_a_failed_workflow_check_keeps_no_beat`:
-/// a claimed task whose node is already terminal fails the start check, and
-/// no runner beat is written. With orphan self-heal on (the default), the
-/// check cancels the task as an orphan; Python cancels it in the finalize of
-/// the failed check.
+/// a claimed task whose node is already terminal fails the start check of the
+/// child host (`NODE_NOT_LINKED`): the start writes nothing, so the task stays
+/// CLAIMED by its claim and has no runner beat.
+///
+/// What follows the miss is the outcome writer's: with orphan self-heal on it
+/// cancels the owned orphan (`worker/executor/slots/settle_tests.rs::a_task_whose_node_is_not_linked_is_cancelled_when_the_self_heal_is_on`),
+/// with it off the row stays CLAIMED (`::a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off`).
 #[tokio::test]
 #[serial]
-async fn a_failed_workflow_check_writes_no_runner_beat() {
+async fn a_failed_workflow_check_keeps_the_claim_and_writes_no_runner_beat() {
     let db = IsolatedDatabase::create().await;
     let (_workflow_id, task_id, claimed_at) = seed_claimed_task_of_a_completed_node(&db.pool).await;
 
-    let outcome = start_check(&db.pool, task_id, claimed_at, true).await;
+    let outcome = start_claimed_task(&db.pool, task_id, claimed_at).await;
 
-    assert!(matches!(outcome, OwnershipOutcome::Aborted));
-    assert_eq!(runner_beats(&db.pool, task_id).await, 0);
-    assert_eq!(live_status(&db.pool, task_id).await, None);
-    assert_eq!(
-        history_row(&db.pool, task_id)
-            .await
-            .map(|(status, _kind)| status)
-            .as_deref(),
-        Some("CANCELLED")
-    );
-    db.drop().await;
-}
-
-/// `test_workflow_node_handoff.py::test_a_failed_workflow_check_keeps_no_beat`,
-/// with orphan self-heal off: the failed check leaves the task CLAIMED, as
-/// Python's check does, and writes no runner beat.
-#[tokio::test]
-#[serial]
-#[ignore = "waits on #921"]
-async fn a_failed_workflow_check_with_self_heal_off_keeps_the_claim_and_writes_no_beat() {
-    let db = IsolatedDatabase::create().await;
-    let (_workflow_id, task_id, claimed_at) = seed_claimed_task_of_a_completed_node(&db.pool).await;
-
-    let outcome = start_check(&db.pool, task_id, claimed_at, false).await;
-
-    assert!(matches!(outcome, OwnershipOutcome::Aborted));
+    assert_eq!(outcome, StartOutcome::Missed(StartMiss::NodeNotLinked));
     assert_eq!(
         live_status(&db.pool, task_id).await.as_deref(),
         Some("CLAIMED")
@@ -762,7 +720,6 @@ async fn a_phase_two_that_fails_sends_no_wake() {
 /// server refuses is a phase-2 error, and the node write does not commit.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #722"]
 async fn a_wake_that_the_server_refuses_is_a_phase_two_error() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;

@@ -1339,7 +1339,7 @@ pub fn worker_profiles_claim_errors(
 }
 
 /// The profile that a worker runs, by its name in the profile set (Python
-/// `SelectedProfile`, `horsies/core/cli.py:425-430`).
+/// `SelectedProfile`, `python/horsies/core/cli.py:425-430`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedProfile {
     pub name: String,
@@ -1375,7 +1375,7 @@ pub enum ProfileSelectionRefused {
 
 impl ProfileSelectionRefused {
     /// The startup errors of the refusal, with Python's text
-    /// (`horsies/core/cli.py:467-518`, `_profile_selection_error`). Pure.
+    /// (`python/horsies/core/cli.py:467-518`, `_profile_selection_error`). Pure.
     pub fn errors(&self) -> Vec<HorsiesError> {
         match self {
             Self::InvalidProfiles { errors } => errors.clone(),
@@ -1421,7 +1421,7 @@ fn profile_help(defined: &[String]) -> String {
 /// Check every profile of `profiles` as AppConfig validation does (the
 /// shape refusals, then the claim refusals with `prefetch_buffer`), then
 /// pick the profile that `request` names (Python `select_worker_profile`,
-/// `horsies/core/cli.py:448-464`). Pure.
+/// `python/horsies/core/cli.py:448-464`). Pure.
 ///
 /// Errors: [`ProfileSelectionRefused`]: the refusals of the set, no
 /// request, or a name that the set does not have.

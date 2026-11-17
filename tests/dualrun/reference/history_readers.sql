@@ -1,5 +1,5 @@
 -- The reference side of the dual-run in test_history_readers.py: the statements that StagedLoaderPublisher.republish
--- sent (horsies/core/history/reads/publisher.py and lookup_generation.py at commit abdc49d4) for a catalog of two
+-- sent (python/horsies/core/history/reads/publisher.py and lookup_generation.py at commit abdc49d4) for a catalog of two
 -- attached history leaves: horsies_task_history_forever_open and horsies_task_history_standard_30d_2030_01_01. The
 -- renderer output is copied as it was rendered.
 --

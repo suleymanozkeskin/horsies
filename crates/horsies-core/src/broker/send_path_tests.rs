@@ -20,7 +20,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
-use crate::broker::{BrokerError, PostgresBroker};
+use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{
@@ -88,6 +88,7 @@ async fn enqueue_payload(
             payload.idempotency_key.as_deref(),
             payload.retention,
             None,
+            SendKind::First,
         )
         .await
 }
@@ -201,7 +202,6 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
 /// and no row is written.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #622"]
 async fn a_malformed_retry_policy_is_refused_before_any_row() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
@@ -256,7 +256,6 @@ async fn valid_retry_policies_store_their_limits() {
 /// 0.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #622"]
 async fn a_null_retry_policy_stores_zero_retries() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
@@ -612,6 +611,7 @@ async fn the_row_stores_the_sent_input_text_byte_for_byte() {
                 None,
                 EnqueueRetention::Forever,
                 Some(true),
+                SendKind::First,
             )
             .await
             .expect("the send writes its row");

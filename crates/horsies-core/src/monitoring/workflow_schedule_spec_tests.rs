@@ -342,7 +342,6 @@ async fn node_execution_time_follows_the_node_status() {
 /// attempts in ascending order.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_node_reports_its_id_error_backing_task_and_attempts() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -354,13 +353,8 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
         error_message: None,
         failed_reason: None,
     };
-    seed_terminal_with_attempts(
-        &database.pool,
-        &task,
-        Ending::failed("TASK_EXCEPTION"),
-        &[(2, false, empty()), (1, true, empty())],
-    )
-    .await;
+    // The node comes first: the move of a failed workflow task reads its
+    // node (`horsies_move_task_to_history`, deferred phase 2).
     let mut node = NodeSeed::task(run.id, 0);
     node.node_id = Some("step-one".to_owned());
     node.status = "FAILED".to_owned();
@@ -369,6 +363,13 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
     };
     node.result = Some(failed_result("node blew up"));
     seed_node(&database.pool, &node).await;
+    seed_terminal_with_attempts(
+        &database.pool,
+        &task,
+        Ending::failed("TASK_EXCEPTION"),
+        &[(2, false, empty()), (1, true, empty())],
+    )
+    .await;
 
     let detail = get_workflow_node(&database.broker(), run.id, 0)
         .await
@@ -391,20 +392,21 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
 /// Python `TestGetWorkflowNode::test_backing_history_row_with_an_unknown_status_is_a_contract_violation`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn an_unknown_status_of_the_backing_history_row_is_a_contract_violation() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
     seed_run(&database.pool, &run).await;
     let mut task = LiveTask::pending("alpha_task");
     task.is_workflow_task = true;
-    seed_terminal(&database.pool, &task, Ending::failed("TASK_EXCEPTION")).await;
+    // The node comes first: the move of a failed workflow task reads its
+    // node (`horsies_move_task_to_history`, deferred phase 2).
     let mut node = NodeSeed::task(run.id, 0);
     node.status = "FAILED".to_owned();
     node.kind = NodeKind::Task {
         task_id: Some(task.id),
     };
     seed_node(&database.pool, &node).await;
+    seed_terminal(&database.pool, &task, Ending::failed("TASK_EXCEPTION")).await;
     set_history_status(&database.pool, task.id, "NOT_KNOWN").await;
 
     let error = get_workflow_node(&database.broker(), run.id, 0)
@@ -425,7 +427,6 @@ async fn an_unknown_status_of_the_backing_history_row_is_a_contract_violation() 
 /// resolves, with no leaf and no attempts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_node_whose_task_is_gone_still_resolves_without_a_leaf() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");

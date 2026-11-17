@@ -1,7 +1,7 @@
 /// Typed error types for WorkflowHandle operations.
 use uuid::Uuid;
 ///
-/// Mirrors Python's `horsies/core/models/workflow/handle_types.py`.
+/// Mirrors Python's `python/horsies/core/models/workflow/handle_types.py`.
 ///
 /// Two error strategies by return type:
 ///

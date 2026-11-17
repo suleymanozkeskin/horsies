@@ -1,5 +1,5 @@
 //! Whether the connections of one worker of a profile fit the server
-//! (Python `horsies/core/worker/profile_fit.py`, the connection part).
+//! (Python `python/horsies/core/worker/profile_fit.py`, the connection part).
 //!
 //! One worker of a profile opens connections itself: its pool (the resolved
 //! `WorkerProfile.pool`), its session pool when the session URL differs, its
@@ -61,7 +61,7 @@ pub const RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER: u32 = 1;
 /// (Python `CONNECTION_LIMIT_READ_TIMEOUT_S`).
 pub const CONNECTION_LIMIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Python's statement (`horsies/core/worker/profile_fit.py:85-92`).
+/// Python's statement (`python/horsies/core/worker/profile_fit.py:85-92`).
 /// `reserved_connections` exists from PostgreSQL 16; before it, no slot is
 /// reserved for it.
 const CONNECTION_LIMIT_SQL: &str = "\
@@ -514,7 +514,7 @@ pub fn connection_limit_unreadable_error(cause: &ConnectionLimitUnreadable) -> H
 }
 
 /// The live connection check of `horsies check --live` (Python
-/// `Horsies._check_worker_connections`, `horsies/core/app.py:1421-1478`).
+/// `Horsies._check_worker_connections`, `python/horsies/core/app.py:1421-1478`).
 ///
 /// - No worker profile, or PgBouncer transaction mode: reads nothing and
 ///   returns no error.
@@ -541,7 +541,7 @@ pub async fn check_worker_connections(
 
 /// The connection fit of the profile that a worker runs, read at boot before
 /// the worker starts. The worker starts in every case (Python
-/// `_log_connection_fit`, `horsies/core/cli.py:711-745`).
+/// `_log_connection_fit`, `python/horsies/core/cli.py:711-745`).
 #[derive(Debug)]
 pub enum BootConnectionFit {
     /// PgBouncer transaction mode: nothing is read.
@@ -586,7 +586,7 @@ pub struct BootConnectionLog {
 }
 
 /// The record that the worker logs for the fit of its profile `name`, with
-/// Python's level and text (`horsies/core/cli.py:691-745`): a profile above
+/// Python's level and text (`python/horsies/core/cli.py:691-745`): a profile above
 /// the usable slots or an unreadable limit is a warning; a fitting profile
 /// and a transaction pooler are info. Pure.
 pub fn boot_connection_log(name: &str, fit: &BootConnectionFit) -> BootConnectionLog {
