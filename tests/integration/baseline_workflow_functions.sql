@@ -1309,6 +1309,37 @@ BEGIN
     PERFORM wft_check((wft_workflow(v_wf)).status = 'FAILED', 'child finish: the parent completes FAILED');
 END $$;
 
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000513';
+    v_child uuid := '00000000-0000-7000-8000-000000000514';
+    v_result record;
+BEGIN
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(jsonb_build_object('idx', 0, 'sub', true), jsonb_build_object('wf', v_child, 'idx', 0))
+    );
+    -- A stored child error that is the JSON null is summarized as its text, as Python's reader takes the first 200
+    -- characters of a stored error that does not read as a JSON value other than null.
+    UPDATE horsies_workflows SET status = 'FAILED', error = 'null', completed_at = now(), updated_at = now()
+    WHERE id = v_child;
+    SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+    PERFORM wft_check(v_result.node_status = 'FAILED'
+                      AND (v_result.summary::json -> 'error_summary')::text = '"null"'
+                      AND (v_result.failure_error::json -> 'sub_workflow_summary' -> 'error_summary')::text = '"null"',
+                      'child node result: a stored error null is summarized as the text null');
+    UPDATE horsies_workflows SET error = ' null ' WHERE id = v_child;
+    SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+    PERFORM wft_check((v_result.summary::json -> 'error_summary')::text = '" null "',
+                      'child node result: a stored error null with spaces is summarized as its text');
+    UPDATE horsies_workflows SET error = '7' WHERE id = v_child;
+    SELECT * INTO v_result FROM horsies_workflow_child_node_result(v_child);
+    PERFORM wft_check((v_result.summary::json -> 'error_summary')::text = 'null',
+                      'child node result: a stored error that is JSON other than an object or null has no summary');
+END $$;
+
 -- Pause, resume, cancel ---------------------------------------------------------------------------------------------
 
 DO $$
