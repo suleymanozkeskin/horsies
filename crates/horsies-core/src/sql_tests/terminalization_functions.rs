@@ -230,30 +230,39 @@ const CANCEL_TASK_SQL: &str = "
     FROM horsies_cancel_task(CAST($1 AS uuid), CAST($2 AS BOOLEAN))
 ";
 
-/// Sets the row's started_at `$2` seconds and finalizing_at `$3` seconds
-/// before now; NULL clears the column. Parameter `$1` is the task id.
+/// Sets the row's started_at to `$2` and finalizing_at to `$3`; NULL clears
+/// the column. Parameter `$1` is the task id.
 const AGE_SQL: &str = "
     UPDATE horsies_tasks
-    SET started_at = CASE
-            WHEN CAST($2 AS INTEGER) IS NULL THEN NULL
-            ELSE NOW() - make_interval(secs => $2)
-        END,
-        finalizing_at = CASE
-            WHEN CAST($3 AS INTEGER) IS NULL THEN NULL
-            ELSE NOW() - make_interval(secs => $3)
-        END
+    SET started_at = CAST($2 AS timestamptz),
+        finalizing_at = CAST($3 AS timestamptz)
     WHERE id = $1
 ";
 
-/// A heartbeat of the task, sent `$3` seconds before now in the role `$2`.
-/// Parameter `$1` is the task id.
+/// The start of the earliest heartbeat leaf in the leaf catalog.
+const FIRST_HEARTBEAT_HOUR_SQL: &str = "
+    SELECT min(lower_anchor)
+    FROM horsies_task_history_leaf_catalog
+    WHERE class_key = 'heartbeats'
+";
+
+/// Creates the heartbeat leaf of the UTC hour that holds `$1`, or finds it
+/// conformant, and returns the outcome of `horsies_create_heartbeat_leaf`.
+const HEARTBEAT_LEAF_SQL: &str = "
+    SELECT outcome
+    FROM horsies_create_heartbeat_leaf(
+        date_trunc('hour', CAST($1 AS timestamptz), 'UTC')
+    )
+";
+
+/// A heartbeat of the task, sent at `$3` in the role `$2`. Parameter `$1` is
+/// the task id.
 const HEARTBEAT_SQL: &str = "
     INSERT INTO horsies_heartbeats (
         task_id, sender_id, role, sent_at, hostname, pid
     )
     VALUES (
-        $1, 'staleness-test', $2,
-        NOW() - make_interval(secs => CAST($3 AS INTEGER)),
+        $1, 'staleness-test', $2, CAST($3 AS timestamptz),
         'terminalization-test-host', 4242
     )
 ";
@@ -598,34 +607,91 @@ async fn cancel_admin(
     .await
 }
 
+/// `NOW()` of the database: the start of the open transaction, or of this
+/// statement in autocommit. A staleness case reads it once and seeds every
+/// time relative to it.
+async fn database_now(session: &Session) -> DateTime<Utc> {
+    session
+        .client()
+        .query_one("SELECT NOW()", &[])
+        .await
+        .unwrap_or_else(|error| panic!("read the database clock: {}", describe(&error)))
+        .get(0)
+}
+
+/// The start of the earliest heartbeat leaf: the UTC hour in which the
+/// coverage pass of [`covered`] ran. No leaf holds the hour before it.
+async fn first_heartbeat_hour(session: &Session) -> DateTime<Utc> {
+    let first: Option<DateTime<Utc>> = session
+        .client()
+        .query_one(FIRST_HEARTBEAT_HOUR_SQL, &[])
+        .await
+        .unwrap_or_else(|error| panic!("read the first heartbeat hour: {}", describe(&error)))
+        .get(0);
+    first.expect("the coverage pass created heartbeat leaves")
+}
+
 /// Puts the liveness columns of the row where a staleness case needs them:
-/// started_at and finalizing_at the given seconds before now, NULL for
-/// `None`.
+/// started_at and finalizing_at at the given instants, NULL for `None`.
 async fn age(
     session: &Session,
     task_id: Uuid,
-    started_seconds_ago: Option<i32>,
-    finalizing_seconds_ago: Option<i32>,
+    started_at: Option<DateTime<Utc>>,
+    finalizing_at: Option<DateTime<Utc>>,
 ) {
     let _aged = run(
         session,
         "set the liveness columns",
         AGE_SQL,
-        &[&task_id, &started_seconds_ago, &finalizing_seconds_ago],
+        &[&task_id, &started_at, &finalizing_at],
     )
     .await;
 }
 
-/// A heartbeat of the task in `role`, sent `seconds_ago` seconds before
-/// now.
-async fn heartbeat(session: &Session, task_id: Uuid, seconds_ago: i32, role: &str) {
+/// What [`heartbeat`] found for the leaf of the hour of its heartbeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatLeaf {
+    /// No leaf held the hour; the helper created it.
+    Created,
+    /// A conformant leaf held the hour already.
+    AlreadyConformant,
+}
+
+/// A heartbeat of the task in `role`, sent at `sent_at`. The heartbeats
+/// table is partitioned by the hour of `sent_at`, and the coverage pass
+/// creates the leaves from the hour in which it ran on. So the helper first
+/// creates the leaf of the hour that holds `sent_at`
+/// ([`HEARTBEAT_LEAF_SQL`]), and then inserts the heartbeat.
+///
+/// # Panics
+///
+/// When a statement fails, or the leaf creation returns an outcome other
+/// than CREATED or ALREADY_CONFORMANT.
+async fn heartbeat(
+    session: &Session,
+    task_id: Uuid,
+    sent_at: DateTime<Utc>,
+    role: &str,
+) -> HeartbeatLeaf {
+    let outcome: String = session
+        .client()
+        .query_one(HEARTBEAT_LEAF_SQL, &[&sent_at])
+        .await
+        .unwrap_or_else(|error| panic!("create the heartbeat leaf: {}", describe(&error)))
+        .get(0);
+    let leaf = match outcome.as_str() {
+        "CREATED" => HeartbeatLeaf::Created,
+        "ALREADY_CONFORMANT" => HeartbeatLeaf::AlreadyConformant,
+        refused => panic!("the heartbeat leaf of the hour of {sent_at}: {refused}"),
+    };
     let _sent = run(
         session,
         "insert a heartbeat",
         HEARTBEAT_SQL,
-        &[&task_id, &role, &seconds_ago],
+        &[&task_id, &role, &sent_at],
     )
     .await;
+    leaf
 }
 
 /// A RUNNING workflow task of [`WORKER`] with its RUNNING node in a RUNNING
