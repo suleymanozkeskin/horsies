@@ -87,7 +87,10 @@ pub(super) fn start_control_thread(
                         std::process::exit(PARENT_GONE_EXIT_CODE)
                     }
                     Err(ReadEnd::OverBound(over)) => {
-                        tracing::error!(error = %over, "the parent sent a frame over the bounds");
+                        tracing::error!(
+                            error = %over,
+                            "Parent sent a frame over the bounds: {over}",
+                        );
                         std::process::exit(BAD_PARENT_FRAME_EXIT_CODE)
                     }
                 };
@@ -99,7 +102,7 @@ pub(super) fn start_control_thread(
                         }
                     }
                     Err(refusal) => {
-                        tracing::error!(error = %refusal, "the parent sent a bad frame");
+                        tracing::error!(error = %refusal, "Parent sent a bad frame: {refusal}");
                         std::process::exit(BAD_PARENT_FRAME_EXIT_CODE)
                     }
                 }
