@@ -28,6 +28,7 @@ use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
 };
+use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
@@ -431,6 +432,25 @@ impl CoreHandle {
             "CoreHandle.claim_pass_async",
             CallKind::Write,
             claim_pass_operation(self.connection(), request.get().request()),
+        )
+    }
+
+    /// Count the capped queues of one soft-cap start check: `QueueStartsRecord`
+    /// or `QueueStartsFailed`. Reads only, in one statement; a check with no
+    /// queue sends nothing. Awaitable only: its caller, the worker's claim
+    /// loop, runs on the worker's event loop.
+    fn count_queue_starts_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, QueueStartsRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.count_queue_starts_async",
+            CallKind::Read,
+            count_queue_starts_operation(self.connection(), request.get().check()),
         )
     }
 
