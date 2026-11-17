@@ -26,7 +26,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from types import FrameType
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, Final, assert_never
 
 from horsies import _core
 from horsies._catalog import worker_manifest as wire
@@ -130,11 +130,19 @@ def worker_manifest_json(app: Horsies, launch: WorkerLaunch) -> str:
     return wire.dump_worker_manifest(manifest)
 
 
+PROFILE_REFUSED_HELP: Final = (
+    'fix the profile that the line names in AppConfig.worker_profiles, or start '
+    'the worker with a defined profile: horsies worker <app> --profile <name>'
+)
+"""The help of each line of the core's profile refusal."""
+
+
 def profile_refused_error(refusal: str) -> ConfigurationError:
     """The startup error of one line of the core's profile refusal."""
     error = ConfigurationError(
         message=refusal,
         code=ErrorCode.CONFIG_INVALID_WORKER_PROFILE,
+        help_text=PROFILE_REFUSED_HELP,
     )
     error.location = None
     return error
