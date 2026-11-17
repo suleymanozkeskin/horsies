@@ -175,8 +175,7 @@ pub struct WorkflowDefConfig {
     /// output (the workflow completes without producing a typed result).
     pub output: Option<NodeRef>,
 
-    /// Custom success criteria. `None` means use the default policy (all
-    /// non-optional tasks must complete).
+    /// Custom success criteria. `None`: any task failure fails the workflow.
     pub success_policy: Option<SuccessPolicy>,
 }
 

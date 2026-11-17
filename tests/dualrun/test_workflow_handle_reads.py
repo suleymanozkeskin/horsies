@@ -43,6 +43,7 @@ from tests.dualrun.operation import OperationSide, dual_run
 from tests.dualrun.reference import workflow_handle_reads as reference
 from tests.dualrun.workflow_seeds import (
     OnError,
+    OutputNode,
     TopLevel,
     WorkflowSeed,
     cover_history,
@@ -110,6 +111,7 @@ def _top(workflow_id: uuid.UUID, name: str) -> WorkflowSeed:
         on_error=OnError.FAIL,
         parent=TopLevel(),
         nodes=(task_node(0, _TASK),),
+        output=OutputNode(0),
     )
 
 
@@ -169,6 +171,23 @@ def _handle_result(result: HandleResult[Any], roles: dict[str, str]) -> object:
             return ('err', str(error.code), _id_free(error.message, roles))
 
 
+def _node_results(
+    result: HandleResult[dict[str, TaskResult[Any, TaskError]]],
+    roles: dict[str, str],
+) -> object:
+    """The answer of a results read with each node's result by value:
+    ``TaskResult`` compares by identity, so two reads of one result differ
+    as objects."""
+    match result:
+        case Ok(results):
+            return (
+                'ok',
+                {node_id: _task_result(value, roles) for node_id, value in results.items()},
+            )
+        case Err():
+            return _handle_result(result, roles)
+
+
 def _task_info(info: WorkflowTaskInfo, roles: dict[str, str]) -> object:
     return (
         info.node_id,
@@ -211,7 +230,7 @@ class _ReadFunctions:
             status=_handle_result(await self.reads['status'](handle), roles),
             get=_task_result(await self.reads['get'](handle, timeout_ms=0), roles),
             result_for=_task_result(await self.reads['result_for'](handle, node), roles),
-            results=_handle_result(await self.reads['results'](handle), roles),
+            results=_node_results(await self.reads['results'](handle), roles),
             tasks=tasks_answer,
         )
 

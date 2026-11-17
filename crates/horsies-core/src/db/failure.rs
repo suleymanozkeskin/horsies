@@ -99,6 +99,44 @@ impl fmt::Display for DbErrorText<'_> {
     }
 }
 
+/// Display of a driver error and its causes. tokio-postgres writes only the
+/// kind of an error (`error connecting to server`, `connection closed`) and
+/// keeps its cause, such as the refused socket, as the `source()`. Each cause
+/// follows after `: `, at most [`MAX_ERROR_CHAIN_DEPTH`] of them; a longer
+/// chain ends with a note that more causes follow.
+pub struct DriverErrorText<'a>(pub &'a tokio_postgres::Error);
+
+impl fmt::Display for DriverErrorText<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_with_causes(formatter, self.0)
+    }
+}
+
+/// Writes `error`, then each cause of its `source()` chain after `: `, at
+/// most [`MAX_ERROR_CHAIN_DEPTH`] causes; a longer chain ends with a note
+/// that more causes follow.
+fn write_with_causes(
+    formatter: &mut fmt::Formatter<'_>,
+    error: &(dyn std::error::Error + 'static),
+) -> fmt::Result {
+    write!(formatter, "{error}")?;
+    let mut current = error.source();
+    for _ in 0..MAX_ERROR_CHAIN_DEPTH {
+        let Some(cause) = current else {
+            return Ok(());
+        };
+        write!(formatter, ": {cause}")?;
+        current = cause.source();
+    }
+    match current {
+        Some(_) => write!(
+            formatter,
+            " (more causes after the first {MAX_ERROR_CHAIN_DEPTH} are not shown)"
+        ),
+        None => Ok(()),
+    }
+}
+
 /// A connection attempt failed.
 #[derive(Debug, thiserror::Error)]
 #[error("connecting to {masked_url} failed: {cause}")]
@@ -121,11 +159,11 @@ pub enum ConnectFailure {
     #[error("the server refused the connection: {}", DbErrorText(.0))]
     ServerRefused(DbError),
     /// The socket, the TLS handshake or the protocol failed.
-    #[error("the connection could not be made: {0}")]
+    #[error("the connection could not be made: {}", DriverErrorText(.0))]
     TransportFailed(tokio_postgres::Error),
     /// The connection opened, and its session setting statement failed. The
     /// connection is closed.
-    #[error("the session setup `{statement}` failed: {error}")]
+    #[error("the session setup `{statement}` failed: {}", DriverErrorText(.error))]
     SessionSetupFailed {
         statement: &'static str,
         error: tokio_postgres::Error,
@@ -271,10 +309,10 @@ impl CheckoutFailure {
 #[derive(Debug, thiserror::Error)]
 pub enum PoolingCheckFailure {
     /// `SELECT 1` failed, so the check could not judge the URL.
-    #[error("SELECT 1 failed: {0}")]
+    #[error("SELECT 1 failed: {}", DriverErrorText(.0))]
     SelectFailed(tokio_postgres::Error),
     /// The connection broke during the two-statement transaction.
-    #[error("the connection broke during the check: {0}")]
+    #[error("the connection broke during the check: {}", DriverErrorText(.0))]
     ConnectionLost(tokio_postgres::Error),
     /// The check did not end within its bound.
     #[error("the check did not end within {bound:?}")]
@@ -338,7 +376,7 @@ pub enum NotSentCause {
     #[error("the connection was closed before the statement was sent")]
     ConnectionClosed,
     /// The prepare round trip failed. The statement itself did not run.
-    #[error("preparing the statement failed before it ran: {0}")]
+    #[error("preparing the statement failed before it ran: {}", DriverErrorText(.0))]
     PrepareFailed(tokio_postgres::Error),
     /// An earlier failure discarded this connection (or dropped its open
     /// transaction); nothing more runs on it. Check out another connection.
@@ -399,7 +437,7 @@ impl RefusalCause {
 #[derive(Debug, thiserror::Error)]
 pub enum UnknownOutcomeCause {
     /// The connection closed after the statement was sent.
-    #[error("the connection was lost after the statement was sent: {0}")]
+    #[error("the connection was lost after the statement was sent: {}", DriverErrorText(.0))]
     ConnectionLost(tokio_postgres::Error),
     /// The server ended the session (FATAL or PANIC) after the statement was
     /// sent; it may have committed before the session ended.
@@ -408,7 +446,7 @@ pub enum UnknownOutcomeCause {
     /// The driver failed with an error that is not a server error while the
     /// connection stayed open (a parameter value that does not encode, or a
     /// protocol message the driver did not expect).
-    #[error("the driver failed after the statement was handed to it: {0}")]
+    #[error("the driver failed after the statement was handed to it: {}", DriverErrorText(.0))]
     DriverFailed(tokio_postgres::Error),
     /// No reply came within the statement bound and the cancel grace after it.
     #[error(
@@ -438,7 +476,9 @@ impl fmt::Display for CancelRequestOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CancelRequestOutcome::Sent => formatter.write_str("sent"),
-            CancelRequestOutcome::Failed(error) => write!(formatter, "failed: {error}"),
+            CancelRequestOutcome::Failed(error) => {
+                write!(formatter, "failed: {}", DriverErrorText(error))
+            }
             CancelRequestOutcome::TimedOut { bound } => {
                 write!(formatter, "no answer within {bound:?}")
             }
@@ -449,6 +489,96 @@ impl fmt::Display for CancelRequestOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link of an error chain of `depth` more links, for the chain tests.
+    #[derive(Debug)]
+    struct Link {
+        depth: usize,
+        next: Option<Box<Link>>,
+    }
+
+    fn chain(links: usize) -> Link {
+        (0..links).rev().fold(
+            Link {
+                depth: links,
+                next: None,
+            },
+            |next, depth| Link {
+                depth,
+                next: Some(Box::new(next)),
+            },
+        )
+    }
+
+    impl fmt::Display for Link {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "link {}", self.depth)
+        }
+    }
+
+    impl std::error::Error for Link {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.next
+                .as_deref()
+                .map(|next| next as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    struct ChainText<'a>(&'a Link);
+
+    impl fmt::Display for ChainText<'_> {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write_with_causes(formatter, self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_names_the_cause_of_the_driver_error() {
+        let error = tokio_postgres::connect(
+            "host=127.0.0.1 port=1 user=nobody connect_timeout=5",
+            tokio_postgres::NoTls,
+        )
+        .await
+        .err()
+        .expect("nothing listens on port 1");
+        let cause = error
+            .source()
+            .expect("a refused connect keeps its socket error as the source")
+            .to_string();
+
+        let text = ConnectFailure::TransportFailed(error).to_string();
+
+        assert_eq!(
+            text,
+            format!("the connection could not be made: error connecting to server: {cause}")
+        );
+    }
+
+    #[test]
+    fn an_error_without_a_cause_is_its_own_text() {
+        assert_eq!(ChainText(&chain(0)).to_string(), "link 0");
+    }
+
+    #[test]
+    fn each_cause_within_the_bound_follows_its_error() {
+        assert_eq!(
+            ChainText(&chain(3)).to_string(),
+            "link 0: link 1: link 2: link 3"
+        );
+    }
+
+    #[test]
+    fn a_chain_past_the_bound_ends_with_a_note() {
+        let text = ChainText(&chain(MAX_ERROR_CHAIN_DEPTH + 2)).to_string();
+
+        assert_eq!(
+            text,
+            format!(
+                "link 0: link 1: link 2: link 3: link 4: link 5: link 6: link 7: link 8 \
+                 (more causes after the first {MAX_ERROR_CHAIN_DEPTH} are not shown)"
+            )
+        );
+    }
 
     #[test]
     fn transient_classes_are_the_five_named_classes() {

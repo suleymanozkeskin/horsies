@@ -36,8 +36,8 @@ const PACKAGED_SKILL: [(&str, &[u8]); 5] = [
         include_bytes!("../../.agents/skills/horsies/configs.md"),
     ),
     (
-        "practical-summary.md",
-        include_bytes!("../../.agents/skills/horsies/practical-summary.md"),
+        "monitoring.md",
+        include_bytes!("../../.agents/skills/horsies/monitoring.md"),
     ),
     (
         "tasks.md",

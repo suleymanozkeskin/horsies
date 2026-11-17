@@ -574,6 +574,11 @@ unless it starts with "Added".
   the skill files that the binary carries to `<dir>/horsies/`, as Python's
   command does, and replaces a copy that differs only with `--force`. The
   skill files of the crate are in `.agents/skills/horsies/`.
+- **Added: `monitoring.md` in the skill folder of the crate.** The skill
+  files describe the crate on the core, with the file set of the Python
+  skill folder: `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
+  `monitoring.md`. `practical-summary.md` is removed. Only `SKILL.md` has
+  frontmatter (`name: horsies`).
 - **Task bodies run in child processes of the worker.** The worker starts
   the user's binary again in child mode (`--horsies-child <fd> <pid>`) for
   every execution class, as the Python worker starts Python children.
