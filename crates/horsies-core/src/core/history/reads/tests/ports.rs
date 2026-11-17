@@ -9,6 +9,8 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::broker::history_reads::read_task_result;
+use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::partitions::catalog::read_attached_leaf_rows;
 use crate::core::history::reads::publisher::rendered_reader_signatures;
@@ -342,7 +344,9 @@ async fn every_rendered_reader_runs_without_sequential_scans() {
 /// `TestStagedResultReader.test_a_reader_dropped_after_it_was_seen_fails_once`:
 /// a result reader removed out of band after a read saw it fails the next
 /// call once with an error; the call after it answers from the live and
-/// detail reads (decisions, 13 rule-following rows, row 8).
+/// detail reads (decisions, 13 rule-following rows, row 8). The reads run on
+/// one connection of a core pool, so the second read meets the statement
+/// that the first read prepared.
 #[tokio::test]
 #[serial]
 #[ignore = "waits on #838"]
@@ -357,24 +361,24 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
         Utc::now(),
     )
     .await;
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    let seen = read_task_result(&mut connection, task_id)
+    let reader = unpinged_single_connection_core_pool(&database.pool.connect_options());
+    let seen = read_task_result(&reader, StatementLog::Off, task_id)
         .await
         .expect("read through the published reader");
     assert!(matches!(seen, TaskResultRead::Live(_)), "{seen:?}");
     sqlx::query("DROP FUNCTION horsies_task_result_staged(uuid)")
-        .execute(&mut *connection)
+        .execute(&database.pool)
         .await
         .expect("drop the result reader out of band");
-    let first = read_task_result(&mut connection, task_id).await;
+    let first = read_task_result(&reader, StatementLog::Off, task_id).await;
     assert!(
         first.is_err(),
         "the first call after the drop fails: {first:?}"
     );
-    let second = read_task_result(&mut connection, task_id)
+    let second = read_task_result(&reader, StatementLog::Off, task_id)
         .await
         .expect("the next call answers");
     assert!(matches!(second, TaskResultRead::NotPublished), "{second:?}");
-    drop(connection);
+    reader.close();
     database.drop().await;
 }

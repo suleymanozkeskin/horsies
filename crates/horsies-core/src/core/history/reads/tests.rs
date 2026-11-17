@@ -1,16 +1,16 @@
 //! P4 staged-read parity and disposable-database tests.
 
 use std::collections::HashSet;
-use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool, Row};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
 use crate::core::history::archive::attempts::{
     encode_attempt_snapshot, AttemptRecord, StoredAttemptSnapshot,
 };
@@ -32,6 +32,7 @@ use crate::core::history::partitions::manager::{
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
+use crate::db::StatementFailure;
 
 use super::aggregates::{
     history_breakdown_statement, history_count_statement, history_estimate_statement,
@@ -52,8 +53,7 @@ use super::pages::{
 };
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
 use super::result::{
-    decode_result_row, read_task_result, staged_result_published, HistoryResultPayload,
-    LiveTaskResult, ResultWireRow, TaskResultRead,
+    decode_result_row, HistoryResultPayload, LiveTaskResult, ResultWireRow, TaskResultRead,
 };
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
@@ -464,79 +464,28 @@ fn every_facet_sort_and_aggregate_variant_has_a_bounded_statement() {
     );
 }
 
+/// A copy of the installed test template (`crate::test_support`) with a
+/// sqlx pool for the history reads that still take a sqlx connection.
 struct TestDatabase {
     pool: PgPool,
-    database_name: String,
-    admin_options: PgConnectOptions,
+    database: crate::test_support::TestDatabase,
 }
 
 impl TestDatabase {
     async fn create() -> Self {
-        let base = database_url();
-        let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
-        let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("core_p4_{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect to postgres admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create P4 test database");
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect(database.url())
             .await
             .expect("connect to P4 test database");
-        run_horsies_migrations(&pool)
-            .await
-            .expect("migrate P4 test database");
-        Self {
-            pool,
-            database_name,
-            admin_options,
-        }
+        Self { pool, database }
     }
 
     async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect for P4 database cleanup");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.database_name)
-        .execute(&mut admin)
-        .await
-        .expect("terminate P4 test database sessions");
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\"",
-            self.database_name
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("drop P4 test database");
+        self.database.drop().await;
     }
-}
-
-fn database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let contents = std::fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 fn utc_day(value: DateTime<Utc>) -> DateTime<Utc> {
@@ -1701,6 +1650,26 @@ fn result_wire_decode_is_typed_and_fail_closed() {
     }
 }
 
+/// Reads one task's result with the broker's statement-layer reader
+/// (`broker::history_reads::read_task_result`) on a core handle of the test
+/// database, then closes the handle. Each call opens new connections, so no
+/// statement prepared before a reader change is reused.
+async fn core_result_read(
+    database: &TestDatabase,
+    task_id: Uuid,
+) -> Result<TaskResultRead, BrokerError> {
+    let handle = crate::test_support::core_handle(database.database.url());
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the test URL");
+    let read =
+        crate::broker::history_reads::read_task_result(open.main(), StatementLog::Off, task_id)
+            .await;
+    drop(open);
+    let _closed = handle.close().await;
+    read
+}
+
 #[tokio::test]
 #[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
@@ -1744,14 +1713,12 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
         .await
         .expect("commit stale reader setup");
 
-    let mut connection = database.pool.acquire().await.expect("acquire result read");
     assert_eq!(
-        read_task_result(&mut connection, completed_id)
+        core_result_read(&database, completed_id)
             .await
             .expect("stale result read"),
         TaskResultRead::Absent
     );
-    drop(connection);
     let broker = PostgresBroker::from_pool(database.pool.clone());
     let confirmed = broker
         .get_result::<i32>(completed_id, None)
@@ -1807,7 +1774,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
 
     let mut connection = database.pool.acquire().await.expect("acquire result reads");
     assert_eq!(
-        read_task_result(&mut connection, live_id)
+        core_result_read(&database, live_id)
             .await
             .expect("read live result"),
         TaskResultRead::Live(LiveTaskResult {
@@ -1817,7 +1784,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
             failed_reason: None,
         })
     );
-    let TaskResultRead::History(failed) = read_task_result(&mut connection, failed_id)
+    let TaskResultRead::History(failed) = core_result_read(&database, failed_id)
         .await
         .expect("read history result")
     else {
@@ -1838,7 +1805,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     );
     for absent_id in [v7_with_birth(today + Duration::hours(5)), Uuid::new_v4()] {
         assert_eq!(
-            read_task_result(&mut connection, absent_id)
+            core_result_read(&database, absent_id)
                 .await
                 .expect("read absent result"),
             TaskResultRead::Absent
@@ -1857,7 +1824,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .await
         .expect("drop only staged result function");
     assert_eq!(
-        read_task_result(&mut connection, failed_id)
+        core_result_read(&database, failed_id)
             .await
             .expect("read with unpublished result function"),
         TaskResultRead::NotPublished
@@ -1876,9 +1843,12 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .republish(&mut connection)
         .await
         .expect("republish staged readers");
-    assert!(staged_result_published(&mut connection)
-        .await
-        .expect("result publication probe"));
+    assert!(matches!(
+        core_result_read(&database, failed_id)
+            .await
+            .expect("read with the republished result function"),
+        TaskResultRead::History(_)
+    ));
 
     sqlx::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
@@ -1892,9 +1862,9 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     .await
     .expect("plant result function with an undefined inner call");
     assert!(matches!(
-        read_task_result(&mut connection, failed_id).await,
-        Err(HistoryError::Database(sqlx::Error::Database(ref error)))
-            if error.code().as_deref() == Some("42883")
+        core_result_read(&database, failed_id).await,
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { ref cause, .. }))
+            if cause.server_error().code().code() == "42883"
     ));
     drop(connection);
     database.drop().await;

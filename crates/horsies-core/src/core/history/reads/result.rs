@@ -1,6 +1,6 @@
-//! One-statement terminal-result read over the staged result function.
+//! The staged result read: its SQL text and the decoding of its row. The
+//! read runs on the statement layer (`broker::history_reads::read_task_result`).
 
-use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
@@ -71,7 +71,7 @@ pub enum TaskResultRead {
     NotPublished,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct ResultWireRow {
     pub location: String,
     pub status: Option<String>,
@@ -81,35 +81,6 @@ pub struct ResultWireRow {
     pub result_payload: Option<Vec<u8>>,
     pub result_digest: Option<Vec<u8>>,
     pub task_name: Option<String>,
-}
-
-/// Reads the result columns of one task in one statement. All probes of the
-/// staged function use one snapshot. Reads only.
-///
-/// A `42883` failure is confirmed with `to_regprocedure`: an absent function
-/// is `NotPublished`; a present function returns the original error. Call it
-/// outside a transaction block. Inside one, the failed call aborts the
-/// transaction and the confirmation returns that database error instead.
-pub async fn read_task_result(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-) -> Result<TaskResultRead, HistoryError> {
-    let sql = task_result_sql();
-    let fetched = sqlx::query_as::<_, ResultWireRow>(&sql)
-        .bind(task_id)
-        .fetch_optional(&mut *connection)
-        .await;
-    match fetched {
-        Ok(None) => Ok(TaskResultRead::Absent),
-        Ok(Some(row)) => decode_result_row(task_id, row),
-        Err(error) if is_undefined_function(&error) => {
-            match staged_result_published(connection).await? {
-                true => Err(HistoryError::Database(error)),
-                false => Ok(TaskResultRead::NotPublished),
-            }
-        }
-        Err(error) => Err(HistoryError::Database(error)),
-    }
 }
 
 pub fn decode_result_row(
@@ -161,19 +132,4 @@ fn required<T>(value: Option<T>, column: &str, task_id: Uuid) -> Result<T, Histo
     value.ok_or_else(|| {
         HistoryError::contract(format!("staged result for task {task_id} has no {column}"))
     })
-}
-
-fn is_undefined_function(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|database| database.code())
-        .as_deref()
-        == Some(UNDEFINED_FUNCTION)
-}
-
-pub async fn staged_result_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
-    Ok(sqlx::query_scalar(FUNCTION_PUBLISHED_SQL)
-        .bind(task_result_function_signature())
-        .fetch_one(connection)
-        .await?)
 }

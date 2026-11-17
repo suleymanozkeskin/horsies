@@ -3810,43 +3810,33 @@ mod tests {
     /// A database of its own, migrated without the install's family record,
     /// for a worker start. Dropped with `FreshDatabase::drop`.
     struct FreshDatabase {
-        admin: sqlx::PgConnection,
         pool: PgPool,
-        name: String,
+        database: crate::test_support::TestDatabase,
         /// The shared test database URL, for the worker's config only: the
         /// worker reaches this database through `pool`.
         config_url: String,
     }
 
     impl FreshDatabase {
+        /// A copy of the installed test template (`crate::test_support`)
+        /// with its family row removed.
         async fn create() -> Self {
-            use sqlx::Connection;
-            use std::str::FromStr;
-
             let config_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-            let base_options =
-                sqlx::postgres::PgConnectOptions::from_str(&config_url).expect("test database URL");
-            let mut admin =
-                sqlx::PgConnection::connect_with(&base_options.clone().database("postgres"))
-                    .await
-                    .expect("connect admin database");
-            let name = format!("core_worker_start_{}", Uuid::new_v4().simple());
-            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-                .execute(&mut admin)
-                .await
-                .expect("create start test database");
+            let database = crate::test_support::TestDatabase::create().await;
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(8)
-                .connect_with(base_options.database(&name))
+                .connect(database.url())
                 .await
                 .expect("connect start test database");
-            crate::broker::migrations::run_horsies_migrations(&pool)
+            // The template holds this client's family row; a start test
+            // records the family it needs itself.
+            sqlx::query("DELETE FROM horsies_client_family")
+                .execute(&pool)
                 .await
-                .expect("migrate start test database");
+                .expect("remove the family row of the install");
             Self {
-                admin,
                 pool,
-                name,
+                database,
                 config_url,
             }
         }
@@ -3862,12 +3852,9 @@ mod tests {
             .expect("record a client family");
         }
 
-        async fn drop(mut self) {
+        async fn drop(self) {
             self.pool.close().await;
-            sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
-                .execute(&mut self.admin)
-                .await
-                .expect("drop start test database");
+            self.database.drop().await;
         }
     }
 
@@ -4236,7 +4223,7 @@ mod tests {
         .expect("install the lease log");
         // The worker writes its plain successes on the worker pool and
         // claims on the wakes of its listener: a broker of a worker.
-        let worker_url = database_url_for(&database.config_url, &database.name);
+        let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker =
             PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
                 .await
@@ -4315,7 +4302,7 @@ mod tests {
         .execute(&database.pool)
         .await
         .expect("install the pool write log");
-        let database_url = database_url_for(&database.config_url, &database.name);
+        let database_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_with(&PostgresConfig {
             database_url: with_application_name(&database_url, "reaper_runtime"),
             session_database_url: Some(with_application_name(&database_url, "reaper_session")),

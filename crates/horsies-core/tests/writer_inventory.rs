@@ -12,13 +12,26 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, Row};
-use uuid::Uuid;
+use horsies_core::PostgresBroker;
 
-use horsies_core::run_horsies_migrations;
+/// The test databases of the core (`src/test_support/database.rs`).
+#[allow(dead_code)]
+#[path = "../src/test_support/database.rs"]
+mod test_database;
+
+/// Installs the schema into the test template of this process through the
+/// public API.
+async fn install_template(url: &str) {
+    let broker = PostgresBroker::connect(url)
+        .await
+        .expect("connect the template broker");
+    broker
+        .migrate()
+        .await
+        .expect("install the schema into the test template");
+    broker.close().await;
+}
 
 const TERMINAL_SET_MARKERS: [&str; 4] = [
     "status = 'COMPLETED'",
@@ -136,44 +149,9 @@ fn production_rust_has_no_inline_live_terminal_writers() {
     );
 }
 
-fn database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let contents = fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
-
 #[tokio::test]
 async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_check() {
-    let base_options = PgConnectOptions::from_str(&database_url()).expect("test database URL");
-    let admin_options = base_options.clone().database("postgres");
-    let database_name = format!("core_p5_writer_{}", Uuid::new_v4().simple());
-    let mut admin = PgConnection::connect_with(&admin_options)
-        .await
-        .expect("connect admin database");
-    sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-        .execute(&mut admin)
-        .await
-        .expect("create writer-inventory database");
-    let pool = PgPoolOptions::new()
-        .max_connections(3)
-        .connect_with(base_options.database(&database_name))
-        .await
-        .expect("connect writer-inventory database");
-    run_horsies_migrations(&pool)
-        .await
-        .expect("migrate writer-inventory database");
+    let database = test_database::TestDatabase::create().await;
 
     // (catalog identity, delegates to shared move, directly inserts history
     // and deletes live). Any other function with one of those properties, or
@@ -259,18 +237,20 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
             true,
         ),
     ];
-    let rows = sqlx::query(
-        "SELECT p.oid::regprocedure::text AS identity,
-                p.proname,
-                pg_get_functiondef(p.oid) AS definition
-         FROM pg_proc p
-         JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'public' AND p.prokind = 'f'
-         ORDER BY identity",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("public function definitions");
+    let rows = database
+        .client()
+        .query(
+            "SELECT p.oid::regprocedure::text AS identity,
+                    p.proname::text AS proname,
+                    pg_get_functiondef(p.oid) AS definition
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'public' AND p.prokind = 'f'
+             ORDER BY identity",
+            &[],
+        )
+        .await
+        .expect("public function definitions");
     let mut actual = Vec::new();
     for row in rows {
         let name: String = row.get("proname");
@@ -315,18 +295,23 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
         );
     }
 
-    let status_checks: Vec<String> = sqlx::query_scalar(
-        "SELECT pg_get_constraintdef(con.oid)
-         FROM pg_constraint con
-         JOIN pg_attribute att
-           ON att.attrelid = con.conrelid AND att.attname = 'status'
-         WHERE con.conrelid = 'horsies_tasks'::regclass
-           AND con.contype = 'c'
-           AND att.attnum = ANY(con.conkey)",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("live status checks");
+    let status_checks: Vec<String> = database
+        .client()
+        .query(
+            "SELECT pg_get_constraintdef(con.oid)
+             FROM pg_constraint con
+             JOIN pg_attribute att
+               ON att.attrelid = con.conrelid AND att.attname = 'status'
+             WHERE con.conrelid = 'horsies_tasks'::regclass
+               AND con.contype = 'c'
+               AND att.attnum = ANY(con.conkey)",
+            &[],
+        )
+        .await
+        .expect("live status checks")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
     assert_eq!(status_checks.len(), 1);
     let live_only = &status_checks[0];
     for live in ["PENDING", "CLAIMED", "RUNNING"] {
@@ -336,9 +321,5 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
         assert!(!live_only.contains(terminal));
     }
 
-    pool.close().await;
-    sqlx::query(&format!("DROP DATABASE \"{database_name}\""))
-        .execute(&mut admin)
-        .await
-        .expect("drop writer-inventory database");
+    database.drop().await;
 }
