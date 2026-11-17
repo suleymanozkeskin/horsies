@@ -761,6 +761,7 @@ Each entry: Title -- summary -> URL
 - Error Handling -- TaskResult error patterns -> /horsies/tasks/error-handling/
 - Errors Reference -- the error codes for both clients: task codes, send, workflow start and handle codes, HRS config codes -> /horsies/tasks/errors/
 - Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, TaskResult -> /horsies/tasks/error-types/
+- Task Types -- the Python type surface of task signatures, strict values, shapes refused at definition, JsonValue and JsonInput, StrictJsonError, the codec functions -> /horsies/tasks/task-types/
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
 - Retry Policy -- policy fields and limits, the retry delay (backoff, floor, jitter, cap), auto-retry triggers, retry vs rerun -> /horsies/tasks/retry-policy/
 
@@ -826,7 +827,7 @@ Each entry: Title -- summary -> URL
 ### Internals
 - Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
 - Performance -- measured per-statement latencies of the hot path -> /horsies/internals/performance/
-- Serialization -- JSON codec for args/results -> /horsies/internals/serialization/
+- Serialization -- the wire envelope, how the declared type drives decode, strict values, strict JSON rules, the error path -> /horsies/internals/serialization/
 - Operational Indexes -- the two indexes of each task history leaf, and adding an index for your own query -> /horsies/internals/operational-indexes/
 
 ### Migrations
@@ -884,7 +885,8 @@ schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/schedulin
 scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/
 horsies worker, horsies scheduler, horsies check, horsies get-docs, CLI -> /horsies/cli/
 PostgreSQL, tables, schema, migration -> /horsies/internals/database-schema/
-serialization, JSON, codec, pydantic, datetime -> /horsies/internals/serialization/
+serialization, envelope, __h_task_result__, strict JSON, NaN, surrogate -> /horsies/internals/serialization/
+JsonValue, JsonInput, pydantic, datetime, SignatureValidationError, encode_value, decode_task_result -> /horsies/tasks/task-types/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
 ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
