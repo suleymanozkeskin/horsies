@@ -39,7 +39,7 @@ use horsies_core::web::{
     MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, ResumeChildren, Verdict,
     HEARTBEAT, MAX_REQUEST_BODY_BYTES,
 };
-use horsies_core::{BrokerError, RetentionConfig};
+use horsies_core::{BrokerError, ChildSpecSource};
 use tokio::sync::OnceCell;
 
 use crate::workflow::WorkflowRegistry;
@@ -80,9 +80,9 @@ impl Default for MonitoringConfig {
 ///
 /// Building it does no I/O: the core handler is built at the first request,
 /// on the broker of the app's handle; a request whose broker cannot be built
-/// answers 503 with the cause, and the next request tries again. The
-/// workflow definitions that a resume builds its owed children from are
-/// those registered on `app` at that first request. No schema step runs:
+/// answers 503 with the cause, and the next request tries again. A resume
+/// builds its owed children through the workflow registry of `app`, with
+/// the definitions registered when each child builds. No schema step runs:
 /// build the app with `SchemaMode::ObserveOnly` for a monitoring tool.
 pub fn router<P>(app: &Horsies, config: MonitoringConfig, policy: P) -> Router
 where
@@ -95,7 +95,6 @@ where
     let mount = Arc::new(Mount {
         handle: app.reads_handle(),
         workflows: Arc::clone(app.workflows()),
-        retention: app.config().retention.clone(),
         settings: MonitoringHandlerConfig {
             actions_enabled,
             ui: config.ui,
@@ -112,7 +111,6 @@ where
 struct Mount<P> {
     handle: Arc<CoreHandle>,
     workflows: Arc<WorkflowRegistry>,
-    retention: RetentionConfig,
     settings: MonitoringHandlerConfig,
     policy: P,
     handler: OnceCell<MonitoringHandler>,
@@ -128,15 +126,14 @@ impl<P> Mount<P> {
     }
 
     /// A handler on the broker of the app's handle; a resume builds its
-    /// owed children from the workflow definitions registered now.
+    /// owed children through the app's workflow registry.
     ///
     /// Errors: the [`BrokerError`] of the handle's connect.
     async fn build_handler(&self) -> Result<MonitoringHandler, BrokerError> {
         let broker = self.handle.broker().await?;
-        let children = ResumeChildren::Registry {
-            registry: self.workflows.core_registry(),
-            retention: self.retention.clone(),
-        };
+        let registry = Arc::clone(&self.workflows);
+        let source: Arc<dyn ChildSpecSource> = registry;
+        let children = ResumeChildren::Client(source);
         Ok(MonitoringHandler::new(
             broker,
             children,
