@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::StoredDateTime;
+
 /// The text of the vector file `name` of the core's vector folder.
 pub(crate) fn vector_file(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -196,9 +198,13 @@ fn check_typed(name: &str, type_name: &str, notation: &Value, check: &mut impl T
         "u128" => check.check(parsed::<u128>(name, notation)),
         "f64" => check.check(parsed::<f64>(name, notation)),
         "str" => check.check(notation_text(name, notation).to_owned()),
-        "datetime_utc" => check.check(offset_datetime(name, notation).with_timezone(&Utc)),
-        "datetime_offset" => check.check(offset_datetime(name, notation)),
-        "datetime_naive" => check.check(naive_datetime(name, notation)),
+        // chrono's own serde form writes a whole millisecond with 3 digits;
+        // `StoredDateTime` writes Python's text.
+        "datetime_utc" => check.check(StoredDateTime(
+            offset_datetime(name, notation).with_timezone(&Utc),
+        )),
+        "datetime_offset" => check.check(StoredDateTime(offset_datetime(name, notation))),
+        "datetime_naive" => check.check(StoredDateTime(naive_datetime(name, notation))),
         "date" => check.check(parsed::<NaiveDate>(name, notation)),
         "uuid" => check.check(parsed::<Uuid>(name, notation)),
         "str_enum" => check.check(color(name, notation)),

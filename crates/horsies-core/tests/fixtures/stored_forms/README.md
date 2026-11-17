@@ -67,9 +67,9 @@ file rounds one.
 | `big_int` | decimal text | `int` | none (above `u128::MAX`) |
 | `f64` | float text, `nan`, `inf`, `-inf` | `float` | `f64` |
 | `str` | JSON string | `str` | `String` |
-| `datetime_utc` | ISO 8601 text | aware `datetime` | `DateTime<Utc>` |
-| `datetime_offset` | ISO 8601 text | aware `datetime` | `DateTime<FixedOffset>` |
-| `datetime_naive` | ISO 8601 text | naive `datetime` | `NaiveDateTime` |
+| `datetime_utc` | ISO 8601 text | aware `datetime` | `StoredDateTime<DateTime<Utc>>` |
+| `datetime_offset` | ISO 8601 text | aware `datetime` | `StoredDateTime<DateTime<FixedOffset>>` |
+| `datetime_naive` | ISO 8601 text | naive `datetime` | `StoredDateTime<NaiveDateTime>` |
 | `date` | ISO 8601 date | `date` | `NaiveDate` |
 | `uuid` | hyphenated text | `UUID` | `Uuid` |
 | `decimal` | decimal text | `Decimal` | none |
@@ -81,6 +81,12 @@ file rounds one.
 | `map_str_i64` | object of decimal texts, in order | `dict[str, int]` | `BTreeMap<String, i64>` (sorted keys only) |
 | `json` | the JSON value | `JsonValue` | `serde_json::Value` |
 | `record_order` | `{"id": <decimal>, "amount": <float>}` | `Order(BaseModel)` | `Order` struct, same field order |
+
+A date-time's Rust type is `horsies::StoredDateTime`
+(`crates/horsies/src/task/stored_datetime.rs`), which writes Python's
+fraction: 6 digits when the microsecond is not 0, else none. chrono's own
+serde form of `DateTime` and `NaiveDateTime` writes a whole millisecond with
+3 digits (`.500Z`); both clients read either text to the same value.
 
 ## Task input (`task_input.json`)
 
@@ -236,7 +242,8 @@ Encoders:
 - Rust client: its send stores `stored_options_text`
   (`crates/horsies/src/send/function.rs:322`), with the deadline only in the
   row's `good_until` column; a node merges its deadline in
-  `task_options_text` (`crates/horsies/src/workflow/spec_data.rs:168`).
+  `task_options_text` (`crates/horsies/src/workflow/spec_data.rs`), written
+  with the core's `python_isoformat_utc`.
 
 Decoders:
 
@@ -288,5 +295,5 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | `spec-data-queue-class-order` | workflow spec data | `queue_classes`: Python writes the queues in the order of the nodes; the Rust client writes them sorted (`BTreeMap`). The core reads both | open |
 | `spec-data-non-ascii-escapes` | workflow spec data | Python's `dump_workflow_spec_data` keeps `json.dumps`' default `ensure_ascii=True` and writes `\u00dc` for `Ü`; every other Python stored-form encoder (`dumps_json`) and the Rust client write the character. The core reads both. Not pinned by a vector | open |
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stored `null` (its input is `()`) | fixed, the client's send stores `{}` |
-| `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | open |
+| `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | fixed: `StoredDateTime` writes Python's text for a user value, and the node deadline uses `python_isoformat_utc`; chrono's own serde form is unchanged |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |
