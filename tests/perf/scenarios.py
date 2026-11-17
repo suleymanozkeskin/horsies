@@ -17,8 +17,6 @@ whose candidate does not exist.
 
 from __future__ import annotations
 
-import asyncio
-import atexit
 import hashlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -58,7 +56,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
 from horsies.core.worker.sql import NOTIFY_TASK_QUEUE_SQL
-from horsies.core.workflows.engine import on_workflow_task_complete
+from horsies.core.workflows.steps import NODE_FINISH_FUNCTION_SQL
 from tests.perf.legacy_terminalization_sql import (
     SELECT_STALE_TASK_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
@@ -758,19 +756,6 @@ def _upsert_completed_attempt(connection: Connection, task_id: str) -> None:
     )
 
 
-class _SyncConnectionAsAsyncSession:
-    """The workflow engine's async execute seam over the measured connection."""
-
-    def __init__(self, connection: Connection) -> None:
-        self.connection = connection
-        self.info: dict[str, Any] = {}
-
-    async def execute(self, statement: Any, parameters: Any = None) -> Any:
-        return self.connection.execute(statement, parameters or {})
-
-
-_WORKFLOW_RUNNER = asyncio.Runner()
-atexit.register(_WORKFLOW_RUNNER.close)
 _WORKFLOW_RESULT: TaskResult[int, Any] = TaskResult(ok=1)
 _WORKFLOW_RESULT_JSON = dumps_json(encode_task_result(_WORKFLOW_RESULT, int)).unwrap()
 
@@ -783,16 +768,13 @@ def _run_workflow_success(
         _execute_invocation(connection, invocation_for(task_id))
         connection.commit()
 
-        session = _SyncConnectionAsAsyncSession(connection)
-        _WORKFLOW_RUNNER.run(
-            on_workflow_task_complete(
-                cast(Any, session),
-                task_id,
-                _WORKFLOW_RESULT,
-                None,
-                task_name='perf.task',
-            )
-        )
+        # Phase 2 as the worker runs it, with the capacity wake sent apart as
+        # before: the node write from the phase-2 record, promotion and the
+        # completion check.
+        _ = connection.execute(
+            NODE_FINISH_FUNCTION_SQL,
+            {'task_id': task_id, 'wake': False, 'dependents': 'READ'},
+        ).fetchall()
         connection.execute(
             NOTIFY_TASK_QUEUE_SQL,
             {'c2': 'task_queue_default', 'p': f'capacity:{task_id}'},
