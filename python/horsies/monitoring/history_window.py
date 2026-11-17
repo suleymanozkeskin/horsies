@@ -82,6 +82,12 @@ def resolve_monitoring_window(
     must be timezone-aware, increasing, and within
     ``MONITORING_WINDOW_MAX``. The bounds of the window are in UTC.
 
+    The spans are elapsed time: each bound is converted to a UTC instant
+    first. Bounds in a zone with daylight saving (a ``ZoneInfo`` tzinfo)
+    count the hour of a change: the default span ending at
+    ``2026-11-01 12:00 America/New_York`` starts 24 elapsed hours earlier,
+    at ``2026-10-31 13:00-04:00``.
+
     The core resolves the window (``horsies._core.resolve_monitoring_window``);
     the call is pure and starts no runtime.
 

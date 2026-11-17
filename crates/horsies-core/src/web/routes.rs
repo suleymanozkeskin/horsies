@@ -29,8 +29,8 @@ use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
 use super::app::WebState;
 use super::common::{
     pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool, parse_group_by,
-    parse_i64, parse_path_uuid, parse_sort_by, parse_sort_direction, parse_statuses,
-    parse_workflow_path_uuid, query_failed, validate_f64_range, validate_i64_range, ApiError,
+    parse_i64, parse_path_integer, parse_path_uuid, parse_sort_by, parse_sort_direction,
+    parse_statuses, query_failed, validate_f64_range, validate_i64_range, ApiError, PathInteger,
     QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
@@ -458,22 +458,35 @@ async fn read_workflow(
 }
 
 /// One node's detail. The Python route takes the id as text and the index
-/// as an integer: an index that is not an integer is the 422 of FastAPI,
-/// and an id text that is not a UUID names no node
+/// as an integer: an index text that pydantic does not read as an integer
+/// is the 422 of FastAPI. An id text that is not a UUID, or an integer
+/// index outside the 32-bit node index column, names no node
 /// (`get_workflow_node`): 404, with no database call.
 async fn read_workflow_task(
     State(state): State<WebState>,
     Path((workflow_id, task_index)): Path<(String, String)>,
 ) -> Result<Json<crate::monitoring::WorkflowTaskDetail>, ApiError> {
-    let Ok(task_index) = task_index.parse::<i32>() else {
-        return Err(ApiError::Validation(vec![ApiError::path_issue(
-            "task_index",
-            "int_parsing",
-            "Input should be a valid integer, unable to parse string as an integer",
-            task_index.as_str(),
-        )]));
+    let task_index = match parse_path_integer(&task_index) {
+        PathInteger::Fits(task_index) => Some(task_index),
+        PathInteger::OutsideI32 => None,
+        PathInteger::NotAnInteger => {
+            return Err(ApiError::Validation(vec![ApiError::path_issue(
+                "task_index",
+                "int_parsing",
+                "Input should be a valid integer, unable to parse string as an integer",
+                task_index.as_str(),
+            )]))
+        }
+        PathInteger::TooLong => {
+            return Err(ApiError::Validation(vec![ApiError::path_issue(
+                "task_index",
+                "int_parsing_size",
+                "Unable to parse input string as an integer, exceeded maximum size",
+                task_index.as_str(),
+            )]))
+        }
     };
-    let Ok(workflow_id) = Uuid::parse_str(&workflow_id) else {
+    let (Ok(workflow_id), Some(task_index)) = (Uuid::parse_str(&workflow_id), task_index) else {
         return Err(workflow_task_not_found());
     };
     get_workflow_node(&state.broker, workflow_id, task_index)
@@ -723,8 +736,11 @@ async fn cancel_task(
     action_response(cancel_task_action(&state.broker, task_uuid, body.include_running).await)
 }
 
+/// The workflow path id of an action route. Text that is not a UUID is
+/// refused with 400 `INVALID_INPUT` before any statement, as the task
+/// cancel route refuses its id (Python `require_path_uuid`).
 fn workflow_action_id(workflow_id: &str) -> Result<Uuid, Response> {
-    parse_workflow_path_uuid(workflow_id).map_err(IntoResponse::into_response)
+    parse_path_uuid("workflow_id", workflow_id).map_err(IntoResponse::into_response)
 }
 
 async fn pause_workflow(
