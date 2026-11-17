@@ -344,6 +344,9 @@ class TestResumeThroughCore:
             code='DB_OPERATION_FAILED',
             message='child build did not run',
             retryable=True,
+            exception=core.CorePreconditionFailed(
+                'resume_workflow', 'child build did not run', True,
+            ),
         ))
         result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
 
