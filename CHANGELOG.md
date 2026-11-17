@@ -355,6 +355,9 @@ written in Rust, on a new baseline schema.
   `horsies.web.schema.schema_guard` are removed: the core's handler serves
   every route. The exports of `horsies.web` are unchanged.
 
+- **Syce, the terminal monitoring tool, is removed; the web UI is the
+  monitoring tool.**
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
