@@ -19,14 +19,14 @@ use super::support::{
     node, node_status, node_task_input, ok, required, shared_pool, spec, stored_error,
     stored_result, sub_workflow_node, task_node, workflow, workflow_status,
 };
-use crate::core::registry::workflow::{RegisteredWorkflowDefinition, RegisteredWorkflowSpec};
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::SuccessPolicy;
 use crate::core::{
-    AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskResult, WorkflowSpec,
-    WorkflowSpecRegistry, WorkflowStatus, WorkflowTaskStatus,
+    AnyNode, HorsiesError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus,
+    WorkflowTaskStatus,
 };
+use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 
 /// How long `get()` waits; every workflow here is terminal or PAUSED before the call.
 pub(super) const GET_WAIT: Duration = Duration::from_secs(2);
@@ -119,86 +119,67 @@ pub(super) fn given_params_node(
 /// envelope itself, not the wrap that crosses to a worker (Python
 /// `python/horsies/core/workflows/engine.py:1171-1185`; the core's
 /// `child_build_input`).
-fn failed_input_definition() -> RegisteredWorkflowDefinition {
-    RegisteredWorkflowDefinition {
-        name: "e2e_sub_failed_input_workflow".to_owned(),
-        definition_key: FAILED_INPUT_KEY.to_owned(),
-        declared_children: Vec::new(),
-        spec_builder: Arc::new(|input| {
-            let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
-                SpecBuildError::Failed(HorsiesError::new(format!("params do not decode: {error}")))
+fn failed_input_definition() -> TestChildBuild {
+    Arc::new(|input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+        let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+            TestBuildRefused::Failed(HorsiesError::new(format!("params do not decode: {error}")))
+        })?;
+        let received: TaskResult<serde_json::Value> =
+            serde_json::from_value(params["value"].clone()).map_err(|error| {
+                TestBuildRefused::Failed(HorsiesError::new(format!(
+                    "'value' is not a result envelope: {error}"
+                )))
             })?;
-            let received: TaskResult<serde_json::Value> =
-                serde_json::from_value(params["value"].clone()).map_err(|error| {
-                    SpecBuildError::Failed(HorsiesError::new(format!(
-                        "'value' is not a result envelope: {error}"
-                    )))
-                })?;
-            let report = match &received {
-                TaskResult::Ok(value) => serde_json::json!({
-                    "input_is_err": false,
-                    "input_error_code": null,
-                    "input_value": value,
-                }),
-                TaskResult::Err(error) => serde_json::json!({
-                    "input_is_err": true,
-                    "input_error_code": code(error),
-                    "input_value": null,
-                }),
-            };
-            let mut reporter = task_node(0, "e2e_sub_report_input");
-            reporter.input_json = report.to_string();
-            Ok(WorkflowSpec {
-                definition_key: Some(FAILED_INPUT_KEY.to_owned()),
-                ..one_node_child("e2e_sub_failed_input_workflow", reporter)
-            })
-        }),
-    }
+        let report = match &received {
+            TaskResult::Ok(value) => serde_json::json!({
+                "input_is_err": false,
+                "input_error_code": null,
+                "input_value": value,
+            }),
+            TaskResult::Err(error) => serde_json::json!({
+                "input_is_err": true,
+                "input_error_code": code(error),
+                "input_value": null,
+            }),
+        };
+        let mut reporter = task_node(0, "e2e_sub_report_input");
+        reporter.input_json = report.to_string();
+        Ok(WorkflowSpec {
+            definition_key: Some(FAILED_INPUT_KEY.to_owned()),
+            ..one_node_child("e2e_sub_failed_input_workflow", reporter)
+        })
+    })
 }
 
 /// `E2ESubSlowWorkflow`: one `slow_mark_task` whose input is the params.
-fn slow_definition() -> RegisteredWorkflowDefinition {
-    RegisteredWorkflowDefinition {
-        name: "e2e_sub_slow_workflow".to_owned(),
-        definition_key: SLOW_KEY.to_owned(),
-        declared_children: Vec::new(),
-        spec_builder: Arc::new(|input| {
-            let mut slow = task_node(0, "slow_mark_task");
-            slow.input_json = input.to_owned();
-            Ok(WorkflowSpec {
-                definition_key: Some(SLOW_KEY.to_owned()),
-                ..one_node_child("e2e_sub_slow_workflow", slow)
-            })
-        }),
-    }
+fn slow_definition() -> TestChildBuild {
+    Arc::new(|input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+        let mut slow = task_node(0, "slow_mark_task");
+        slow.input_json = input.to_owned();
+        Ok(WorkflowSpec {
+            definition_key: Some(SLOW_KEY.to_owned()),
+            ..one_node_child("e2e_sub_slow_workflow", slow)
+        })
+    })
 }
 
-/// A registry with every child of the matrix. The dynamic definitions come
-/// first, so the static middles that name them resolve.
-pub(super) fn registry() -> WorkflowSpecRegistry {
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    for definition in [failed_input_definition(), slow_definition()] {
-        registry
-            .register_definition(definition)
-            .expect("register a dynamic child");
-    }
-    for child in [
+/// The child specs of every child of the matrix: the builds by their
+/// definition keys, and the specs by theirs.
+pub(super) fn matrix_children() -> TestChildSpecs {
+    [
         ok_child(),
         fail_child(),
         nested_ok_middle(),
         nested_fail_middle(),
         nested_slow_middle(),
-    ] {
-        let name = child.name.clone();
-        registry
-            .register(RegisteredWorkflowSpec {
-                spec: child,
-                spec_builder: None,
-            })
-            .unwrap_or_else(|error| panic!("register child '{name}': {error}"));
-    }
-    registry
+    ]
+    .into_iter()
+    .fold(
+        TestChildSpecs::empty()
+            .with_build(FAILED_INPUT_KEY, failed_input_definition())
+            .with_build(SLOW_KEY, slow_definition()),
+        TestChildSpecs::with_spec,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -300,25 +281,31 @@ async fn next_enqueued(pool: &PgPool, root_id: Uuid) -> Option<(Uuid, String, St
 
 /// Finishes every ENQUEUED node task of the RUNNING workflows under
 /// `root_id`, as a worker would, until none is left.
-pub(super) async fn drive(pool: &PgPool, root_id: Uuid, registry: &WorkflowSpecRegistry) {
+pub(super) async fn drive(pool: &PgPool, root_id: Uuid, child_specs: &TestChildSpecs) {
     for _step in 0..DRIVE_STEPS {
         match next_enqueued(pool, root_id).await {
             None => return,
             Some((task_id, task_name, input)) => {
                 let input: serde_json::Value =
                     serde_json::from_str(&input).expect("a task input decodes");
-                finish_task(pool, task_id, &worker_outcome(&task_name, &input), registry).await;
+                finish_task(
+                    pool,
+                    task_id,
+                    &worker_outcome(&task_name, &input),
+                    child_specs,
+                )
+                .await;
             }
         }
     }
     panic!("the tree of {root_id} did not settle in {DRIVE_STEPS} tasks");
 }
 
-/// Starts `parent_spec` with [`registry`] and drives it to its end.
+/// Starts `parent_spec` with [`matrix_children`] and drives it to its end.
 async fn run(pool: &PgPool, parent_spec: &WorkflowSpec) -> Uuid {
-    let registry = registry();
-    let workflow_id = super::support::start(pool, parent_spec, &registry).await;
-    drive(pool, workflow_id, &registry).await;
+    let child_specs = matrix_children();
+    let workflow_id = super::support::start(pool, parent_spec, &child_specs).await;
+    drive(pool, workflow_id, &child_specs).await;
     workflow_id
 }
 
@@ -357,7 +344,10 @@ pub(super) fn assert_ok_value(result: &TaskResult<serde_json::Value>, expected: 
 }
 
 pub(super) async fn get(pool: &PgPool, workflow_id: Uuid) -> TaskResult<serde_json::Value> {
-    handle(pool, workflow_id).get(Some(GET_WAIT)).await
+    handle(pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read")
 }
 
 pub(super) fn node_result(text: Option<String>) -> TaskResult<serde_json::Value> {
@@ -462,7 +452,8 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     assert_ok_value(
         &handle(&pool, workflow_id)
             .result_for::<serde_json::Value>("node_0")
-            .await,
+            .await
+            .expect("the node result read"),
         serde_json::json!(11),
     );
 }
@@ -480,7 +471,10 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
         rebuilt.status().await.expect("status()"),
         WorkflowStatus::Completed
     );
-    assert_ok_value(&rebuilt.get(Some(GET_WAIT)).await, serde_json::json!(11));
+    assert_ok_value(
+        &rebuilt.get(Some(GET_WAIT)).await.expect("the result read"),
+        serde_json::json!(11),
+    );
     let infos = rebuilt.tasks().await.expect("tasks()");
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
@@ -560,7 +554,8 @@ async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
     let _by_node = assert_subworkflow_error(
         &handle(&pool, workflow_id)
             .result_for::<serde_json::Value>("node_0")
-            .await,
+            .await
+            .expect("the node result read"),
         Some(child_id),
     );
 }
@@ -572,7 +567,7 @@ async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
 #[serial]
 async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = matrix_children();
     let mut probe = after(task_node(1, "e2e_sub_probe_failed_child"), &[0]);
     probe.args_from.insert("child_result".to_owned(), 0);
     probe.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
@@ -583,7 +578,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
         Some(1),
     );
     probe_parent.success_policy = Some(policy(&[&[1]], &[0]));
-    let workflow_id = super::support::start(&pool, &probe_parent, &registry).await;
+    let workflow_id = super::support::start(&pool, &probe_parent, &child_specs).await;
 
     let child_id = child_of(&pool, workflow_id, 0).await;
     let _task = finish_node(
@@ -591,7 +586,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
         child_id,
         0,
         &err(CHILD_FAIL_CODE, "Subworkflow failed"),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -773,7 +768,7 @@ fn expected(statuses: &[&str]) -> HashMap<String, String> {
 #[serial]
 async fn a_join_any_child_starts_on_the_first_success() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = matrix_children();
     let workflow_id = super::support::start(
         &pool,
         &parent(
@@ -790,7 +785,7 @@ async fn a_join_any_child_starts_on_the_first_success() {
             ],
             Some(2),
         ),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -799,12 +794,12 @@ async fn a_join_any_child_starts_on_the_first_success() {
         workflow_id,
         0,
         &ok(serde_json::json!("fast")),
-        &registry,
+        &child_specs,
     )
     .await;
     let child_id = child_of(&pool, workflow_id, 2).await;
     assert_eq!(node_status(&pool, workflow_id, 1).await, "ENQUEUED");
-    drive(&pool, workflow_id, &registry).await;
+    drive(&pool, workflow_id, &child_specs).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
     assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
@@ -914,7 +909,7 @@ async fn a_quorum_child_is_skipped_when_its_quorum_fails() {
 #[serial]
 async fn a_quorum_child_is_skipped_once_its_quorum_is_impossible() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = matrix_children();
     let workflow_id = super::support::start(
         &pool,
         &parent(
@@ -932,7 +927,7 @@ async fn a_quorum_child_is_skipped_once_its_quorum_is_impossible() {
             ],
             Some(3),
         ),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -942,7 +937,7 @@ async fn a_quorum_child_is_skipped_once_its_quorum_is_impossible() {
             workflow_id,
             index,
             &err("L7_QI_FAIL", "failed"),
-            &registry,
+            &child_specs,
         )
         .await;
     }
@@ -951,7 +946,7 @@ async fn a_quorum_child_is_skipped_once_its_quorum_is_impossible() {
     assert_eq!(skipped.status, "SKIPPED");
     assert_eq!(skipped.sub_workflow_id, None);
     assert_eq!(node_status(&pool, workflow_id, 2).await, "ENQUEUED");
-    drive(&pool, workflow_id, &registry).await;
+    drive(&pool, workflow_id, &child_specs).await;
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
 }
 

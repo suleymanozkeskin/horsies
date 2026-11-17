@@ -1441,7 +1441,6 @@ mod wait_tests {
     use super::*;
     use crate::broker::postgres::PostgresBroker;
     use crate::core::{OutcomeCode, TaskErrorCode};
-    use crate::workflow_engine::bound_handle::WorkflowHandle;
     use serial_test::serial;
     use std::sync::Arc;
 
@@ -1471,7 +1470,7 @@ mod wait_tests {
 
     #[tokio::test]
     #[serial]
-    async fn workflow_handle_get_returns_immediately_for_paused_workflow() {
+    async fn the_result_read_returns_immediately_for_a_paused_workflow() {
         let broker = Arc::new(PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
         ));
@@ -1490,19 +1489,13 @@ mod wait_tests {
         .await
         .expect("seed paused workflow");
 
-        let handle = WorkflowHandle::<i32>::new(
-            workflow_id,
-            Arc::clone(&broker),
-            Arc::new(crate::core::registry::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            )),
-            crate::core::config::payload::PayloadPolicy::default(),
-            crate::core::RetentionConfig::default(),
-        );
-        let result = tokio::time::timeout(Duration::from_secs(5), handle.get(None))
-            .await
-            .expect("PAUSED must complete get() without a terminal notification");
-        let error = result.unwrap_err();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            get_workflow_result::<i32>(&broker, workflow_id, None),
+        )
+        .await
+        .expect("PAUSED must complete the result read without a terminal notification");
+        let error = result.expect("the result read").unwrap_err();
         assert_eq!(
             error.error_code,
             TaskErrorCode::from(OutcomeCode::WorkflowPaused),
@@ -1517,7 +1510,7 @@ mod wait_tests {
 
     #[tokio::test]
     #[serial]
-    async fn workflow_handle_get_preserves_structured_expiry_error() {
+    async fn the_result_read_preserves_a_structured_expiry_error() {
         let broker = Arc::new(PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
         ));
@@ -1548,16 +1541,10 @@ mod wait_tests {
         .await
         .expect("seed expired workflow");
 
-        let handle = WorkflowHandle::<i32>::new(
-            workflow_id,
-            Arc::clone(&broker),
-            Arc::new(crate::core::registry::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            )),
-            crate::core::config::payload::PayloadPolicy::default(),
-            crate::core::RetentionConfig::default(),
-        );
-        let error = handle.get(None).await.unwrap_err();
+        let error = get_workflow_result::<i32>(&broker, workflow_id, None)
+            .await
+            .expect("the result read")
+            .unwrap_err();
         assert_eq!(error.error_code, persisted.error_code);
         assert_eq!(error.message, persisted.message);
         assert_eq!(error.data, persisted.data);
@@ -1571,7 +1558,7 @@ mod wait_tests {
 
     #[tokio::test]
     #[serial]
-    async fn workflow_handle_get_fails_closed_on_malformed_expiry_error() {
+    async fn the_result_read_fails_closed_on_a_malformed_expiry_error() {
         let broker = Arc::new(PostgresBroker::from_pool(
             crate::broker::terminalization_matrix::migrated_pool().await,
         ));
@@ -1591,16 +1578,10 @@ mod wait_tests {
         .await
         .expect("seed malformed expired workflow");
 
-        let handle = WorkflowHandle::<i32>::new(
-            workflow_id,
-            Arc::clone(&broker),
-            Arc::new(crate::core::registry::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            )),
-            crate::core::config::payload::PayloadPolicy::default(),
-            crate::core::RetentionConfig::default(),
-        );
-        let error = handle.get(None).await.unwrap_err();
+        let error = get_workflow_result::<i32>(&broker, workflow_id, None)
+            .await
+            .expect("the result read")
+            .unwrap_err();
         assert_eq!(
             error.error_code,
             TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError,),

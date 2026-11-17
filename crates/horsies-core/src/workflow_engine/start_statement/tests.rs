@@ -7,26 +7,25 @@ use std::sync::Arc;
 use serial_test::serial;
 
 use super::*;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::registry::workflow::RegisteredWorkflowSpec;
+use crate::broker::workflow_start::ClientStartOutcome;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
-use crate::core::workflow::spec::WorkflowSpecBuilder;
-use crate::core::workflow::sub_workflow::SubWorkflowNode;
-use crate::workflow_engine::bound_handle::WorkflowHandle;
-use crate::workflow_engine::start::start_workflow;
-use crate::TaskNode;
+use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 
 const CHILD_KEY: &str = "tests.start_statement.child.v1";
 
-/// The start arguments of a spec of the Rust client. The registry form
-/// awaits nothing, so the future ends on its first poll.
+/// The start arguments of `spec` as a client sends it, with the children of
+/// its sub-workflow roots from `children`. The test source answers when its
+/// future is made, so the future ends on its first poll.
 fn arguments_of(
     spec: &WorkflowSpec,
     workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    retention: &RetentionConfig,
+    children: &TestChildSpecs,
 ) -> Result<StartArguments, WorkflowError> {
-    futures::executor::block_on(start_arguments(spec, workflow_id, registry, retention))
+    futures::executor::block_on(client_start_arguments(
+        &children.client_spec(spec),
+        workflow_id,
+        children,
+    ))
 }
 
 fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
@@ -63,39 +62,41 @@ fn spec_of(name: &str, tasks: Vec<AnyNode>) -> WorkflowSpec {
     }
 }
 
-/// A registry with one static child of one task node under [`CHILD_KEY`]. The
-/// node has its queue and priority resolved and an object input, as the
-/// start and the task row that SQL mints require.
-fn registry_with_child() -> WorkflowSpecRegistry {
-    let mut builder = WorkflowSpecBuilder::new("start_statement_child");
-    builder.definition_key(CHILD_KEY);
-    let node = builder.task(
-        TaskNode::<String>::raw("child_task", "{}")
-            .queue("default")
-            .priority(100),
-    );
-    builder.output(node);
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register(RegisteredWorkflowSpec {
-            spec: builder.build().expect("child spec"),
-            spec_builder: None,
-        })
-        .expect("register the child");
-    registry
+/// The child under [`CHILD_KEY`]: one task node, its output. The node has
+/// its queue and priority resolved and an object input, as the start and the
+/// task row that SQL mints require.
+fn child_spec() -> WorkflowSpec {
+    let mut child_task = task_node(0, vec![]);
+    child_task.task_name = "child_task".to_owned();
+    child_task.node_id = Some("start_statement_child:0".to_owned());
+    WorkflowSpec {
+        name: "start_statement_child".to_owned(),
+        definition_key: Some(CHILD_KEY.to_owned()),
+        tasks: vec![child_task],
+        on_error: OnError::Fail,
+        output_index: Some(0),
+        success_policy: None,
+    }
 }
 
-/// A sub-workflow root at `index` whose child is registered under
-/// [`CHILD_KEY`].
+/// The child specs with [`child_spec`] under [`CHILD_KEY`].
+fn children_with_child() -> TestChildSpecs {
+    TestChildSpecs::empty().with_spec(child_spec())
+}
+
+/// A sub-workflow root at `index` whose child is the one under
+/// [`CHILD_KEY`], with the input `null` and no params.
 fn subworkflow_root(index: usize) -> AnyNode {
-    SubWorkflowNode::<(), String>::typed(
-        "start_statement_child",
-        "null",
-        SubWorkflowParams::NotGiven,
-    )
-    .definition_key(CHILD_KEY)
-    .into_any_node(index)
+    AnyNode {
+        task_name: "start_statement_child".to_owned(),
+        input_json: "null".to_owned(),
+        queue: None,
+        priority: None,
+        node_id: None,
+        is_subworkflow: true,
+        sub_definition_key: Some(CHILD_KEY.to_owned()),
+        ..task_node(index, vec![])
+    }
 }
 
 #[test]
@@ -105,13 +106,7 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
     dependent.args_from = HashMap::from([("value".to_owned(), 0)]);
     let spec = spec_of("chain", vec![task_node(0, vec![]), dependent]);
 
-    let arguments = arguments_of(
-        &spec,
-        workflow_id,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
-    )
-    .expect("arguments");
+    let arguments = arguments_of(&spec, workflow_id, &TestChildSpecs::empty()).expect("arguments");
 
     assert_eq!(arguments.workflow_ids, vec![workflow_id]);
     assert_eq!(arguments.on_errors, vec!["fail".to_owned()]);
@@ -152,13 +147,7 @@ fn an_empty_context_list_is_stored_as_null() {
     named.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
     let spec = spec_of("ctx_lists", vec![task_node(0, vec![]), empty, named]);
 
-    let arguments = arguments_of(
-        &spec,
-        workflow_id,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
-    )
-    .expect("arguments");
+    let arguments = arguments_of(&spec, workflow_id, &TestChildSpecs::empty()).expect("arguments");
 
     assert_eq!(
         arguments.node_workflow_ctx_from,
@@ -171,13 +160,7 @@ fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("parent", vec![subworkflow_root(0)]);
 
-    let arguments = arguments_of(
-        &spec,
-        workflow_id,
-        &registry_with_child(),
-        &RetentionConfig::default(),
-    )
-    .expect("arguments");
+    let arguments = arguments_of(&spec, workflow_id, &children_with_child()).expect("arguments");
 
     assert_eq!(arguments.workflow_ids.len(), 2);
     assert_eq!(arguments.workflow_ids[0], workflow_id);
@@ -211,13 +194,7 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("orphan_parent", vec![subworkflow_root(0)]);
 
-    let arguments = arguments_of(
-        &spec,
-        workflow_id,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
-    )
-    .expect("arguments");
+    let arguments = arguments_of(&spec, workflow_id, &TestChildSpecs::empty()).expect("arguments");
 
     assert_eq!(arguments.workflow_ids, vec![workflow_id]);
     assert!(arguments.has_failed_records());
@@ -246,33 +223,16 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
 #[test]
 fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
     let workflow_id = Uuid::new_v4();
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let mut builder = WorkflowSpecBuilder::new("start_statement_child");
-    builder.definition_key(CHILD_KEY);
-    let node = builder.task(
-        TaskNode::<String>::raw("child_task", "{}")
-            .queue("default")
-            .priority(100),
-    );
-    builder.output(node);
-    let failing_builder: crate::core::SpecBuilderFn = Arc::new(
-        |_input: &str| -> Result<WorkflowSpec, crate::core::SpecBuildError> {
-            Err(crate::core::SpecBuildError::Failed(
-                crate::core::HorsiesError::new("the builder refuses"),
-            ))
-        },
-    );
-    registry
-        .register(RegisteredWorkflowSpec {
-            spec: builder.build().expect("child spec"),
-            spec_builder: Some(failing_builder),
-        })
-        .expect("register the child");
+    let failing_builder: TestChildBuild =
+        Arc::new(|_input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+            Err(TestBuildRefused::Failed(crate::core::HorsiesError::new(
+                "the builder refuses",
+            )))
+        });
+    let children = TestChildSpecs::empty().with_build(CHILD_KEY, failing_builder);
     let spec = spec_of("failing_builder_parent", vec![subworkflow_root(0)]);
 
-    let arguments = arguments_of(&spec, workflow_id, &registry, &RetentionConfig::default())
-        .expect("arguments");
+    let arguments = arguments_of(&spec, workflow_id, &children).expect("arguments");
 
     assert_eq!(arguments.workflow_ids, vec![workflow_id]);
     assert_eq!(arguments.failed_task_indexes, vec![0]);
@@ -301,12 +261,7 @@ fn a_task_node_without_a_resolved_queue_refuses_the_start() {
     unresolved.queue = None;
     let spec = spec_of("unresolved", vec![unresolved]);
 
-    let refused = arguments_of(
-        &spec,
-        Uuid::new_v4(),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &RetentionConfig::default(),
-    );
+    let refused = arguments_of(&spec, Uuid::new_v4(), &TestChildSpecs::empty());
 
     assert!(
         matches!(refused, Err(WorkflowError::Validation(_))),
@@ -505,16 +460,18 @@ async fn the_start_writes_the_tree_in_one_statement() {
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("one_statement_parent", vec![subworkflow_root(0)]);
 
-    let _handle: WorkflowHandle<serde_json::Value> = start_workflow(
-        &broker,
-        &spec,
-        Some(workflow_id),
-        &registry_with_child(),
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("start");
+    let children = children_with_child();
+    let started = broker
+        .start_client_workflow(
+            &children.client_spec(&spec),
+            workflow_id,
+            chrono::Utc::now(),
+            false,
+            &children,
+        )
+        .await
+        .expect("start");
+    assert_eq!(started, ClientStartOutcome::Started);
 
     let (node_status, child_id): (String, Option<Uuid>) = sqlx::query_as(
         "SELECT status, sub_workflow_id FROM horsies_workflow_tasks

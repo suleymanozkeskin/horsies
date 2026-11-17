@@ -1767,22 +1767,19 @@ fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serd
     })
 }
 
-/// Cases 2/3 and 4 of a global pass with `max_rows` per audit page, for the tests of this module.
+/// Cases 2/3 and 4 of a global pass with `max_rows` per audit page, for the tests of this module,
+/// with the children of its cases from `child_specs`.
 #[cfg(test)]
 async fn audit_end_states(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &crate::test_support::child_specs::TestChildSpecs,
     max_rows: i64,
     report: &mut RecoveryReport,
     failure_policy: RecoveryFailurePolicy,
 ) -> Result<(), WorkflowError> {
-    let retention = RetentionConfig::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild::Registry {
-            registry,
-            retention: &retention,
-        },
+        build: ChildBuild::Client(child_specs),
         scope: RecoveryScope::Global { max_rows },
         failure_policy,
     };
@@ -1792,6 +1789,7 @@ async fn audit_end_states(
 #[cfg(test)]
 mod cap_tests {
     use super::*;
+    use crate::test_support::child_specs::TestChildSpecs;
     use crate::workflow_engine::steps::CommittedStep;
     use serial_test::serial;
     use sqlx::PgPool;
@@ -1821,9 +1819,7 @@ mod cap_tests {
         workflow_id: Uuid,
         task_index: i32,
     ) -> Result<CommittedStep<EnqueueReadyDisposition>, WorkflowError> {
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        let retention = RetentionConfig::default();
+        let child_specs = TestChildSpecs::empty();
         let task_indexes = vec![task_index];
         run_in_transaction(
             broker,
@@ -1833,10 +1829,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_indexes)
                 .finish(),
-            ChildBuild::Registry {
-                registry: &registry,
-                retention: &retention,
-            },
+            ChildBuild::Client(&child_specs),
         )
         .await
     }
@@ -1848,9 +1841,7 @@ mod cap_tests {
         workflow_id: Uuid,
         task_index: i32,
     ) -> Result<CommittedStep<ReevaluateDisposition>, WorkflowError> {
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        let retention = RetentionConfig::default();
+        let child_specs = TestChildSpecs::empty();
         run_in_transaction(
             broker,
             CheckoutClass::Reserved,
@@ -1859,10 +1850,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_index)
                 .finish(),
-            ChildBuild::Registry {
-                registry: &registry,
-                retention: &retention,
-            },
+            ChildBuild::Client(&child_specs),
         )
         .await
     }
@@ -2053,11 +2041,10 @@ mod cap_tests {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         insert_orphaned_workflow(&pool, workflow_id).await;
-        let report = recover_stuck_workflow_tree(
+        let report = recover_workflow_tree(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             workflow_id,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -2075,13 +2062,13 @@ mod cap_tests {
 
     #[tokio::test]
     async fn discovery_query_failure_is_typed() {
-        let error = recover_stuck_workflows(
+        let error = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             25,
-            &RetentionConfig::default(),
         )
         .await
+        .map_err(|failure| failure.error)
         .expect_err("candidate discovery failure must cross the containment seam");
         assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
     }
@@ -2090,12 +2077,7 @@ mod cap_tests {
     async fn discovery_query_failure_keeps_case_metrics_in_the_health_snapshot() {
         let failure = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            ChildBuild::Registry {
-                registry: &WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
-                retention: &RetentionConfig::default(),
-            },
+            ChildBuild::Client(&TestChildSpecs::empty()),
             25,
         )
         .await
@@ -2119,7 +2101,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         let error = audit_end_states(
             &unreachable_broker(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2144,7 +2126,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         let refused = audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             0,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2220,11 +2202,10 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let report = recover_stuck_workflow_tree(
+        let report = recover_workflow_tree(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             workflow_id,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -2280,31 +2261,32 @@ mod cap_tests {
             insert_orphaned_workflow(&pool, *id).await;
         }
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
-        let report = recover_stuck_workflows_with_cap(
+        let report = recover_stuck_workflows_in_scope(
             &broker,
-            &registry,
-            2,
+            ChildBuild::Client(&child_specs),
+            RecoveryScope::Global { max_rows: 2 },
             RecoveryFailurePolicy::LogOnly,
-            &RetentionConfig::default(),
         )
         .await
+        .map_err(|failure| failure.error)
         .unwrap();
         assert_eq!(report.case4_orphaned_failed, 2, "{report:?}");
         assert_eq!(failed_count(&pool, &ids).await, 2);
 
         // Uncapped: the remaining orphan is failed.
-        let report = recover_stuck_workflows_with_cap(
+        let report = recover_stuck_workflows_in_scope(
             &broker,
-            &registry,
-            GLOBAL_SCAN_ROW_CAP,
+            ChildBuild::Client(&child_specs),
+            RecoveryScope::Global {
+                max_rows: GLOBAL_SCAN_ROW_CAP,
+            },
             RecoveryFailurePolicy::LogOnly,
-            &RetentionConfig::default(),
         )
         .await
+        .map_err(|failure| failure.error)
         .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         assert_eq!(failed_count(&pool, &ids).await, 3);
@@ -2545,7 +2527,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2717,12 +2699,11 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
         let mut first = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             200,
             &mut first,
             RecoveryFailurePolicy::LogOnly,
@@ -2734,7 +2715,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             200,
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -2798,12 +2779,11 @@ mod cap_tests {
             .await;
         }
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
         let mut first = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             2,
             &mut first,
             RecoveryFailurePolicy::LogOnly,
@@ -2833,7 +2813,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             2,
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -2854,7 +2834,7 @@ mod cap_tests {
         let mut third = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             2,
             &mut third,
             RecoveryFailurePolicy::LogOnly,
@@ -2959,7 +2939,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2980,7 +2960,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -3135,7 +3115,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -3308,7 +3288,7 @@ mod cap_tests {
             std::time::Duration::from_secs(1),
             audit_end_states(
                 &broker_of(&pool),
-                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+                &TestChildSpecs::empty(),
                 200,
                 &mut report,
                 RecoveryFailurePolicy::LogOnly,
@@ -3331,11 +3311,10 @@ mod cap_tests {
         insert_orphaned_workflow(&pool, selected).await;
         insert_orphaned_workflow(&pool, unrelated).await;
 
-        let report = recover_stuck_workflow_tree(
+        let report = recover_workflow_tree(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             selected,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();

@@ -5,6 +5,8 @@ use crate::core::config::retention::{PausedWorkflowAge, RetentionConfig};
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::WorkflowSpecRegistry;
 #[cfg(test)]
+use crate::test_support::child_specs::TestChildSpecs;
+#[cfg(test)]
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -612,8 +614,7 @@ mod resume_idempotency_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
 
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
@@ -623,12 +624,10 @@ mod resume_idempotency_tests {
         insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
         insert_running_task(&pool, &child).await;
 
-        let resumed = resume_workflow(
+        let resumed = resume_client_workflow(
             &broker,
             Uuid::parse_str(&parent).expect("test identity must be UUID"),
-            &registry,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &child_specs,
         )
         .await
         .expect("resume");
@@ -650,20 +649,17 @@ mod resume_idempotency_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
 
         let id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &id, "RUNNING", None).await;
         insert_running_task(&pool, &id).await;
 
         // No paused children, no ready nodes → genuinely nothing to do.
-        let resumed = resume_workflow(
+        let resumed = resume_client_workflow(
             &broker,
             Uuid::parse_str(&id).expect("test identity must be UUID"),
-            &registry,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &child_specs,
         )
         .await
         .expect("resume");
@@ -712,12 +708,10 @@ mod resume_idempotency_tests {
             .expect("insert node");
         }
 
-        assert!(resume_workflow(
+        assert!(resume_client_workflow(
             &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &TestChildSpecs::empty()
         )
         .await
         .expect("resume"));
@@ -780,12 +774,10 @@ mod resume_idempotency_tests {
         .await
         .expect("set the start call time");
 
-        assert!(resume_workflow(
+        assert!(resume_client_workflow(
             &broker,
             Uuid::parse_str(&workflow_id).unwrap(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &TestChildSpecs::empty()
         )
         .await
         .expect("resume"));
@@ -1022,12 +1014,10 @@ mod p7_lifecycle_tests {
         seed_workflow(&pool, child_id, "RUNNING", Some(root_id)).await;
         seed_workflow(&pool, unrelated_id, "RUNNING", None).await;
 
-        assert!(resume_workflow(
+        assert!(resume_client_workflow(
             &PostgresBroker::from_pool(pool.clone()),
             root_id,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &TestChildSpecs::empty()
         )
         .await
         .expect("resume workflow tree"));
@@ -1089,12 +1079,10 @@ mod p7_lifecycle_tests {
             ("CANCELLED".to_owned(), "PAUSE_ABANDON_WORKFLOW".to_owned())
         );
 
-        assert!(resume_workflow(
+        assert!(resume_client_workflow(
             &PostgresBroker::from_pool(pool.clone()),
             workflow_id,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &TestChildSpecs::empty()
         )
         .await
         .unwrap());
@@ -1226,11 +1214,10 @@ mod p7_lifecycle_tests {
             .unwrap(),
             1,
         );
-        let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
+        let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
             &crate::broker::PostgresBroker::from_pool(pool.clone()),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             parent_id,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -1344,11 +1331,10 @@ mod p7_lifecycle_tests {
                 .unwrap();
         assert_eq!(child_status, "EXPIRED");
 
-        let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
+        let recovery = crate::workflow_engine::recovery::recover_workflow_tree(
             &crate::broker::PostgresBroker::from_pool(pool.clone()),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             parent_id,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -1751,15 +1737,9 @@ mod client_family_tests {
             pause_workflow(&python, workflow_id)
                 .await
                 .expect_err("pause of another family"),
-            resume_workflow(
-                &python,
-                workflow_id,
-                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-                &PayloadPolicy::default(),
-                &RetentionConfig::default(),
-            )
-            .await
-            .expect_err("resume of another family"),
+            resume_client_workflow(&python, workflow_id, &TestChildSpecs::empty())
+                .await
+                .expect_err("resume of another family"),
             cancel_workflow(&python, workflow_id)
                 .await
                 .expect_err("cancel of another family"),
