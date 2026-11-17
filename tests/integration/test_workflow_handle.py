@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,6 +44,20 @@ from tests.broker_resources_support import current_resources, listener_of, repla
 # =============================================================================
 # Shared helpers
 # =============================================================================
+
+
+async def _workflow_completed_at(
+    session: AsyncSession,
+    workflow_id: str,
+) -> datetime | None:
+    """The stored completed_at of one workflow row, read in a new snapshot."""
+    await session.commit()
+    return (
+        await session.execute(
+            text('SELECT completed_at FROM horsies_workflows WHERE id = :id'),
+            {'id': workflow_id},
+        )
+    ).scalar_one()
 
 
 async def _complete_task(
@@ -306,6 +320,52 @@ class TestWorkflowHandleGet:
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_err()
         assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_PAUSED
+
+    async def test_paused_expiry_sets_completed_at_on_the_skipped_nodes(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The PENDING node that the expiry of a paused workflow skips gets completed_at."""
+        failing = make_failing_task(app, 'expiry_skip_completed_at_a')
+        waiting = make_simple_task(app, 'expiry_skip_completed_at_b')
+        node_a = TaskNode(fn=failing)
+        node_b = TaskNode(fn=waiting, kwargs={'value': 1}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker,
+            name='expiry_skip_completed_at',
+            tasks=[node_a, node_b],
+            on_error=OnError.PAUSE,
+        )
+        handle = await start_ok(spec, broker)
+        await _complete_task(
+            session,
+            broker,
+            handle.workflow_id,
+            0,
+            TaskResult(err=TaskError(error_code='FAIL', message='pause')),
+        )
+
+        expired = await expire_paused_workflows(
+            current_resources(broker).session_factory,
+            older_than=timedelta(0),
+            batch_size=1,
+        )
+
+        assert expired == 1
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, completed_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).one()
+        assert row.status == 'SKIPPED'
+        assert row.completed_at is not None
 
     async def test_auto_expired_pause_returns_workflow_expired_error(
         self,
@@ -998,6 +1058,52 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
 
+    async def test_cancel_sets_completed_at_on_every_cancelled_workflow(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The cancelled root and its cancelled child both get completed_at."""
+        task_a = make_simple_task(app, 'cancel_completed_at_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_completed_at', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+        child_workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
+                VALUES
+                    (:child_id, 'cancel_completed_at_child', 'PAUSED', 'fail', 1,
+                     :parent_id, 0, :parent_id, NOW(), NOW(), NOW(), NOW())
+            """),
+            {'child_id': child_workflow_id, 'parent_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT id, status, completed_at FROM horsies_workflows
+                    WHERE id IN (:root_id, :child_id)
+                """),
+                {'root_id': handle.workflow_id, 'child_id': child_workflow_id},
+            )
+        ).fetchall()
+        assert len(rows) == 2
+        for row in rows:
+            assert row.status == 'CANCELLED', row
+            assert row.completed_at is not None, row
+
     async def test_cancel_skips_pending(
         self,
         clean_workflow_tables: None,
@@ -1026,6 +1132,40 @@ class TestWorkflowHandleCancel:
         assert is_ok(tasks_r)
         # B should be SKIPPED
         assert tasks_r.ok_value[1].status == WorkflowTaskStatus.SKIPPED
+
+    async def test_cancel_sets_completed_at_on_the_skipped_nodes(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The PENDING node and the ENQUEUED node that the cancel skips get completed_at."""
+        task_a = make_simple_task(app, 'cancel_skip_completed_at_a')
+        task_b = make_simple_task(app, 'cancel_skip_completed_at_b')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_skip_completed_at', tasks=[node_a, node_b],
+        )
+        handle = await start_ok(spec, broker)
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, completed_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id ORDER BY task_index
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchall()
+        assert [(row.task_index, row.status) for row in rows] == [
+            (0, 'SKIPPED'), (1, 'SKIPPED'),
+        ]
+        assert all(row.completed_at is not None for row in rows), rows
 
     async def test_cancel_completed_is_noop(
         self,
@@ -1109,6 +1249,8 @@ class TestWorkflowHandleCancel:
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
+        cancelled_at = await _workflow_completed_at(session, handle.workflow_id)
+        assert cancelled_at is not None
 
         # The still-running task finishes after the cancel.
         await _complete_task(
@@ -1128,7 +1270,9 @@ class TestWorkflowHandleCancel:
         assert row[0] == 'CANCELLED', (
             f'Late completion must not resurrect a cancelled workflow, got {row[0]}'
         )
-        assert row[1] is None, 'completed_at must stay NULL for CANCELLED'
+        assert row[1] == cancelled_at, (
+            'a late completion must not move the completed_at of the cancel'
+        )
         assert row[2] is None, 'workflow result must not be written after cancel'
 
     async def test_cancel_does_not_deadlock_against_completion_lock_order(
@@ -1196,6 +1340,54 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
 
+    async def test_cancel_sets_completed_at_on_descendants(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The cascade sets completed_at on each child workflow it cancels."""
+        task_a = make_simple_task(app, 'descendant_cancel_completed_at_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker,
+            name='descendant_cancel_completed_at',
+            tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
+                VALUES
+                    (:child_id, 'descendant_completed_at_child', 'RUNNING',
+                     'fail', 1, :parent_id, 0, :parent_id, NOW(), NOW(),
+                     NOW(), NOW())
+            """),
+            {
+                'child_id': child_workflow_id,
+                'parent_id': handle.workflow_id,
+            },
+        )
+        await session.commit()
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        child_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :id'),
+                {'id': child_workflow_id},
+            )
+        ).scalar_one()
+        assert child_status == 'CANCELLED'
+        assert await _workflow_completed_at(session, child_workflow_id) is not None
+
     async def test_descendant_cancel_uses_completion_lock_order(
         self,
         clean_workflow_tables: None,
@@ -1234,13 +1426,13 @@ class TestWorkflowHandleCancel:
         await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                      input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
                      is_subworkflow, status, created_at,
                      max_retries, execution, retention_class_key)
                 VALUES
-                    (:node_id, :child_id, 0, 'child_node',
+                    ('NONE', :node_id, :child_id, 0, 'child_node',
                      'descendant_cancel_lock_order_a', '{}',
                      'default', 100, '{}', FALSE, 'all', FALSE,
                      'PENDING', NOW(),
@@ -2093,10 +2285,11 @@ class TestResumeCommitSplit:
     ) -> None:
         """The resume transaction rolled back: the workflow stays PAUSED."""
         handle = await self._paused_workflow(broker, app, 'resume_commit_err')
-        db_exc = OperationalError('cascade', {}, Exception('connection lost'))
+        db_exc = OperationalError('child start', {}, Exception('connection lost'))
 
+        # The resume statement ran in the transaction; the next statement fails.
         with patch(
-            'horsies.core.workflows.lifecycle.cascade_resume_to_children',
+            'horsies.core.workflows.steps.run_child_starts',
             new=AsyncMock(side_effect=db_exc),
         ):
             resume_r = await handle.resume_async()
@@ -2228,10 +2421,12 @@ class TestWorkflowHandleInfraErrors:
         )
         handle = await start_ok(spec, broker)
 
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = OperationalError(
+        mock_connection = AsyncMock()
+        mock_connection.execute.side_effect = OperationalError(
             'connection lost', {}, Exception('test'),
         )
+        mock_session = AsyncMock()
+        mock_session.connection = AsyncMock(return_value=mock_connection)
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)

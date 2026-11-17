@@ -17,8 +17,9 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
-use crate::broker::terminalization::terminalize;
+use crate::broker::client_family::ClientFamily;
+use crate::broker::migrations::install_schema;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -33,9 +34,10 @@ use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
-use crate::workflow_engine::engine::on_workflow_task_complete;
+use crate::workflow_engine::engine::{
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
+};
 use crate::workflow_engine::start::start_workflow;
-use crate::workflow_engine::WorkflowError;
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -91,8 +93,10 @@ pub(super) struct IsolatedDatabase {
 }
 
 impl IsolatedDatabase {
-    /// Creates, migrates and covers a new database. Inactive databases that
-    /// earlier runs left behind are dropped first.
+    /// Creates, migrates and covers a new database, and records the core's
+    /// client family in it (a workflow start, pause, resume and cancel refuse
+    /// a database with no family row). Inactive databases that earlier runs
+    /// left behind are dropped first.
     pub(super) async fn create() -> Self {
         let shared_url = crate::broker::terminalization_matrix::migrated_database_url().await;
         let base = PgConnectOptions::from_str(&shared_url).expect("parse the test database URL");
@@ -109,9 +113,9 @@ impl IsolatedDatabase {
         unlock_setup(&mut admin).await;
         let options = base.database(&name);
         let pool = connect(&options).await;
-        run_horsies_migrations(&pool)
+        install_schema(&pool, ClientFamily::Rust)
             .await
-            .expect("migrate the isolated database");
+            .expect("install the schema of the isolated database");
         let coverage = ensure_partition_coverage_in_pool(
             &pool,
             COVERAGE_HISTORY_DAYS,
@@ -712,7 +716,8 @@ pub(super) fn required(cases: &[&[usize]]) -> SuccessPolicy {
 
 /// A registry that resolves each of `children` by its definition key.
 pub(super) fn registry_of(children: &[WorkflowSpec]) -> WorkflowSpecRegistry {
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     for child in children {
         registry
             .register(RegisteredWorkflowSpec {
@@ -789,7 +794,9 @@ pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowHandle<serde_j
     WorkflowHandle::new(
         workflow_id,
         broker(pool),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         PayloadPolicy::default(),
         RetentionConfig::default(),
     )
@@ -840,7 +847,24 @@ pub(super) async fn try_finish_task(
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
     registry: &WorkflowSpecRegistry,
-) -> Result<(), WorkflowError> {
+) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
+    let _ = finish_phase1(pool, task_id, outcome).await;
+    on_workflow_task_complete(
+        &PostgresBroker::from_pool(pool.clone()),
+        task_id,
+        registry,
+        &RetentionConfig::default(),
+    )
+    .await
+}
+
+/// Phase 1 of [`finish_task`] alone: the task moves to history with
+/// `outcome` and phase 2 stays owed. Returns the stored result text.
+pub(super) async fn finish_phase1(
+    pool: &PgPool,
+    task_id: Uuid,
+    outcome: &TaskResult<serde_json::Value>,
+) -> String {
     hold_running(pool, task_id).await;
     let result_json = serde_json::to_string(outcome).expect("encode the task outcome");
     let fence = PriorLockedRead {
@@ -870,16 +894,7 @@ pub(super) async fn try_finish_task(
         ),
         "phase 1 of task {task_id}: {outcomes:?}"
     );
-    on_workflow_task_complete(
-        pool,
-        task_id,
-        &result_json,
-        outcome.is_ok(),
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
+    result_json
 }
 
 /// Finishes the task of node `task_index` of `workflow_id` (see [`finish_task`])
@@ -1122,6 +1137,43 @@ impl WorkflowDoneListener {
             }
         }
         payloads
+    }
+}
+
+/// A connection that listens on several channels and keeps each
+/// notification as (channel, payload).
+pub(super) struct Notifications {
+    listener: sqlx::postgres::PgListener,
+}
+
+impl Notifications {
+    pub(super) async fn listen(pool: &PgPool, channels: &[&str]) -> Self {
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+            .await
+            .expect("connect the notification listener");
+        listener
+            .listen_all(channels.iter().copied())
+            .await
+            .unwrap_or_else(|error| panic!("LISTEN {channels:?}: {error}"));
+        Self { listener }
+    }
+
+    /// The (channel, payload) pairs that arrive within [`NOTIFICATION_WAIT`]
+    /// of the last one, at most [`NOTIFICATION_LIMIT`], sorted.
+    pub(super) async fn received(&mut self) -> Vec<(String, String)> {
+        let mut received = Vec::new();
+        while received.len() < NOTIFICATION_LIMIT {
+            match tokio::time::timeout(NOTIFICATION_WAIT, self.listener.recv()).await {
+                Ok(Ok(notification)) => received.push((
+                    notification.channel().to_owned(),
+                    notification.payload().to_owned(),
+                )),
+                Ok(Err(error)) => panic!("the notification listener failed: {error}"),
+                Err(_) => break,
+            }
+        }
+        received.sort();
+        received
     }
 }
 

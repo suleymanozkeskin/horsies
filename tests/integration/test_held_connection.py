@@ -42,6 +42,7 @@ from horsies.core.utils.db import (
     StatementRows,
 )
 from tests.integration.autocommit_support import ProxiedWorker, open_proxied_worker
+from horsies.core.utils.url import sqlalchemy_url
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -56,7 +57,9 @@ BACKEND_PID: Final = SingleStatement(
 
 @pytest_asyncio.fixture(loop_scope='function')
 async def engine(db_url: str) -> AsyncGenerator[AsyncEngine]:
-    created = create_async_engine(db_url, pool_size=POOL_SIZE, max_overflow=0)
+    created = create_async_engine(
+        sqlalchemy_url(db_url), pool_size=POOL_SIZE, max_overflow=0,
+    )
     yield created
     await created.dispose()
 

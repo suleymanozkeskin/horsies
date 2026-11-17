@@ -1,9 +1,10 @@
-"""The relations that the generated identity lookup locks.
+"""The relations that the published detail reader locks.
 
-`horsies_task_lookup_staged` is static PL/pgSQL: one statement per relation,
-the live table first, then each history leaf by its own name, never the
-partitioned parent. PostgreSQL plans and locks a statement only when it runs,
-so a lookup locks only the relations it probed:
+`horsies_task_detail_staged` (rendered by `horsies_publish_history_readers`)
+is static PL/pgSQL: one statement per relation, the live table first, then
+each history leaf by its own name, never the partitioned parent. PostgreSQL
+plans and locks a statement only when it runs, so a lookup locks only the
+relations it probed:
 
 - an id in the live table: the live table, no history leaf;
 - a UUIDv7 id: the forever leaf, then the finite leaves from the one that can
@@ -28,7 +29,7 @@ from horsies.core.history.commands import (
     LeafRef,
 )
 from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
-from horsies.core.history.names import FOREVER_LEAF, TASK_LOOKUP_FUNCTION
+from horsies.core.history.names import FOREVER_LEAF, TASK_DETAIL_FUNCTION
 from horsies.core.history.outcomes import LeafCreated
 from horsies.core.history.partitions.catalog import daily_leaf_name
 from horsies.core.history.partitions.manager import (
@@ -65,7 +66,7 @@ history_schema = task_history_schema_fixture('task_history_it_lookup_locks')
 
 def v7_with_birth(birth: datetime) -> str:
     milliseconds = int(birth.timestamp() * 1_000)
-    return MonotonicUuid7Generator(clock_ms=lambda: milliseconds).mint()
+    return str(MonotonicUuid7Generator(clock_ms=lambda: milliseconds).mint())
 
 
 async def create_past_leaf(
@@ -106,8 +107,8 @@ async def locked_history_relations(
             found = (
                 await connection.execute(
                     text(
-                        f'SELECT found FROM {TASK_LOOKUP_FUNCTION}('
-                        'CAST(:task_id AS uuid))'
+                        f'SELECT EXISTS (SELECT 1 FROM {TASK_DETAIL_FUNCTION}('
+                        'CAST(:task_id AS uuid)))'
                     ),
                     {'task_id': task_id},
                 )
@@ -167,7 +168,7 @@ async def test_a_lookup_locks_only_the_relations_it_probes(
             await connection.execute(
                 text(
                     'SELECT pg_get_functiondef('
-                    f"'{TASK_LOOKUP_FUNCTION}(uuid)'::regprocedure)"
+                    f"'{TASK_DETAIL_FUNCTION}(uuid)'::regprocedure)"
                 )
             )
         ).scalar_one()

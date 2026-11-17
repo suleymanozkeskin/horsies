@@ -4,8 +4,8 @@
 A task that the engine creates for a workflow node stores the ``sent_at`` of
 its workflow row: the call time of the start of that workflow. This holds for
 a root task written at the start, for a dependent promoted later, and for the
-tasks of a child workflow, whose row stores the time its parent node started
-it.
+tasks of a child workflow. The child that a workflow start writes for a
+sub-workflow root is part of that start: its row stores the start call time.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class TestEngineTaskSentAt:
             1: START_CALL_TIME,
         }
 
-    async def test_a_child_workflow_task_stores_the_child_row_sent_at(
+    async def test_the_child_of_a_subworkflow_root_stores_the_start_call_time(
         self,
         clean_workflow_tables: None,
         app: Horsies,
@@ -133,5 +133,51 @@ class TestEngineTaskSentAt:
             )
         ).scalar_one()
 
-        child_sent_at = await _workflow_sent_at(session, str(child_id))
-        assert await _task_sent_at(session, str(child_id)) == {0: child_sent_at}
+        assert await _workflow_sent_at(session, str(child_id)) == START_CALL_TIME
+        assert await _task_sent_at(session, str(child_id)) == {0: START_CALL_TIME}
+
+    async def test_the_child_of_a_child_root_stores_the_start_call_time(
+        self,
+        clean_workflow_tables: None,
+        app: Horsies,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        leaf_fn = _task(app, 'sent_at_leaf')
+        suffix = uuid.uuid4().hex[:8]
+
+        class SentAtLeaf(WorkflowDefinition[int]):
+            name = f'sent_at_leaf_{suffix}'
+            definition_key = f'sent-at-leaf-{suffix}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = (args, params)
+                node = TaskNode(fn=leaf_fn, kwargs={'value': 3})
+                return app.workflow(cls.name, [node], output=node)
+
+        class SentAtMiddle(WorkflowDefinition[int]):
+            name = f'sent_at_middle_{suffix}'
+            definition_key = f'sent-at-middle-{suffix}'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = (args, params)
+                node = SubWorkflowNode(workflow_def=SentAtLeaf)
+                return app.workflow(cls.name, [node], output=node)
+
+        spec = app.workflow(
+            f'sent_at_top_{suffix}', [SubWorkflowNode(workflow_def=SentAtMiddle)],
+            definition_key=f'sent-at-top-{suffix}',
+        )
+        started = await start_workflow_async(spec, broker, sent_at=START_CALL_TIME)
+        assert not is_err(started), started
+        leaf_id = (
+            await session.execute(
+                text('SELECT id FROM horsies_workflows WHERE depth = 2 AND root_workflow_id = :r'),
+                {'r': started.ok_value.workflow_id},
+            )
+        ).scalar_one()
+
+        assert await _workflow_sent_at(session, str(leaf_id)) == START_CALL_TIME
+        assert await _task_sent_at(session, str(leaf_id)) == {0: START_CALL_TIME}

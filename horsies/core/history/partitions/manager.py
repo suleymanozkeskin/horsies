@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -113,6 +114,13 @@ from .locks import (
     unlock_leaf_for_session,
 )
 from .publication import LoaderPublication
+from .retirement import (
+    DetachLocked,
+    DetachRecord,
+    begin_leaf_detach,
+    drop_detached_retention_leaf,
+    record_leaf_detached,
+)
 
 _DAILY = timedelta(days=1)
 
@@ -776,71 +784,138 @@ async def detach_expired_leaf(
     A pending locator on the leaf keeps it `LeafPendingBlocked` until phase
     2 or phase-2 recovery deletes or repoints the locator.
 
-    After a successful detach the staged loader is republished without the
-    leaf; the relation still exists until drop, so a reader holding the old
-    function sees a standalone table, never a missing one.
+    The classification and the session leaf lock are one call of
+    ``horsies_begin_leaf_detach``. After the detach, the catalog record and,
+    when the published manifest names the leaf, the reader publication
+    commit in one transaction; the relation still exists until drop, so a
+    reader holding the old function sees a standalone table, never a
+    missing one.
     '''
-    leaf = command.leaf
-    inspect = InspectHistoryLeaf(leaf=leaf, lifecycle=LeafLifecycle.RETENTION)
-    async with database.autocommit() as connection:
-        inspection = await inspect_leaf(connection, inspect)
-        match inspection:
-            case LeafDetachable():
-                pass
-            case _:
-                return inspection
+    return await _detach_retention_leaf(
+        database,
+        command.leaf,
+        step=_DetachStep.CONCURRENTLY,
+        statement_timeout_ms=command.statement_timeout_ms,
+        publisher=publisher,
+    )
 
-        lock_acquired = False
+
+class _DetachStep(Enum):
+    """The detach statement one call runs, and the state it acts on."""
+
+    CONCURRENTLY = 'CONCURRENTLY'
+    """Acts on `LeafDetachable`."""
+    FINALIZE = 'FINALIZE'
+    """Acts on `LeafDetachInterrupted`."""
+
+
+async def _detach_retention_leaf(
+    database: PartitionMaintenanceDatabase,
+    leaf: LeafRef,
+    *,
+    step: _DetachStep,
+    statement_timeout_ms: int | None,
+    publisher: LoaderPublication,
+) -> LeafInspection | LeafMaintenanceBusy:
+    """Run one detach or finalize of a PERIOD or HEARTBEAT leaf on one autocommit connection.
+
+    ``horsies_begin_leaf_detach`` classifies the leaf and takes its session
+    lock; the detach statement runs under the command's statement timeout
+    and a 2 s lock timeout; ``horsies_record_leaf_detached`` records it.
+    The prior session timeouts are restored and the lock released after;
+    a cancel, or a failure whose lock state is unknown, closes the
+    connection instead. A leaf that `FINALIZE` finds already detached gets
+    its detach recorded, without the lock.
+    """
+    async with database.autocommit() as connection:
+        try:
+            begun = await begin_leaf_detach(connection, leaf)
+        except BaseException as error:
+            await connection.invalidate(error)
+            raise
+        match begun, step:
+            case DetachLocked(), _:
+                pass
+            case LeafDetached(), _DetachStep.FINALIZE:
+                return await _record_detached(connection, leaf, begun, publisher)
+            case _:
+                return begun
         prior_timeouts: _SessionTimeouts | None = None
         cancelled = False
         try:
-            lock_attempt = await _try_session_leaf_lock(connection, leaf=leaf)
-            if lock_attempt is LeafLockAttempt.BUSY:
-                return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
-            lock_acquired = True
-            inspection = await inspect_leaf(connection, inspect)
-            match inspection:
-                case LeafDetachable():
+            match begun.inspection, step:
+                case LeafDetachable(), _DetachStep.CONCURRENTLY:
                     pass
-                case _:
+                case LeafDetachInterrupted(), _DetachStep.FINALIZE:
+                    pass
+                case inspection, _:
                     return inspection
             prior_timeouts = await _read_session_timeouts(connection)
             await _set_session_timeouts(
-                connection,
-                statement_timeout_ms=command.statement_timeout_ms,
+                connection, statement_timeout_ms=statement_timeout_ms
             )
-            retention_class = await read_retention_class(connection, leaf.class_key)
-            if retention_class is None or retention_class.finite_parent_name is None:
-                raise AssertionError(
-                    'detachable classification requires a finite retention class'
-                )
             try:
                 await connection.execute(
                     text(
-                        f"""
-                        ALTER TABLE {retention_class.finite_parent_name}
-                        DETACH PARTITION {leaf.leaf_name} CONCURRENTLY
-                        """
+                        f'ALTER TABLE {begun.parent_name} '
+                        f'DETACH PARTITION {leaf.leaf_name} {step.value}'
                     )
                 )
             except DBAPIError as error:
                 if is_lock_not_available(error):
                     return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
                 raise
-            await _record_detached(connection, leaf.leaf_name)
-            await _republish_if_stale(connection, publisher)
-            return await inspect_leaf(connection, inspect)
+            return await _record_detached(
+                connection, leaf, begun.inspection, publisher
+            )
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            if lock_acquired:
-                await _cleanup_session_leaf_lock(
-                    connection,
-                    leaf=leaf,
-                    prior_timeouts=prior_timeouts,
-                    uncertain=cancelled,
-                )
+            await _cleanup_session_leaf_lock(
+                connection,
+                leaf=leaf,
+                prior_timeouts=prior_timeouts,
+                uncertain=cancelled,
+            )
+
+
+async def _record_detached(
+    connection: AsyncConnection,
+    leaf: LeafRef,
+    detached: LeafDetachable | LeafDetachInterrupted | LeafDetached,
+    publisher: LoaderPublication,
+) -> LeafDetached | LeafMissing:
+    """Record a detach that the leaf's state shows, in one transaction on the
+    autocommit connection.
+
+    ``horsies_record_leaf_detached`` and, when the published manifest names
+    the leaf, the reader publication commit together. A leaf whose relation
+    vanished after its detach is `LeafMissing`. A leaf still attached, or a
+    catalog row that vanished, contradicts the detach that just completed
+    and raises ``HistoryContractError``.
+    """
+    await connection.commit()
+    await connection.execution_options(isolation_level='READ COMMITTED')
+    try:
+        async with connection.begin():
+            recorded = await record_leaf_detached(connection, leaf.leaf_name)
+            if recorded.manifest_names_leaf:
+                await publisher.republish(connection)
+    finally:
+        await connection.execution_options(isolation_level='AUTOCOMMIT')
+    match recorded.record:
+        case DetachRecord.RECORDED | DetachRecord.ALREADY_RECORDED:
+            return LeafDetached(leaf_name=leaf.leaf_name, expires_at=detached.expires_at)
+        case DetachRecord.MISSING:
+            return LeafMissing(
+                leaf_name=leaf.leaf_name, cataloged=True, expires_at=detached.expires_at
+            )
+        case DetachRecord.STILL_ATTACHED | DetachRecord.NOT_CATALOGED:
+            raise HistoryContractError(
+                f'leaf {leaf.leaf_name}: the detach record found '
+                f'{recorded.record.value} after the detach completed'
+            )
 
 
 async def detach_empty_forever_leaf(
@@ -900,7 +975,7 @@ async def detach_empty_forever_leaf(
                 if is_lock_not_available(error):
                     return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
                 raise
-            await _record_detached(connection, leaf.leaf_name)
+            await _record_forever_detached(connection, leaf.leaf_name)
             await _republish_if_stale(connection, publisher)
             return await inspect_leaf(connection, inspect)
         except asyncio.CancelledError:
@@ -916,24 +991,6 @@ async def detach_empty_forever_leaf(
                 )
 
 
-async def _lifecycle_parent(
-    connection: AsyncConnection,
-    leaf: LeafRef,
-    lifecycle: LeafLifecycle,
-) -> str:
-    """The parent a leaf detaches from under its lifecycle."""
-    match lifecycle:
-        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
-            return TASK_HISTORY_FOREVER
-        case LeafLifecycle.RETENTION:
-            retention_class = await read_retention_class(connection, leaf.class_key)
-            if retention_class is None or retention_class.finite_parent_name is None:
-                raise AssertionError(
-                    'interrupted-detach classification requires a finite class'
-                )
-            return retention_class.finite_parent_name
-
-
 async def finalize_interrupted_detach(
     database: PartitionMaintenanceDatabase,
     command: FinalizeInterruptedLeafDetach,
@@ -945,7 +1002,30 @@ async def finalize_interrupted_detach(
     detached has its catalog record reconciled. Every other classification
     is returned unchanged — in particular a blocked interrupted detach stays
     pending until its recovery evidence drains or is quarantined.
+
+    Under `RETENTION` the classification, the lock and the record are the
+    baseline functions (`_detach_retention_leaf`); under
+    `CLOSED_EMPTY_FOREVER` they are the statements of this module.
     """
+    match command.lifecycle:
+        case LeafLifecycle.RETENTION:
+            return await _detach_retention_leaf(
+                database,
+                command.leaf,
+                step=_DetachStep.FINALIZE,
+                statement_timeout_ms=command.statement_timeout_ms,
+                publisher=publisher,
+            )
+        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
+            return await _finalize_forever_detach(database, command, publisher)
+
+
+async def _finalize_forever_detach(
+    database: PartitionMaintenanceDatabase,
+    command: FinalizeInterruptedLeafDetach,
+    publisher: LoaderPublication,
+) -> LeafInspection | LeafMaintenanceBusy:
+    """`finalize_interrupted_detach` of a closed daily `forever` leaf."""
     leaf = command.leaf
     inspect = InspectHistoryLeaf(leaf=leaf, lifecycle=command.lifecycle)
     async with database.autocommit() as connection:
@@ -967,7 +1047,7 @@ async def finalize_interrupted_detach(
             inspection = await inspect_leaf(connection, inspect)
             match inspection:
                 case LeafDetached():
-                    await _record_detached(connection, leaf.leaf_name)
+                    await _record_forever_detached(connection, leaf.leaf_name)
                     await _republish_if_stale(connection, publisher)
                     return await inspect_leaf(connection, inspect)
                 case LeafDetachInterrupted():
@@ -979,14 +1059,11 @@ async def finalize_interrupted_detach(
                 connection,
                 statement_timeout_ms=command.statement_timeout_ms,
             )
-            parent_name = await _lifecycle_parent(
-                connection, leaf, command.lifecycle
-            )
             try:
                 await connection.execute(
                     text(
                         f"""
-                        ALTER TABLE {parent_name}
+                        ALTER TABLE {TASK_HISTORY_FOREVER}
                         DETACH PARTITION {leaf.leaf_name} FINALIZE
                         """
                     )
@@ -995,7 +1072,7 @@ async def finalize_interrupted_detach(
                 if is_lock_not_available(error):
                     return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
                 raise
-            await _record_detached(connection, leaf.leaf_name)
+            await _record_forever_detached(connection, leaf.leaf_name)
             await _republish_if_stale(connection, publisher)
             return await inspect_leaf(connection, inspect)
         except asyncio.CancelledError:
@@ -1018,12 +1095,27 @@ async def drop_detached_leaf(
 ) -> LeafDrop:
     """Drop one already-detached leaf inside the caller's transaction.
 
-    Refused while the published staged loader still references the relation:
-    the regeneration gap blocks the drop, never the reader. The catalog
+    Refused while the published readers still probe the relation: the
+    regeneration gap blocks the drop, never the reader. The catalog
     retains the dropped leaf's row as durable memory that it existed.
-    Under `CLOSED_EMPTY_FOREVER`, a leaf holding rows under the exclusive
-    lock is `LeafKeptNonEmpty`.
+    Under `RETENTION` the drop is one call of ``horsies_drop_detached_leaf``,
+    which reads the published manifest itself. Under
+    `CLOSED_EMPTY_FOREVER`, a leaf holding rows under the exclusive lock is
+    `LeafKeptNonEmpty`.
     """
+    match command.lifecycle:
+        case LeafLifecycle.RETENTION:
+            return await drop_detached_retention_leaf(connection, command.leaf)
+        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
+            return await _drop_forever_leaf(connection, command, publisher)
+
+
+async def _drop_forever_leaf(
+    connection: AsyncConnection,
+    command: DropDetachedHistoryLeaf,
+    publisher: LoaderPublication,
+) -> LeafDrop:
+    """`drop_detached_leaf` of a closed daily `forever` leaf."""
     leaf = command.leaf
     inspect = InspectHistoryLeaf(leaf=leaf, lifecycle=command.lifecycle)
     inspection = await inspect_leaf(connection, inspect)
@@ -1187,7 +1279,7 @@ async def _republish_if_stale(
         await publisher.republish(connection)
 
 
-async def _record_detached(connection: AsyncConnection, leaf_name: str) -> None:
+async def _record_forever_detached(connection: AsyncConnection, leaf_name: str) -> None:
     await connection.execute(
         text(
             f"""

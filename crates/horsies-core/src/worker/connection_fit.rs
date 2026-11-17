@@ -43,7 +43,8 @@ use std::time::Duration;
 
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::{
-    profile_path, IsolatedSetting, SharedAsyncSetting, SharedThreadSetting, WorkerProfile,
+    profile_path, quoted_profile_name, IsolatedSetting, SharedAsyncSetting, SharedThreadSetting,
+    WorkerProfile,
 };
 use crate::core::config::{AppConfig, PostgresConfig};
 use crate::core::error::{ErrorCode, HorsiesError};
@@ -535,6 +536,99 @@ pub async fn check_worker_connections(
             Ok(limit) => worker_connection_errors(&config.worker_profiles, &config.broker, limit),
             Err(cause) => vec![connection_limit_unreadable_error(&cause)],
         },
+    }
+}
+
+/// The connection fit of the profile that a worker runs, read at boot before
+/// the worker starts. The worker starts in every case (Python
+/// `_log_connection_fit`, `horsies/core/cli.py:711-745`).
+#[derive(Debug)]
+pub enum BootConnectionFit {
+    /// PgBouncer transaction mode: nothing is read.
+    NotComparedThroughPooler,
+    /// The limit was not read; the profile is not compared.
+    LimitUnreadable(ConnectionLimitUnreadable),
+    /// The limit was read and the profile compared with it.
+    Compared(ConnectionFit),
+}
+
+/// Reads the server limit through `broker` and compares the profile with it,
+/// unless the pooled connections go through a transaction pooler. Writes
+/// nothing; never refuses: an unreadable limit is an outcome.
+pub async fn boot_connection_fit(
+    profile: &WorkerProfile,
+    broker_config: &PostgresConfig,
+    broker: &PostgresBroker,
+) -> BootConnectionFit {
+    match broker_config.pgbouncer_transaction_mode {
+        true => BootConnectionFit::NotComparedThroughPooler,
+        false => match read_server_connection_limit(broker).await {
+            Ok(limit) => {
+                BootConnectionFit::Compared(compare_connections(profile, broker_config, limit))
+            }
+            Err(cause) => BootConnectionFit::LimitUnreadable(cause),
+        },
+    }
+}
+
+/// The level of a boot log record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootLogLevel {
+    Info,
+    Warning,
+}
+
+/// The log record of a boot connection fit: its level and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootConnectionLog {
+    pub level: BootLogLevel,
+    pub message: String,
+}
+
+/// The record that the worker logs for the fit of its profile `name`, with
+/// Python's level and text (`horsies/core/cli.py:691-745`): a profile above
+/// the usable slots or an unreadable limit is a warning; a fitting profile
+/// and a transaction pooler are info. Pure.
+pub fn boot_connection_log(name: &str, fit: &BootConnectionFit) -> BootConnectionLog {
+    let profile = quoted_profile_name(name);
+    match fit {
+        BootConnectionFit::NotComparedThroughPooler => BootConnectionLog {
+            level: BootLogLevel::Info,
+            message: format!(
+                "Worker profile {profile}: connections go through a transaction pooler; the \
+                 server connection limit is not compared"
+            ),
+        },
+        BootConnectionFit::LimitUnreadable(cause) => BootConnectionLog {
+            level: BootLogLevel::Warning,
+            message: format!(
+                "Worker profile {profile}: the server connection limit could not be read \
+                 ({cause}); the connections of this worker were not compared with it"
+            ),
+        },
+        BootConnectionFit::Compared(fit @ ConnectionFit::Fits { .. }) => BootConnectionLog {
+            level: BootLogLevel::Info,
+            message: format!("Worker profile {profile}: {}", fit.describe()),
+        },
+        BootConnectionFit::Compared(fit @ ConnectionFit::ExceedsServer { need, .. }) => {
+            BootConnectionLog {
+                level: BootLogLevel::Warning,
+                message: format!(
+                    "Worker profile {profile}: {}. {}; {}. To fix: {CONNECTIONS_HELP}",
+                    fit.describe(),
+                    need.formula(),
+                    need.task_sends_note()
+                ),
+            }
+        }
+    }
+}
+
+/// Writes the record to the log at its level.
+pub fn log_boot_connection_fit(record: &BootConnectionLog) {
+    match record.level {
+        BootLogLevel::Info => tracing::info!("{}", record.message),
+        BootLogLevel::Warning => tracing::warn!("{}", record.message),
     }
 }
 

@@ -29,6 +29,7 @@ from typing import (
 from abc import abstractmethod
 from collections.abc import Coroutine, Mapping
 from types import MappingProxyType
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
@@ -89,6 +90,7 @@ from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, Ok, Err, Result
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
@@ -214,6 +216,20 @@ type _RetentionStamp = _FromQueueMapping | _ExplicitClass
 _SEND_RETRY_COUNT: Final[int] = 3
 _SEND_RETRY_INITIAL_MS: Final[int] = 200
 _SEND_RETRY_MAX_MS: Final[int] = 2000
+
+
+def _send_kind_of_attempt(first: SendKind, attempt: int) -> SendKind:
+    """The send kind of broker call ``attempt`` (0 is the first) of one send.
+
+    ``first`` is the kind of the first call: ``FIRST`` for a new send,
+    ``REPEAT`` for a retry method. Every later call of the resend loop sends
+    the same task id and ``sent_at`` again, so it is a ``REPEAT``. Pure.
+    """
+    match attempt:
+        case 0:
+            return first
+        case _:
+            return SendKind.REPEAT
 
 # The send variants that a broker error maps to.
 type _BrokerSendError = (
@@ -416,7 +432,7 @@ class TaskHandle(Generic[T]):
 
     def __init__(
         self,
-        task_id: str,
+        task_id: UUID,
         app: Optional['Horsies'] = None,
         broker_mode: bool = False,
         ok_type: TypeAnnotation | None = None,
@@ -541,7 +557,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=err_code,
                 message=broker_err.message,
-                data={'task_id': self.task_id, 'broker_code': broker_err.code.value},
+                data={'task_id': str(self.task_id), 'broker_code': broker_err.code.value},
                 exception=cause,
                 cache=cache,
             )
@@ -550,7 +566,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=RetrievalCode.TASK_NOT_FOUND,
                 message=f'Task {self.task_id} not found in database',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
                 # Possibly a handle reconstructed by id racing the enqueue
                 # commit; a later get() may find the row.
                 cache=False,
@@ -561,7 +577,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=OutcomeCode.TASK_CANCELLED,
                 message=f'Task {self.task_id} was cancelled before completion',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         if record.raw_result is None:
             # ``raw_result is None`` covers two distinct cases per the
@@ -588,7 +604,7 @@ class TaskHandle(Generic[T]):
                         f'payload'
                     ),
                     data={
-                        'task_id': self.task_id,
+                        'task_id': str(self.task_id),
                         'status': record.status.value,
                     },
                 )
@@ -601,7 +617,7 @@ class TaskHandle(Generic[T]):
                         f'running.'
                     ),
                     data={
-                        'task_id': self.task_id,
+                        'task_id': str(self.task_id),
                         'timeout_ms': timeout_ms,
                         'status': record.status.value,
                     },
@@ -621,7 +637,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'TaskResult envelope invalid: {exc}',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         err_slot = envelope.get('err')
         # Err-fast-path: TaskError is fixed-schema; decodable without
@@ -634,7 +650,7 @@ class TaskHandle(Generic[T]):
                 return self._error_result(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                     message=f'Failed to decode TaskError: {exc}',
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                 )
             decoded_err: TaskResult[T, TaskError] = TaskResult(
                 err=cast('TaskError', err_value),
@@ -652,7 +668,7 @@ class TaskHandle(Generic[T]):
                     f'a declared OkT; the handle has none (task not '
                     f'locally registered). Use raw_result() instead.'
                 ),
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         try:
             decoded = decode_task_result(raw, self.ok_type)
@@ -660,7 +676,7 @@ class TaskHandle(Generic[T]):
             return self._error_result(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'decode_task_result failed: {exc}',
-                data={'task_id': self.task_id},
+                data={'task_id': str(self.task_id)},
             )
         decoded_tr = cast('TaskResult[T, TaskError]', decoded)
         self._cached_result = decoded_tr
@@ -686,7 +702,7 @@ class TaskHandle(Generic[T]):
             message=wait_inside_task_message(
                 f'TaskHandle.{operation}() for task {self.task_id}',
             ),
-            data={'task_id': self.task_id},
+            data={'task_id': str(self.task_id)},
             cache=False,
         )
 
@@ -719,7 +735,7 @@ class TaskHandle(Generic[T]):
                 return self._error_result(
                     error_code=RetrievalCode.INVALID_INPUT,
                     message=f'TaskHandle.get() for task {self.task_id}: {refused.message}',
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                     cache=False,
                 )
             case Ok():
@@ -730,7 +746,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result cache is empty after fetch',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -743,7 +759,7 @@ class TaskHandle(Generic[T]):
                         f'TaskHandle.get() for task {self.task_id}',
                         'handle.get_async(...)',
                     ),
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                     cache=False,
                 )
             broker = self._app.get_broker()
@@ -758,7 +774,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result not available - task may not have been executed',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -790,7 +806,7 @@ class TaskHandle(Generic[T]):
                 return self._error_result(
                     error_code=RetrievalCode.INVALID_INPUT,
                     message=f'TaskHandle.get_async() for task {self.task_id}: {refused.message}',
-                    data={'task_id': self.task_id},
+                    data={'task_id': str(self.task_id)},
                     cache=False,
                 )
             case Ok():
@@ -801,7 +817,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result cache is empty after fetch',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -819,7 +835,7 @@ class TaskHandle(Generic[T]):
                     return self._error_result(
                         error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
                         message='Result not available - task may not have been executed',
-                        data={'task_id': self.task_id},
+                        data={'task_id': str(self.task_id)},
                     )
                 case result:
                     return result
@@ -1247,7 +1263,7 @@ class TaskSendOptions(Protocol[P, T]):
 
 def _map_broker_err(
     broker_err: BrokerEnqueueError | BrokerSyncCallError,
-    task_id: str,
+    task_id: UUID,
     payload: TaskSendPayload,
 ) -> _BrokerSendError:
     """Map a broker error variant to its send variant."""
@@ -2066,10 +2082,15 @@ def create_task_wrapper(
     # ---- Core send/schedule helpers ----
 
     def _do_send(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core sync send logic. Used by send() and retry_send()."""
+        """Core sync send logic. Used by send() and retry_send().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         if in_running_event_loop():
             return Err(TaskSendAsyncContext(
                 task_id=task_id,
@@ -2099,6 +2120,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2129,10 +2151,15 @@ def create_task_wrapper(
         return Err(last_err)
 
     async def _do_send_async(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core async send logic. Used by send_async() and retry_send_async()."""
+        """Core async send logic. Used by send_async() and retry_send_async().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
@@ -2151,6 +2178,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2181,10 +2209,15 @@ def create_task_wrapper(
         return Err(last_err)
 
     def _do_schedule(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core sync schedule logic. Used by schedule() and retry_schedule()."""
+        """Core sync schedule logic. Used by schedule() and retry_schedule().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         if in_running_event_loop():
             return Err(TaskSendAsyncContext(
                 task_id=task_id,
@@ -2214,6 +2247,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2245,11 +2279,16 @@ def create_task_wrapper(
         return Err(last_err)
 
     async def _do_schedule_async(
-        task_id: str,
+        task_id: UUID,
         payload: TaskSendPayload,
+        first_kind: SendKind,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core async schedule logic. Used by schedule_async() and
-        retry_schedule_async()."""
+        retry_schedule_async().
+
+        ``first_kind`` is the send kind of the first broker call
+        (``_send_kind_of_attempt``).
+        """
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
@@ -2268,6 +2307,7 @@ def create_task_wrapper(
                 payload.queue_name,
                 task_id=task_id,
                 enqueue_sha=payload.enqueue_sha,
+                send_kind=_send_kind_of_attempt(first_kind, attempt),
                 args_json=payload.args_json,
                 kwargs_json=payload.kwargs_json,
                 priority=payload.priority,
@@ -2305,7 +2345,7 @@ def create_task_wrapper(
         kwargs_dict: dict[str, Any],
         enqueue_delay_seconds: int | None = None,
         good_until_override: datetime | None | object = _UNSET,
-    ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
+    ) -> TaskSendResult[tuple[UUID, TaskSendPayload]]:
         """Validate, serialize, and build a (task_id, TaskSendPayload) tuple.
 
         Returns Err(TaskSendError) on validation or serialization failure.
@@ -2397,11 +2437,11 @@ def create_task_wrapper(
                 app.config.payload,
                 task_name=task_name,
                 kind='kwargs',
-                encoded_len=len(kwargs_json),
+                payload_text=kwargs_json,
             )
             match check_payload_size(
                 app.config.payload,
-                encoded_len=len(kwargs_json),
+                payload_text=kwargs_json,
             ):
                 case PayloadWithinLimit():
                     pass
@@ -2488,7 +2528,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return _do_send(task_id, payload)
+        return _do_send(task_id, payload, SendKind.FIRST)
 
     async def _send_async_with_options(
         args: tuple[Any, ...],
@@ -2527,7 +2567,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return await _do_send_async(task_id, payload)
+        return await _do_send_async(task_id, payload, SendKind.FIRST)
 
     def _stamped_class(
         stamp: _RetentionStamp, queue_name: str
@@ -2712,7 +2752,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return _do_schedule(task_id, payload)
+        return _do_schedule(task_id, payload, SendKind.FIRST)
 
     async def _schedule_async_with_options(
         delay: int,
@@ -2758,7 +2798,7 @@ def create_task_wrapper(
             payload,
             retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
-        return await _do_schedule_async(task_id, payload)
+        return await _do_schedule_async(task_id, payload, SendKind.FIRST)
 
     def send(
         *args: P.args,
@@ -2873,7 +2913,7 @@ def create_task_wrapper(
         *,
         require_delay: bool = False,
         reject_delay: bool = False,
-    ) -> Result[tuple[str, TaskSendPayload], TaskSendValidationFailed]:
+    ) -> Result[tuple[UUID, TaskSendPayload], TaskSendValidationFailed]:
         """Check that a retryable error's payload fits this retry method.
 
         The parameter type admits ``TaskSendEnqueueFailed``,
@@ -2920,42 +2960,58 @@ def create_task_wrapper(
     def retry_send(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed send using the stored payload."""
+        """Retry a failed send using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, reject_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return _do_send(task_id, payload)
+        return _do_send(task_id, payload, SendKind.REPEAT)
 
     async def retry_send_async(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed async send using the stored payload."""
+        """Retry a failed async send using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, reject_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return await _do_send_async(task_id, payload)
+        return await _do_send_async(task_id, payload, SendKind.REPEAT)
 
     def retry_schedule(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed schedule using the stored payload."""
+        """Retry a failed schedule using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, require_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return _do_schedule(task_id, payload)
+        return _do_schedule(task_id, payload, SendKind.REPEAT)
 
     async def retry_schedule_async(
         error: TaskSendRetryable,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Retry a failed async schedule using the stored payload."""
+        """Retry a failed async schedule using the stored payload.
+
+        Each broker call is a ``SendKind.REPEAT``: a task that an earlier
+        call wrote answers with its id, also after it finished.
+        """
         v = _validate_retry(error, require_delay=True)
         if is_err(v):
             return v
         task_id, payload = v.ok_value
-        return await _do_schedule_async(task_id, payload)
+        return await _do_schedule_async(task_id, payload, SendKind.REPEAT)
 
     class TaskFunctionImpl:
         """The members that both kinds share. A subclass adds `__call__`."""

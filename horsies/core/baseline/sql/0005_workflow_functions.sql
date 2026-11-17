@@ -15,8 +15,9 @@
 -- - Results are plain rows of built-in types. A step function returns SETOF horsies_workflow_step_row: one OUTCOME
 --   row, and one CHILD_START row per owed child start with one SOURCE row per terminal dependency of that node.
 -- - A task row that SQL mints has PENDING status, is_workflow_task TRUE, no command fingerprint (the named "no
---   fingerprint" variant), retain_rerun_input FALSE, retry_count 0, sent_at of its workflow, and max_retries,
---   execution, good_until and retention_class_key from its node row. Its id is horsies_uuidv7().
+--   fingerprint" variant), retain_rerun_input FALSE, retry_count 0, sent_at of its workflow, max_retries, execution
+--   and retention_class_key from its node row, and good_until from the good_until of its stored task options. Its id
+--   is horsies_uuidv7().
 -- - Row-set arguments are parallel arrays of built-in types. A function refuses arrays of different lengths, a NULL
 --   element where the column needs a value, and duplicate keys with SQLSTATE 22023.
 -- - Every PL/pgSQL function that runs table statements uses generic plans (plan_cache_mode = force_generic_plan).
@@ -35,18 +36,22 @@
 -- - OUTCOME (exactly one per call): disposition, workflow_id (the workflow of the step), workflow_status (after the
 --   step), advance_child_workflow_id (a workflow that this step ended and that has a parent: the caller advances its
 --   parent node after the commit with horsies_workflow_child_finish), detail.
--- - CHILD_START (one per owed child start): workflow_id (the parent workflow), task_index (the sub-workflow node),
---   node_input, args_from (JSON text or NULL), sub_workflow_name, sub_definition_key, parent_depth,
---   root_workflow_id.
+-- - CHILD_START (one per owed child start): workflow_id (the parent workflow), workflow_name (the name of the parent
+--   workflow, never NULL: the errors of a child that cannot start name the workflow by it; Python reads it in the
+--   node CAS as parent_workflow_name, core/workflows/engine.py:1014-1016), task_index (the sub-workflow node),
+--   node_input, args_from (JSON text or NULL), sub_workflow_name, sub_definition_key, sub_workflow_params (GIVEN or
+--   NOT_GIVEN), parent_depth, root_workflow_id.
 -- - SOURCE (one per terminal dependency of a CHILD_START node): workflow_id, task_index (the CHILD_START node),
 --   source_task_index, source_node_id, source_status, source_task_name, source_definition_key, source_result (the
 --   stored text, copied), source_summary (the stored child summary text of a sub-workflow source).
+-- workflow_name is NULL on OUTCOME and SOURCE rows.
 -- A row type, not a function: no locks. Python: the composite horsies_phase2_disposition and the in-memory results of
 -- the engine (core/workflows/engine.py); the rows replace the arrays of composite types of the first design.
 CREATE TYPE horsies_workflow_step_row AS (
     row_kind text,
     disposition text,
     workflow_id uuid,
+    workflow_name text,
     workflow_status text,
     advance_child_workflow_id uuid,
     detail text,
@@ -55,6 +60,7 @@ CREATE TYPE horsies_workflow_step_row AS (
     args_from text,
     sub_workflow_name text,
     sub_definition_key text,
+    sub_workflow_params text,
     parent_depth integer,
     root_workflow_id uuid,
     source_task_index integer,
@@ -102,7 +108,7 @@ BEGIN
         p_error_code IN (
             'UPSTREAM_SKIPPED', 'WORKFLOW_OUTPUT_SKIPPED', 'WORKFLOW_SUCCESS_CASE_NOT_MET',
             'RESULT_DESERIALIZATION_ERROR', 'SUBWORKFLOW_FAILED', 'SUBWORKFLOW_DEPTH_LIMIT_REACHED',
-            'WORKFLOW_ENQUEUE_FAILED'
+            'WORKFLOW_ENQUEUE_FAILED', 'WORKFLOW_RECOVERY_LIMIT_REACHED', 'WORKER_SERIALIZATION_ERROR'
         ),
         format('engine error code %L is not in the engine catalog', p_error_code)
     );
@@ -342,29 +348,47 @@ END;
 $$;
 
 -- Mints and links the task row of every task node of p_workflow_id whose index is in p_task_indexes and that is
--- ENQUEUED with no task: one INSERT into horsies_tasks (ids from horsies_uuidv7() in index order) and one link
--- UPDATE of the nodes. The insert trigger sends the wake of each queue. A conflict on a minted id is a defect and
--- fails the statement. Returns the number of rows minted.
--- Precondition: the caller holds the workflow row FOR UPDATE, so no other transaction links these nodes.
+-- ENQUEUED with no task: the rows are built here (ids from horsies_uuidv7() in index order, the input of
+-- horsies_workflow_task_input) and inserted through horsies_insert_task_rows, the one column list of a new task row,
+-- with the values of a workflow task row: is_workflow_task TRUE, no command fingerprint (the "no fingerprint"
+-- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at of the workflow, enqueued_at now(),
+-- max_retries, execution and retention_class_key from the node row, and good_until cast from the good_until member of
+-- the stored task options (NULL for no options, empty options, or a null or absent member). Then one link UPDATE of
+-- the nodes. The insert trigger sends the wake of each queue.
+-- Raises, and nothing commits:
+-- - a good_until that the timestamptz input cannot read (22007 or 22008), as the database refuses Python's text;
+-- - an outcome other than INSERTED (a conflict on a freshly minted id), a defect: unique_violation (23505), as the
+--   plain insert did.
+-- Returns the number of rows minted.
+-- Precondition: the caller holds the workflow row FOR UPDATE, so no other transaction links these nodes. The stored
+-- task options of each node parse (horsies_workflow_unbuildable_nodes failed every node whose options do not).
 -- Python: the INSERT_AND_LINK_WORKFLOW_TASK_SQL executemany (core/workflows/sql.py:194-206;
--- core/workflows/engine.py:2406-2461), INSERT_TASK_FOR_WORKFLOW_SQL at start (core/workflows/lifecycle.py:758).
+-- core/workflows/engine.py:2406-2461), INSERT_TASK_FOR_WORKFLOW_SQL at start (core/workflows/lifecycle.py:758); the
+-- task row's good_until is str() of the options member (core/workflows/engine.py:832-835).
 -- Locks: the new task rows and the linked node rows (the workflow row is held by the caller).
 CREATE FUNCTION horsies_workflow_node_tasks_insert(p_workflow_id uuid, p_task_indexes integer[]) RETURNS integer
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 DECLARE
-    v_minted integer;
+    v_minted bigint;
+    v_refused bigint;
 BEGIN
     IF p_task_indexes IS NULL OR cardinality(p_task_indexes) = 0 THEN
         RETURN 0;
     END IF;
+    -- One statement: build, insert through the helper, link. The ORDER BY of the materialized build runs before its
+    -- volatile target list, so the ids are minted in index order (horsies_uuidv7 strictly increases within one
+    -- transaction). The aggregates of built_rows read the build in one scan, so their arrays are aligned element by
+    -- element.
+    -- The link has no foreign key to the task row, so its order against the insert does not matter.
     WITH built AS MATERIALIZED (
         SELECT n.id AS node_row_id,
                horsies_uuidv7() AS task_id,
-               n.task_name, n.queue_name, n.priority,
+               n.task_index, n.task_name, n.queue_name, n.priority,
                horsies_workflow_task_input(n) AS input,
-               n.task_options, n.execution, n.retention_class_key, n.max_retries, n.good_until
+               n.task_options, n.execution, n.retention_class_key, n.max_retries,
+               (nullif(n.task_options, '')::jsonb ->> 'good_until')::timestamptz AS good_until
         FROM horsies_workflow_tasks n
         WHERE n.workflow_id = p_workflow_id
           AND n.task_index = ANY(p_task_indexes)
@@ -373,33 +397,493 @@ BEGIN
           AND n.task_id IS NULL
         ORDER BY n.task_index
     ),
-    inserted AS (
-        INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, input, task_options, execution, retention_class_key, sent_at,
-            created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest, status,
-            enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at, finalizing_at,
-            finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name, retry_count, max_retries,
-            next_retry_at, good_until, is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id,
-            rerun_root_task_id
-        )
-        SELECT b.task_id, b.task_name, b.queue_name, b.priority, b.input, b.task_options, b.execution,
-               b.retention_class_key, w.sent_at,
-               now(), NULL, NULL, NULL, 'PENDING',
-               now(), NULL, NULL, NULL, NULL, NULL,
-               NULL, NULL, NULL, NULL, 0, b.max_retries,
-               NULL, b.good_until, TRUE, now(), FALSE, NULL,
-               NULL
+    built_rows AS (
+        SELECT array_agg(b.task_id) AS task_ids,
+               array_agg(b.task_name::text) AS task_names,
+               array_agg(b.queue_name::text) AS queue_names,
+               array_agg(b.priority) AS priorities,
+               array_agg(b.input) AS inputs,
+               array_agg(b.task_options) AS task_options,
+               array_agg(b.execution) AS executions,
+               array_agg(b.retention_class_key::text) AS retention_class_keys,
+               array_agg(b.max_retries) AS max_retries,
+               array_agg(b.good_until) AS good_untils,
+               count(*)::integer AS row_count,
+               (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = p_workflow_id) AS sent_at
         FROM built b
-        CROSS JOIN horsies_workflows w
-        WHERE w.id = p_workflow_id
-        RETURNING id
+    ),
+    inserted AS (
+        SELECT r.outcome
+        FROM built_rows b
+        CROSS JOIN LATERAL horsies_insert_task_rows(
+            b.task_ids, b.task_names, b.queue_names, b.priorities, b.inputs, b.task_options, b.executions,
+            b.retention_class_keys, array_fill(FALSE, ARRAY[b.row_count]), b.max_retries, b.good_untils,
+            array_fill(b.sent_at, ARRAY[b.row_count]), array_fill(now(), ARRAY[b.row_count]),
+            array_fill(TRUE, ARRAY[b.row_count]), array_fill(NULL::smallint, ARRAY[b.row_count]),
+            array_fill(NULL::bytea, ARRAY[b.row_count]), array_fill(NULL::bytea, ARRAY[b.row_count]),
+            array_fill(NULL::uuid, ARRAY[b.row_count]), array_fill(NULL::uuid, ARRAY[b.row_count]), 'NONE'
+        ) AS r
+        WHERE b.row_count > 0
+    ),
+    linked AS (
+        UPDATE horsies_workflow_tasks wt
+        SET task_id = b.task_id
+        FROM built b
+        WHERE wt.id = b.node_row_id
+        RETURNING wt.id
     )
-    UPDATE horsies_workflow_tasks wt
-    SET task_id = b.task_id
-    FROM built b
-    WHERE wt.id = b.node_row_id;
-    GET DIAGNOSTICS v_minted = ROW_COUNT;
+    SELECT (SELECT count(*) FROM linked), (SELECT count(*) FROM inserted i WHERE i.outcome <> 'INSERTED')
+    INTO v_minted, v_refused;
+    IF v_refused > 0 THEN
+        RAISE EXCEPTION 'workflow % minted % task ids that are already taken', p_workflow_id, v_refused
+            USING ERRCODE = 'unique_violation';
+    END IF;
     RETURN v_minted;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Internal helpers: the stored task options of a task node
+------------------------------------------------------------------------------------------------------------------------
+
+-- The name of the Python type that json.loads gives for p_value: dict, list, str, int, float, bool or NoneType; NULL
+-- for NULL. A number is a float when its literal has a fraction or an exponent (the number rule of Python's json
+-- module), else an int. The json type keeps the literal; jsonb does not (it reads 1e2 as 100).
+-- Locks: none. Python: type(value).__name__ in the texts of core/codec/task_options.py.
+CREATE FUNCTION horsies_workflow_json_type_name(p_value json) RETURNS text
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT CASE json_typeof(p_value)
+        WHEN 'object' THEN 'dict'
+        WHEN 'array' THEN 'list'
+        WHEN 'string' THEN 'str'
+        WHEN 'boolean' THEN 'bool'
+        WHEN 'null' THEN 'NoneType'
+        WHEN 'number' THEN CASE WHEN p_value::text ~ '[.eE]' THEN 'float' ELSE 'int' END
+    END
+$$;
+
+-- p_value as a number when it is a JSON integer literal (an int for Python's json module), else NULL.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_json_int(p_value json) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT CASE WHEN horsies_workflow_json_type_name(p_value) = 'int' THEN p_value::text::numeric END
+$$;
+
+-- TRUE when the parsed text p_doc breaks a rule of Python's loads_json (core/codec/json_io.py) that the PostgreSQL
+-- json and jsonb inputs do not apply:
+-- - an object repeats a key;
+-- - an integer literal has more than 4300 digits (Python's limit for an int conversion);
+-- - a float literal rounds to infinity: its magnitude is at least 2^1024 - 2^970, the midpoint between the largest
+--   double and 2^1024;
+-- - lists and objects nest deeper than 300 levels (MAX_JSON_DEPTH of core/codec/json_value.py).
+-- The walk expands containers down to depth 300 only, so it is bounded by the size of p_doc.
+-- Precondition: the text of p_doc also parses as jsonb, so every number literal casts to numeric.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_json_breaks_strict_rules(p_doc json) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+AS $$
+    WITH RECURSIVE walk (value, kind, depth) AS (
+        SELECT p_doc, json_typeof(p_doc), 1
+        UNION ALL
+        SELECT c.value, json_typeof(c.value), w.depth + 1
+        FROM walk w
+        CROSS JOIN LATERAL (
+            SELECT e.value FROM json_each(CASE WHEN w.kind = 'object' THEN w.value END) AS e
+            UNION ALL
+            SELECT a.value FROM json_array_elements(CASE WHEN w.kind = 'array' THEN w.value END) AS a
+        ) AS c
+        WHERE w.kind IN ('object', 'array') AND w.depth <= 300
+    )
+    SELECT EXISTS (
+        SELECT 1
+        FROM walk w
+        WHERE CASE w.kind
+            WHEN 'object' THEN w.depth > 300
+                OR (SELECT count(*) <> count(DISTINCT k) FROM json_object_keys(w.value) AS k)
+            WHEN 'array' THEN w.depth > 300
+            WHEN 'number' THEN CASE
+                WHEN w.value::text ~ '[.eE]' THEN abs(w.value::text::numeric) >= '1797693134862315807937289714053034'
+                    '1507993413271003782693617377898044496829276475094664901797758720709633028641669288791094655554'
+                    '7851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959'
+                    '622842914819860834936475292719074168444365510704342711559699508093042880177904174497792'::numeric
+                ELSE length(regexp_replace(w.value::text, '[^0-9]', '', 'g')) > 4300
+            END
+            ELSE FALSE
+        END
+    )
+$$;
+
+-- The stored task options p_text parsed by the rules of Python's loads_json, or NULL when it does not parse. The text
+-- must parse as json and as jsonb (jsonb also refuses an unpaired UTF-16 surrogate escape) and keep the rules of
+-- horsies_workflow_json_breaks_strict_rules. The json value keeps the literals and the member order of the text.
+-- The walk of those rules runs only when one of them can be broken. With the string literals removed from the text:
+-- the member count (one ':' per member) differs from the member count of the jsonb value, which keeps one member per
+-- key; or more than 300 '[' and '{' are left; or a digit is followed by '.', 'e' or 'E' (a float literal); or more
+-- than 4300 characters are left.
+-- PostgreSQL refuses two kinds of text that Python reads: the escape \u0000 (text cannot hold U+0000), and a number
+-- literal whose exponent is outside the range of numeric (Python reads 1e-20000 as the float 0.0).
+-- The parse runs in a subtransaction. Precondition: p_text is not NULL or empty (Python reads no options then).
+-- Locks: none. Python: _deser_json (core/workflows/engine.py:415-423) and loads_json (core/codec/json_io.py:97-137).
+CREATE FUNCTION horsies_workflow_options_json(p_text text) RETURNS json
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_max_depth CONSTANT integer := 300;
+    c_max_int_digits CONSTANT integer := 4300;
+    v_doc json;
+    v_distinct_members integer;
+    v_bare text;
+BEGIN
+    v_doc := p_text::json;
+    v_distinct_members := jsonb_array_length(
+        jsonb_path_query_array(p_text::jsonb, 'strict $.** ? (@.type() == "object").keyvalue()')
+    );
+    -- The E'' literal keeps its backslashes whatever standard_conforming_strings is.
+    v_bare := regexp_replace(p_text, E'"(\\\\.|[^"\\\\])*"', '', 'g');
+    IF length(v_bare) - length(replace(v_bare, ':', '')) <> v_distinct_members
+       OR length(v_bare) - length(translate(v_bare, '[{', '')) > c_max_depth
+       OR v_bare ~ '[0-9][.eE]'
+       OR length(v_bare) > c_max_int_digits
+    THEN
+        IF horsies_workflow_json_breaks_strict_rules(v_doc) THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+    RETURN v_doc;
+EXCEPTION
+    WHEN data_exception OR statement_too_complex THEN
+        RETURN NULL;
+END;
+$$;
+
+-- The validation entries of the intervals member p_intervals of a retry_policy object, as validation_summary writes
+-- them: none when absent; one list_type entry for a value that is not a list; one too_long entry (with the length) for
+-- a list longer than 20, whatever its items; one too_short entry for an empty list; else one entry per item that is
+-- not an int from 1 to 86400, at 'intervals.<position from 0>'. Strict mode refuses a bool or a float for an int.
+-- A list whose text holds only int literals from 1 to 86400 has no item entry, and its items are not walked.
+-- Locks: none. Python: RetryPolicy.intervals (core/models/tasks.py:549-557).
+CREATE FUNCTION horsies_workflow_retry_interval_entries(p_intervals json) RETURNS text[]
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+BEGIN
+    CASE
+        WHEN p_intervals IS NULL THEN
+            RETURN ARRAY[]::text[];
+        WHEN json_typeof(p_intervals) <> 'array' THEN
+            RETURN ARRAY['intervals: Input should be a valid list [list_type]'];
+        WHEN json_array_length(p_intervals) > 20 THEN
+            RETURN ARRAY[format(
+                'intervals: List should have at most 20 items after validation, not %s [too_long]',
+                json_array_length(p_intervals)
+            )];
+        WHEN json_array_length(p_intervals) = 0 THEN
+            RETURN ARRAY['intervals: List should have at least 1 item after validation, not 0 [too_short]'];
+        -- An int literal from 1 to 86400 is one of 1-9999, 10000-79999, 80000-85999, 86000-86399 and 86400.
+        WHEN p_intervals::text ~ (
+            '^[[][[:space:]]*([1-9][0-9]{0,3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400)'
+            '([[:space:]]*,[[:space:]]*([1-9][0-9]{0,3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400))*'
+            '[[:space:]]*[]]$'
+        ) THEN
+            RETURN ARRAY[]::text[];
+        ELSE
+            RETURN ARRAY(
+                SELECT format('intervals.%s: %s', i.position - 1, CASE
+                    WHEN horsies_workflow_json_int(i.value) IS NULL THEN 'Input should be a valid integer [int_type]'
+                    WHEN horsies_workflow_json_int(i.value) < 1 THEN 'Input should be greater than 0 [greater_than]'
+                    ELSE 'Input should be less than or equal to 86400 [less_than_equal]'
+                END)
+                FROM json_array_elements(p_intervals) WITH ORDINALITY AS i(value, position)
+                WHERE horsies_workflow_json_int(i.value) IS NULL
+                   OR horsies_workflow_json_int(i.value) NOT BETWEEN 1 AND 86400
+                ORDER BY i.position
+            );
+    END CASE;
+END;
+$$;
+
+-- TRUE when the text of p_codes is a list of one or more UPPER_SNAKE_CASE string literals with no escape: each item
+-- is a str that matches ERROR_CODE_RE (core/exception_mapper.py:14) and, having no lowercase letter, cannot match
+-- EXCEPTION_NAME_RE. FALSE says nothing: the caller then walks the items. Locks: none.
+CREATE FUNCTION horsies_workflow_retry_codes_plain(p_codes json) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT p_codes::text ~ (
+        '^[[][[:space:]]*"[A-Z][A-Z0-9_]*"([[:space:]]*,[[:space:]]*"[A-Z][A-Z0-9_]*")*[[:space:]]*[]]$'
+    )
+$$;
+
+-- The validation entries of the auto_retry_for member p_codes of a retry_policy object, as validation_summary writes
+-- them: one missing entry when absent; one list_type entry for a value that is not a list; one too_short entry for an
+-- empty list; else five entries per item that is not a str, at 'auto_retry_for.<position from 0>': the str member and
+-- the four str enums of BuiltInTaskCode of Union[str, BuiltInTaskCode], in pydantic's order. Plain codes
+-- (horsies_workflow_retry_codes_plain) have no item entry, and their items are not walked.
+-- Locks: none. Python: RetryPolicy.auto_retry_for (core/models/tasks.py:564-567), BuiltInTaskCode (:58).
+CREATE FUNCTION horsies_workflow_retry_code_entries(p_codes json) RETURNS text[]
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+BEGIN
+    CASE
+        WHEN p_codes IS NULL THEN
+            RETURN ARRAY['auto_retry_for: Field required [missing]'];
+        WHEN json_typeof(p_codes) <> 'array' THEN
+            RETURN ARRAY['auto_retry_for: Input should be a valid list [list_type]'];
+        WHEN json_array_length(p_codes) = 0 THEN
+            RETURN ARRAY['auto_retry_for: List should have at least 1 item after validation, not 0 [too_short]'];
+        WHEN horsies_workflow_retry_codes_plain(p_codes) THEN
+            RETURN ARRAY[]::text[];
+        ELSE
+            RETURN ARRAY(
+                SELECT format('auto_retry_for.%s.%s', c.position - 1, m.entry)
+                FROM json_array_elements(p_codes) WITH ORDINALITY AS c(value, position)
+                CROSS JOIN (
+                    SELECT 0 AS member, 'str: Input should be a valid string [string_type]' AS entry
+                    UNION ALL
+                    SELECT e.member, format(
+                        'union[str-enum[OperationalErrorCode],str-enum[ContractCode],str-enum[RetrievalCode],'
+                        'str-enum[OutcomeCode]].str-enum[%1$s]: Input should be an instance of %1$s [is_instance_of]',
+                        e.enum_name
+                    )
+                    FROM unnest(ARRAY['OperationalErrorCode', 'ContractCode', 'RetrievalCode', 'OutcomeCode'])
+                        WITH ORDINALITY AS e(enum_name, member)
+                ) AS m
+                WHERE json_typeof(c.value) <> 'string'
+                ORDER BY c.position, m.member
+            );
+    END CASE;
+END;
+$$;
+
+-- The field entries of a retry_policy object p_policy, as Python's validation_summary writes the field errors of
+-- RetryPolicy.model_validate(policy, strict=True) (core/codec/validation_errors.py:95-115): one '<loc>: <msg> [<type>]'
+-- per error, the fields in declaration order (max_retries: an int from 1 to 20; intervals; backoff_strategy: 'fixed'
+-- or 'exponential'; jitter: a bool; max_delay_seconds: null or an int above 0; auto_retry_for), then one entry per
+-- member that is not a field, in the order of the text (an empty key has no '<loc>: '). Empty when the fields
+-- validate. Precondition: p_policy is an object with no repeated key.
+-- Locks: none. Python: RetryPolicy (core/models/tasks.py:522-567, extra='forbid').
+CREATE FUNCTION horsies_workflow_retry_policy_entries(p_policy json) RETURNS text[]
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_fields CONSTANT text[] := ARRAY[
+        'max_retries', 'intervals', 'backoff_strategy', 'jitter', 'max_delay_seconds', 'auto_retry_for'
+    ];
+    v_max_retries json := p_policy -> 'max_retries';
+    v_backoff_strategy json := p_policy -> 'backoff_strategy';
+    v_jitter json := p_policy -> 'jitter';
+    v_max_delay_seconds json := p_policy -> 'max_delay_seconds';
+    v_extras text[] := ARRAY[]::text[];
+BEGIN
+    IF p_policy::jsonb - c_fields <> '{}'::jsonb THEN
+        v_extras := ARRAY(
+            SELECT CASE WHEN e.key = '' THEN '' ELSE e.key || ': ' END
+                || 'Extra inputs are not permitted [extra_forbidden]'
+            FROM json_each(p_policy) WITH ORDINALITY AS e(key, value, position)
+            WHERE e.key <> ALL (c_fields)
+            ORDER BY e.position
+        );
+    END IF;
+    RETURN array_remove(ARRAY[
+               CASE
+                   WHEN v_max_retries IS NULL THEN NULL
+                   WHEN horsies_workflow_json_int(v_max_retries) IS NULL
+                       THEN 'max_retries: Input should be a valid integer [int_type]'
+                   WHEN horsies_workflow_json_int(v_max_retries) < 1
+                       THEN 'max_retries: Input should be greater than or equal to 1 [greater_than_equal]'
+                   WHEN horsies_workflow_json_int(v_max_retries) > 20
+                       THEN 'max_retries: Input should be less than or equal to 20 [less_than_equal]'
+               END
+           ], NULL)
+        || horsies_workflow_retry_interval_entries(p_policy -> 'intervals')
+        || array_remove(ARRAY[
+               CASE
+                   WHEN v_backoff_strategy IS NULL THEN NULL
+                   WHEN json_typeof(v_backoff_strategy) = 'string'
+                        AND (v_backoff_strategy #>> '{}') IN ('fixed', 'exponential') THEN NULL
+                   ELSE 'backoff_strategy: Input should be ''fixed'' or ''exponential'' [literal_error]'
+               END,
+               CASE
+                   WHEN v_jitter IS NULL OR json_typeof(v_jitter) = 'boolean' THEN NULL
+                   ELSE 'jitter: Input should be a valid boolean [bool_type]'
+               END,
+               CASE
+                   WHEN v_max_delay_seconds IS NULL OR json_typeof(v_max_delay_seconds) = 'null' THEN NULL
+                   WHEN horsies_workflow_json_int(v_max_delay_seconds) IS NULL
+                       THEN 'max_delay_seconds: Input should be a valid integer [int_type]'
+                   WHEN horsies_workflow_json_int(v_max_delay_seconds) < 1
+                       THEN 'max_delay_seconds: Input should be greater than 0 [greater_than]'
+               END
+           ], NULL)
+        || horsies_workflow_retry_code_entries(p_policy -> 'auto_retry_for')
+        || v_extras;
+END;
+$$;
+
+-- The model validator error of a retry_policy object p_policy whose fields validate, as validation_summary writes it
+-- ('Value error, <text> [value_error]'), or NULL. The validators run in Python's order; the first error ends the
+-- validation:
+-- 1. validate_strategy_consistency: 'fixed' needs as many intervals as max_retries, 'exponential' needs one interval.
+--    An absent field has its default: max_retries 3, intervals [60, 300, 900], backoff_strategy 'fixed'.
+-- 2. validate_error_code_fields: each auto_retry_for code in order, by validate_error_code_string
+--    (core/exception_mapper.py:64-84): not empty, not an exception class name (EXCEPTION_NAME_RE), UPPER_SNAKE_CASE
+--    (ERROR_CODE_RE), and not in RESERVED_NON_TASK_CODES (WORKFLOW_STOPPED). Plain codes
+--    (horsies_workflow_retry_codes_plain) other than WORKFLOW_STOPPED pass all four checks and are not walked.
+-- Precondition: horsies_workflow_retry_policy_entries(p_policy) is empty.
+-- Locks: none. Python: RetryPolicy (core/models/tasks.py:569-600).
+CREATE FUNCTION horsies_workflow_retry_policy_value_error(p_policy json) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_backoff_strategy text := coalesce(p_policy ->> 'backoff_strategy', 'fixed');
+    v_max_retries integer := coalesce((p_policy ->> 'max_retries')::integer, 3);
+    v_interval_count integer := coalesce(json_array_length(p_policy -> 'intervals'), 3);
+    v_codes json := p_policy -> 'auto_retry_for';
+    v_error text;
+BEGIN
+    v_error := CASE v_backoff_strategy
+        WHEN 'fixed' THEN CASE WHEN v_interval_count <> v_max_retries THEN format(
+            'Fixed backoff strategy requires intervals length (%s) to match max_retries (%s). '
+            'Either adjust intervals list or use exponential strategy.', v_interval_count, v_max_retries) END
+        WHEN 'exponential' THEN CASE WHEN v_interval_count <> 1 THEN format(
+            'Exponential backoff strategy requires exactly one base interval, got %s intervals. '
+            'Use intervals=[base_seconds] for exponential backoff.', v_interval_count) END
+    END;
+    IF v_error IS NULL AND NOT (
+        horsies_workflow_retry_codes_plain(v_codes) AND strpos(v_codes::text, '"WORKFLOW_STOPPED"') = 0
+    ) THEN
+        SELECT CASE
+            WHEN c.code = '' THEN 'auto_retry_for must be a non-empty string, got '''''
+            WHEN c.code ~ '^[A-Z][A-Za-z0-9_]*(Error|Exception)$' THEN format(
+                'auto_retry_for ''%s'' looks like an exception class name; retry matching is '
+                'error-code-only, use UPPER_SNAKE_CASE code names', c.code)
+            WHEN c.code !~ '^[A-Z][A-Z0-9_]*$' THEN format(
+                'auto_retry_for ''%s'' is invalid; expected UPPER_SNAKE_CASE (e.g. RATE_LIMITED)', c.code)
+            ELSE format(
+                'auto_retry_for ''%s'' is a reserved error code name and is not a task code; '
+                'use another UPPER_SNAKE_CASE code', c.code)
+        END
+        INTO v_error
+        FROM json_array_elements_text(v_codes) WITH ORDINALITY AS c(code, position)
+        WHERE c.code = '' OR c.code ~ '^[A-Z][A-Za-z0-9_]*(Error|Exception)$' OR c.code !~ '^[A-Z][A-Z0-9_]*$'
+           OR c.code = 'WORKFLOW_STOPPED'
+        ORDER BY c.position
+        LIMIT 1;
+    END IF;
+    RETURN 'Value error, ' || v_error || ' [value_error]';
+END;
+$$;
+
+-- The refusal of the retry_policy member p_policy of task options, as Python's stored_retry_policy writes it, or NULL
+-- when it reads: none for an absent or null member; 'retry_policy is not an object: <type>' for a value that is not an
+-- object; else the field entries of horsies_workflow_retry_policy_entries joined by '; ' (at most 10, then
+-- '(+<count> more)', MAX_VALIDATION_ERRORS_IN_TEXT), or when the fields validate, the model validator error.
+-- Locks: none. Python: stored_retry_policy and stored_max_retries (core/codec/task_options.py:85-136).
+CREATE FUNCTION horsies_workflow_retry_policy_refusal(p_policy json) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_max_entries CONSTANT integer := 10;
+    v_entries text[];
+BEGIN
+    IF p_policy IS NULL OR json_typeof(p_policy) = 'null' THEN
+        RETURN NULL;
+    END IF;
+    IF json_typeof(p_policy) <> 'object' THEN
+        RETURN 'retry_policy is not an object: ' || horsies_workflow_json_type_name(p_policy);
+    END IF;
+    v_entries := horsies_workflow_retry_policy_entries(p_policy);
+    IF cardinality(v_entries) = 0 THEN
+        RETURN horsies_workflow_retry_policy_value_error(p_policy);
+    END IF;
+    RETURN array_to_string(v_entries[1:c_max_entries], '; ')
+        || CASE
+            WHEN cardinality(v_entries) > c_max_entries
+                THEN format('; (+%s more)', cardinality(v_entries) - c_max_entries)
+            ELSE ''
+        END;
+END;
+$$;
+
+-- The refusal of the execution class of a task options object p_options, as Python's stored_execution writes it, or
+-- NULL when it reads. An absent execution member is ISOLATED; a present one must be one of the Execution values.
+-- cancel_grace_ms (absent is null) must then fit the class: an int from 100 to 10000 for SHARED_ASYNC
+-- (MIN_CANCEL_GRACE_MS and MAX_CANCEL_GRACE_MS, core/models/tasks.py:479-487), null for the other classes.
+-- Locks: none. Python: stored_execution and its helpers (core/codec/task_options.py:147-240).
+CREATE FUNCTION horsies_workflow_execution_refusal(p_options json) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    c_min_grace_ms CONSTANT integer := 100;
+    c_max_grace_ms CONSTANT integer := 10000;
+    v_execution json := p_options -> 'execution';
+    v_grace json := coalesce(p_options -> 'cancel_grace_ms', 'null');
+    v_class text;
+BEGIN
+    IF v_execution IS NOT NULL AND json_typeof(v_execution) <> 'string' THEN
+        RETURN format('execution is a JSON %s, not a string', horsies_workflow_json_type_name(v_execution));
+    END IF;
+    v_class := coalesce(v_execution #>> '{}', 'ISOLATED');
+    CASE v_class
+        WHEN 'ISOLATED', 'SHARED_THREAD' THEN
+            RETURN CASE
+                WHEN json_typeof(v_grace) = 'null' THEN NULL
+                ELSE format('cancel_grace_ms is set for execution %s; only SHARED_ASYNC has one', v_class)
+            END;
+        WHEN 'SHARED_ASYNC' THEN
+            RETURN CASE
+                WHEN json_typeof(v_grace) = 'null' THEN 'cancel_grace_ms is absent for execution SHARED_ASYNC'
+                WHEN json_typeof(v_grace) = 'boolean' THEN 'cancel_grace_ms is a bool, not an int'
+                WHEN horsies_workflow_json_int(v_grace) IS NULL
+                    THEN format('cancel_grace_ms is a JSON %s, not an int', horsies_workflow_json_type_name(v_grace))
+                WHEN horsies_workflow_json_int(v_grace) < c_min_grace_ms
+                    THEN format('cancel_grace_ms is below %s ms', c_min_grace_ms)
+                WHEN horsies_workflow_json_int(v_grace) > c_max_grace_ms
+                    THEN format('cancel_grace_ms is above %s ms', c_max_grace_ms)
+            END;
+        ELSE
+            RETURN 'execution is not one of ISOLATED, SHARED_ASYNC, SHARED_THREAD';
+    END CASE;
+END;
+$$;
+
+-- The message with which the promotion fails a task node whose stored task options p_task_options do not read, as
+-- Python's _build_enqueued_task_params writes it for node p_task_index, or NULL when they read (NULL and empty options
+-- read as no options). The checks run in Python's order; the first refusal is the message:
+-- 1. text that does not parse, or the JSON null (horsies_workflow_options_json): 'Corrupt task_options JSON for task
+--    <index>';
+-- 2. a value that is not an object: 'Invalid task_options payload for task <index>: expected object';
+-- 3. the retry_policy member (horsies_workflow_retry_policy_refusal): 'Invalid retry_policy for task <index>:
+--    <detail>';
+-- 4. the execution class (horsies_workflow_execution_refusal): 'Invalid execution for task <index>: <detail>'.
+-- The good_until member is not checked here: the task row insert casts it (horsies_workflow_node_tasks_insert).
+-- Locks: none. Python: _build_enqueued_task_params (core/workflows/engine.py:795-835).
+CREATE FUNCTION horsies_workflow_task_options_refusal(p_task_options text, p_task_index integer) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_options json;
+    v_detail text;
+BEGIN
+    IF p_task_options IS NULL OR p_task_options = '' THEN
+        RETURN NULL;
+    END IF;
+    v_options := horsies_workflow_options_json(p_task_options);
+    IF v_options IS NULL OR json_typeof(v_options) = 'null' THEN
+        RETURN format('Corrupt task_options JSON for task %s', p_task_index);
+    END IF;
+    IF json_typeof(v_options) <> 'object' THEN
+        RETURN format('Invalid task_options payload for task %s: expected object', p_task_index);
+    END IF;
+    v_detail := horsies_workflow_retry_policy_refusal(v_options -> 'retry_policy');
+    IF v_detail IS NOT NULL THEN
+        RETURN format('Invalid retry_policy for task %s: %s', p_task_index, v_detail);
+    END IF;
+    v_detail := horsies_workflow_execution_refusal(v_options);
+    IF v_detail IS NOT NULL THEN
+        RETURN format('Invalid execution for task %s: %s', p_task_index, v_detail);
+    END IF;
+    RETURN NULL;
 END;
 $$;
 
@@ -507,13 +991,15 @@ END;
 $$;
 
 -- The nodes among p_task_indexes (ENQUEUED, of p_workflow_id) whose task row or child cannot be built, with the
--- engine error of each, in index order:
+-- engine error of each, in index order. The first refusal of a node in Python's order:
+-- - a task node whose stored task options do not read: WORKER_SERIALIZATION_ERROR with the message of
+--   horsies_workflow_task_options_refusal (Python: _build_enqueued_task_params, core/workflows/engine.py:795-831);
 -- - a task node with an args_from key that is also a member of its static input: WORKFLOW_ENQUEUE_FAILED
---   (Python: _build_enqueued_task_params, core/workflows/engine.py:835-841; the spec refuses the overlap when it is
+--   (Python: _build_enqueued_task_params, core/workflows/engine.py:867-872; the spec refuses the overlap when it is
 --   built, this check guards stored rows);
 -- - a sub-workflow node of a workflow at depth 32: SUBWORKFLOW_DEPTH_LIMIT_REACHED (Python:
 --   enqueue_subworkflow_task, core/workflows/engine.py:1052-1066).
--- data names the workflow and the node, as Python's _fail_enqueued_task (core/workflows/engine.py:472-555).
+-- data names the workflow and the node, as Python's _fail_enqueued_task (core/workflows/engine.py:514-555).
 -- Locks: none. Returns (task_index, error_result) rows.
 CREATE FUNCTION horsies_workflow_unbuildable_nodes(p_workflow_id uuid, p_task_indexes integer[])
     RETURNS TABLE (task_index integer, error_result text)
@@ -521,11 +1007,16 @@ CREATE FUNCTION horsies_workflow_unbuildable_nodes(p_workflow_id uuid, p_task_in
 AS $$
     SELECT n.task_index,
            horsies_task_error_envelope(
-               CASE WHEN n.is_subworkflow THEN 'SUBWORKFLOW_DEPTH_LIMIT_REACHED' ELSE 'WORKFLOW_ENQUEUE_FAILED' END,
+               CASE
+                   WHEN n.is_subworkflow THEN 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+                   WHEN o.refusal IS NOT NULL THEN 'WORKER_SERIALIZATION_ERROR'
+                   ELSE 'WORKFLOW_ENQUEUE_FAILED'
+               END,
                CASE
                    WHEN n.is_subworkflow THEN format(
                        'Subworkflow not started: the child workflow would have depth %s, and the limit is 32 '
                        '(workflow %s:%s)', w.depth + 1, w.name, n.task_index)
+                   WHEN o.refusal IS NOT NULL THEN o.refusal
                    ELSE format(
                        'args_from key %L conflicts with static kwarg (task %s)',
                        (SELECT k FROM jsonb_object_keys(n.args_from) AS k
@@ -537,11 +1028,19 @@ AS $$
            )
     FROM horsies_workflow_tasks n
     JOIN horsies_workflows w ON w.id = n.workflow_id
+    -- OFFSET 0 keeps the subquery apart, so the options are read once per node.
+    CROSS JOIN LATERAL (
+        SELECT CASE
+            WHEN NOT n.is_subworkflow THEN horsies_workflow_task_options_refusal(n.task_options, n.task_index)
+        END AS refusal
+        OFFSET 0
+    ) AS o
     WHERE n.workflow_id = p_workflow_id
       AND n.task_index = ANY(p_task_indexes)
       AND n.status = 'ENQUEUED'
       AND (
           (n.is_subworkflow AND w.depth >= 32)
+          OR o.refusal IS NOT NULL
           OR (
               NOT n.is_subworkflow
               AND n.args_from IS NOT NULL
@@ -667,9 +1166,9 @@ CREATE FUNCTION horsies_workflow_child_start_rows(p_workflow_id uuid, p_task_ind
     RETURNS SETOF horsies_workflow_step_row
     LANGUAGE sql STABLE
 AS $$
-    SELECT 'CHILD_START'::text, NULL::text, p_workflow_id, NULL::text, NULL::uuid, NULL::text,
+    SELECT 'CHILD_START'::text, NULL::text, p_workflow_id, w.name::text, NULL::text, NULL::uuid, NULL::text,
            n.task_index, n.input, n.args_from::text, n.sub_workflow_name::text, n.sub_definition_key::text,
-           w.depth, coalesce(w.root_workflow_id, w.id),
+           n.sub_workflow_params::text, w.depth, coalesce(w.root_workflow_id, w.id),
            NULL::integer, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
     FROM horsies_workflow_tasks n
     JOIN horsies_workflows w ON w.id = n.workflow_id
@@ -679,8 +1178,8 @@ AS $$
       AND n.is_subworkflow
       AND n.sub_workflow_id IS NULL
     UNION ALL
-    SELECT 'SOURCE'::text, NULL::text, p_workflow_id, NULL::text, NULL::uuid, NULL::text,
-           n.task_index, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer, NULL::uuid,
+    SELECT 'SOURCE'::text, NULL::text, p_workflow_id, NULL::text, NULL::text, NULL::uuid, NULL::text,
+           n.task_index, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer, NULL::uuid,
            s.task_index, s.node_id::text, s.status::text, s.task_name::text, s.sub_definition_key::text,
            s.result, s.sub_workflow_summary
     FROM horsies_workflow_tasks n
@@ -928,21 +1427,107 @@ BEGIN
 END;
 $$;
 
+-- Why an array of node indexes of a stored success policy does not read, or NULL when it reads. It reads when it is
+-- a JSON array whose items are integers from 0. jsonb keeps the written form of a number: 1.0 is not an index, and
+-- 1e2 is stored as 100, which is one. Python's reader decodes the same jsonb text, so it sees the same numbers.
+-- The cause text is the one of Python's read_stored_success_policy (core/workflows/stored_success_policy.py).
+-- Precondition: p_indices is not SQL NULL (the caller checks that the key is present).
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_policy_indices_cause(p_indices jsonb) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_cause text;
+BEGIN
+    IF jsonb_typeof(p_indices) <> 'array' THEN
+        RETURN format('a JSON %s, not an array', jsonb_typeof(p_indices));
+    END IF;
+    SELECT format('item %s %s', i.position - 1, CASE
+               WHEN jsonb_typeof(i.item) = 'number' AND (i.item #>> '{}') ~ '^-[0-9]+$' THEN 'is below 0'
+               ELSE format('is a JSON %s, not an index', jsonb_typeof(i.item))
+           END)
+    INTO v_cause
+    FROM jsonb_array_elements(p_indices) WITH ORDINALITY AS i(item, position)
+    WHERE jsonb_typeof(i.item) <> 'number' OR (i.item #>> '{}') !~ '^[0-9]+$'
+    ORDER BY i.position
+    LIMIT 1;
+    RETURN v_cause;
+END;
+$$;
+
+-- The success cases of a workflow's stored success policy (horsies_workflows.success_policy), read by the rule of
+-- Python's read_stored_success_policy (core/workflows/stored_success_policy.py). Returns:
+-- - NULL for no policy: SQL NULL or JSON null;
+-- - the "cases" array for the form the workflow start stores: an object whose "cases" is an array of objects, each
+--   with "required_indices", an array of integers from 0; "optional_indices", when present and not null, is the
+--   same kind of array. Other keys are ignored.
+-- Any other value raises SQLSTATE XX001 (data_corrupted) with the text
+-- 'stored success_policy of workflow <id> does not parse: <cause>'. The step that reads it fails and its
+-- transaction rolls back; the raise is persistent, so the workflow recovery limit counts it
+-- (horsies_workflow_phase2_record_raise) and fails the workflow closed. No reader falls back to the default rule.
+-- Locks: none.
+CREATE FUNCTION horsies_workflow_success_cases(p_workflow_id uuid, p_success_policy jsonb) RETURNS jsonb
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE
+    v_cause text;
+BEGIN
+    CASE
+        WHEN p_success_policy IS NULL OR jsonb_typeof(p_success_policy) = 'null' THEN
+            RETURN NULL;
+        WHEN jsonb_typeof(p_success_policy) <> 'object' THEN
+            v_cause := format('the policy is a JSON %s, not an object', jsonb_typeof(p_success_policy));
+        WHEN NOT p_success_policy ? 'cases' THEN
+            v_cause := 'the policy has no cases';
+        WHEN jsonb_typeof(p_success_policy -> 'cases') <> 'array' THEN
+            v_cause := format('cases is a JSON %s, not an array', jsonb_typeof(p_success_policy -> 'cases'));
+        ELSE
+            SELECT format('cases[%s]: %s', c.position - 1, CASE
+                       WHEN jsonb_typeof(c.success_case) <> 'object'
+                           THEN format('the case is a JSON %s, not an object', jsonb_typeof(c.success_case))
+                       WHEN NOT c.success_case ? 'required_indices' THEN 'the case has no required_indices'
+                       ELSE 'required_indices: '
+                           || horsies_workflow_policy_indices_cause(c.success_case -> 'required_indices')
+                   END)
+            INTO v_cause
+            FROM jsonb_array_elements(p_success_policy -> 'cases') WITH ORDINALITY AS c(success_case, position)
+            WHERE jsonb_typeof(c.success_case) <> 'object'
+               OR NOT c.success_case ? 'required_indices'
+               OR horsies_workflow_policy_indices_cause(c.success_case -> 'required_indices') IS NOT NULL
+            ORDER BY c.position
+            LIMIT 1;
+            IF v_cause IS NULL
+               AND coalesce(jsonb_typeof(p_success_policy -> 'optional_indices'), 'null') <> 'null' THEN
+                v_cause := 'optional_indices: '
+                    || horsies_workflow_policy_indices_cause(p_success_policy -> 'optional_indices');
+            END IF;
+    END CASE;
+    IF v_cause IS NOT NULL THEN
+        RAISE EXCEPTION 'stored success_policy of workflow % does not parse: %', p_workflow_id, v_cause
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+    RETURN p_success_policy -> 'cases';
+END;
+$$;
+
 -- The error of a workflow that completion fails, as the bare error object text, or NULL to keep the stored error.
--- Python: get_workflow_failure_error (core/workflows/engine.py:3530-3627).
+-- Python: get_workflow_failure_error (core/workflows/engine.py). The stored policy is read with
+-- horsies_workflow_success_cases; one that does not parse raises XX001.
 -- - No success policy: the err slot of the first FAILED node by index (NULL when it has no readable error).
--- - A policy that is not an object: NULL.
--- - A policy: the err slot of the first FAILED required node by index, else WORKFLOW_SUCCESS_CASE_NOT_MET.
+-- - A policy: the err slot of the first FAILED node by index that a case requires; WORKFLOW_SUCCESS_CASE_NOT_MET when
+--   there is none or it has no readable error. Indexes are compared as jsonb numbers, so an index above the integer
+--   range names no node.
 -- Locks: none. Returns the error object text or NULL.
 CREATE FUNCTION horsies_workflow_failure_error(p_workflow_id uuid, p_success_policy jsonb) RETURNS text
     LANGUAGE plpgsql STABLE
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 DECLARE
-    v_required integer[];
+    v_cases jsonb := horsies_workflow_success_cases(p_workflow_id, p_success_policy);
+    v_required jsonb;
     v_error text;
 BEGIN
-    IF p_success_policy IS NULL THEN
+    IF v_cases IS NULL THEN
         SELECT horsies_workflow_err_slot(n.result) INTO v_error
         FROM horsies_workflow_tasks n
         WHERE n.workflow_id = p_workflow_id AND n.status = 'FAILED'
@@ -950,43 +1535,33 @@ BEGIN
         LIMIT 1;
         RETURN v_error;
     END IF;
-    IF jsonb_typeof(p_success_policy) <> 'object' THEN
-        RETURN NULL;
-    END IF;
-    v_required := ARRAY(
-        SELECT DISTINCT r.value::integer
-        FROM jsonb_array_elements(
-                 CASE WHEN jsonb_typeof(p_success_policy -> 'cases') = 'array'
-                      THEN p_success_policy -> 'cases' ELSE '[]'::jsonb END
-             ) AS c(success_case)
-        CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(c.success_case -> 'required_indices') = 'array'
-                 THEN c.success_case -> 'required_indices' ELSE '[]'::jsonb END
-        ) AS r(value)
+    SELECT coalesce(jsonb_agg(r.value), '[]'::jsonb) INTO v_required
+    FROM jsonb_array_elements(v_cases) AS c(success_case)
+    CROSS JOIN LATERAL jsonb_array_elements(c.success_case -> 'required_indices') AS r(value);
+    SELECT horsies_workflow_err_slot(n.result) INTO v_error
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = p_workflow_id AND n.status = 'FAILED' AND v_required @> to_jsonb(n.task_index)
+    ORDER BY n.task_index
+    LIMIT 1;
+    RETURN coalesce(
+        v_error,
+        horsies_task_error_object('WORKFLOW_SUCCESS_CASE_NOT_MET', 'No success case was satisfied', NULL)
     );
-    IF cardinality(v_required) > 0 THEN
-        SELECT horsies_workflow_err_slot(n.result) INTO v_error
-        FROM horsies_workflow_tasks n
-        WHERE n.workflow_id = p_workflow_id AND n.status = 'FAILED' AND n.task_index = ANY(v_required)
-        ORDER BY n.task_index
-        LIMIT 1;
-        IF v_error IS NOT NULL THEN
-            RETURN v_error;
-        END IF;
-    END IF;
-    RETURN horsies_task_error_object('WORKFLOW_SUCCESS_CASE_NOT_MET', 'No success case was satisfied', NULL);
 END;
 $$;
 
 -- Finalizes a RUNNING workflow with no live node, once. Returns the status it wrote (COMPLETED or FAILED), or NULL
 -- when the workflow is not RUNNING or has a live node (PENDING, READY, ENQUEUED, RUNNING).
+-- The stored policy is read with horsies_workflow_success_cases, once no node is live; one that does not parse raises
+-- XX001 and nothing is written.
 -- - No success policy: COMPLETED when no node FAILED and no error is stored; else FAILED.
 -- - A policy: COMPLETED when every required node of some case with required nodes is COMPLETED; else FAILED.
+--   Indexes are compared as jsonb numbers, so an index above the integer range names no node and its case is not met.
 -- COMPLETED stores the output (horsies_workflow_explicit_output or horsies_workflow_outputless_result); FAILED
 -- stores no result and the error of horsies_workflow_failure_error, or keeps the stored error. Both set
 -- completed_at. The status trigger sends workflow_done at commit.
 -- Precondition: the caller holds the workflow row FOR UPDATE.
--- Python: check_workflow_completion and evaluate_workflow_success (core/workflows/engine.py:2946-3080, 3467-3528).
+-- Python: check_workflow_completion and evaluate_workflow_success (core/workflows/engine.py).
 -- Locks: the workflow row (held by the caller); reads the nodes.
 CREATE FUNCTION horsies_workflow_try_complete(p_workflow_id uuid) RETURNS text
     LANGUAGE plpgsql
@@ -996,6 +1571,8 @@ DECLARE
     v_wf record;
     v_live bigint;
     v_failed bigint;
+    v_cases jsonb;
+    v_completed jsonb;
     v_succeeded boolean;
 BEGIN
     SELECT w.status, w.success_policy, w.output_task_index, w.error INTO v_wf
@@ -1013,27 +1590,19 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    IF jsonb_typeof(v_wf.success_policy) IS DISTINCT FROM 'object' THEN
+    v_cases := horsies_workflow_success_cases(p_workflow_id, v_wf.success_policy);
+    IF v_cases IS NULL THEN
         v_succeeded := v_wf.error IS NULL AND v_failed = 0;
     ELSE
+        -- The COMPLETED node indexes as one jsonb array; a case is met when it contains the case's indexes.
+        SELECT coalesce(jsonb_agg(n.task_index), '[]'::jsonb) INTO v_completed
+        FROM horsies_workflow_tasks n
+        WHERE n.workflow_id = p_workflow_id AND n.status = 'COMPLETED';
         v_succeeded := EXISTS (
             SELECT 1
-            FROM jsonb_array_elements(
-                     CASE WHEN jsonb_typeof(v_wf.success_policy -> 'cases') = 'array'
-                          THEN v_wf.success_policy -> 'cases' ELSE '[]'::jsonb END
-                 ) AS c(success_case)
-            WHERE jsonb_typeof(c.success_case -> 'required_indices') = 'array'
-              AND jsonb_array_length(c.success_case -> 'required_indices') > 0
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM jsonb_array_elements_text(c.success_case -> 'required_indices') AS r(value)
-                  WHERE NOT EXISTS (
-                      SELECT 1 FROM horsies_workflow_tasks n
-                      WHERE n.workflow_id = p_workflow_id
-                        AND n.task_index = r.value::integer
-                        AND n.status = 'COMPLETED'
-                  )
-              )
+            FROM jsonb_array_elements(v_cases) AS c(success_case)
+            WHERE jsonb_array_length(c.success_case -> 'required_indices') > 0
+              AND (c.success_case -> 'required_indices') <@ v_completed
         );
     END IF;
 
@@ -1104,11 +1673,11 @@ CREATE FUNCTION horsies_workflow_outcome_row(
     LANGUAGE sql STABLE
 AS $$
     SELECT ROW(
-        'OUTCOME', p_disposition, p_workflow_id, w.status::text,
+        'OUTCOME', p_disposition, p_workflow_id, NULL, w.status::text,
         CASE WHEN p_ended_check AND w.status IN ('COMPLETED', 'FAILED') AND w.parent_workflow_id IS NOT NULL
              THEN w.id END,
         p_detail,
-        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     )::horsies_workflow_step_row
     FROM (SELECT 1) AS one
     LEFT JOIN horsies_workflows w ON w.id = p_workflow_id
@@ -1393,8 +1962,12 @@ $$;
 -- the node write, the delete of the phase-2 record, the capacity wake of the task's queue (p_wake), the failure
 -- policy, the paused guard, promotion with the task rows of promoted task nodes, and the completion check.
 -- p_dependents: 'NONE' when phase 1 reported that no node depends on this node (no dependents read), 'READ'
--- otherwise (a replay or a retry, which do not know it). A promoted sub-workflow node is owed work: the caller runs
--- this call inside BEGIN, then horsies_workflow_child_start per CHILD_START row, then COMMIT.
+-- otherwise (a replay or a retry, which do not know it). A promoted sub-workflow node is owed work, so the form of
+-- the call follows the phase-1 outcome: node_has_dependents FALSE, or downstream_subworkflow NONE, is one statement
+-- in autocommit; downstream_subworkflow REACHABLE runs BEGIN, this call, horsies_workflow_child_start per
+-- CHILD_START row, COMMIT. A replay or a retry, which have no phase-1 outcome, runs the transaction form. The fact
+-- is computed at start from the static graph, so a NONE node can never owe a child start: if one does, the call
+-- raises (data_corrupted) and nothing commits.
 -- Returns the OUTCOME row (the disposition of horsies_workflow_node_apply; advance_child_workflow_id when this step
 -- ended a child workflow) and the CHILD_START and SOURCE rows. A retaining disposition writes nothing: the worker
 -- treats it as a phase-2 error, and phase-2 recovery counts it.
@@ -1409,16 +1982,29 @@ CREATE FUNCTION horsies_workflow_node_finish(p_task_id uuid, p_wake boolean, p_d
 AS $$
 DECLARE
     v_apply record;
+    v_row horsies_workflow_step_row;
+    v_owes_child_start boolean := FALSE;
 BEGIN
     PERFORM horsies_workflow_require(p_task_id IS NOT NULL, 'task id must not be NULL');
     PERFORM horsies_workflow_require(p_dependents IN ('NONE', 'READ'), 'dependents must be NONE or READ');
     SELECT * INTO v_apply FROM horsies_workflow_node_apply(p_task_id, p_wake);
-    IF v_apply.disposition = 'APPLIED' THEN
-        RETURN QUERY SELECT * FROM horsies_workflow_progress(v_apply.workflow_id, v_apply.task_index, p_dependents);
-        RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_apply.workflow_id, TRUE, NULL);
+    IF v_apply.disposition <> 'APPLIED' THEN
+        RETURN NEXT horsies_workflow_outcome_row(v_apply.disposition, v_apply.workflow_id, FALSE, NULL);
         RETURN;
     END IF;
-    RETURN NEXT horsies_workflow_outcome_row(v_apply.disposition, v_apply.workflow_id, FALSE, NULL);
+    FOR v_row IN SELECT * FROM horsies_workflow_progress(v_apply.workflow_id, v_apply.task_index, p_dependents) LOOP
+        v_owes_child_start := v_owes_child_start OR v_row.row_kind = 'CHILD_START';
+        RETURN NEXT v_row;
+    END LOOP;
+    IF v_owes_child_start AND EXISTS (
+        SELECT 1 FROM horsies_workflow_tasks n
+        WHERE n.workflow_id = v_apply.workflow_id AND n.task_index = v_apply.task_index
+          AND n.downstream_subworkflow = 'NONE'
+    ) THEN
+        RAISE EXCEPTION 'workflow % node % has downstream_subworkflow NONE and its phase 2 owes a child start',
+            v_apply.workflow_id, v_apply.task_index USING ERRCODE = 'data_corrupted';
+    END IF;
+    RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_apply.workflow_id, TRUE, NULL);
 END;
 $$;
 
@@ -1787,14 +2373,17 @@ $$;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- Internal: refuses start arguments that do not describe one tree (22023): arrays of different lengths, NULL in a
--- column that needs a value, a repeated workflow id or (workflow, index) pair, a first row that is not the
--- top-level row (no parent, depth 0), a later row without a parent in the tree or with a depth that is not its
--- parent's plus one, a node or failed record of a workflow outside the tree.
+-- column that needs a value, a repeated workflow id or (workflow, index) pair, a first row that is not the top row
+-- of the tree (its parent pair and depth are p_top_parent_workflow_id, p_top_parent_task_index and p_top_depth: no
+-- parent and depth 0 for a top-level start; the sub-workflow node for a child start, whose caller checks the depth
+-- against the parent workflow under its lock), a later row without a parent in the tree or with a depth that is not
+-- its parent's plus one, a node or failed record of a workflow outside the tree.
 -- Locks: none. Returns nothing. Python: the in-memory prevalidation of start_workflow_async
 -- (core/workflows/lifecycle.py:298-351).
 CREATE FUNCTION horsies_workflow_start_check(
     p_workflow_ids uuid[], p_names text[], p_on_errors text[], p_parent_workflow_ids uuid[],
-    p_parent_task_indexes integer[], p_depths integer[], p_other_workflow_lengths integer[],
+    p_parent_task_indexes integer[], p_depths integer[], p_top_parent_workflow_id uuid,
+    p_top_parent_task_index integer, p_top_depth integer, p_other_workflow_lengths integer[],
     p_node_workflow_ids uuid[], p_node_task_indexes integer[], p_node_required_lengths integer[],
     p_node_has_null boolean,
     p_failed_workflow_ids uuid[], p_failed_task_indexes integer[], p_failed_results text[]
@@ -1823,8 +2412,10 @@ BEGIN
         'a workflow id repeats'
     );
     PERFORM horsies_workflow_require(
-        p_parent_workflow_ids[1] IS NULL AND p_parent_task_indexes[1] IS NULL AND p_depths[1] = 0,
-        'the first workflow row must be the top-level row (no parent, depth 0)'
+        p_parent_workflow_ids[1] IS NOT DISTINCT FROM p_top_parent_workflow_id
+        AND p_parent_task_indexes[1] IS NOT DISTINCT FROM p_top_parent_task_index
+        AND p_depths[1] = p_top_depth,
+        'the first workflow row must be the top row of the tree (its parent pair and depth)'
     );
     PERFORM horsies_workflow_require(
         NOT EXISTS (
@@ -1869,8 +2460,12 @@ $$;
 -- parent pair names the node) goes in RUNNING, linked to the child, with started_at; any other node without
 -- dependencies goes in READY; the rest PENDING. dependencies is a JSON array of indexes, workflow_ctx_from a JSON
 -- array of node ids, args_from a JSON object of key to index. sub_workflow_params is the params choice of a
--- sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the table CHECK refuses another pairing). Refuses
--- (22023) a child workflow row that names no sub-workflow root node.
+-- sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the table CHECK refuses another pairing).
+-- downstream_subworkflow is computed here, once, from the static graph: REACHABLE for every node from which a
+-- sub-workflow node of the same workflow is reachable along the dependency edges (an ancestor of one), NONE for the
+-- rest. The walk goes up from each sub-workflow node through the dependencies; UNION keeps each node once, so it
+-- ends after at most the node count of steps. Refuses (22023) a child workflow row that names no sub-workflow
+-- root node.
 -- Locks: the new node rows. Returns nothing. Python: INSERT_WORKFLOW_TASKS_BULK_SQL (core/workflows/sql.py:46-58;
 -- core/workflows/lifecycle.py:699) and LINK_SUB_WORKFLOW_SQL (core/workflows/sql.py:271-276).
 CREATE FUNCTION horsies_workflow_start_nodes(
@@ -1887,43 +2482,62 @@ CREATE FUNCTION horsies_workflow_start_nodes(
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 BEGIN
+    WITH RECURSIVE n AS MATERIALIZED (
+        SELECT u.*, ARRAY(
+            SELECT e.value::integer
+            FROM jsonb_array_elements_text(u.dependencies_json::jsonb) WITH ORDINALITY AS e(value, position)
+            ORDER BY e.position
+        ) AS dependencies
+        FROM unnest(
+                p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
+                p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
+                p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,
+                p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils,
+                p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                p_node_sub_definition_keys, p_node_sub_workflow_params
+             ) AS u(workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies_json,
+                    args_from, ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries,
+                    execution, good_until, retention_class_key, is_subworkflow, sub_workflow_name,
+                    sub_definition_key, sub_workflow_params)
+    ),
+    edge AS MATERIALIZED (
+        SELECT n.workflow_id, n.task_index, d.dependency
+        FROM n, unnest(n.dependencies) AS d(dependency)
+    ),
+    upstream(workflow_id, task_index) AS (
+        SELECT e.workflow_id, e.dependency
+        FROM edge e
+        JOIN n ON n.workflow_id = e.workflow_id AND n.task_index = e.task_index
+        WHERE n.is_subworkflow
+        UNION
+        SELECT e.workflow_id, e.dependency
+        FROM upstream r
+        JOIN edge e ON e.workflow_id = r.workflow_id AND e.task_index = r.task_index
+    )
     INSERT INTO horsies_workflow_tasks (
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-        good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-        sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
-        completed_at
+        good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+        sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error,
+        created_at, started_at, completed_at
     )
     SELECT horsies_uuidv7(), n.workflow_id, n.task_index, n.node_id, n.task_name, n.input, n.queue_name, n.priority,
-           d.dependencies, n.args_from::jsonb,
+           n.dependencies, n.args_from::jsonb,
            CASE WHEN n.ctx_from IS NULL THEN NULL ELSE ARRAY(
                SELECT x.value FROM jsonb_array_elements_text(n.ctx_from::jsonb) WITH ORDINALITY AS x(value, position)
                ORDER BY x.position
            ) END,
            n.allow_failed_deps, n.join_type, n.min_success, n.task_options, n.max_retries, n.execution,
            n.good_until, n.retention_class_key,
-           CASE WHEN c.id IS NOT NULL THEN 'RUNNING' WHEN cardinality(d.dependencies) = 0 THEN 'READY'
+           CASE WHEN EXISTS (
+               SELECT 1 FROM upstream r WHERE r.workflow_id = n.workflow_id AND r.task_index = n.task_index
+           ) THEN 'REACHABLE' ELSE 'NONE' END,
+           CASE WHEN c.id IS NOT NULL THEN 'RUNNING' WHEN cardinality(n.dependencies) = 0 THEN 'READY'
                 ELSE 'PENDING' END,
            NULL, n.is_subworkflow, c.id, n.sub_workflow_name, n.sub_definition_key, n.sub_workflow_params,
            NULL, NULL, NULL, now(),
            CASE WHEN c.id IS NOT NULL THEN now() END, NULL
-    FROM unnest(
-            p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
-            p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
-            p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options,
-            p_node_max_retries, p_node_executions, p_node_good_untils, p_node_retention_class_keys,
-            p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params
-         ) AS n(workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
-                ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-                good_until, retention_class_key, is_subworkflow, sub_workflow_name, sub_definition_key,
-                sub_workflow_params)
-    CROSS JOIN LATERAL (
-        SELECT ARRAY(
-            SELECT e.value::integer
-            FROM jsonb_array_elements_text(n.dependencies::jsonb) WITH ORDINALITY AS e(value, position)
-            ORDER BY e.position
-        ) AS dependencies
-    ) d
+    FROM n
     LEFT JOIN unnest(p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes) AS c(id, parent_id, parent_index)
       ON c.parent_id = n.workflow_id AND c.parent_index = n.task_index
     ORDER BY n.workflow_id, n.task_index;
@@ -1944,15 +2558,17 @@ BEGIN
 END;
 $$;
 
--- Internal: inserts the workflow rows of a starting tree. The top-level row (the first) goes in with ON CONFLICT (id)
--- DO NOTHING; when it exists already, nothing is written and the function returns FALSE. Else the child rows go in
--- (RUNNING, root id of the tree, the start call time) and it returns TRUE.
--- Locks: the new rows and the unique index entry of the top-level id. Python: INSERT_WORKFLOW_SQL and
+-- Internal: inserts the workflow rows of a starting tree, every row RUNNING with p_root_workflow_id (the top-level
+-- id for a top-level start, the root of the parent's tree for a child start) and the start call time. The top row
+-- (the first) goes in with ON CONFLICT (id) DO NOTHING; when it exists already, nothing is written and the function
+-- returns FALSE. Else the other rows go in and it returns TRUE.
+-- Locks: the new rows and the unique index entry of the top id. Python: INSERT_WORKFLOW_SQL and
 -- INSERT_CHILD_WORKFLOW_SQL (core/workflows/sql.py:23-34, 260-270; core/workflows/lifecycle.py:420-442).
 CREATE FUNCTION horsies_workflow_start_workflows(
     p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
     p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
-    p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone
+    p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
+    p_root_workflow_id uuid
 ) RETURNS boolean
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -1967,7 +2583,8 @@ BEGIN
         completed_at, updated_at
     ) VALUES (
         v_top, p_names[1], p_definition_keys[1], 'RUNNING', p_on_errors[1], p_output_task_indexes[1],
-        p_success_policies[1]::jsonb, NULL, NULL, NULL, NULL, v_top, 0, p_sent_at, now(), now(), NULL, now()
+        p_success_policies[1]::jsonb, NULL, NULL, p_parent_workflow_ids[1], p_parent_task_indexes[1],
+        p_root_workflow_id, p_depths[1], p_sent_at, now(), now(), NULL, now()
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id INTO v_inserted;
@@ -1980,7 +2597,7 @@ BEGIN
         completed_at, updated_at
     )
     SELECT c.id, c.name, c.definition_key, 'RUNNING', c.on_error, c.output_index, c.policy::jsonb, NULL, NULL,
-           c.parent_id, c.parent_index, v_top, c.depth, p_sent_at, now(), now(), NULL, now()
+           c.parent_id, c.parent_index, p_root_workflow_id, c.depth, p_sent_at, now(), now(), NULL, now()
     FROM unnest(p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
                 p_parent_workflow_ids, p_parent_task_indexes, p_depths)
          WITH ORDINALITY AS c(id, name, definition_key, on_error, output_index, policy, parent_id, parent_index,
@@ -2061,6 +2678,80 @@ BEGIN
 END;
 $$;
 
+-- Internal: the argument check of a tree (horsies_workflow_start_check over the lengths and NULL elements of every
+-- array), for a top-level start (p_top_parent_workflow_id and p_top_parent_task_index NULL, p_top_depth 0) and for a
+-- child start (the sub-workflow node; horsies_workflow_child_start checks the depth of the child row against the
+-- parent workflow after it locks that row). Refuses with 22023.
+-- Locks: none. Returns nothing.
+CREATE FUNCTION horsies_workflow_tree_check(
+    p_top_parent_workflow_id uuid,
+    p_top_parent_task_index integer,
+    p_top_depth integer,
+    p_workflow_ids uuid[],
+    p_names text[],
+    p_definition_keys text[],
+    p_on_errors text[],
+    p_output_task_indexes integer[],
+    p_success_policies text[],
+    p_parent_workflow_ids uuid[],
+    p_parent_task_indexes integer[],
+    p_depths integer[],
+    p_node_workflow_ids uuid[],
+    p_node_task_indexes integer[],
+    p_node_ids text[],
+    p_node_task_names text[],
+    p_node_inputs text[],
+    p_node_queue_names text[],
+    p_node_priorities integer[],
+    p_node_dependencies text[],
+    p_node_args_from text[],
+    p_node_workflow_ctx_from text[],
+    p_node_allow_failed_deps boolean[],
+    p_node_join_types text[],
+    p_node_min_successes integer[],
+    p_node_task_options text[],
+    p_node_max_retries integer[],
+    p_node_executions text[],
+    p_node_good_untils timestamp with time zone[],
+    p_node_retention_class_keys text[],
+    p_node_is_subworkflow boolean[],
+    p_node_sub_workflow_names text[],
+    p_node_sub_definition_keys text[],
+    p_node_sub_workflow_params text[],
+    p_failed_workflow_ids uuid[],
+    p_failed_task_indexes integer[],
+    p_failed_results text[]
+) RETURNS void
+    LANGUAGE plpgsql IMMUTABLE
+AS $$
+BEGIN
+    PERFORM horsies_workflow_start_check(
+        p_workflow_ids, p_names, p_on_errors, p_parent_workflow_ids, p_parent_task_indexes, p_depths,
+        p_top_parent_workflow_id, p_top_parent_task_index, p_top_depth,
+        ARRAY[cardinality(p_definition_keys), cardinality(p_output_task_indexes), cardinality(p_success_policies)],
+        p_node_workflow_ids, p_node_task_indexes,
+        ARRAY[cardinality(p_node_task_indexes), cardinality(p_node_ids), cardinality(p_node_task_names),
+              cardinality(p_node_inputs), cardinality(p_node_queue_names), cardinality(p_node_priorities),
+              cardinality(p_node_dependencies), cardinality(p_node_args_from),
+              cardinality(p_node_workflow_ctx_from), cardinality(p_node_allow_failed_deps),
+              cardinality(p_node_join_types), cardinality(p_node_min_successes), cardinality(p_node_task_options),
+              cardinality(p_node_max_retries), cardinality(p_node_executions), cardinality(p_node_good_untils),
+              cardinality(p_node_retention_class_keys), cardinality(p_node_is_subworkflow),
+              cardinality(p_node_sub_workflow_names), cardinality(p_node_sub_definition_keys),
+              cardinality(p_node_sub_workflow_params)],
+        array_position(p_node_workflow_ids, NULL) IS NOT NULL OR array_position(p_node_task_indexes, NULL) IS NOT NULL
+        OR array_position(p_node_task_names, NULL) IS NOT NULL OR array_position(p_node_inputs, NULL) IS NOT NULL
+        OR array_position(p_node_queue_names, NULL) IS NOT NULL OR array_position(p_node_priorities, NULL) IS NOT NULL
+        OR array_position(p_node_dependencies, NULL) IS NOT NULL
+        OR array_position(p_node_allow_failed_deps, NULL) IS NOT NULL
+        OR array_position(p_node_join_types, NULL) IS NOT NULL
+        OR array_position(p_node_is_subworkflow, NULL) IS NOT NULL,
+        coalesce(p_failed_workflow_ids, ARRAY[]::uuid[]), coalesce(p_failed_task_indexes, ARRAY[]::integer[]),
+        coalesce(p_failed_results, ARRAY[]::text[])
+    );
+END;
+$$;
+
 -- Starts a workflow tree in one statement. Arguments: the workflow rows of the tree (the top-level row first, then
 -- each child that the core pre-built for a sub-workflow root, with its parent, parent index and depth), the start
 -- call time p_sent_at, every node row of the tree (dependencies, args_from and workflow_ctx_from as one JSON text per
@@ -2073,7 +2764,8 @@ $$;
 --    WORKFLOW_ID_CONFLICT). The unique key makes a concurrent second start wait for the first commit.
 -- 2. Insert the child workflow rows (RUNNING, root id of the tree) and every node row: a sub-workflow node with a
 --    pre-built child goes in RUNNING, linked, with started_at; any other node without dependencies goes in READY;
---    the rest PENDING. Node row ids come from horsies_uuidv7().
+--    the rest PENDING. Node row ids come from horsies_uuidv7(). Each node gets downstream_subworkflow from the
+--    static graph (horsies_workflow_start_nodes).
 -- 3. Each failed-node record, deepest workflow first: the node goes FAILED with its envelope, then progression (the
 --    failure policy, promotion of its dependents, completion).
 -- 4. Each workflow of the tree that is still RUNNING: its READY nodes are enqueued, with their task rows minted
@@ -2132,33 +2824,19 @@ DECLARE
     v_name text;
 BEGIN
     PERFORM horsies_workflow_require(p_sent_at IS NOT NULL, 'sent_at must not be NULL');
-    PERFORM horsies_workflow_start_check(
-        p_workflow_ids, p_names, p_on_errors, p_parent_workflow_ids, p_parent_task_indexes, p_depths,
-        ARRAY[cardinality(p_definition_keys), cardinality(p_output_task_indexes), cardinality(p_success_policies)],
-        p_node_workflow_ids, p_node_task_indexes,
-        ARRAY[cardinality(p_node_task_indexes), cardinality(p_node_ids), cardinality(p_node_task_names),
-              cardinality(p_node_inputs), cardinality(p_node_queue_names), cardinality(p_node_priorities),
-              cardinality(p_node_dependencies), cardinality(p_node_args_from),
-              cardinality(p_node_workflow_ctx_from), cardinality(p_node_allow_failed_deps),
-              cardinality(p_node_join_types), cardinality(p_node_min_successes), cardinality(p_node_task_options),
-              cardinality(p_node_max_retries), cardinality(p_node_executions), cardinality(p_node_good_untils),
-              cardinality(p_node_retention_class_keys), cardinality(p_node_is_subworkflow),
-              cardinality(p_node_sub_workflow_names), cardinality(p_node_sub_definition_keys),
-              cardinality(p_node_sub_workflow_params)],
-        array_position(p_node_workflow_ids, NULL) IS NOT NULL OR array_position(p_node_task_indexes, NULL) IS NOT NULL
-        OR array_position(p_node_task_names, NULL) IS NOT NULL OR array_position(p_node_inputs, NULL) IS NOT NULL
-        OR array_position(p_node_queue_names, NULL) IS NOT NULL OR array_position(p_node_priorities, NULL) IS NOT NULL
-        OR array_position(p_node_dependencies, NULL) IS NOT NULL
-        OR array_position(p_node_allow_failed_deps, NULL) IS NOT NULL
-        OR array_position(p_node_join_types, NULL) IS NOT NULL
-        OR array_position(p_node_is_subworkflow, NULL) IS NOT NULL,
-        coalesce(p_failed_workflow_ids, ARRAY[]::uuid[]), coalesce(p_failed_task_indexes, ARRAY[]::integer[]),
-        coalesce(p_failed_results, ARRAY[]::text[])
+    PERFORM horsies_workflow_tree_check(
+        NULL, NULL, 0, p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes,
+        p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids,
+        p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities,
+        p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types,
+        p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils,
+        p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys,
+        p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
     );
 
     IF NOT horsies_workflow_start_workflows(
         p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
-        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at
+        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top
     ) THEN
         SELECT w.name INTO v_name FROM horsies_workflows w WHERE w.id = v_top;
         RETURN NEXT horsies_workflow_outcome_row('EXISTS', v_top, FALSE, v_name);
@@ -2176,5 +2854,1028 @@ BEGIN
         p_workflow_ids, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
     );
     RETURN NEXT horsies_workflow_outcome_row('STARTED', v_top, FALSE, NULL);
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Sub-workflow start
+------------------------------------------------------------------------------------------------------------------------
+
+-- Step function: the owed child start of one sub-workflow node, in the transaction of the step that owes it (BEGIN;
+-- the step function; the host build callback and this call for each CHILD_START row; COMMIT). The parent node, the
+-- child rows and the link commit together.
+-- p_outcome_kind (a kind text plus the arguments of each kind; each kind refuses the arguments of the other, 22023):
+-- - TREE: the child tree that the core built, in the arrays of horsies_workflow_start: the child row first, with the
+--   parent pair (p_parent_workflow_id, p_parent_task_index) and the depth of the parent workflow plus one, then the
+--   pre-built children of its sub-workflow roots; every node of the tree; the failed-node records (a sub-workflow
+--   root of the tree whose own child could not be built). p_sent_at is the call time of the child start.
+-- - FAILURE: p_failure_result, the error envelope of a child that could not be built (a definition that does not
+--   load, a failing build callback, an args_from key or value that the callback refuses, the depth limit). It must
+--   be an error envelope (22023 otherwise).
+-- Steps:
+-- 1. Lock the parent workflow row FOR UPDATE (the step function of this transaction holds it already), then the
+--    node row.
+-- 2. The node is not an ENQUEUED sub-workflow node with no child: STALE, nothing written.
+-- 3. The parent workflow is not RUNNING (a failure earlier in the same step paused it): the node goes back to READY
+--    with started_at NULL, so the resume or recovery case 1.5 starts it later. WORKFLOW_NOT_RUNNING (detail: the
+--    status). Without this the node would stay ENQUEUED with no child, which no recovery case selects.
+-- 4. TREE: insert the child workflow rows (RUNNING, the root id of the parent's tree) and every node row
+--    (horsies_workflow_start_workflows, horsies_workflow_start_nodes), link the node (RUNNING, sub_workflow_id), then
+--    run the progression of a start for the child tree (horsies_workflow_start_progress: failed records, READY nodes
+--    enqueued with their task rows, the pause gate, completion deepest first). A child that is COMPLETED or FAILED
+--    now advances the node in this statement (horsies_workflow_child_finish), as Python's in-session drain does.
+--    STARTED.
+-- 5. FAILURE: the node goes FAILED with the envelope and completed_at, then horsies_workflow_progress for it
+--    (failure policy, promotion of its dependents, completion). NODE_FAILED.
+-- A refused argument raises 22023; a child id that exists already raises unique_violation (23505): the core mints
+-- it, so a conflict is a defect. Nothing is written in either case.
+-- Returns the OUTCOME row (workflow_id: the parent workflow; workflow_status: its status after the call;
+-- advance_child_workflow_id: the parent workflow when this call ended it and it has a parent, for the advance after
+-- the commit) and the CHILD_START and SOURCE rows that this call owes in turn.
+-- Lock order: parent workflow row, node row, the new child rows, then the progression locks (node rows; under
+-- on_error pause the RUNNING descendant rows in (depth, id) order).
+-- Python: enqueue_subworkflow_task after its READY to ENQUEUED write (core/workflows/engine.py:1068-1627, with
+-- INSERT_CHILD_WORKFLOW_SQL and LINK_SUB_WORKFLOW_SQL, core/workflows/sql.py:260-276), and _fail_enqueued_task
+-- (core/workflows/engine.py:472-555).
+CREATE FUNCTION horsies_workflow_child_start(
+    p_parent_workflow_id uuid,
+    p_parent_task_index integer,
+    p_outcome_kind text,
+    p_failure_result text,
+    p_sent_at timestamp with time zone,
+    p_workflow_ids uuid[],
+    p_names text[],
+    p_definition_keys text[],
+    p_on_errors text[],
+    p_output_task_indexes integer[],
+    p_success_policies text[],
+    p_parent_workflow_ids uuid[],
+    p_parent_task_indexes integer[],
+    p_depths integer[],
+    p_node_workflow_ids uuid[],
+    p_node_task_indexes integer[],
+    p_node_ids text[],
+    p_node_task_names text[],
+    p_node_inputs text[],
+    p_node_queue_names text[],
+    p_node_priorities integer[],
+    p_node_dependencies text[],
+    p_node_args_from text[],
+    p_node_workflow_ctx_from text[],
+    p_node_allow_failed_deps boolean[],
+    p_node_join_types text[],
+    p_node_min_successes integer[],
+    p_node_task_options text[],
+    p_node_max_retries integer[],
+    p_node_executions text[],
+    p_node_good_untils timestamp with time zone[],
+    p_node_retention_class_keys text[],
+    p_node_is_subworkflow boolean[],
+    p_node_sub_workflow_names text[],
+    p_node_sub_definition_keys text[],
+    p_node_sub_workflow_params text[],
+    p_failed_workflow_ids uuid[],
+    p_failed_task_indexes integer[],
+    p_failed_results text[]
+) RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_parent record;
+    v_node record;
+    v_child uuid := p_workflow_ids[1];
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_parent_workflow_id IS NOT NULL AND p_parent_task_index IS NOT NULL,
+        'the parent workflow id and task index must not be NULL'
+    );
+    PERFORM horsies_workflow_require(
+        p_outcome_kind IN ('TREE', 'FAILURE'), 'the outcome kind must be TREE or FAILURE'
+    );
+    CASE p_outcome_kind
+        WHEN 'TREE' THEN
+            PERFORM horsies_workflow_require(
+                p_failure_result IS NULL AND p_sent_at IS NOT NULL,
+                'a TREE child start takes sent_at and no failure result'
+            );
+            PERFORM horsies_workflow_tree_check(
+                p_parent_workflow_id, p_parent_task_index, p_depths[1],
+                p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+                p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids, p_node_task_indexes,
+                p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities,
+                p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps,
+                p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions,
+                p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes,
+                p_failed_results
+            );
+        WHEN 'FAILURE' THEN
+            PERFORM horsies_workflow_require(
+                p_sent_at IS NULL AND num_nonnulls(
+                    p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+                    p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids, p_node_task_indexes,
+                    p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names, p_node_priorities,
+                    p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from, p_node_allow_failed_deps,
+                    p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries, p_node_executions,
+                    p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                    p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids,
+                    p_failed_task_indexes, p_failed_results
+                ) = 0,
+                'a FAILURE child start takes the failure result alone'
+            );
+            PERFORM horsies_workflow_require(
+                horsies_workflow_result_kind(p_failure_result) = 'ERROR',
+                'the failure result of a child start must be an error envelope'
+            );
+    END CASE;
+
+    SELECT w.status, w.depth, coalesce(w.root_workflow_id, w.id) AS root_workflow_id INTO v_parent
+    FROM horsies_workflows w
+    WHERE w.id = p_parent_workflow_id
+    FOR UPDATE;
+    SELECT n.id, n.status, n.is_subworkflow, n.sub_workflow_id INTO v_node
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = p_parent_workflow_id AND n.task_index = p_parent_task_index
+    FOR UPDATE;
+    IF v_node.id IS NULL OR NOT v_node.is_subworkflow OR v_node.status <> 'ENQUEUED'
+       OR v_node.sub_workflow_id IS NOT NULL THEN
+        RETURN NEXT horsies_workflow_outcome_row('STALE', p_parent_workflow_id, FALSE, v_node.status::text);
+        RETURN;
+    END IF;
+    IF v_parent.status <> 'RUNNING' THEN
+        UPDATE horsies_workflow_tasks n SET status = 'READY', started_at = NULL WHERE n.id = v_node.id;
+        RETURN NEXT horsies_workflow_outcome_row(
+            'WORKFLOW_NOT_RUNNING', p_parent_workflow_id, FALSE, v_parent.status::text
+        );
+        RETURN;
+    END IF;
+
+    CASE p_outcome_kind
+        WHEN 'TREE' THEN
+            PERFORM horsies_workflow_require(
+                p_depths[1] = v_parent.depth + 1,
+                'the child row must have the depth of its parent workflow plus one'
+            );
+            IF NOT horsies_workflow_start_workflows(
+                p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+                p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_parent.root_workflow_id
+            ) THEN
+                RAISE EXCEPTION 'child workflow % of workflow % node % exists already', v_child, p_parent_workflow_id,
+                    p_parent_task_index USING ERRCODE = 'unique_violation';
+            END IF;
+            PERFORM horsies_workflow_start_nodes(
+                p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes,
+                p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
+                p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
+                p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,
+                p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils,
+                p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                p_node_sub_definition_keys, p_node_sub_workflow_params
+            );
+            UPDATE horsies_workflow_tasks n SET status = 'RUNNING', sub_workflow_id = v_child WHERE n.id = v_node.id;
+            RETURN QUERY SELECT * FROM horsies_workflow_start_progress(
+                p_workflow_ids, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
+            );
+            IF EXISTS (SELECT 1 FROM horsies_workflows w WHERE w.id = v_child AND w.status IN ('COMPLETED', 'FAILED'))
+            THEN
+                RETURN QUERY SELECT * FROM horsies_workflow_child_finish(v_child) AS r WHERE r.row_kind <> 'OUTCOME';
+            END IF;
+            RETURN NEXT horsies_workflow_outcome_row('STARTED', p_parent_workflow_id, TRUE, NULL);
+        WHEN 'FAILURE' THEN
+            UPDATE horsies_workflow_tasks n
+            SET status = 'FAILED', result = p_failure_result, completed_at = now()
+            WHERE n.id = v_node.id;
+            RETURN QUERY SELECT * FROM horsies_workflow_progress(p_parent_workflow_id, p_parent_task_index, 'READ');
+            RETURN NEXT horsies_workflow_outcome_row('NODE_FAILED', p_parent_workflow_id, TRUE, NULL);
+    END CASE;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Claim-time check and the stop before start
+------------------------------------------------------------------------------------------------------------------------
+
+-- The claim-time workflow check of one claim pass, in one statement in autocommit after the claim committed.
+-- Arguments: the claimed task ids, the claim generation of each (claimed_at), the worker. Refused (22023): a NULL
+-- array, element or worker id, arrays of different lengths, a repeated id, more than 1000 ids (the bound of one
+-- claim pass, as horsies_release_claims).
+-- Steps:
+-- 1. The lookup: the workflow of each claimed task (the node by task_id, the workflow by id), unlocked. Two index
+--    probes per task, bounded by the claim pass. A task with no node, or whose workflow is neither PAUSED nor
+--    CANCELLED, is dispatched; when there is none of the other kind, the statement ends here.
+-- 2. The PAUSED or CANCELLED workflows of the batch, locked FOR SHARE in (depth, id) order, and their status read
+--    again under the lock: a resume or a pause cannot commit meanwhile. A workflow that a resume made RUNNING since
+--    the lookup has its tasks dispatched.
+-- 3. The task rows of the blocked tasks, locked FOR UPDATE in id order in one pass (the batch rule).
+-- 4. Tasks of a PAUSED workflow: abandoned (horsies_abandon_owned_nodes, PAUSE_ABANDON_CLAIM_BATCH, fenced to this
+--    worker and each claim generation); the node of each abandoned task goes back to READY with no task.
+-- 5. Tasks of a CANCELLED workflow: cancelled (horsies_cancel_owned_nodes, WORKFLOW_CANCEL_CLAIM_BATCH, same fence);
+--    the node of each cancelled task goes SKIPPED with completed_at.
+-- A blocked task is never dispatched, whether its move applied or found the row moved on (a lost claim, a task
+-- already terminal): that row belongs to its current owner.
+-- The guard of v61 (no workflow PAUSED or CANCELLED at all) is not used: it needs an index on the workflow status,
+-- which the baseline does not have, and any CANCELLED workflow kept by retention makes it pass.
+-- Returns one row per input id, in input order: DISPATCH or BLOCKED.
+-- Lock order: workflow rows FOR SHARE in (depth, id) order, task rows in id order (no task advisory lock), node rows.
+-- Python: _filter_nonrunnable_workflow_tasks (core/worker/claiming.py:503-620) with
+-- horsies_find_non_runnable_workflow_tasks, horsies_abandon_owned_nodes, RESET_PAUSED_WORKFLOW_TASKS_SQL,
+-- horsies_cancel_owned_nodes and SKIP_CANCELLED_WORKFLOW_TASKS_SQL (core/worker/sql.py:228-233, 286-299).
+CREATE FUNCTION horsies_workflow_claimed_tasks_settle(
+    p_task_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text
+) RETURNS TABLE (task_id uuid, disposition text)
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_max_tasks CONSTANT integer := 1000;
+    v_lookup_workflows uuid[];
+    v_paused_workflows uuid[];
+    v_cancelled_workflows uuid[];
+    v_paused_ids uuid[];
+    v_paused_ats timestamp with time zone[];
+    v_cancelled_ids uuid[];
+    v_cancelled_ats timestamp with time zone[];
+    v_abandoned uuid[];
+    v_cancelled uuid[];
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_task_ids IS NOT NULL AND p_claimed_ats IS NOT NULL AND p_worker_id IS NOT NULL,
+        'the task ids, claim generations and worker id must not be NULL'
+    );
+    PERFORM horsies_workflow_require(
+        cardinality(p_task_ids) = cardinality(p_claimed_ats)
+        AND array_position(p_task_ids, NULL) IS NULL AND array_position(p_claimed_ats, NULL) IS NULL,
+        'the task id and claim generation arrays differ in length or hold NULL'
+    );
+    PERFORM horsies_workflow_require(cardinality(p_task_ids) <= c_max_tasks, 'at most 1000 task ids per call');
+    PERFORM horsies_workflow_require(
+        cardinality(p_task_ids) = (SELECT count(DISTINCT u.id) FROM unnest(p_task_ids) AS u(id)),
+        'a task id repeats'
+    );
+
+    -- One probe of the node by task_id and one of its workflow by primary key per task: the LATERAL with OFFSET 0
+    -- keeps each workflow read tied to its node, so no plan reads the workflows by status.
+    SELECT array_agg(DISTINCT w.id) INTO v_lookup_workflows
+    FROM horsies_workflow_tasks n
+    CROSS JOIN LATERAL (
+        SELECT workflow.id, workflow.status
+        FROM horsies_workflows workflow
+        WHERE workflow.id = n.workflow_id
+        OFFSET 0
+    ) AS w
+    WHERE n.task_id = ANY(p_task_ids)
+      AND w.status IN ('PAUSED', 'CANCELLED');
+    IF v_lookup_workflows IS NULL THEN
+        RETURN QUERY
+        SELECT u.id, 'DISPATCH'::text FROM unnest(p_task_ids) WITH ORDINALITY AS u(id, position) ORDER BY u.position;
+        RETURN;
+    END IF;
+
+    WITH locked AS (
+        SELECT w.id, w.status
+        FROM horsies_workflows w
+        WHERE w.id = ANY(v_lookup_workflows)
+        ORDER BY w.depth, w.id
+        FOR SHARE
+    )
+    SELECT array_agg(l.id) FILTER (WHERE l.status = 'PAUSED'),
+           array_agg(l.id) FILTER (WHERE l.status = 'CANCELLED')
+    INTO v_paused_workflows, v_cancelled_workflows
+    FROM locked l;
+
+    SELECT array_agg(u.id ORDER BY u.id) FILTER (WHERE n.workflow_id = ANY(v_paused_workflows)),
+           array_agg(u.claimed_at ORDER BY u.id) FILTER (WHERE n.workflow_id = ANY(v_paused_workflows)),
+           array_agg(u.id ORDER BY u.id) FILTER (WHERE n.workflow_id = ANY(v_cancelled_workflows)),
+           array_agg(u.claimed_at ORDER BY u.id) FILTER (WHERE n.workflow_id = ANY(v_cancelled_workflows))
+    INTO v_paused_ids, v_paused_ats, v_cancelled_ids, v_cancelled_ats
+    FROM unnest(p_task_ids, p_claimed_ats) AS u(id, claimed_at)
+    JOIN horsies_workflow_tasks n ON n.task_id = u.id;
+
+    PERFORM 1 FROM horsies_tasks t
+    WHERE t.id = ANY(coalesce(v_paused_ids, ARRAY[]::uuid[]) || coalesce(v_cancelled_ids, ARRAY[]::uuid[]))
+    ORDER BY t.id
+    FOR UPDATE;
+
+    IF v_paused_ids IS NOT NULL THEN
+        SELECT coalesce(array_agg(o.task_id), ARRAY[]::uuid[]) INTO v_abandoned
+        FROM horsies_abandon_owned_nodes(v_paused_ids, v_paused_ats, p_worker_id) AS o
+        WHERE o.outcome = 'APPLIED';
+        UPDATE horsies_workflow_tasks n
+        SET status = 'READY', task_id = NULL, started_at = NULL
+        WHERE n.task_id = ANY(v_abandoned) AND n.status IN ('ENQUEUED', 'RUNNING');
+    END IF;
+    IF v_cancelled_ids IS NOT NULL THEN
+        SELECT coalesce(array_agg(o.task_id), ARRAY[]::uuid[]) INTO v_cancelled
+        FROM horsies_cancel_owned_nodes(v_cancelled_ids, v_cancelled_ats, p_worker_id) AS o
+        WHERE o.outcome = 'APPLIED';
+        UPDATE horsies_workflow_tasks n
+        SET status = 'SKIPPED', completed_at = now()
+        WHERE n.task_id = ANY(v_cancelled) AND n.status IN ('PENDING', 'READY', 'ENQUEUED');
+    END IF;
+
+    RETURN QUERY
+    SELECT u.id,
+           CASE
+               WHEN u.id = ANY(coalesce(v_paused_ids, ARRAY[]::uuid[]) || coalesce(v_cancelled_ids, ARRAY[]::uuid[]))
+                   THEN 'BLOCKED'
+               ELSE 'DISPATCH'
+           END::text
+    FROM unnest(p_task_ids) WITH ORDINALITY AS u(id, position)
+    ORDER BY u.position;
+END;
+$$;
+
+-- The stop of a workflow task whose start (horsies_start_attempt) missed, in one statement in autocommit sent after
+-- the start statement ended, so no row lock of the start is held. The reason of the start's miss only chooses that
+-- this call runs: the function judges again under its own locks, in Python's order.
+-- Arguments: the task, the worker, the claim generation of the start, p_expiry_result (the TASK_EXPIRED envelope
+-- built by the core) and p_orphan_self_heal. Every argument is required (22023).
+-- Steps:
+-- 1. The workflow row of the task's node (the node by task_id) locked FOR SHARE: a resume, a pause or a cancel of
+--    that workflow cannot commit until this statement ends.
+-- 2. The deadline (horsies_expire_owned_claim: the task advisory lock, the row lock, the owner fence, good_until
+--    passed): when the expiry applies, or was applied already, EXPIRED. Phase 2 of the node is owed, in its long
+--    form.
+-- 3. The node of the task, locked, and the workflow status read under the lock of step 1:
+--    - PAUSED: ABANDONED. The abandon runs (horsies_abandon_owned_node, PAUSE_ABANDON_CLAIM, fenced to the claim
+--      generation); when it applies or was applied, the node goes back to READY with no task and no started_at.
+--    - CANCELLED: CANCELLED. The cancel runs (horsies_cancel_owned_node, WORKFLOW_CANCEL_CLAIM, with the carve-out
+--      for a row requeued to PENDING); when it applies or was applied, the node goes SKIPPED with completed_at.
+--    - the claim is still startable (CLAIMED by this worker at this generation, lease and deadline not passed) and
+--      the node is linked live (ENQUEUED, READY, PENDING or RUNNING) in a RUNNING workflow: RESUMED, nothing
+--      written. A resume committed after the start read PAUSED; the worker runs the start once more.
+-- 4. The claim is held by this worker at this generation and no node links the task live:
+--    - p_orphan_self_heal: ORPHAN_CANCELLED. The orphan cancel runs (horsies_cancel_owned_orphan, CANCEL_ORPHAN).
+--    - else NODE_NOT_LINKED, nothing written (the worker reports WORKFLOW_CHECK_FAILED).
+-- 5. Anything else: NOT_HELD, with the classification of horsies_terminalization_miss.
+-- Returns one row: outcome (the step that ran), and move_outcome, the outcome of the move it ran (APPLIED,
+-- ALREADY_APPLIED, LOST_CLAIM, SOURCE_STATE_CONFLICT, TASK_ABSENT), NULL for RESUMED and NODE_NOT_LINKED.
+-- Lock order: workflow row FOR SHARE, task advisory lock, task row, node row.
+-- Python: the miss path of _confirm_ownership_and_set_running (core/worker/child_runner.py:1195-1235) with
+-- _expire_claimed_task_before_start (:1066-1100) and _handle_workflow_stop_before_start (:960-1064), and the
+-- orphan cancel of the finalize classification (core/lifecycle/classify.py:281-297).
+CREATE FUNCTION horsies_workflow_task_stop_before_start(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamp with time zone,
+    p_expiry_result text,
+    p_orphan_self_heal boolean
+) RETURNS TABLE (outcome text, move_outcome text)
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_workflow_id uuid;
+    v_workflow_status text;
+    v_move text;
+    v_task record;
+    v_node record;
+    v_held boolean;
+BEGIN
+    PERFORM horsies_workflow_require(
+        num_nulls(p_task_id, p_worker_id, p_claimed_at, p_expiry_result, p_orphan_self_heal) = 0,
+        'every argument of the stop before start is required'
+    );
+    SELECT n.workflow_id INTO v_workflow_id FROM horsies_workflow_tasks n WHERE n.task_id = p_task_id;
+    IF v_workflow_id IS NOT NULL THEN
+        SELECT w.status INTO v_workflow_status FROM horsies_workflows w WHERE w.id = v_workflow_id FOR SHARE;
+    END IF;
+
+    SELECT o.outcome INTO v_move
+    FROM horsies_expire_owned_claim(p_task_id, p_worker_id, p_expiry_result, 'TASK_EXPIRED') AS o;
+    IF v_move IN ('APPLIED', 'ALREADY_APPLIED') THEN
+        RETURN QUERY SELECT 'EXPIRED'::text, v_move;
+        RETURN;
+    END IF;
+
+    -- The task row is locked by the expiry call (its fence or its miss classifier); the node row last.
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at, t.claim_expires_at, t.good_until INTO v_task
+    FROM horsies_tasks t WHERE t.id = p_task_id;
+    SELECT n.id, n.workflow_id, n.status INTO v_node
+    FROM horsies_workflow_tasks n WHERE n.task_id = p_task_id
+    FOR UPDATE;
+    v_held := v_task.status = 'CLAIMED' AND v_task.claimed_by_worker_id = p_worker_id
+              AND v_task.claimed_at = p_claimed_at;
+
+    IF v_node.workflow_id IS NOT DISTINCT FROM v_workflow_id AND v_workflow_status = 'PAUSED' THEN
+        SELECT o.outcome INTO v_move FROM horsies_abandon_owned_node(p_task_id, p_worker_id, p_claimed_at) AS o;
+        IF v_move IN ('APPLIED', 'ALREADY_APPLIED') THEN
+            UPDATE horsies_workflow_tasks n
+            SET status = 'READY', task_id = NULL, started_at = NULL
+            WHERE n.task_id = p_task_id AND n.status IN ('ENQUEUED', 'RUNNING');
+        END IF;
+        RETURN QUERY SELECT 'ABANDONED'::text, v_move;
+        RETURN;
+    END IF;
+    IF v_node.workflow_id IS NOT DISTINCT FROM v_workflow_id AND v_workflow_status = 'CANCELLED' THEN
+        SELECT o.outcome INTO v_move
+        FROM horsies_cancel_owned_node(p_task_id, p_worker_id, p_claimed_at, TRUE) AS o;
+        IF v_move IN ('APPLIED', 'ALREADY_APPLIED') THEN
+            UPDATE horsies_workflow_tasks n
+            SET status = 'SKIPPED', completed_at = now()
+            WHERE n.task_id = p_task_id AND n.status IN ('ENQUEUED', 'READY');
+        END IF;
+        RETURN QUERY SELECT 'CANCELLED'::text, v_move;
+        RETURN;
+    END IF;
+    IF v_held
+       AND v_task.claim_expires_at > now()
+       AND (v_task.good_until IS NULL OR v_task.good_until > now())
+       AND v_workflow_status = 'RUNNING'
+       AND v_node.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING') THEN
+        RETURN QUERY SELECT 'RESUMED'::text, NULL::text;
+        RETURN;
+    END IF;
+    IF v_held AND v_node.status IS DISTINCT FROM 'ENQUEUED' AND v_node.status IS DISTINCT FROM 'READY'
+       AND v_node.status IS DISTINCT FROM 'PENDING' AND v_node.status IS DISTINCT FROM 'RUNNING' THEN
+        IF NOT p_orphan_self_heal THEN
+            RETURN QUERY SELECT 'NODE_NOT_LINKED'::text, NULL::text;
+            RETURN;
+        END IF;
+        SELECT o.outcome INTO v_move FROM horsies_cancel_owned_orphan(p_task_id, p_worker_id, p_claimed_at) AS o;
+        RETURN QUERY SELECT 'ORPHAN_CANCELLED'::text, v_move;
+        RETURN;
+    END IF;
+    -- The classifier takes one kind. EXPIRE_CLAIMED answers as an empty class would: a history row of the expire
+    -- family ended this call at the expiry above (ALREADY_APPLIED there), and the task advisory lock that the expiry
+    -- took keeps history unchanged until the transaction ends. Every other history row is FOREIGN_TERMINALIZATION.
+    SELECT o.outcome INTO v_move
+    FROM horsies_terminalization_miss(
+        p_task_id, 'EXPIRE_CLAIMED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+    ) AS o;
+    RETURN QUERY SELECT 'NOT_HELD'::text, v_move;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Paused workflow expiry
+------------------------------------------------------------------------------------------------------------------------
+
+-- Expires one PAUSED workflow older than the age policy, in one statement in autocommit; the caller reads the
+-- candidates (idx_horsies_workflows_paused_age) and calls this once per workflow. The body of horsies_workflow_cancel
+-- for one workflow, with EXPIRED: lock the workflow row FOR UPDATE; the status write needs PAUSED and updated_at
+-- before now() minus p_older_than_ms (a resume that committed first wins); lock the live backing task rows in id
+-- order and the live node rows in id order; EXPIRED with p_error and completed_at; the tasks behind ENQUEUED nodes are
+-- moved to history (horsies_cancel_nodes_of_cancelled_workflow, WORKFLOW_CANCEL_WORKFLOW); SKIPPED with completed_at
+-- for PENDING and READY nodes, for the ENQUEUED nodes of the moved tasks, and for ENQUEUED sub-workflow nodes with no
+-- child. No cascade: each paused child expires on its own age. The status trigger sends workflow_done at commit.
+-- Arguments: p_older_than_ms >= 0; p_error, the stored error object (WORKFLOW_EXPIRED) built by the core. Refused
+-- (22023): a NULL argument, a negative age.
+-- Outcomes: EXPIRED (expired_task_ids); NOT_EXPIRED (observed_status: not PAUSED, or PAUSED for less than the age;
+-- nothing written); NOT_FOUND.
+-- Lock order: workflow row, task rows in id order, node rows in id order.
+-- Python: expire_paused_workflows (core/workflows/lifecycle.py:1408-1540), one transaction per workflow.
+-- Returns one row (outcome, observed_status, expired_task_ids).
+CREATE FUNCTION horsies_workflow_expire_paused(p_workflow_id uuid, p_older_than_ms bigint, p_error text)
+    RETURNS TABLE (outcome text, observed_status text, expired_task_ids uuid[])
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_workflow record;
+    v_moved uuid[];
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_workflow_id IS NOT NULL AND p_error IS NOT NULL AND p_older_than_ms >= 0,
+        'the workflow id and error must not be NULL, and the age must be 0 or more milliseconds'
+    );
+    SELECT w.status, w.updated_at INTO v_workflow FROM horsies_workflows w WHERE w.id = p_workflow_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT 'NOT_FOUND'::text, NULL::text, NULL::uuid[];
+        RETURN;
+    END IF;
+    IF v_workflow.status <> 'PAUSED'
+       OR v_workflow.updated_at >= now() - p_older_than_ms * interval '1 millisecond' THEN
+        RETURN QUERY SELECT 'NOT_EXPIRED'::text, v_workflow.status::text, NULL::uuid[];
+        RETURN;
+    END IF;
+
+    PERFORM 1 FROM horsies_tasks t
+    JOIN horsies_workflow_tasks n ON n.task_id = t.id
+    WHERE n.workflow_id = p_workflow_id AND n.status IN ('ENQUEUED', 'RUNNING')
+    ORDER BY t.id
+    FOR UPDATE OF t;
+    PERFORM 1 FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = p_workflow_id AND n.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
+    ORDER BY n.id
+    FOR UPDATE;
+
+    UPDATE horsies_workflows w
+    SET status = 'EXPIRED', error = p_error, completed_at = now(), updated_at = now()
+    WHERE w.id = p_workflow_id;
+    SELECT coalesce(array_agg(o.task_id ORDER BY o.task_id), ARRAY[]::uuid[]) INTO v_moved
+    FROM horsies_cancel_nodes_of_cancelled_workflow(ARRAY[p_workflow_id]) AS o
+    WHERE o.outcome = 'APPLIED';
+    UPDATE horsies_workflow_tasks n
+    SET status = 'SKIPPED', completed_at = now()
+    WHERE n.workflow_id = p_workflow_id
+      AND (
+          n.status IN ('PENDING', 'READY')
+          OR (n.status = 'ENQUEUED' AND n.task_id = ANY(v_moved))
+          OR (n.status = 'ENQUEUED' AND n.is_subworkflow AND n.sub_workflow_id IS NULL)
+      );
+    RETURN QUERY SELECT 'EXPIRED'::text, 'EXPIRED'::text, v_moved;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Workflow recovery
+------------------------------------------------------------------------------------------------------------------------
+
+-- Step function of recovery case 0: a PENDING node of a RUNNING workflow whose dependencies are all terminal (a join
+-- that two concurrent steps both missed). In the caller's transaction (BEGIN; this; owed child starts; COMMIT).
+-- Steps: lock the workflow row FOR UPDATE; the join verdict of the node (horsies_workflow_promote with the node as
+-- the candidate: SKIPPED with the skip cascade, ENQUEUED with its task row minted, or a child start owed); then the
+-- completion check (horsies_workflow_try_complete).
+-- Dispositions: APPLIED (the node left PENDING; detail: its status); WAITING (the join is not met; nothing written);
+-- STALE (the node is absent or not PENDING; detail: its status; nothing written); NOT_RUNNING (detail: the workflow
+-- status; nothing written); NOT_FOUND.
+-- Lock order: workflow row, node rows, new task rows (the promotion locks).
+-- Python: recovery case 0 with try_make_ready_and_enqueue (core/workflows/recovery.py:705-760;
+-- core/workflows/engine.py:2547-2738).
+-- Returns the OUTCOME row (advance_child_workflow_id when the step ended the workflow and it has a parent) and the
+-- owed CHILD_START and SOURCE rows.
+CREATE FUNCTION horsies_workflow_node_reevaluate(p_workflow_id uuid, p_task_index integer)
+    RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_status text;
+    v_node_status text;
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_workflow_id IS NOT NULL AND p_task_index IS NOT NULL, 'the workflow id and task index must not be NULL'
+    );
+    SELECT w.status INTO v_status FROM horsies_workflows w WHERE w.id = p_workflow_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN NEXT horsies_workflow_outcome_row('NOT_FOUND', p_workflow_id, FALSE, NULL);
+        RETURN;
+    END IF;
+    IF v_status <> 'RUNNING' THEN
+        RETURN NEXT horsies_workflow_outcome_row('NOT_RUNNING', p_workflow_id, FALSE, v_status);
+        RETURN;
+    END IF;
+    SELECT n.status INTO v_node_status
+    FROM horsies_workflow_tasks n WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
+    IF v_node_status IS DISTINCT FROM 'PENDING' THEN
+        RETURN NEXT horsies_workflow_outcome_row('STALE', p_workflow_id, FALSE, v_node_status);
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_promote(p_workflow_id, NULL, ARRAY[p_task_index], NULL);
+    PERFORM horsies_workflow_try_complete(p_workflow_id);
+    SELECT n.status INTO v_node_status
+    FROM horsies_workflow_tasks n WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
+    RETURN NEXT horsies_workflow_outcome_row(
+        CASE WHEN v_node_status = 'PENDING' THEN 'WAITING' ELSE 'APPLIED' END, p_workflow_id, TRUE, v_node_status
+    );
+END;
+$$;
+
+-- Step function of recovery cases 1 and 1.5: READY nodes of a RUNNING workflow that have no work, a task node with
+-- no task (case 1) or a sub-workflow node with no child (case 1.5). In the caller's transaction (BEGIN; this; owed
+-- child starts; COMMIT).
+-- Steps: lock the workflow row FOR UPDATE; of p_task_indexes, the nodes that are still READY with no task (task
+-- node) or no child (sub-workflow node) move READY to ENQUEUED (horsies_workflow_promote: a task node gets its task
+-- row with its dependency results read from the stored node rows; a sub-workflow node owes a child start, or fails
+-- with SUBWORKFLOW_DEPTH_LIMIT_REACHED at depth 32); then the completion check (horsies_workflow_try_complete).
+-- Arguments: p_task_indexes, at least one index, no NULL and no repeat (22023).
+-- Dispositions: APPLIED (detail: the indexes moved, as a JSON array); STALE (none of the nodes is READY with no work;
+-- nothing written); NOT_RUNNING (detail: the workflow status; nothing written); NOT_FOUND.
+-- Lock order: workflow row, node rows, new task rows.
+-- Python: recovery cases 1 and 1.5 with enqueue_workflow_task and enqueue_subworkflow_task
+-- (core/workflows/recovery.py:762-902).
+-- Returns the OUTCOME row (advance_child_workflow_id when the step ended the workflow and it has a parent) and the
+-- owed CHILD_START and SOURCE rows.
+CREATE FUNCTION horsies_workflow_nodes_enqueue_ready(p_workflow_id uuid, p_task_indexes integer[])
+    RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_status text;
+    v_ready integer[];
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_workflow_id IS NOT NULL AND cardinality(p_task_indexes) >= 1
+        AND array_position(p_task_indexes, NULL) IS NULL
+        AND cardinality(p_task_indexes) = (SELECT count(DISTINCT i) FROM unnest(p_task_indexes) AS i),
+        'the workflow id must not be NULL, and the task indexes must be one or more distinct non-NULL values'
+    );
+    SELECT w.status INTO v_status FROM horsies_workflows w WHERE w.id = p_workflow_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN NEXT horsies_workflow_outcome_row('NOT_FOUND', p_workflow_id, FALSE, NULL);
+        RETURN;
+    END IF;
+    IF v_status <> 'RUNNING' THEN
+        RETURN NEXT horsies_workflow_outcome_row('NOT_RUNNING', p_workflow_id, FALSE, v_status);
+        RETURN;
+    END IF;
+    v_ready := ARRAY(
+        SELECT n.task_index
+        FROM horsies_workflow_tasks n
+        WHERE n.workflow_id = p_workflow_id
+          AND n.task_index = ANY(p_task_indexes)
+          AND n.status = 'READY'
+          AND ((NOT n.is_subworkflow AND n.task_id IS NULL) OR (n.is_subworkflow AND n.sub_workflow_id IS NULL))
+        ORDER BY n.task_index
+    );
+    IF cardinality(v_ready) = 0 THEN
+        RETURN NEXT horsies_workflow_outcome_row('STALE', p_workflow_id, FALSE, NULL);
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_promote(p_workflow_id, NULL, NULL, v_ready);
+    PERFORM horsies_workflow_try_complete(p_workflow_id);
+    RETURN NEXT horsies_workflow_outcome_row('APPLIED', p_workflow_id, TRUE, to_json(v_ready)::text);
+END;
+$$;
+
+-- One page of the audit of RUNNING workflows (recovery cases 2/3 and 4), in one statement in autocommit: Python's
+-- audit statement as a function. The cursor row of 'running_workflows' is taken FOR UPDATE SKIP LOCKED, and only
+-- when no live claim holds it. The page is the next p_max_rows RUNNING workflows in (created_at, id) order after the
+-- cursor, up to the cycle upper bound fixed when the cycle began (a workflow created later waits for the next
+-- cycle). Each is classified with two probes of the live-node index: completion candidates (nodes, none live) and
+-- orphan candidates (no node). The cursor advances (a short page or the upper bound ends the cycle); when the page
+-- has candidates, the cursor row carries the claim p_claim_token until p_claim_ttl_ms after the statement time, which
+-- fences a second reaper and this one once the claim expires.
+-- Arguments: p_max_rows 1..1000, p_claim_token, p_claim_ttl_ms 1..3,600,000 (22023 otherwise).
+-- Outcomes: PAGE (scanned_count, completion_ids and orphan_ids in page order, orphan_names, claim_token when the page
+-- has candidates, else NULL); CURSOR_HELD (another reaper holds the cursor row or its live claim; nothing written).
+-- Locks: the cursor row. Reads horsies_workflows through idx_horsies_workflows_running_recovery_scan and the nodes
+-- through idx_horsies_workflow_tasks_nonterminal and uq_horsies_workflow_task_index.
+-- Python: GLOBAL_WORKFLOW_AUDIT_SQL (core/workflows/recovery.py:341-494).
+CREATE FUNCTION horsies_workflow_recovery_audit_page(p_max_rows integer, p_claim_token uuid, p_claim_ttl_ms integer)
+    RETURNS TABLE (
+        outcome text, scanned_count bigint, completion_ids uuid[], orphan_ids uuid[], orphan_names text[],
+        claim_token uuid
+    )
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_page record;
+BEGIN
+    PERFORM horsies_workflow_require(p_max_rows BETWEEN 1 AND 1000, 'the page size must be 1 to 1000');
+    PERFORM horsies_workflow_require(p_claim_token IS NOT NULL, 'the claim token must not be NULL');
+    PERFORM horsies_workflow_require(
+        p_claim_ttl_ms BETWEEN 1 AND 3600000, 'the claim time to live must be 1 to 3,600,000 ms'
+    );
+    WITH cursor_row AS MATERIALIZED (
+        SELECT c.last_created_at, c.last_id, c.cycle_upper_created_at, c.cycle_upper_id
+        FROM horsies_recovery_scan_cursors c
+        WHERE c.scan_name = 'running_workflows'
+          AND (c.claim_token IS NULL OR c.claim_expires_at <= statement_timestamp())
+        FOR UPDATE SKIP LOCKED
+    ),
+    upper_bound AS MATERIALIZED (
+        SELECT coalesce(c.cycle_upper_created_at, latest.created_at) AS created_at,
+               coalesce(c.cycle_upper_id, latest.id) AS id
+        FROM cursor_row c
+        LEFT JOIN LATERAL (
+            SELECT w.created_at, w.id
+            FROM horsies_workflows w
+            WHERE c.cycle_upper_id IS NULL
+              AND w.status = 'RUNNING'
+            ORDER BY w.created_at DESC, w.id DESC
+            LIMIT 1
+        ) latest ON TRUE
+    ),
+    scanned AS MATERIALIZED (
+        SELECT page.created_at, page.id, page.name
+        FROM cursor_row c
+        CROSS JOIN upper_bound u
+        CROSS JOIN LATERAL (
+            SELECT bounded.created_at, bounded.id, bounded.name
+            FROM (
+                (
+                    SELECT w.created_at, w.id, w.name
+                    FROM horsies_workflows w
+                    WHERE c.last_id IS NULL
+                      AND w.status = 'RUNNING'
+                      AND u.id IS NOT NULL
+                      AND (w.created_at, w.id) <= (u.created_at, u.id)
+                    ORDER BY w.created_at, w.id
+                    LIMIT p_max_rows
+                )
+                UNION ALL
+                (
+                    SELECT w.created_at, w.id, w.name
+                    FROM horsies_workflows w
+                    WHERE c.last_id IS NOT NULL
+                      AND w.status = 'RUNNING'
+                      AND u.id IS NOT NULL
+                      AND (w.created_at, w.id) > (c.last_created_at, c.last_id)
+                      AND (w.created_at, w.id) <= (u.created_at, u.id)
+                    ORDER BY w.created_at, w.id
+                    LIMIT p_max_rows
+                )
+            ) bounded
+            ORDER BY bounded.created_at, bounded.id
+            LIMIT p_max_rows
+        ) page
+    ),
+    classified AS MATERIALIZED (
+        SELECT s.created_at, s.id, s.name,
+               nonterminal_task.found IS NOT NULL OR any_task.found IS NOT NULL AS has_tasks,
+               nonterminal_task.found IS NULL AS all_tasks_terminal
+        FROM scanned s
+        LEFT JOIN LATERAL (
+            SELECT TRUE AS found
+            FROM horsies_workflow_tasks wt
+            WHERE wt.workflow_id = s.id
+              AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
+            LIMIT 1
+        ) nonterminal_task ON TRUE
+        -- A live node already proves the workflow has nodes; the any-node probe runs only when the live probe found
+        -- none.
+        LEFT JOIN LATERAL (
+            SELECT TRUE AS found
+            FROM horsies_workflow_tasks wt
+            WHERE nonterminal_task.found IS NULL
+              AND wt.workflow_id = s.id
+            LIMIT 1
+        ) any_task ON TRUE
+    ),
+    summary AS MATERIALIZED (
+        SELECT count(*)::bigint AS scanned_count,
+               coalesce(array_agg(k.id ORDER BY k.created_at, k.id) FILTER (WHERE k.has_tasks AND k.all_tasks_terminal),
+                        ARRAY[]::uuid[]) AS completion_ids,
+               coalesce(array_agg(k.id ORDER BY k.created_at, k.id) FILTER (WHERE NOT k.has_tasks),
+                        ARRAY[]::uuid[]) AS orphan_ids,
+               coalesce(array_agg(k.name::text ORDER BY k.created_at, k.id) FILTER (WHERE NOT k.has_tasks),
+                        ARRAY[]::text[]) AS orphan_names
+        FROM classified k
+    ),
+    progress AS MATERIALIZED (
+        SELECT s.scanned_count,
+               last_row.created_at AS last_created_at,
+               last_row.id AS last_id,
+               s.scanned_count < p_max_rows OR (last_row.created_at, last_row.id) = (u.created_at, u.id)
+                   AS cycle_complete
+        FROM summary s
+        CROSS JOIN upper_bound u
+        LEFT JOIN LATERAL (
+            SELECT scanned.created_at, scanned.id
+            FROM scanned
+            ORDER BY scanned.created_at DESC, scanned.id DESC
+            LIMIT 1
+        ) last_row ON TRUE
+    ),
+    advance AS (
+        UPDATE horsies_recovery_scan_cursors c
+        SET last_created_at = CASE WHEN progress.cycle_complete THEN NULL ELSE progress.last_created_at END,
+            last_id = CASE WHEN progress.cycle_complete THEN NULL ELSE progress.last_id END,
+            cycle_upper_created_at = CASE WHEN progress.cycle_complete THEN NULL ELSE upper_bound.created_at END,
+            cycle_upper_id = CASE WHEN progress.cycle_complete THEN NULL ELSE upper_bound.id END,
+            claim_token = CASE
+                WHEN cardinality(summary.completion_ids) + cardinality(summary.orphan_ids) > 0 THEN p_claim_token
+            END,
+            claim_expires_at = CASE
+                WHEN cardinality(summary.completion_ids) + cardinality(summary.orphan_ids) > 0
+                    THEN statement_timestamp() + p_claim_ttl_ms * interval '1 millisecond'
+            END,
+            completed_cycles = c.completed_cycles + CASE WHEN progress.cycle_complete THEN 1 ELSE 0 END,
+            last_scan_rows = summary.scanned_count::integer,
+            last_candidate_rows = cardinality(summary.completion_ids) + cardinality(summary.orphan_ids),
+            last_scan_at = statement_timestamp()
+        FROM summary, progress, upper_bound
+        WHERE c.scan_name = 'running_workflows'
+          AND EXISTS (SELECT 1 FROM cursor_row)
+        RETURNING c.claim_token
+    )
+    SELECT summary.scanned_count, summary.completion_ids, summary.orphan_ids, summary.orphan_names,
+           (SELECT a.claim_token FROM advance a) AS claim_token
+    INTO v_page
+    FROM summary
+    WHERE EXISTS (SELECT 1 FROM advance);
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT 'CURSOR_HELD'::text, NULL::bigint, NULL::uuid[], NULL::uuid[], NULL::text[], NULL::uuid;
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT 'PAGE'::text, v_page.scanned_count, v_page.completion_ids, v_page.orphan_ids,
+        v_page.orphan_names, v_page.claim_token;
+END;
+$$;
+
+-- Internal: renews the audit page claim p_claim_token for p_claim_ttl_ms from the statement time. FALSE when the
+-- claim is gone (released, expired, or taken by another reaper): the caller then does nothing. The renewal and the
+-- candidate's work commit together, which fences an owner whose claim expired.
+-- Locks: the cursor row of 'running_workflows'. Python: RENEW_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL and
+-- LOCK_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL (core/workflows/recovery.py:496-513).
+CREATE FUNCTION horsies_workflow_audit_claim_renew(p_claim_token uuid, p_claim_ttl_ms integer) RETURNS boolean
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+BEGIN
+    PERFORM horsies_workflow_require(p_claim_token IS NOT NULL, 'the claim token must not be NULL');
+    PERFORM horsies_workflow_require(
+        p_claim_ttl_ms BETWEEN 1 AND 3600000, 'the claim time to live must be 1 to 3,600,000 ms'
+    );
+    UPDATE horsies_recovery_scan_cursors c
+    SET claim_expires_at = statement_timestamp() + p_claim_ttl_ms * interval '1 millisecond'
+    WHERE c.scan_name = 'running_workflows'
+      AND c.claim_token = p_claim_token
+      AND c.claim_expires_at > statement_timestamp();
+    RETURN FOUND;
+END;
+$$;
+
+-- Recovery cases 2/3: the completion of one candidate of an audit page, in one statement in autocommit. Steps: renew
+-- the page claim (horsies_workflow_audit_claim_renew; gone: AUDIT_CLAIM_LOST, nothing done); lock the workflow row
+-- FOR UPDATE; the completion check (horsies_workflow_try_complete: only a RUNNING workflow with no live node is
+-- finalized, with the success policy, the output and the error).
+-- Outcomes: COMPLETED or FAILED (this call finalized the workflow; advance_child_workflow_id is the workflow when it
+-- has a parent: the caller advances the parent node next, in its own transaction, as Python orders it);
+-- UNCHANGED (workflow_status: the observed status, NULL when the workflow is gone; a live node, or not RUNNING);
+-- AUDIT_CLAIM_LOST.
+-- Lock order: the cursor row, then the workflow row (no other holder of the cursor row waits for a workflow row).
+-- Python: _recover_global_completion_candidate (core/workflows/recovery.py:1115-1192).
+CREATE FUNCTION horsies_workflow_recover_completion(p_workflow_id uuid, p_claim_token uuid, p_claim_ttl_ms integer)
+    RETURNS TABLE (outcome text, workflow_status text, advance_child_workflow_id uuid)
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_written text;
+    v_workflow record;
+BEGIN
+    PERFORM horsies_workflow_require(p_workflow_id IS NOT NULL, 'the workflow id must not be NULL');
+    IF NOT horsies_workflow_audit_claim_renew(p_claim_token, p_claim_ttl_ms) THEN
+        RETURN QUERY SELECT 'AUDIT_CLAIM_LOST'::text, NULL::text, NULL::uuid;
+        RETURN;
+    END IF;
+    PERFORM 1 FROM horsies_workflows w WHERE w.id = p_workflow_id FOR UPDATE;
+    v_written := horsies_workflow_try_complete(p_workflow_id);
+    SELECT w.status, w.parent_workflow_id INTO v_workflow FROM horsies_workflows w WHERE w.id = p_workflow_id;
+    RETURN QUERY SELECT coalesce(v_written, 'UNCHANGED'), v_workflow.status::text,
+        CASE WHEN v_written IS NOT NULL AND v_workflow.parent_workflow_id IS NOT NULL THEN p_workflow_id END;
+END;
+$$;
+
+-- Recovery case 4: a RUNNING workflow with no node, from one audit page, in one statement in autocommit. With the
+-- one-statement start this state comes only from a write outside the core. Steps: renew the page claim (gone:
+-- AUDIT_CLAIM_LOST, nothing done); lock the workflow row FOR UPDATE; FAILED with p_error (the WORKFLOW_START_INCOMPLETE
+-- error object built by the core) and completed_at, only while it is RUNNING and still has no node.
+-- Outcomes: FAILED (advance_child_workflow_id is the workflow when it has a parent); UNCHANGED (workflow_status: the
+-- observed status, NULL when the workflow is gone; not RUNNING, or it has a node); AUDIT_CLAIM_LOST.
+-- Arguments: p_error must not be NULL (22023).
+-- Lock order: the cursor row, then the workflow row.
+-- Python: _recover_global_orphan_candidate with FAIL_ORPHANED_WORKFLOW_SQL (core/workflows/recovery.py:1194-1227,
+-- 522-530), which stored the non-catalog code E400.
+CREATE FUNCTION horsies_workflow_fail_orphaned(
+    p_workflow_id uuid, p_claim_token uuid, p_claim_ttl_ms integer, p_error text
+) RETURNS TABLE (outcome text, workflow_status text, advance_child_workflow_id uuid)
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_workflow record;
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_workflow_id IS NOT NULL AND p_error IS NOT NULL, 'the workflow id and error must not be NULL'
+    );
+    IF NOT horsies_workflow_audit_claim_renew(p_claim_token, p_claim_ttl_ms) THEN
+        RETURN QUERY SELECT 'AUDIT_CLAIM_LOST'::text, NULL::text, NULL::uuid;
+        RETURN;
+    END IF;
+    UPDATE horsies_workflows w
+    SET status = 'FAILED', error = p_error, completed_at = now(), updated_at = now()
+    WHERE w.id = p_workflow_id
+      AND w.status = 'RUNNING'
+      AND NOT EXISTS (SELECT 1 FROM horsies_workflow_tasks n WHERE n.workflow_id = w.id)
+    RETURNING w.status, w.parent_workflow_id INTO v_workflow;
+    IF FOUND THEN
+        RETURN QUERY SELECT 'FAILED'::text, 'FAILED'::text,
+            CASE WHEN v_workflow.parent_workflow_id IS NOT NULL THEN p_workflow_id END;
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT 'UNCHANGED'::text, (SELECT w.status::text FROM horsies_workflows w WHERE w.id = p_workflow_id),
+        NULL::uuid;
+END;
+$$;
+
+-- Counts one persistent raise of a workflow recovery candidate, in one statement in autocommit after the candidate's
+-- own transaction rolled back. A transient raise is not counted: the core does not call this for it.
+-- Steps:
+-- 1. Lock the workflow row FOR UPDATE (absent: WORKFLOW_ABSENT, nothing written). The row comes first, as in every
+--    statement that writes rows keyed by a workflow, so this cannot deadlock against the retention delete, which
+--    locks the workflow row and then cascades to the count row.
+-- 2. The count, once per pass: an upsert of horsies_workflow_recovery_failures that adds one only when last_pass_id
+--    is another pass (else ALREADY_COUNTED, nothing written). It stores the case, the node index and the error type.
+-- 3. Under p_limit: COUNTED.
+-- 4. At or over p_limit, in an inner block that rolls back alone (the count stays, as Python's two savepoints):
+--    the workflow is not RUNNING: REFUSED (a pause or a cancel won; a later pass after a resume tries again);
+--    else the limit writes of horsies_workflow_apply_recovery_limit with the WORKFLOW_RECOVERY_LIMIT_REACHED error,
+--    built here so it names the stored count: LIMIT_REACHED_FAILED (no live node: the workflow is FAILED) or
+--    LIMIT_REACHED_LIVE_NODES (the last live node ends it). A limit write that raises: LIMIT_WRITE_FAILED, with
+--    limit_write_error (SQLSTATE and message), and the count stays.
+-- The limit error: message 'Workflow recovery raised a persistent error in <n> passes. Last case: <case>. Last
+-- raise: <error type>: <detail>', data {"workflow_id", "case", "task_index", "failed_passes", "exception_type"}; the
+-- node of the raise stores the envelope, the workflow error column the err slot (Python's recovery_limit_error and
+-- recovery_limit_payloads).
+-- Arguments: p_pass_id (one value per reaper pass); p_case, one of the five stored cases, with p_task_index NULL
+-- exactly for terminal_workflow_running; p_error_type (1..255 characters) and p_error_detail (0..500 characters),
+-- cut and escaped by the core; p_limit 3..1000. Refused (22023).
+-- Lock order: workflow row, count row, then the limit writes (node rows).
+-- Python: record_recovery_raise with _count_recovery_raise and apply_recovery_limit
+-- (core/workflows/recovery_limit.py:203-223, 341-470).
+-- Returns one row (outcome, failed_passes: the count after this call, NULL when nothing was counted;
+-- limit_write_error).
+CREATE FUNCTION horsies_workflow_recovery_record_raise(
+    p_workflow_id uuid,
+    p_pass_id uuid,
+    p_case text,
+    p_task_index integer,
+    p_error_type text,
+    p_error_detail text,
+    p_limit integer
+) RETURNS TABLE (outcome text, failed_passes integer, limit_write_error text)
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+#variable_conflict use_column
+DECLARE
+    v_status text;
+    v_failed_passes integer;
+    v_node_result text;
+    v_outcome text;
+BEGIN
+    PERFORM horsies_workflow_require(
+        p_workflow_id IS NOT NULL AND p_pass_id IS NOT NULL, 'the workflow id and pass id must not be NULL'
+    );
+    PERFORM horsies_workflow_require(
+        p_case IN ('pending_terminal_deps', 'ready_not_enqueued', 'ready_subworkflow_not_started',
+                   'completed_child_parent_not_updated', 'terminal_workflow_running')
+        AND (p_case = 'terminal_workflow_running') = (p_task_index IS NULL)
+        AND (p_task_index IS NULL OR p_task_index >= 0),
+        'the case must be a counted recovery case, with a node index exactly when it names a node'
+    );
+    PERFORM horsies_workflow_require(
+        char_length(p_error_type) BETWEEN 1 AND 255 AND char_length(p_error_detail) BETWEEN 0 AND 500,
+        'the error type must be 1 to 255 characters and the detail 0 to 500'
+    );
+    PERFORM horsies_workflow_require(p_limit BETWEEN 3 AND 1000, 'the failure limit must be 3 to 1000');
+
+    SELECT w.status INTO v_status FROM horsies_workflows w WHERE w.id = p_workflow_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT 'WORKFLOW_ABSENT'::text, NULL::integer, NULL::text;
+        RETURN;
+    END IF;
+    INSERT INTO horsies_workflow_recovery_failures AS f (
+        workflow_id, failed_passes, last_pass_id, first_failed_at, last_failed_at, last_case, last_task_index,
+        last_error_type
+    ) VALUES (
+        p_workflow_id, 1, p_pass_id, statement_timestamp(), statement_timestamp(), p_case, p_task_index,
+        p_error_type
+    )
+    ON CONFLICT (workflow_id) DO UPDATE
+    SET failed_passes = f.failed_passes + 1,
+        last_pass_id = EXCLUDED.last_pass_id,
+        last_failed_at = EXCLUDED.last_failed_at,
+        last_case = EXCLUDED.last_case,
+        last_task_index = EXCLUDED.last_task_index,
+        last_error_type = EXCLUDED.last_error_type
+    WHERE f.last_pass_id <> EXCLUDED.last_pass_id
+    RETURNING f.failed_passes INTO v_failed_passes;
+    IF v_failed_passes IS NULL THEN
+        RETURN QUERY SELECT 'ALREADY_COUNTED'::text, NULL::integer, NULL::text;
+        RETURN;
+    END IF;
+    IF v_failed_passes < p_limit THEN
+        RETURN QUERY SELECT 'COUNTED'::text, v_failed_passes, NULL::text;
+        RETURN;
+    END IF;
+    IF v_status <> 'RUNNING' THEN
+        RETURN QUERY SELECT 'REFUSED'::text, v_failed_passes, NULL::text;
+        RETURN;
+    END IF;
+
+    v_node_result := horsies_task_error_envelope(
+        'WORKFLOW_RECOVERY_LIMIT_REACHED',
+        format('Workflow recovery raised a persistent error in %s passes. Last case: %s. Last raise: %s: %s',
+               v_failed_passes, p_case, p_error_type, p_error_detail),
+        '{"workflow_id":' || to_json(p_workflow_id::text)::text
+            || ',"case":' || to_json(p_case)::text
+            || ',"task_index":' || coalesce(p_task_index::text, 'null')
+            || ',"failed_passes":' || v_failed_passes
+            || ',"exception_type":' || to_json(p_error_type)::text || '}',
+        NULL, NULL
+    );
+    BEGIN
+        v_outcome := horsies_workflow_apply_recovery_limit(
+            p_workflow_id, p_task_index, (v_node_result::json -> 'err')::text, v_node_result
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN QUERY SELECT 'LIMIT_WRITE_FAILED'::text, v_failed_passes, SQLSTATE || ': ' || SQLERRM;
+            RETURN;
+    END;
+    RETURN QUERY SELECT v_outcome, v_failed_passes, NULL::text;
 END;
 $$;

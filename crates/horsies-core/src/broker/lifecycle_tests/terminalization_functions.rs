@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
-    FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
-use crate::broker::terminalization::{terminalize, terminalize_in_tx};
+use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, CallerHoldsRowLock, FailedAttemptOutcome, GuardEvidence,
@@ -44,8 +44,6 @@ fn fused_completion(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: r#"{"ok": 2}"#.to_owned(),
-        notify_channel: "task_queue_default".to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -217,7 +215,7 @@ mod applied_transitions {
         seed_node(&pool, workflow_id, Some(task_id), "RUNNING").await;
         record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
 
-        let outcome = finish_workflow_success(&pool, &workflow_success(task_id))
+        let outcome = write_workflow_success(&pool, &workflow_success(task_id))
             .await
             .expect("workflow success");
 
@@ -273,7 +271,7 @@ mod refusals {
         };
         assert_eq!(observed.status, Some(TaskStatus::Pending));
 
-        let outcome = finish_workflow_success(&pool, &workflow_success(workflow_task))
+        let outcome = write_workflow_success(&pool, &workflow_success(workflow_task))
             .await
             .expect("workflow success");
         let WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::LostClaim { observed, .. }) =
@@ -297,7 +295,6 @@ mod kind_vocabulary {
     /// on the history table: a typo cannot become history.
     #[tokio::test]
     #[serial]
-    #[ignore = "waits on #695"]
     async fn the_database_rejects_a_kind_outside_the_vocabulary() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -357,7 +354,7 @@ mod fail_locked {
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
 
-        let outcome = finish_failed_attempt(&pool, &running_failure(task_id, None))
+        let outcome = write_failed_attempt(&pool, &running_failure(task_id, None))
             .await
             .expect("finish failed attempt");
 
@@ -385,7 +382,7 @@ mod fail_locked {
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
 
-        let outcome = finish_failed_attempt(
+        let outcome = write_failed_attempt(
             &pool,
             &running_failure(task_id, Some("attempt two crashed")),
         )
@@ -419,7 +416,7 @@ mod fail_locked {
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         force_terminal(&pool, task_id, "FAILED", "FAIL_STALE").await;
 
-        let outcome = finish_failed_attempt(&pool, &running_failure(task_id, None))
+        let outcome = write_failed_attempt(&pool, &running_failure(task_id, None))
             .await
             .expect("finish failed attempt");
 
@@ -444,7 +441,7 @@ mod fail_locked {
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
         let before = live_row(&pool, task_id).await;
 
-        let outcome = finish_failed_attempt(&pool, &running_failure(task_id, None))
+        let outcome = write_failed_attempt(&pool, &running_failure(task_id, None))
             .await
             .expect("finish failed attempt");
 
@@ -471,7 +468,7 @@ mod fail_locked {
         let pool = pool().await;
         let task_id = Uuid::new_v4();
 
-        let outcome = finish_failed_attempt(&pool, &running_failure(task_id, None))
+        let outcome = write_failed_attempt(&pool, &running_failure(task_id, None))
             .await
             .expect("finish failed attempt");
 
@@ -1371,7 +1368,6 @@ mod abandon_owned_node {
     /// before any lock or write (differences ledger, row 3).
     #[tokio::test]
     #[serial]
-    #[ignore = "waits on #697"]
     async fn a_null_generation_is_refused() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1748,7 +1744,6 @@ mod id_keyed_workflow_batches {
     /// refused before any lock or write (differences ledger, row 3).
     #[tokio::test]
     #[serial]
-    #[ignore = "waits on #697"]
     async fn a_null_generation_is_refused() {
         let pool = pool().await;
         for function in ["horsies_abandon_owned_nodes", "horsies_cancel_owned_nodes"] {

@@ -80,7 +80,7 @@ from horsies.core.worker.profile_fit import (
 
 pytestmark = [pytest.mark.unit]
 
-_URL = 'postgresql+psycopg://user:pass@localhost/db'
+_URL = 'postgresql://user:pass@localhost/db'
 
 
 def _limited(count: int, mb: int) -> WorkerProfile:
@@ -842,7 +842,7 @@ class TestCheckLiveWorkerConnections:
             {'small': WorkerProfile(isolated=IsolatedChildren(count=1))},
             pgbouncer_transaction_mode=True,
             session_database_url=SecretStr(
-                'postgresql+psycopg://user:pass@localhost:5433/db',
+                'postgresql://user:pass@localhost:5433/db',
             ),
         )
         reader = mock.AsyncMock()

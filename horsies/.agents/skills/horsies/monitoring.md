@@ -32,7 +32,7 @@ api.mount(
 
 ```bash
 horsies web myapp.tasks:app                    # app path: full feature set
-horsies web --database-url "postgresql+psycopg://..."   # registry-less
+horsies web --database-url "postgresql://..."   # registry-less
 ```
 
 | Flag | Default | Notes |
@@ -103,7 +103,7 @@ error changes stored data. HTTP is the status of the web read routes.
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The database operation failed |
 | `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -112,13 +112,17 @@ task_facets(broker, *, window, statuses, retried_only)          # + error_catego
 task_breakdown(broker, *, window, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
 list_tasks(broker, *, window, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
 get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
-list_workflow_names(broker)
+list_workflow_names(broker)                             # at most 10,000 names; a cut is logged as a warning
 list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
 get_workflow_node(broker, workflow_id, task_index)
-list_schedules(broker)
+list_schedules(broker)                                  # next run, then name; at most 10,000; a cut is logged
 ```
 
+- `task_breakdown` groups: each `GroupRow.group` is `BreakdownValueGroup(value)`
+  or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (tasks no worker
+  claimed). A worker whose id is `'unknown'` is a value group of its own.
+  `Breakdown.total` is a `BreakdownCounts` over every group.
 - Filter lists: OR within a dimension, AND across dimensions; empty = no filter.
 - `error_categories` (`ErrorCategory`: OPERATIONAL / CONTRACT / RETRIEVAL /
   OUTCOME / DOMAIN) expands server-side from the library's own code registry —
@@ -175,18 +179,22 @@ list_schedules(broker)
 A task that reaches a terminal status leaves `horsies_tasks` for the
 `horsies_task_history` archive in the same transaction. Detail, result, and
 attempt-history reads resolve on **both** sides, so a moved task still
-answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
-READ snapshot, so the live read and the history read see the same rows.
+answers. `get_task_detail` and `get_workflow_node` each send one statement
+(`horsies_monitoring_task_detail`, `horsies_monitoring_workflow_node`), so
+the live read and the history read see the same rows.
 
 `TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
-404 for each reason.
+404 for each reason. `get_task_detail` derives it from the detached history
+leaves: a UUIDv7 id born before the latest upper bound of a detached leaf of a
+period class (plus 5 s) predates retained history; any other UUIDv7 id is
+within it.
 
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |
 |---|---|
-| `PREDATES_RETAINED_HISTORY` | The id's UUIDv7 birth is before the oldest retained history; retention can have removed the task |
-| `WITHIN_RETAINED_HISTORY` | Retained history covers the id's birth and has no row: the task did not exist, or its history partition was removed out of band |
-| `NOT_CLASSIFIED` | The id is not a UUIDv7, no attached history partition has a birth, or the database has no staged history read |
+| `PREDATES_RETAINED_HISTORY` | The id's UUIDv7 birth is before the end of the latest history period that retention removed (plus 5 s); retention can have removed the task |
+| `WITHIN_RETAINED_HISTORY` | The id's UUIDv7 birth is later: the task did not exist, or its history partition was removed out of band |
+| `NOT_CLASSIFIED` | The id is not a UUIDv7, or the database has no staged history read |
 
 List and aggregate reads are **window-scoped** and take a
 `MonitoringWindow`. Only `resolve_monitoring_window(since=..., until=...)`
@@ -201,6 +209,11 @@ bounds is a defect and raises `AssertionError`.
 `TaskListPage.total` follows a stated contract: **exact when any filter is
 active, a planner estimate on the unfiltered view.** Do not present an
 unfiltered total as an exact count.
+
+`list_tasks` orders by the sort key in the database collation (NULL keys
+last in both directions), then a live task before an ended task with the
+same value, then the task id ascending. The order is total, so a page does
+not reorder between polls.
 
 ## Task Actions — `cancel_task`
 
@@ -230,12 +243,13 @@ cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, 
 | `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id, or the id is not a UUID; nothing changed |
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
-| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The transaction failed: it rolled back, or at the commit the commit outcome is unknown. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
 | `EVENT_LOOP_LIMIT` | `TaskActionEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `HistoryContractError` or `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: a history row that does not decode, for example a history status that is not a `TaskStatus` member, or a cancel outcome row that does not decode; nothing changed |
+| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
 `cancel_task` raises `RuntimeError` when the cancel outcome contradicts the
-row lock that the call holds. That is a defect, not an outcome.
+cancel function (a lost claim, or no observed status). That is a defect, not
+an outcome.
 
 ## Live Updates
 
@@ -281,6 +295,7 @@ from horsies.monitoring import (
     # Response models (unstable pre-1.0)
     TaskSummary, TaskListPage, TaskDetail, LeafTaskInfo, TaskAttemptInfo,
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
+    BreakdownCounts, BreakdownGroup, BreakdownValueGroup, BreakdownUnclaimedGroup,
     WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
     WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
     ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
