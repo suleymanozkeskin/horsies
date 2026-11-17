@@ -705,6 +705,8 @@ pub(crate) async fn recover_stuck_workflow_tree(
     .map_err(|failure| failure.error)
 }
 
+/// Each case future is boxed: each holds its candidate steps and the parent advances, and inline,
+/// a debug build needs more than a 2 MiB thread stack for one pass.
 async fn recover_stuck_workflows_in_scope(
     broker: &PostgresBroker,
     registry: &WorkflowSpecRegistry,
@@ -723,25 +725,37 @@ async fn recover_stuck_workflows_in_scope(
         failure_policy,
     };
 
-    if let Err(error) = recover_case0(&pass, &mut report).await {
+    if let Err(error) = Box::pin(recover_case0(&pass, &mut report)).await {
         return Err(RecoveryPassFailure { report, error });
     }
-    if let Err(error) = recover_ready_nodes(&pass, ReadyCase::TaskNode, &mut report).await {
+    if let Err(error) = Box::pin(recover_ready_nodes(&pass, ReadyCase::TaskNode, &mut report)).await
+    {
         return Err(RecoveryPassFailure { report, error });
     }
-    if let Err(error) = recover_ready_nodes(&pass, ReadyCase::SubWorkflowNode, &mut report).await {
+    if let Err(error) = Box::pin(recover_ready_nodes(
+        &pass,
+        ReadyCase::SubWorkflowNode,
+        &mut report,
+    ))
+    .await
+    {
         return Err(RecoveryPassFailure { report, error });
     }
-    if let Err(error) = recover_case1_6(&pass, &mut report).await {
+    if let Err(error) = Box::pin(recover_case1_6(&pass, &mut report)).await {
         return Err(RecoveryPassFailure { report, error });
     }
     let end_states = match scope {
         RecoveryScope::Global { max_rows } => {
-            recover_global_workflow_end_states(&pass, max_rows, &mut report).await
+            Box::pin(recover_global_workflow_end_states(
+                &pass,
+                max_rows,
+                &mut report,
+            ))
+            .await
         }
         RecoveryScope::WorkflowTree(ids) => {
-            match recover_tree_case2_3(&pass, ids, &mut report).await {
-                Ok(()) => recover_tree_case4(&pass, ids, &mut report).await,
+            match Box::pin(recover_tree_case2_3(&pass, ids, &mut report)).await {
+                Ok(()) => Box::pin(recover_tree_case4(&pass, ids, &mut report)).await,
                 Err(error) => Err(error),
             }
         }
@@ -2137,6 +2151,8 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
+        // A node input is a JSON object text: the task row minted at ENQUEUED
+        // refuses any other (horsies_workflow_task_input).
         for (task_index, dependencies) in [(0_i32, vec![]), (1_i32, vec![2_i32])] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
@@ -2144,7 +2160,7 @@ mod cap_tests {
                     priority, dependencies, allow_failed_deps, join_type, status,
                     is_subworkflow, created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    'NONE', $1, $2, $3, $4, $5, 'null', 'default', 100, $6, FALSE, 'all', 'PENDING',
+                    'NONE', $1, $2, $3, $4, $5, '{}', 'default', 100, $6, FALSE, 'all', 'PENDING',
                     FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -2164,7 +2180,7 @@ mod cap_tests {
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                'NONE', $1, $2, 2, 'blocker', 'p7_case0_blocker', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 2, 'blocker', 'p7_case0_blocker', '{}', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )

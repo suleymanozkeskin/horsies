@@ -37,7 +37,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const UNREACHABLE_BOUND: Duration = Duration::from_secs(30);
 /// Python's bound of one start attempt: the pool wait (30 s), the statements
 /// (10 s) and the end of a cancelled write (10 s)
-/// (`horsies/core/worker/shared_lifecycle.py`, `RUNNING_ATTEMPT_TIMEOUT_S`
+/// (`python/horsies/core/worker/shared_lifecycle.py`, `RUNNING_ATTEMPT_TIMEOUT_S`
 /// and `CANCELLED_WRITE_END_S`).
 const START_ATTEMPT_BOUND: Duration = Duration::from_secs(50);
 /// Python's bound of the finalizing marker (10 s) and the end of its
