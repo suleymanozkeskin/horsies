@@ -15,20 +15,17 @@ import asyncio
 import json
 import uuid
 from typing import Any, get_args
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.exc import OperationalError
 
 import horsies._core as core
-from horsies.core.brokers.resources import EventLoopLimit, ListenerDisabled
+from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, RetrievalCode
 from horsies.core.models.workflow.enums import WorkflowStatus
-from horsies.core.models.workflow.handle import (
-    GET_WORKFLOW_STATUS_SQL,
-    WorkflowHandle,
-)
+from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
     HandleDbOperationFailed,
@@ -47,11 +44,6 @@ from horsies.web.routes.actions import (
     RESUME_RECOVERY_WARNING,
     _handle_failed,
     build_router,
-)
-from tests.broker_resources_support import (
-    attach_resources,
-    fake_resources,
-    resources_of,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -153,48 +145,28 @@ class TestVariantCatalog:
 # =============================================================================
 
 
-def _status_row(status: str) -> MagicMock:
-    row = MagicMock()
-    row.status = status
-    return row
+def _core_record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a record of ``horsies._core``: a class pattern matches it."""
+    record = MagicMock(spec=record_class)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
 
 
-def _handle_with_session(session: AsyncMock) -> WorkflowHandle[Any]:
-    session.info = {}
-    session.commit = AsyncMock()
-    cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(return_value=session)
-    cm.__aexit__ = AsyncMock(return_value=False)
+def _handle_answering(method: str, answer: object) -> WorkflowHandle[Any]:
+    """A handle whose core handle answers ``method`` with ``answer``."""
     broker = MagicMock()
-    attach_resources(
-        broker,
-        fake_resources(
-            session_factory=MagicMock(return_value=cm),
-            listener=ListenerDisabled(),
-        ),
-    )
+    setattr(broker._core_handle, method, AsyncMock(return_value=answer))
     return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
-
-
-def _status_session(stored_status: str) -> AsyncMock:
-    """A session whose workflow status read returns ``stored_status``."""
-    status_result = MagicMock()
-    status_result.fetchone.return_value = _status_row(stored_status)
-
-    def execute(statement: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
-        if statement is GET_WORKFLOW_STATUS_SQL:
-            return status_result
-        return MagicMock()
-
-    session = AsyncMock()
-    session.execute = AsyncMock(side_effect=execute)
-    return session
 
 
 class TestStoredWorkflowStatus:
     @pytest.mark.asyncio
     async def test_a_known_status_parses(self) -> None:
-        handle = _handle_with_session(_status_session('RUNNING'))
+        handle = _handle_answering(
+            'workflow_status_async',
+            _core_record(core.WorkflowStatusRead, status='RUNNING'),
+        )
 
         result = await handle.status_async()
 
@@ -203,14 +175,22 @@ class TestStoredWorkflowStatus:
 
     @pytest.mark.asyncio
     async def test_an_unknown_status_is_stored_data_invalid(self) -> None:
-        handle = _handle_with_session(_status_session(UNKNOWN_STATUS))
+        handle = _handle_answering(
+            'workflow_status_async',
+            _core_record(
+                core.HandleFailed,
+                code='STORED_DATA_INVALID',
+                message=f'invalid workflow status: {UNKNOWN_STATUS}',
+                retryable=False,
+            ),
+        )
 
         result = await handle.status_async()
 
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, HandleStoredDataInvalid)
-        assert isinstance(err.exception, ValueError)
+        assert isinstance(err.exception, CoreOperationFailed)
         assert err.workflow_id == WORKFLOW_ID
         assert UNKNOWN_STATUS in err.message
 
@@ -312,28 +292,25 @@ class TestCancelOutcome:
 # =============================================================================
 
 
-def _status_read_failures() -> list[tuple[Any, object]]:
-    """Each variant that ``_status`` can return, with its folded code."""
-    message = 'status read failed'
+def _wait_failures() -> list[tuple[Any, object]]:
+    """Each failure record of the core wait, with its folded code."""
     return [
+        (_core_record(core.WorkflowAbsent), RetrievalCode.WORKFLOW_NOT_FOUND),
         (
-            HandleWorkflowNotFound(message=message, workflow_id=WORKFLOW_ID),
-            RetrievalCode.WORKFLOW_NOT_FOUND,
-        ),
-        (
-            HandleDbOperationFailed(
-                message=message,
+            _core_record(
+                core.HandleFailed,
+                code='DB_OPERATION_FAILED',
+                message=CAUSE_MARKER,
                 retryable=True,
-                workflow_id=WORKFLOW_ID,
-                exception=_db_error(),
             ),
             OperationalErrorCode.BROKER_ERROR,
         ),
         (
-            HandleStoredDataInvalid(
-                message=message,
-                workflow_id=WORKFLOW_ID,
-                exception=ValueError(UNKNOWN_STATUS),
+            _core_record(
+                core.HandleFailed,
+                code='STORED_DATA_INVALID',
+                message=CAUSE_MARKER,
+                retryable=False,
             ),
             OperationalErrorCode.BROKER_ERROR,
         ),
@@ -341,28 +318,18 @@ def _status_read_failures() -> list[tuple[Any, object]]:
 
 
 @pytest.mark.parametrize(
-    ('status_error', 'folded_code'),
-    _status_read_failures(),
-    ids=lambda value: type(value).__name__,
+    ('answer', 'folded_code'),
+    _wait_failures(),
+    ids=['absent', 'db_operation_failed', 'stored_data_invalid'],
 )
-def test_get_folds_each_status_read_failure(
-    status_error: Any, folded_code: object,
-) -> None:
-    broker = MagicMock()
-    attach_resources(broker, fake_resources(listener=ListenerDisabled()))
-    handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=WORKFLOW_ID, broker=broker,
-    )
+def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
+    handle = _handle_answering('wait_workflow_result_async', answer)
 
-    with patch.object(
-        handle, '_status', AsyncMock(return_value=Err(status_error)),
-    ):
-        result = asyncio.run(handle.get_async(timeout_ms=0))
+    result = asyncio.run(handle.get_async(timeout_ms=0))
 
     assert result.is_err()
     task_error = result.unwrap_err()
     assert task_error.error_code is folded_code
-    assert task_error.message == 'status read failed'
 
 
 # =============================================================================
@@ -371,27 +338,27 @@ def test_get_folds_each_status_read_failure(
 
 
 def _task_row(summary: str) -> MagicMock:
-    row = MagicMock()
-    row.node_id = 'parent:0'
-    row.task_index = 0
-    row.task_name = 'child_wf'
-    row.status = 'COMPLETED'
-    row.result = None
-    row.started_at = None
-    row.completed_at = None
-    row.sub_workflow_id = 'child-id'
-    row.sub_workflow_summary = summary
-    row.is_subworkflow = True
-    row.sub_definition_key = None
-    return row
+    return _core_record(
+        core.StoredNodeRecord,
+        node_id='parent:0',
+        task_index=0,
+        task_name='child_wf',
+        status='COMPLETED',
+        result_json=None,
+        started_at=None,
+        completed_at=None,
+        sub_workflow_id=uuid.UUID('00000000-0000-0000-0000-0000000000c1'),
+        sub_workflow_summary_json=summary,
+        is_subworkflow=True,
+        sub_definition_key=None,
+    )
 
 
 def _tasks_handle(summary: str) -> WorkflowHandle[Any]:
-    tasks_result = MagicMock()
-    tasks_result.fetchall.return_value = [_task_row(summary)]
-    session = AsyncMock()
-    session.execute = AsyncMock(return_value=tasks_result)
-    return _handle_with_session(session)
+    return _handle_answering(
+        'workflow_nodes_async',
+        _core_record(core.WorkflowNodesRead, nodes=[_task_row(summary)]),
+    )
 
 
 class TestStoredSubworkflowSummary:
@@ -471,20 +438,16 @@ class TestStoredWorkflowResult:
         self,
     ) -> None:
         """Before, `RecursionError` left `get()`."""
-        row = MagicMock()
-        row.result = (
+        stored = (
             '{"__h_task_result__":true,"ok":'
             + '[' * 1_100 + ']' * 1_100
             + ',"err":null}'
         )
-        read = MagicMock()
-        read.fetchone.return_value = row
-        session = AsyncMock()
-        session.execute = AsyncMock(return_value=read)
-        handle = _handle_with_session(session)
+        broker = MagicMock()
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
         handle.out_type = int
 
-        result = await handle._get_result(await resources_of(handle.broker))
+        result = handle._completed_result(stored)
 
         assert result.err is not None
         assert (

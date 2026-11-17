@@ -71,8 +71,6 @@ impl StopSignal {
 /// not start), the exception of a signal handler (raised after the run
 /// ended), `PanicException` (the run panicked), `CoreStopped`, and the error
 /// of the outcome conversion.
-// The first caller is the worker run.
-#[allow(dead_code)]
 pub fn run_blocking<T, F>(
     py: Python<'_>,
     core: &'static Core,
@@ -151,7 +149,7 @@ where
 
 /// Refuse a run off the main thread: signal handlers run only there, so the
 /// run could not be stopped by a signal.
-fn refuse_off_main_thread(py: Python<'_>, subject: &'static str) -> PyResult<()> {
+pub(crate) fn refuse_off_main_thread(py: Python<'_>, subject: &'static str) -> PyResult<()> {
     let threading = py.import("threading")?;
     let current = threading.call_method0("current_thread")?;
     let main = threading.call_method0("main_thread")?;

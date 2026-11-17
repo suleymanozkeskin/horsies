@@ -161,9 +161,6 @@ impl Core {
     }
 
     /// The callback thread of this process, started at the first callback.
-    // The first callers are the build callback of `build_with` and the
-    // worker's `on_started`; until they exist, only the tests submit.
-    #[allow(dead_code)]
     pub fn callbacks(&self) -> &CallbackThreadSlot {
         &self.callbacks
     }

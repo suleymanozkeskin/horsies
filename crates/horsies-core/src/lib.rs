@@ -142,6 +142,10 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
+pub use crate::worker::run_end::{
+    run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,
+};
 pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
@@ -149,13 +153,14 @@ pub use crate::worker::{
         spawn_scheduler, ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted,
         SchedulerStop, SchedulerTickError,
     },
-    worker::Worker,
+    worker::{OnStarted, Worker, WorkerStop},
     WorkerError,
 };
 
 // worker state snapshot values
 pub use crate::broker::{
-    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    checked_history_limit, worker_history_limit_refused, ClassBudget, ClassBudgets,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
@@ -192,7 +197,10 @@ pub use crate::workflow_engine::engine::{
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
-pub use crate::workflow_engine::query::get_workflow_result;
+pub use crate::workflow_engine::query::{
+    get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
+    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
+};
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::start::{retry_start, start_workflow, start_workflow_with_retry};
 

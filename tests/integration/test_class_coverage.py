@@ -37,10 +37,6 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.brokers.class_coverage_reads import (
-    _PENDING_HEADS_SQL,
-    _PENDING_STREAMS_SQL,
-)
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.cli import execution_settings
@@ -67,6 +63,10 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.slots import SlotPool
 from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.dualrun.reference.class_coverage_reads import (
+    _PENDING_HEADS_SQL,  # pyright: ignore[reportPrivateUsage]
+    _PENDING_STREAMS_SQL,  # pyright: ignore[reportPrivateUsage]
+)
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -599,6 +599,11 @@ async def _plan(session: AsyncSession, statement: Any, params: dict[str, Any]) -
 @pytest.mark.usefixtures('empty_fleet')
 class TestClassReadsUseTheClaimIndex:
     """Both skip scans probe horsies_tasks_claim_pending.
+
+    The statements are Python's reads before the monitoring switch, the
+    dual-run reference (``tests/dualrun/reference/class_coverage_reads.py``).
+    The core's statements have their own plan test
+    (``crates/horsies-core/src/broker/class_coverage_read_tests.rs``).
 
     20,000 PENDING rows over 4 queues, 3 classes and 100 priorities, so the
     planner picks on its own, without ``enable_seqscan = off``.

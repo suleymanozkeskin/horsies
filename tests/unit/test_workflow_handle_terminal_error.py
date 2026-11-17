@@ -1,11 +1,11 @@
-"""``get()`` of a workflow whose status reads as terminal.
+"""``get()`` of a workflow whose wait ends in a terminal status.
 
-``get_async`` reads the status, and for a terminal status it reads the
-stored result (``COMPLETED``) or the stored error (``FAILED``,
-``CANCELLED``, ``EXPIRED``) in a second statement. The second read uses the
-status of the first read: a terminal status does not change. Retention can
-delete the row between the two reads; that is ``WORKFLOW_NOT_FOUND``, not a
-guessed status and not a success.
+The core reads the status, the stored result and the stored error in one
+statement (``CoreHandle.wait_workflow_result_async``) and answers with the
+stored text: ``WorkflowCompletedRead`` for ``COMPLETED``, ``WorkflowEndedRead``
+for ``FAILED``, ``CANCELLED`` and ``EXPIRED``. The handle decodes the text.
+The row cannot change between a status read and a result read: there is one
+read.
 """
 
 from __future__ import annotations
@@ -16,20 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.brokers.resources import ListenerDisabled
+import horsies._core as core
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
-    RetrievalCode,
 )
 from horsies.core.models.workflow.enums import WorkflowStatus
-from horsies.core.models.workflow.handle import (
-    GET_WORKFLOW_ERROR_SQL,
-    GET_WORKFLOW_RESULT_SQL,
-    GET_WORKFLOW_STATUS_SQL,
-    WorkflowHandle,
-)
-from tests.broker_resources_support import attach_resources, fake_resources
+from horsies.core.models.workflow.handle import WorkflowHandle
 
 pytestmark = [pytest.mark.unit]
 
@@ -42,58 +35,21 @@ TERMINAL_ERROR_STATUSES = [
     WorkflowStatus.EXPIRED,
 ]
 
-TERMINAL_STATUSES = [WorkflowStatus.COMPLETED, *TERMINAL_ERROR_STATUSES]
-
 
 def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
-    """A handle whose status read gives ``status`` and whose second read
-    (the result read for ``COMPLETED``, else the error read) gives
-    ``error_row`` (``None`` is a missing row)."""
-    status_result = MagicMock()
-    status_result.fetchone.return_value = SimpleNamespace(status=status.value)
-    second_result = MagicMock()
-    second_result.fetchone.return_value = error_row
-    second_statement = (
-        GET_WORKFLOW_RESULT_SQL
-        if status is WorkflowStatus.COMPLETED
-        else GET_WORKFLOW_ERROR_SQL
-    )
-
-    def execute(statement: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
-        if statement is GET_WORKFLOW_STATUS_SQL:
-            return status_result
-        if statement is second_statement:
-            return second_result
-        raise AssertionError(f'unexpected statement: {statement}')
-
-    session = AsyncMock()
-    session.execute = AsyncMock(side_effect=execute)
-    context = AsyncMock()
-    context.__aenter__ = AsyncMock(return_value=session)
-    context.__aexit__ = AsyncMock(return_value=False)
+    """A handle whose core wait ends with ``status`` and the stored text of
+    ``error_row`` (``result`` for ``COMPLETED``, else ``error``)."""
+    match status:
+        case WorkflowStatus.COMPLETED:
+            record = MagicMock(spec=core.WorkflowCompletedRead)
+            record.result_json = error_row.result
+        case _:
+            record = MagicMock(spec=core.WorkflowEndedRead)
+            record.status = status.value
+            record.error_json = error_row.error
     broker = MagicMock()
-    attach_resources(
-        broker,
-        fake_resources(
-            session_factory=MagicMock(return_value=context),
-            listener=ListenerDisabled(),
-        ),
-    )
+    broker._core_handle.wait_workflow_result_async = AsyncMock(return_value=record)
     return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
-
-
-class TestRowRemovedAfterTheStatusRead:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize('status', TERMINAL_STATUSES, ids=str)
-    async def test_it_is_workflow_not_found(self, status: WorkflowStatus) -> None:
-        handle = _handle(status, error_row=None)
-
-        result = await handle.get_async(timeout_ms=0)
-
-        error = result.unwrap_err()
-        assert error.error_code is RetrievalCode.WORKFLOW_NOT_FOUND
-        assert WORKFLOW_ID in (error.message or '')
-        assert status.value in (error.message or '')
 
 
 class TestNoStoredError:

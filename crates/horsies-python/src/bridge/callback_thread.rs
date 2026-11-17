@@ -318,9 +318,6 @@ impl CallbackThreadSlot {
 
     /// Submit `call` and wait for its outcome. Failure exits: those of
     /// [`Self::submit`] and of [`CallbackReply::outcome`].
-    // The first callers are the build callback of `build_with` and the
-    // worker's `on_started`; until they exist, only the tests call it.
-    #[allow(dead_code)]
     pub fn call<T: Send + 'static>(
         &self,
         subject: String,

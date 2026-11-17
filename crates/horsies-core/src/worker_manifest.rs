@@ -683,12 +683,22 @@ impl WorkerManifest {
     /// of the resolved worker pool with no overflow and the worker pre-ping
     /// (`PostgresConfig::worker_process_config`). Pure.
     pub fn worker_process_config(&self, selected: &SelectedProfile) -> PostgresConfig {
+        self.app_broker_config(selected)
+            .worker_process_config(NonZeroU32::from(selected.profile.resolved_parent_pool()))
+    }
+
+    /// The broker config of the app's connection settings, with the
+    /// resolved worker pool of `selected` and no overflow, and the pre-ping
+    /// of every pool but the worker's (`PostgresConfig.pool_pre_ping`). The
+    /// children's connection settings and the runner heartbeat pool read it.
+    /// Pure.
+    pub fn app_broker_config(&self, selected: &SelectedProfile) -> PostgresConfig {
         let database = &self.database;
         let session_database_url = match &database.session_database {
             SessionDatabase::SameAsDatabaseUrl => None,
             SessionDatabase::Separate { url } => Some(url.expose().to_owned()),
         };
-        let app_config = PostgresConfig {
+        PostgresConfig {
             database_url: database.database_url.expose().to_owned(),
             session_database_url,
             pgbouncer_transaction_mode: database.pgbouncer_transaction_mode,
@@ -703,8 +713,7 @@ impl WorkerManifest {
             echo: database.echo,
             tcp_keepalives: database.tcp_keepalives,
             tcp_user_timeout: database.tcp_user_timeout,
-        };
-        app_config.worker_process_config(NonZeroU32::from(selected.profile.resolved_parent_pool()))
+        }
     }
 }
 
@@ -870,4 +879,4 @@ impl WorkerProfileManifest {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
