@@ -2671,8 +2671,23 @@ class PythonProgram:
 
 
 @final
+class ChildPool:
+    """The connection pool of a child: min_size connections kept open, at most max_size; check
+    pings each pooled connection at checkout.
+    """
+    @property
+    def min_size(self) -> int: ...
+    @property
+    def max_size(self) -> int: ...
+    @property
+    def check(self) -> bool: ...
+
+
+@final
 class IsolatedChildKind:
     """An isolated child: one task at a time."""
+    @property
+    def pool(self) -> ChildPool: ...
     @property
     def task_send_pool(self) -> int: ...
 
@@ -2682,6 +2697,8 @@ class SharedAsyncChildKind:
     """A shared async child: up to seats async tasks on one event loop."""
     @property
     def seats(self) -> int: ...
+    @property
+    def pool(self) -> ChildPool: ...
     @property
     def executor_threads(self) -> int: ...
     @property
@@ -2693,6 +2710,8 @@ class SharedThreadChildKind:
     """A shared thread child: up to seats blocking tasks, each on a thread."""
     @property
     def seats(self) -> int: ...
+    @property
+    def pool(self) -> ChildPool: ...
     @property
     def task_send_pool(self) -> int: ...
 

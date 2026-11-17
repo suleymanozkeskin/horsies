@@ -152,6 +152,7 @@ assert frame.process_name == 'horsies-child-1'
 kind = frame.child_kind
 assert isinstance(kind, core.SharedAsyncChildKind), kind
 assert (kind.seats, kind.executor_threads, kind.task_send_pool) == (4, 3, 1)
+assert (kind.pool.min_size, kind.pool.max_size, kind.pool.check) == (0, 2, False)
 assert not hasattr(frame, 'database_url')
 ",
             &[("meta", meta), ("body", body)],

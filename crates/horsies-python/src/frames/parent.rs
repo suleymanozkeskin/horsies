@@ -9,9 +9,9 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::frame_protocol::{
-    ChildKind, ChildLogLevel, ChildProgram, InitFrame, IsolatedWork, MalformedFrame, ParentFrame,
-    ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame, SharedRunFrame, SharedWork,
-    StoredOptionsRefusal, PROTOCOL_VERSION,
+    ChildKind, ChildLogLevel, ChildPool, ChildProgram, InitFrame, IsolatedWork, MalformedFrame,
+    ParentFrame, ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame, SharedRunFrame,
+    SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
 };
 use horsies_core::OrphanSelfHeal;
 use pyo3::prelude::*;
@@ -29,9 +29,19 @@ pub struct PythonProgram {
     parent_argv: Vec<String>,
 }
 
+/// The connection pool of a child: `min_size` connections kept open, at
+/// most `max_size`; `check` pings each pooled connection at checkout.
+#[pyclass(module = "horsies._core", name = "ChildPool", frozen, get_all)]
+pub struct ChildPoolRecord {
+    min_size: u64,
+    max_size: u64,
+    check: bool,
+}
+
 /// An isolated child: one task at a time.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 pub struct IsolatedChildKind {
+    pool: Py<ChildPoolRecord>,
     task_send_pool: u64,
 }
 
@@ -39,6 +49,7 @@ pub struct IsolatedChildKind {
 #[pyclass(module = "horsies._core", frozen, get_all)]
 pub struct SharedAsyncChildKind {
     seats: u64,
+    pool: Py<ChildPoolRecord>,
     executor_threads: u64,
     task_send_pool: u64,
 }
@@ -47,6 +58,7 @@ pub struct SharedAsyncChildKind {
 #[pyclass(module = "horsies._core", frozen, get_all)]
 pub struct SharedThreadChildKind {
     seats: u64,
+    pool: Py<ChildPoolRecord>,
     task_send_pool: u64,
 }
 
@@ -220,20 +232,34 @@ fn program_object(py: Python<'_>, program: &ChildProgram) -> PyResult<Py<PyAny>>
     }
 }
 
+fn pool_object(py: Python<'_>, pool: ChildPool) -> PyResult<Py<ChildPoolRecord>> {
+    Py::new(
+        py,
+        ChildPoolRecord {
+            min_size: pool.min_size.get(),
+            max_size: pool.max_size.get(),
+            check: pool.check,
+        },
+    )
+}
+
 fn child_kind_object(py: Python<'_>, kind: ChildKind) -> PyResult<Py<PyAny>> {
     match kind {
         ChildKind::Isolated(child) => IsolatedChildKind {
+            pool: pool_object(py, child.pool)?,
             task_send_pool: child.task_send_pool.get(),
         }
         .into_py_any(py),
         ChildKind::SharedAsync(child) => SharedAsyncChildKind {
             seats: child.seats.get(),
+            pool: pool_object(py, child.pool)?,
             executor_threads: child.executor_threads.get(),
             task_send_pool: child.task_send_pool.get(),
         }
         .into_py_any(py),
         ChildKind::SharedThread(child) => SharedThreadChildKind {
             seats: child.seats.get(),
+            pool: pool_object(py, child.pool)?,
             task_send_pool: child.task_send_pool.get(),
         }
         .into_py_any(py),
@@ -330,6 +356,7 @@ fn shared_run_object(py: Python<'_>, run: SharedRunFrame) -> PyResult<Py<PyAny>>
 /// Every class of this module, for the module registration.
 pub fn add_parent_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PythonProgram>()?;
+    module.add_class::<ChildPoolRecord>()?;
     module.add_class::<IsolatedChildKind>()?;
     module.add_class::<SharedAsyncChildKind>()?;
     module.add_class::<SharedThreadChildKind>()?;
