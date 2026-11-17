@@ -1,8 +1,8 @@
 //! Port of Python `tests/integration/test_task_history_terminalization_failure.py`.
 //!
-//! The Python file drives `horsies_fail_locked_task`, which leaves the core
-//! (differences ledger, row 5); the ports drive `horsies_finish_failed_attempt`,
-//! which writes the same kind. `TestStalenessGuard::test_absent_task_classifies_through_the_null_claim_path`
+//! The Python file and the ports drive `horsies_finish_failed_attempt` (kind
+//! `FAIL_RUNNING`) and `horsies_finish_stale_attempt` (kind `FAIL_STALE`).
+//! `TestStalenessGuard::test_absent_task_classifies_through_the_null_claim_path`
 //! is `terminalization_functions::fail_stale::a_task_that_does_not_exist`.
 
 use serial_test::serial;

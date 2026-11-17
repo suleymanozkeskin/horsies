@@ -1,12 +1,12 @@
 //! Port of Python `tests/integration/test_terminalization_functions.py`.
 //!
 //! The rows that a matrix test of `broker/terminalization_matrix.rs` already
-//! checks in full are not repeated here. The locked writers
-//! `horsies_complete_locked_task` and `horsies_fail_locked_task` leave the
-//! core (differences ledger, row 5); their rows run against the
-//! one-statement writers that keep their kinds: `horsies_finish_workflow_success`
-//! writes `COMPLETE_LOCKED`, `horsies_finish_failed_attempt` writes
-//! `FAIL_RUNNING`.
+//! checks in full are not repeated here. The Python file drives the interim
+//! writers; the rows run against the 0004 writers that keep their kinds:
+//! `horsies_finish_workflow_success` writes `COMPLETE_LOCKED`,
+//! `horsies_finish_failed_attempt` writes `FAIL_RUNNING`,
+//! `horsies_finish_stale_attempt` (with no retry) writes `FAIL_STALE` and
+//! `horsies_cancel_task` writes `CANCEL_ADMIN`.
 
 use chrono::Duration;
 use serial_test::serial;
@@ -20,11 +20,12 @@ use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
-    AttemptWriteRefusal, BatchSize, CallerHoldsRowLock, FailedAttemptOutcome, GuardEvidence,
-    OwnedClaim, OwnedClaimBatch, TerminalizationCommand, TerminalizationKind,
-    TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
+    AttemptWriteRefusal, BatchSize, FailedAttemptOutcome, GuardEvidence, OwnedClaim,
+    OwnedClaimBatch, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
+    WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
+use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const STALE_AFTER_MS: i32 = 60_000;
 const FINALIZING_STALE_AFTER_MS: i32 = 30_000;
@@ -73,9 +74,9 @@ fn running_failure(task_id: Uuid, failed_reason: Option<&str>) -> FinishFailedAt
     }
 }
 
-fn fail_stale(task_id: Uuid) -> TerminalizationCommand {
-    TerminalizationCommand::FailStaleTask {
-        task_id,
+/// The stale RUNNING failure with no retry (`horsies_finish_stale_attempt`).
+fn stale_failure() -> StaleFailure {
+    StaleFailure {
         stale_after_ms: STALE_AFTER_MS,
         finalizing_stale_after_ms: FINALIZING_STALE_AFTER_MS,
         result_json: r#"{"err": 2}"#.to_owned(),
@@ -483,6 +484,8 @@ mod fail_locked {
 }
 
 mod fail_stale {
+    //! Python `TestFailStale`, on `horsies_finish_stale_attempt` (kind
+    //! `FAIL_STALE`), with no retry.
     use super::*;
 
     /// Python `TestFailStale::test_fractional_second_threshold_is_not_truncated`:
@@ -504,15 +507,13 @@ mod fail_stale {
         .await
         .expect("age the start");
         insert_beat(&mut *transaction, task_id, BeatRole::Runner, 1.25).await;
-        let outcomes = terminalize_in_tx(
-            &mut transaction,
-            &TerminalizationCommand::FailStaleTask {
-                task_id,
+        let outcomes = terminal_writes::fail_stale_task(
+            transaction.as_mut(),
+            task_id,
+            &StaleFailure {
                 stale_after_ms: 1_500,
                 finalizing_stale_after_ms: 2_750,
-                result_json: r#"{"err": 2}"#.to_owned(),
-                error_code: "WORKER_CRASHED".to_owned(),
-                failed_reason: "Worker crashed".to_owned(),
+                ..stale_failure()
             },
         )
         .await
@@ -547,7 +548,7 @@ mod fail_stale {
         set_started(&pool, task_id, Since::SecondsAgo(STALE_AFTER_SECONDS * 2.0)).await;
         beat(&pool, task_id, BeatRole::Claimer, 1.0).await;
 
-        let outcomes = terminalize(&pool, &fail_stale(task_id))
+        let outcomes = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("fail stale");
 
@@ -573,7 +574,7 @@ mod fail_stale {
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         set_started(&pool, task_id, Since::Never).await;
 
-        let outcomes = terminalize(&pool, &fail_stale(task_id))
+        let outcomes = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("fail stale");
 
@@ -604,7 +605,7 @@ mod fail_stale {
         set_started(&pool, task_id, Since::SecondsAgo(STALE_AFTER_SECONDS * 2.0)).await;
         set_finalizing(&pool, task_id, Since::SecondsAgo(1.0)).await;
 
-        let outcomes = terminalize(&pool, &fail_stale(task_id))
+        let outcomes = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("fail stale");
 
@@ -635,7 +636,7 @@ mod fail_stale {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         set_started(&pool, task_id, Since::SecondsAgo(STALE_AFTER_SECONDS * 2.0)).await;
-        let first = terminalize(&pool, &fail_stale(task_id))
+        let first = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("fail stale");
         assert!(
@@ -643,7 +644,7 @@ mod fail_stale {
             "{first:?}"
         );
 
-        let replay = terminalize(&pool, &fail_stale(task_id))
+        let replay = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("replay");
 
@@ -668,7 +669,7 @@ mod fail_stale {
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         force_terminal(&pool, task_id, "FAILED", "FAIL_RUNNING").await;
 
-        let outcomes = terminalize(&pool, &fail_stale(task_id))
+        let outcomes = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("fail stale");
 
@@ -691,7 +692,7 @@ mod fail_stale {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
 
-        let outcomes = terminalize(&pool, &fail_stale(task_id))
+        let outcomes = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await
             .expect("fail stale");
 
@@ -711,7 +712,7 @@ mod fail_stale {
     #[serial]
     async fn a_task_that_does_not_exist() {
         let pool = pool().await;
-        let outcomes = terminalize(&pool, &fail_stale(Uuid::new_v4()))
+        let outcomes = terminal_writes::fail_stale_task(&pool, Uuid::new_v4(), &stale_failure())
             .await
             .expect("fail stale");
         assert!(
@@ -944,14 +945,6 @@ fn expire_pending(batch_size: i32) -> TerminalizationCommand {
     }
 }
 
-fn cancel_locked(task_id: Uuid) -> TerminalizationCommand {
-    TerminalizationCommand::CancelLockedTask {
-        task_id,
-        fence: CallerHoldsRowLock,
-        permitted_source_statuses: vec![TaskStatus::Pending, TaskStatus::Claimed],
-    }
-}
-
 fn cancel_owned_orphan(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
     TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
 }
@@ -1072,16 +1065,18 @@ mod expire_pending_tasks {
     }
 }
 
-mod cancel_locked_task {
+mod cancel_task {
+    //! Python `TestCancelTask`, on `horsies_cancel_task` (kind
+    //! `CANCEL_ADMIN`), with no RUNNING opt-in.
     use super::*;
 
-    /// Python `TestCancelLockedTask::test_replay_is_already_applied`.
+    /// Python `TestCancelTask::test_replay_is_already_applied`.
     #[tokio::test]
     #[serial]
     async fn replay_is_already_applied() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
-        let first = terminalize(&pool, &cancel_locked(task_id))
+        let first = terminal_writes::cancel_live_task(&pool, task_id, false)
             .await
             .expect("cancel");
         assert!(
@@ -1089,7 +1084,7 @@ mod cancel_locked_task {
             "{first:?}"
         );
 
-        let replay = terminalize(&pool, &cancel_locked(task_id))
+        let replay = terminal_writes::cancel_live_task(&pool, task_id, false)
             .await
             .expect("replay");
 
@@ -1106,12 +1101,12 @@ mod cancel_locked_task {
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
-    /// Python `TestCancelLockedTask::test_absence_is_an_outcome`.
+    /// Python `TestCancelTask::test_absence_is_an_outcome`.
     #[tokio::test]
     #[serial]
     async fn absence_is_an_outcome() {
         let pool = pool().await;
-        let outcomes = terminalize(&pool, &cancel_locked(Uuid::new_v4()))
+        let outcomes = terminal_writes::cancel_live_task(&pool, Uuid::new_v4(), false)
             .await
             .expect("cancel");
         assert!(

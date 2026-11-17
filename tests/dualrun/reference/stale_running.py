@@ -7,7 +7,8 @@ task advisory lock, ``SELECT_STALE_TASK_FOR_UPDATE_SQL``, the retry decision
 from the locked row, then either ``UPSERT_TASK_ATTEMPT_SQL`` and
 ``SCHEDULE_STALE_TASK_RETRY_SQL`` (commit, then the ``retry:<id>`` wake), or
 ``UPSERT_TASK_ATTEMPT_SQL`` and ``horsies_fail_stale_task`` (commit only when
-applied).
+applied). The baseline no longer defines ``horsies_fail_stale_task``:
+``interim_terminal_writes.py`` installs its record on the reference database.
 """
 
 from __future__ import annotations

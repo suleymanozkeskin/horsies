@@ -39,10 +39,8 @@ async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[st
         'retry.limit.task',
         task_id=str(uuid.uuid4()),
         send_kind=SendKind.FIRST,
-        enqueue_sha='c' * 64,
         sent_at=datetime.now(timezone.utc),
-        args_json='[]',
-        kwargs_json='{}',
+        input_json='{}',
         task_options=task_options,
     )
 

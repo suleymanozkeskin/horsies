@@ -1,10 +1,15 @@
-"""Every way a task can be moved to a terminal status, as fifteen commands.
+"""The ways the client ends a task, as thirteen commands.
 
-Sixteen statements in the runtime package terminalize tasks. They are fifteen
-operations, not sixteen: two failure writers agree on fence, cardinality,
-coupled write, target status and guards, and differ only in whether they carry
-a failure reason. Everything else differs in at least one of those five, and
-so needs its own contract.
+Sixteen writer contracts terminalize tasks. They are fifteen operations, not
+sixteen: two failure writers agree on fence, cardinality, coupled write, target
+status and guards, and differ only in whether they carry a failure reason.
+Everything else differs in at least one of those five, and so needs its own
+contract. Two of the fifteen have no command here: the administrative cancel
+(``horsies_cancel_task``, which the core runs) and the stale RUNNING recovery
+(``horsies_finish_stale_attempt``, which ``core/brokers/stale_running.py``
+sends). ``CompleteLockedTask`` and
+``FailLockedTask`` are finalize decisions that the attempt writers execute
+(``horsies_finish_workflow_success``, ``horsies_finish_failed_attempt``).
 
 The count is not the point and compression was never the goal. What this
 vocabulary buys is that states which cannot occur cannot be written down: a
@@ -15,7 +20,7 @@ exactly the data its guard needs and nothing that could contradict it.
 
 Payload obeys the same rule and is per-variant. A variant carries a result, an
 error code, or a failure reason only where its statement takes that value from
-the caller; nine of the fifteen own those values as literals — a workflow pause
+the caller; eight of the thirteen own those values as literals — a workflow pause
 always writes the same reason — so those variants carry none, and cannot be
 handed a payload the database would silently ignore.
 
@@ -33,7 +38,6 @@ from dataclasses import dataclass
 
 from ..types.status import TaskStatus
 from .fences import (
-    CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
     PriorLockedRead,
@@ -103,24 +107,6 @@ class FailLockedTask:
     failed_reason: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class FailStaleTask:
-    """Failure for a task whose runner stopped reporting.
-
-    Cross-worker by design: the guard is staleness, not ownership, because the
-    worker that held this task is by hypothesis not answering. Retry policy is
-    evaluated before this command is built — a task that will be retried is
-    never terminalized.
-    """
-
-    task_id: str
-    stale_after_ms: int
-    finalizing_stale_after_ms: int
-    result_json: str
-    error_code: str
-    failed_reason: str
-
-
 def _require_positive_batch_size(batch_size: int) -> None:
     """A discovery batch's bound is load-bearing, so it must actually bound.
 
@@ -172,26 +158,6 @@ class ExpirePendingTasks:
 
     def __post_init__(self) -> None:
         _require_positive_batch_size(self.batch_size)
-
-
-# ---------------------------------------------------------------------------
-# CANCELLED — administrative
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class CancelLockedTask:
-    """Operator cancellation of a plain task, under the caller's row lock.
-
-    The permitted source statuses are the operator's choice — whether a task
-    already running may be cancelled is a decision the caller makes, and the
-    command carries it explicitly rather than leaving it implicit in a
-    caller-supplied predicate.
-    """
-
-    task_id: str
-    fence: CallerHoldsRowLock
-    permitted_source_statuses: tuple[TaskStatus, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +267,8 @@ type TerminalizationCommand = (
     CompleteLockedTask
     | CompleteTaskFused
     | FailLockedTask
-    | FailStaleTask
     | ExpireOwnedClaim
     | ExpirePendingTasks
-    | CancelLockedTask
     | CancelOwnedOrphan
     | CancelOrphanedTasks
     | AbandonOwnedNode
@@ -321,13 +285,12 @@ def target_status(command: TerminalizationCommand) -> TaskStatus:
     match command:
         case CompleteLockedTask() | CompleteTaskFused():
             return TaskStatus.COMPLETED
-        case FailLockedTask() | FailStaleTask():
+        case FailLockedTask():
             return TaskStatus.FAILED
         case ExpireOwnedClaim() | ExpirePendingTasks():
             return TaskStatus.EXPIRED
         case (
-            CancelLockedTask()
-            | CancelOwnedOrphan()
+            CancelOwnedOrphan()
             | CancelOrphanedTasks()
             | AbandonOwnedNode()
             | AbandonOwnedNodes()
@@ -343,11 +306,11 @@ def fence_of(command: TerminalizationCommand) -> TerminalFence | None:
     """The command's claim-ownership guard, for outcome reporting.
 
     None means the statement carries no ownership predicate. Three kinds of
-    command have none, for three different reasons: stale recovery and batch
-    expiry act across workers because the owner is by hypothesis absent or
-    irrelevant; orphan sweeping acts on rows whose linkage, not their claim, is
-    the defect; and the workflow-scoped commands must reach claims other
-    workers hold, so an ownership predicate would skip their whole purpose.
+    command have none, for three different reasons: batch expiry acts across
+    workers because the owner is irrelevant; orphan sweeping acts on rows whose
+    linkage, not their claim, is the defect; and the workflow-scoped commands
+    must reach claims other workers hold, so an ownership predicate would skip
+    their whole purpose.
     """
     match command:
         case CompleteLockedTask(fence=fence) | FailLockedTask(fence=fence):
@@ -356,8 +319,6 @@ def fence_of(command: TerminalizationCommand) -> TerminalFence | None:
             return fence
         case ExpireOwnedClaim(fence=fence):
             return fence
-        case CancelLockedTask(fence=fence):
-            return fence
         case CancelOwnedOrphan(fence=fence):
             return fence
         case AbandonOwnedNode(fence=fence) | CancelOwnedNode(fence=fence):
@@ -365,8 +326,7 @@ def fence_of(command: TerminalizationCommand) -> TerminalFence | None:
         case AbandonOwnedNodes(fence=fence) | CancelOwnedNodes(fence=fence):
             return fence
         case (
-            FailStaleTask()
-            | ExpirePendingTasks()
+            ExpirePendingTasks()
             | CancelOrphanedTasks()
             | AbandonNodesOfPausedWorkflows()
             | CancelNodesOfCancelledWorkflow()

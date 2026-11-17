@@ -33,7 +33,6 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.integration.conftest import finish_task
 
 pytestmark = [pytest.mark.integration]
@@ -163,26 +162,13 @@ class TestSendPaths:
     ) -> None:
         options = json.dumps({'execution': 'PARALLEL'})
         sent_at = datetime.now(timezone.utc)
-        sha = enqueue_fingerprint(
-            task_name='exec_store_raw',
-            queue_name='default',
-            priority=100,
-            args_json='[]',
-            kwargs_json='{}',
-            sent_at=sent_at,
-            good_until=None,
-            enqueue_delay_seconds=None,
-            task_options=options,
-        )
         task_id = str(uuid.uuid4())
 
         outcome = await broker.enqueue_async(
             'exec_store_raw',
             task_id=task_id,
             send_kind=SendKind.FIRST,
-            enqueue_sha=sha,
-            args_json='[]',
-            kwargs_json='{}',
+            input_json='{}',
             sent_at=sent_at,
             task_options=options,
         )

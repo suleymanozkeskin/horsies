@@ -6,8 +6,7 @@ selection. It is the claim-ownership predicate layered on top.
 
 Which fence a transition needs follows from where it runs, not from preference:
 
-- a caller that already locked and read the row needs no predicate in the write;
-- a caller whose generation fence lives in that preceding locked read carries
+- a caller whose generation fence lives in a preceding locked read carries
   only the worker in the write itself;
 - a caller acting on a deadline needs the worker but not the generation, since
   the outcome is correct for whichever generation holds an expired row;
@@ -30,15 +29,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-
-
-@dataclass(frozen=True, slots=True)
-class CallerHoldsRowLock:
-    """No predicate in the statement; the caller locked the row first.
-
-    The decision was made against a locked read, so re-checking ownership in
-    the write would guard nothing already established.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +99,7 @@ class OwnedClaimBatch:
 
 
 type TerminalFence = (
-    CallerHoldsRowLock
-    | PriorLockedRead
+    PriorLockedRead
     | WorkerOwned
     | OwnedClaim
     | OwnedClaimBatch

@@ -29,10 +29,10 @@ HEARTBEATS_PARTITIONED_DDL = baseline_table('horsies_heartbeats')
 
 
 def failure_family_fragments() -> list[str]:
-    """The baseline failure functions: the locked and the stale failure."""
+    """The baseline failure functions: the failed and the stale attempt."""
     return [
-        baseline_function('horsies_fail_locked_task'),
-        baseline_function('horsies_fail_stale_task'),
+        baseline_function('horsies_finish_failed_attempt'),
+        baseline_function('horsies_finish_stale_attempt'),
     ]
 
 HOUR = datetime(2026, 8, 7, 13, 0, tzinfo=timezone.utc)
@@ -166,7 +166,7 @@ class TestStaleProbeRecencyBound:
         stale_fragment = next(
             fragment
             for fragment in failure_family_fragments()
-            if 'horsies_fail_stale_task' in fragment
+            if 'horsies_finish_stale_attempt' in fragment
             and 'CREATE FUNCTION' in fragment
         )
         probe = stale_fragment.index("h.role = 'runner'")
@@ -180,7 +180,7 @@ class TestStaleProbeRecencyBound:
         stale_fragment = next(
             fragment
             for fragment in failure_family_fragments()
-            if 'horsies_fail_stale_task' in fragment
+            if 'horsies_finish_stale_attempt' in fragment
             and 'CREATE FUNCTION' in fragment
         )
         capture = stale_fragment.index('ORDER BY h.sent_at DESC')

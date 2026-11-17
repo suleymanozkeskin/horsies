@@ -117,6 +117,15 @@ The shared async child holds the deadline of each of its tasks. It starts the de
 
 A task that returns a value after its deadline fired still fails with `TASK_TIMEOUT`. A task that returns before its deadline keeps what it returned, also when work that it started is still alive then: see [A Return That Leaves Work](#a-return-that-leaves-work). The other tasks of the child continue in every case. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
+The `data` of the `TASK_TIMEOUT` error has `task_id` and `timeout_ms`. When the child reports the end of the attempt, `data` also has `cancel_end`, which tells how the attempt ended:
+
+| `cancel_end` | The attempt |
+| ------------ | ----------- |
+| `RETURNED_AFTER_SIGNAL` | ended within G after the cancel at T: the child sent no second cancel |
+| `DROPPED_AFTER_GRACE` | was still alive at T + G: the child sent the second cancel (step 3) |
+
+When the worker kills the child of the task, `data` has no `cancel_end`.
+
 The finalizing marker of a task is written when its attempt ends, never before: after its coroutine and the work that it started. Only a task that returned before its deadline, and whose work ended within the grace, gets it; the child reports the end after the marker, and waits for it at most until the deadline of the task. The marker stops the runner heartbeats of the row and gives the worker `finalizing_stale_threshold_ms` to write the outcome before stale recovery. A task that timed out, or whose work needed a cancel, gets no marker: the child reports its end at once, and the heartbeats of the worker cover the row until the worker reads that end. So the heartbeats of a row never stop while work of its attempt still runs, and the marker never uses the cancel grace or changes the outcome of a task.
 
 Library work that a task causes counts as the work of that task. For example, when a cancel closes a connection of an asyncpg pool, the pool starts a refill task in the context of the task, and the attempt ends when that refill task ends. Work that an `on_shared_async_child_start` hook started is not the work of any task.

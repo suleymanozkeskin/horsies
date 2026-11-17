@@ -19,7 +19,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.types.result import Err, Ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -40,18 +39,7 @@ async def send(
         TASK_NAME,
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=enqueue_fingerprint(
-            task_name=TASK_NAME,
-            queue_name='default',
-            priority=100,
-            args_json=None,
-            kwargs_json=KWARGS_JSON,
-            sent_at=sent_at,
-            good_until=None,
-            enqueue_delay_seconds=None,
-            task_options=None,
-        ),
-        kwargs_json=KWARGS_JSON,
+        input_json=KWARGS_JSON,
         sent_at=sent_at,
         idempotency_key=idempotency_key,
     )

@@ -1,12 +1,8 @@
-"""Deterministic hashing and ID functions for idempotent enqueue.
-
-Both the broker and the scheduler import from this module.
-"""
+"""The deterministic task id of a schedule slot."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Final
@@ -17,66 +13,6 @@ from typing import Final
 _SLOT_ID_DOMAIN: Final = b'horsies.schedule_slot.v1'
 _UNIX_EPOCH: Final = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_SLOT_MICROSECONDS: Final = (1 << 48) * 1000
-
-
-def _canon_dt(dt: datetime) -> str:
-    """Canonical UTC string for hashing. Normalizes to UTC offset +00:00.
-
-    Guarantees the same instant always produces the same string regardless
-    of the original tzinfo representation (datetime.timezone.utc,
-    zoneinfo.ZoneInfo('UTC'), psycopg/asyncpg-returned tzinfo, etc.).
-
-    Raises ValueError if dt is naive (tzinfo is None). Naive datetimes are
-    ambiguous — we cannot know which instant they represent, so hashing
-    them would produce silently wrong results.
-    """
-    if dt.tzinfo is None:
-        raise ValueError(
-            f'_canon_dt requires timezone-aware datetime, got naive: {dt!r}',
-        )
-    utc = dt.astimezone(timezone.utc)
-    return utc.strftime('%Y-%m-%dT%H:%M:%S.%f+00:00')
-
-
-def enqueue_fingerprint(
-    task_name: str,
-    queue_name: str,
-    priority: int,
-    args_json: str | None,
-    kwargs_json: str | None,
-    sent_at: datetime,
-    good_until: datetime | None,
-    enqueue_delay_seconds: int | None,
-    task_options: str | None,
-) -> str:
-    """Deterministic SHA-256 fingerprint for enqueue payload identity.
-
-    Computed once from Python values and carried in ``TaskSendPayload``.
-    The broker neither stores nor compares it: the exact-id resend check
-    compares the stored command fingerprint and ``sent_at``, which cover
-    every field hashed here.
-
-    The text keeps the default ``ensure_ascii=True``, so this call does not
-    use ``dumps_canonical_json``: unescaped text gives a different hash for
-    non-ASCII input, and a resend of a stored row would then mismatch.
-    """
-    canonical = json.dumps(
-        [
-            task_name,
-            queue_name,
-            priority,
-            args_json,
-            kwargs_json,
-            _canon_dt(sent_at),
-            _canon_dt(good_until) if good_until is not None else None,
-            enqueue_delay_seconds,
-            task_options,
-        ],
-        sort_keys=False,
-        separators=(',', ':'),
-        allow_nan=False,
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def schedule_slot_task_id(schedule_name: str, slot_time: datetime) -> uuid.UUID:

@@ -2,8 +2,9 @@
 
 Two properties matter and neither is visible by reading:
 
-- the union covers every structurally distinct writer and no more, so a new
-  writer forces a new variant and a redundant variant fails to justify itself;
+- the union covers every structurally distinct writer that a client command
+  executes and no more, so a new writer forces a new variant and a redundant
+  variant fails to justify itself;
 - dispatch over the union is exhaustive, which the type checker proves by
   rejecting a match that omits a variant, and these tests confirm at runtime.
 
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timedelta, timezone
-from typing import get_args
+from typing import Final, get_args
 
 import pytest
 
@@ -23,7 +24,6 @@ from horsies.core.lifecycle.commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
     AbandonOwnedNodes,
-    CancelLockedTask,
     CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
     CancelOwnedNode,
@@ -34,19 +34,16 @@ from horsies.core.lifecycle.commands import (
     ExpireOwnedClaim,
     ExpirePendingTasks,
     FailLockedTask,
-    FailStaleTask,
     TerminalizationCommand,
     fence_of,
     target_status,
 )
 from horsies.core.lifecycle.fences import (
-    CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
     PriorLockedRead,
     WorkerOwned,
 )
-from horsies.core.types.status import TaskStatus
 from tests.lifecycle_matrix import MATRIX
 
 pytestmark = [pytest.mark.unit]
@@ -75,14 +72,6 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
         error_code='TASK_EXCEPTION',
         failed_reason=None,
     ),
-    FailStaleTask(
-        task_id='t1',
-        stale_after_ms=60_000,
-        finalizing_stale_after_ms=60_000,
-        result_json=_RESULT,
-        error_code='WORKER_CRASHED',
-        failed_reason='Worker process crashed',
-    ),
     ExpireOwnedClaim(
         task_id='t1',
         fence=_WORKER,
@@ -91,11 +80,6 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
     ),
     ExpirePendingTasks(
         batch_size=100, result_json=_RESULT, error_code='TASK_EXPIRED',
-    ),
-    CancelLockedTask(
-        task_id='t1',
-        fence=CallerHoldsRowLock(),
-        permitted_source_statuses=(TaskStatus.PENDING, TaskStatus.CLAIMED),
     ),
     CancelOwnedOrphan(task_id='t1', fence=_OWNED),
     CancelOrphanedTasks(batch_size=100),
@@ -110,16 +94,25 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
 )
 
 
+WRITERS_WITHOUT_A_COMMAND: Final = frozenset({'T01', 'T13'})
+"""Writers whose function no client command executes: the administrative
+cancel (``horsies_cancel_task``, which the core runs) and the stale RUNNING
+recovery (``horsies_finish_stale_attempt``, which
+``core/brokers/stale_running.py`` sends)."""
+
+
 def _matrix_signature_count() -> int:
     return len({
         (row.fence, row.shape, row.coupled_write, row.target_status, row.guards)
         for row in MATRIX
+        if row.writer_id not in WRITERS_WITHOUT_A_COMMAND
     })
 
 
 class TestUnionMatchesTheWriters:
     def test_variant_count_equals_distinct_writer_signatures(self) -> None:
         """A new structurally distinct writer must force a new variant."""
+        assert WRITERS_WITHOUT_A_COMMAND <= {row.writer_id for row in MATRIX}
         variants = get_args(TerminalizationCommand.__value__)
         assert len(variants) == _matrix_signature_count(), (
             f'{len(variants)} command variants against '
@@ -218,8 +211,7 @@ class TestIllegalStatesAreUnrepresentable:
             # what it acts on
             'task_id', 'workflow_ids', 'batch_size',
             # what proves it may
-            'fence', 'permitted_source_statuses', 'accepts_requeued_pending',
-            'stale_after_ms', 'finalizing_stale_after_ms',
+            'fence', 'accepts_requeued_pending',
             # what it records
             'result_json', 'error_code', 'failed_reason',
             # what it wakes
@@ -302,7 +294,6 @@ class TestFenceCoverageMatchesTheWriters:
             for c in ONE_OF_EACH
         }
         expected = {
-            Fence.CALLER_ROW_LOCK: 'CallerHoldsRowLock',
             Fence.PRIOR_LOCKED_SELECT: 'PriorLockedRead',
             Fence.WORKER: 'WorkerOwned',
             Fence.WORKER_AND_GENERATION: 'OwnedClaim',

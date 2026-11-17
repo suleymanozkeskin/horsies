@@ -42,6 +42,7 @@ use crate::operations::monitoring_reads::{
     list_tasks_operation, task_detail_operation, task_facets_operation, TaskFacetsQuery,
     TaskListQuery,
 };
+use crate::operations::paused_expiry::expire_paused_workflows_operation;
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::result::{raw_result_record_operation, result_wait_bound};
@@ -712,6 +713,28 @@ impl CoreHandle {
                 batch_size,
                 budget_ms,
             ),
+        )
+    }
+
+    /// Expire the PAUSED workflows older than `older_than_us` microseconds,
+    /// at most `batch_size`, oldest first (`horsies_workflow_expire_paused`
+    /// per candidate): `PausedExpired` or `PausedExpiryFailed`. Writes; each
+    /// candidate commits alone. Awaitable only: its caller, the reaper, runs
+    /// on the worker's event loop. A batch size that does not fit in 32 bits
+    /// raises `OverflowError`.
+    fn expire_paused_workflows_async<'py>(
+        &self,
+        py: Python<'py>,
+        older_than_us: i64,
+        batch_size: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.expire_paused_workflows_async",
+            CallKind::Write,
+            expire_paused_workflows_operation(self.connection(), older_than_us, batch_size),
         )
     }
 

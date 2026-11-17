@@ -47,9 +47,13 @@ from horsies.core.worker.runtime import (
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
+    CancelEnd,
+    EndedByKill,
+    NoCancelSignal,
     RetryPlacement,
     ReturnedBeforeKill,
     TimedOutAtKill,
+    TimeoutCancel,
 )
 from horsies.core.worker.slots import SeatKilled, describe_exit
 
@@ -82,6 +86,7 @@ class SharedKillFinalizeMixin:
             timeout_ms: int,
             claim: DispatchClaim,
             retry: RetryPlacement,
+            cancel: TimeoutCancel,
         ) -> Result[None, _FinalizeError]: ...
         async def _recover_worker_future_failure(
             self,
@@ -183,14 +188,15 @@ class SharedKillFinalizeMixin:
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
         """Write ``TASK_TIMEOUT`` for a run that was past its deadline at the
-        kill of its child (``killed_by``). A refusal has no deadline:
-        ``AssertionError``."""
+        kill of its child (``killed_by``). An async run records
+        ``EndedByKill``, a thread run ``NoCancelSignal``. A refusal has no
+        deadline: ``AssertionError``."""
+        cancel: TimeoutCancel
         match work:
-            case (
-                SeatTask(timeout_ms=timeout_ms)
-                | ThreadSeatTask(timeout_ms=timeout_ms)
-            ):
-                pass
+            case SeatTask(timeout_ms=timeout_ms):
+                cancel = EndedByKill()
+            case ThreadSeatTask(timeout_ms=timeout_ms):
+                cancel = NoCancelSignal()
             case SeatRefusal():
                 raise AssertionError(
                     f'the refused task {task_id} was killed past a '
@@ -211,6 +217,7 @@ class SharedKillFinalizeMixin:
             timeout_ms,
             claim,
             retry,
+            cancel,
         )
 
     async def _fail_killed_run(
@@ -289,31 +296,34 @@ def timeout_retry_data(
     timeout_ms: int,
     retry: RetryPlacement,
     claim: DispatchClaim,
+    cancel: TimeoutCancel,
 ) -> dict[str, Any]:
     """The data of a timeout-stage error: the TASK_TIMEOUT write that its
     retry runs again, for an attempt of ``timeout_ms`` whose retry runs at
-    ``retry``. Pure."""
+    ``retry``, with the ``cancel`` that its error data records. Pure."""
     return {
         'timeout_ms': timeout_ms,
         'retry': retry.value,
         'claim': claim,
+        'cancel': cancel,
     }
 
 
 def timeout_retry_write(
     data: dict[str, Any] | None,
-) -> tuple[int, RetryPlacement, DispatchClaim]:
-    """The ``timeout_ms``, the retry placement and the claim of the dispatch
-    that ``timeout_retry_data`` kept. Data of another shape is a defect: only
-    ``timeout_retry_data`` builds the data of a timeout-stage error.
-    ``AssertionError``. Pure."""
+) -> tuple[int, RetryPlacement, DispatchClaim, TimeoutCancel]:
+    """The ``timeout_ms``, the retry placement, the claim of the dispatch and
+    the cancel record that ``timeout_retry_data`` kept. Data of another shape
+    is a defect: only ``timeout_retry_data`` builds the data of a
+    timeout-stage error. ``AssertionError``. Pure."""
     match data:
         case {
             'timeout_ms': int() as timeout_ms,
             'retry': str() as placement,
             'claim': DispatchClaim() as claim,
+            'cancel': NoCancelSignal() | CancelEnd() | EndedByKill() as cancel,
         }:
-            return timeout_ms, RetryPlacement(placement), claim
+            return timeout_ms, RetryPlacement(placement), claim, cancel
         case _:
             raise AssertionError(
                 f'the data of a timeout-stage error has no TASK_TIMEOUT write: {data!r}',

@@ -132,9 +132,9 @@ async def test_async_adapter_logs_its_decoded_outcome(
 ) -> None:
     connection = MagicMock()
     connection.execute = AsyncMock(return_value=_result_with_rows([_wire_row()]))
-    command = CompleteLockedTask(
+    command = CompleteTaskFused(
         task_id='one',
-        fence=PriorLockedRead(worker_id='worker'),
+        fence=OwnedClaim(worker_id='worker', claimed_at=_NOW),
         result_json='{"ok": 1}',
     )
 
@@ -155,9 +155,9 @@ def test_sync_adapter_logs_its_decoded_outcome(
     cursor = MagicMock()
     cursor.description = [SimpleNamespace(name=column) for column in row]
     cursor.fetchall.return_value = [tuple(row.values())]
-    command = CompleteLockedTask(
+    command = CompleteTaskFused(
         task_id='one',
-        fence=PriorLockedRead(worker_id='worker'),
+        fence=OwnedClaim(worker_id='worker', claimed_at=_NOW),
         result_json='{"ok": 1}',
     )
 
@@ -223,7 +223,7 @@ def test_refusal_log_contains_operation_fence_and_locked_observation(
 
     message = caplog.records[-1].getMessage()
     assert 'operation=CompleteLockedTask' in message
-    assert 'function=horsies_complete_locked_task' in message
+    assert 'function=horsies_finish_workflow_success' in message
     assert "worker_id='expected-worker'" in message
     assert "worker_id='actual-worker'" in message
     assert 'claimed_at=' in message

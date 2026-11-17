@@ -1,4 +1,8 @@
-//! Every way a task can be moved to a terminal status, as fifteen commands.
+//! The terminal transitions that run through `broker::terminalization`, as
+//! eleven commands. The success of a workflow task, a failed attempt, a stale
+//! RUNNING recovery and the administrative cancel have writers of their own
+//! (`broker::attempt_writes`, `broker::stale_recovery`,
+//! `broker::lifecycle_operations`).
 //!
 //! What this vocabulary buys is that states which cannot occur cannot be
 //! written down: a batch fence cannot be attached to a single-task command, a
@@ -20,9 +24,7 @@
 use crate::core::types::status::TaskStatus;
 use uuid::Uuid;
 
-use super::fences::{
-    CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead, TerminalFence, WorkerOwned,
-};
+use super::fences::{OwnedClaim, OwnedClaimBatch, TerminalFence, WorkerOwned};
 use super::LifecycleValidationError;
 
 /// A discovery batch's bound, validated at construction.
@@ -50,16 +52,6 @@ impl BatchSize {
 /// The typed vocabulary of terminal transitions. One variant per operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalizationCommand {
-    /// Success for a task whose row the caller already locked and read.
-    ///
-    /// The attempt row is written separately by the caller in the same
-    /// transaction, from the context that locked read produced.
-    CompleteLockedTask {
-        task_id: Uuid,
-        fence: PriorLockedRead,
-        result_json: String,
-    },
-
     /// Success as one statement: locks the row, writes the attempt from the
     /// locked row's own context, transitions, and wakes queue capacity — one
     /// round trip. The fence lives in the locking read ahead of the update,
@@ -70,37 +62,6 @@ pub enum TerminalizationCommand {
         task_id: Uuid,
         fence: OwnedClaim,
         result_json: String,
-    },
-
-    /// Failure for a task whose row the caller already locked and read.
-    ///
-    /// Covers both application failure and worker-level failure; they differ
-    /// only in whether a failure reason is carried. `failed_reason` is
-    /// assigned unconditionally: the terminal writer owns the complete
-    /// final-attempt summary, and `None` clears any value a requeued earlier
-    /// attempt left on the row. Per-attempt history lives in
-    /// `horsies_task_attempts`.
-    FailLockedTask {
-        task_id: Uuid,
-        fence: PriorLockedRead,
-        result_json: String,
-        error_code: Option<String>,
-        failed_reason: Option<String>,
-    },
-
-    /// Failure for a task whose runner stopped reporting.
-    ///
-    /// Cross-worker by design: the guard is staleness, not ownership, because
-    /// the worker that held this task is by hypothesis not answering. Retry
-    /// policy is evaluated before this command is built — a task that will be
-    /// retried is never terminalized.
-    FailStaleTask {
-        task_id: Uuid,
-        stale_after_ms: i32,
-        finalizing_stale_after_ms: i32,
-        result_json: String,
-        error_code: String,
-        failed_reason: String,
     },
 
     /// A claimed task whose deadline passed before user code started.
@@ -125,18 +86,6 @@ pub enum TerminalizationCommand {
         batch_size: BatchSize,
         result_json: String,
         error_code: String,
-    },
-
-    /// Operator cancellation of a plain task, under the caller's row lock.
-    ///
-    /// The permitted source statuses are the operator's choice — whether a
-    /// task already running may be cancelled is a decision the caller makes,
-    /// and the command carries it explicitly rather than leaving it implicit
-    /// in a caller-supplied predicate.
-    CancelLockedTask {
-        task_id: Uuid,
-        fence: CallerHoldsRowLock,
-        permitted_source_statuses: Vec<TaskStatus>,
     },
 
     /// One workflow task this worker holds that can never progress.
@@ -195,13 +144,9 @@ impl TerminalizationCommand {
     /// The status the command writes. Exhaustive over the enum.
     pub fn target_status(&self) -> TaskStatus {
         match self {
-            Self::CompleteLockedTask { .. } | Self::CompleteTaskFused { .. } => {
-                TaskStatus::Completed
-            }
-            Self::FailLockedTask { .. } | Self::FailStaleTask { .. } => TaskStatus::Failed,
+            Self::CompleteTaskFused { .. } => TaskStatus::Completed,
             Self::ExpireOwnedClaim { .. } | Self::ExpirePendingTasks { .. } => TaskStatus::Expired,
-            Self::CancelLockedTask { .. }
-            | Self::CancelOwnedOrphan { .. }
+            Self::CancelOwnedOrphan { .. }
             | Self::CancelOrphanedTasks { .. }
             | Self::AbandonOwnedNode { .. }
             | Self::AbandonOwnedNodes { .. }
@@ -215,28 +160,22 @@ impl TerminalizationCommand {
     /// The command's claim-ownership guard, for outcome reporting.
     ///
     /// `None` means the statement carries no ownership predicate. Three kinds
-    /// of command have none, for three different reasons: stale recovery and
-    /// batch expiry act across workers because the owner is by hypothesis
-    /// absent or irrelevant; orphan sweeping acts on rows whose linkage, not
-    /// their claim, is the defect; and the workflow-scoped commands must
-    /// reach claims other workers hold, so an ownership predicate would skip
-    /// their whole purpose.
+    /// of command have none, for three different reasons: batch expiry acts
+    /// across workers because the owner is irrelevant; orphan sweeping acts on
+    /// rows whose linkage, not their claim, is the defect; and the
+    /// workflow-scoped commands must reach claims other workers hold, so an
+    /// ownership predicate would skip their whole purpose.
     pub fn fence(&self) -> Option<TerminalFence<'_>> {
         match self {
-            Self::CompleteLockedTask { fence, .. } | Self::FailLockedTask { fence, .. } => {
-                Some(TerminalFence::PriorLockedRead(fence))
-            }
             Self::CompleteTaskFused { fence, .. } => Some(TerminalFence::OwnedClaim(fence)),
             Self::ExpireOwnedClaim { fence, .. } => Some(TerminalFence::WorkerOwned(fence)),
-            Self::CancelLockedTask { fence, .. } => Some(TerminalFence::CallerHoldsRowLock(fence)),
             Self::CancelOwnedOrphan { fence, .. }
             | Self::AbandonOwnedNode { fence, .. }
             | Self::CancelOwnedNode { fence, .. } => Some(TerminalFence::OwnedClaim(fence)),
             Self::AbandonOwnedNodes { fence } | Self::CancelOwnedNodes { fence } => {
                 Some(TerminalFence::OwnedClaimBatch(fence))
             }
-            Self::FailStaleTask { .. }
-            | Self::ExpirePendingTasks { .. }
+            Self::ExpirePendingTasks { .. }
             | Self::CancelOrphanedTasks { .. }
             | Self::AbandonNodesOfPausedWorkflows { .. }
             | Self::CancelNodesOfCancelledWorkflow { .. } => None,

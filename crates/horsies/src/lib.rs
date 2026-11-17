@@ -69,4 +69,11 @@ pub mod __private {
     pub const fn input_field<I, F>(name: &'static str) -> crate::InputField<I, F> {
         crate::InputField::raw(name)
     }
+
+    /// Whether `text` may be a user error code: not the name of a built-in
+    /// code and not a reserved name. `#[derive(UserErrorCode)]` asserts it
+    /// for each code at compile time.
+    pub const fn is_free_user_code(text: &str) -> bool {
+        crate::task::is_free_user_code(text)
+    }
 }
