@@ -239,12 +239,13 @@ jobs:
     outputs:
       run_rust: ${{ steps.decide.outputs.run_rust }}
       run_python: ${{ steps.decide.outputs.run_python }}
+      run_generated: ${{ steps.decide.outputs.run_generated }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Decide the Rust and Python jobs
+      - name: Decide the Rust, Python and generated-files jobs
         id: decide
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -254,14 +255,23 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "program/0.8.0" ]; then
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
             echo 'run_python=true' >> "$GITHUB_OUTPUT"
+            echo 'run_generated=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           base="$(git merge-base "$BASE_SHA" HEAD)"
-          # The Rust client builds on the core and the macros.
-          if git diff --quiet "$base" HEAD -- crates/horsies/ crates/horsies-core/ crates/horsies-macros/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+          # The rust job checks and tests every crate of the workspace.
+          if git diff --quiet "$base" HEAD -- crates/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
             echo 'run_rust=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+          fi
+          # The generator renders the catalogs and the stubs from horsies-core
+          # (which derives its catalogs with horsies-macros). A change to an
+          # input or to a committed output can make a committed file stale.
+          if git diff --quiet "$base" HEAD -- crates/horsies-core/ crates/horsies-macros/ crates/horsies-codegen/ python/horsies/_catalog/ python/horsies/_core.pyi Cargo.toml Cargo.lock rust-toolchain.toml; then
+            echo 'run_generated=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run_generated=true' >> "$GITHUB_OUTPUT"
           fi
           # horsies._core is built from crates/horsies-python, crates/horsies-core
           # and crates/horsies-macros with the root Cargo and toolchain files, so
@@ -289,10 +299,9 @@ jobs:
       - name: Check formatting of every crate, the core included
         run: cargo fmt --all --check
 
-  # The Rust client (crates/horsies), its macros and the examples. The
-  # end-to-end crates under rust/tests/ and the core's own tests are not run
-  # here: rust/tests/ moves to the client of the core with #1410, and the core
-  # jobs are turned on with #846.
+  # Every crate of the workspace. The check leaves out horsies-test-worker
+  # (rust/tests/worker/): its workflow tests still use the API of the old
+  # Rust client and move to the client of the core with #1410.
   rust:
     needs: scope
     if: needs.scope.outputs.run_rust == 'true'
@@ -325,8 +334,32 @@ jobs:
           rustup toolchain install
           rustc --version
 
+      # horsies-python enables PyO3's `abi3-py313` feature, so its build script
+      # needs a Python 3.13 interpreter; the runner's python3 is older.
+      # `cargo test -p horsies-python` links libpython (the `extension-module`
+      # feature is on only in the wheel build). This Python ships the shared
+      # library, and the action puts its folder on LD_LIBRARY_PATH.
+      - name: Install Python 3.13 for PyO3
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Point PyO3 at Python 3.13
+        env:
+          PYTHON_PATH: ${{ steps.python.outputs.python-path }}
+        run: echo "PYO3_PYTHON=$PYTHON_PATH" >> "$GITHUB_ENV"
+
       - name: Cache Cargo builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # Cargo unifies the features of the checked crates: horsies-python turns
+      # on the `web` feature of horsies-core here.
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets --exclude horsies-test-worker
+
+      - name: Check the core without the web feature
+        run: cargo check -p horsies-core --all-targets
 
       # Each feature of the client has code of its own: `cli` (the default)
       # holds horsies::cli::run and the shipped binary, `web` the axum mount,
@@ -354,6 +387,25 @@ jobs:
       - name: Test the macros
         run: cargo test -p horsies-macros
 
+      # The core's tests create one database per test, copied from a
+      # template that each test process installs, on the server of
+      # DATABASE_URL (crates/horsies-core/src/test_support/database.rs).
+      - name: Create the core test database
+        run: docker exec ${{ job.services.postgres.id }} createdb -U postgres horsies-core
+
+      # The `web` feature adds the monitoring handler and its tests; no core
+      # test needs the feature off.
+      - name: Test the core
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-core
+        run: cargo test -p horsies-core --features web
+
+      - name: Test the extension module crate
+        run: cargo test -p horsies-python
+
+      - name: Test the generator
+        run: cargo test -p horsies-codegen
+
       # Without `web`, `horsies web` refuses with its message; that test runs
       # only in this run.
       - name: Test the client with default features
@@ -366,6 +418,33 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
         run: cargo test -p horsies --features web,tokio-postgres,sqlx
+
+  # horsies-codegen renders the catalog modules under python/horsies/_catalog/
+  # and the stubs python/horsies/_core.pyi from horsies-core; the rendered
+  # files are committed. This job renders them again and fails when a
+  # committed file differs, is missing, or is a retired generated file. The
+  # fix is `cargo run -p horsies-codegen -- write python/horsies`.
+  generated-files:
+    needs: scope
+    if: needs.scope.outputs.run_generated == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check the generated Python files
+        run: cargo run -p horsies-codegen -- check python/horsies
 
   rust-showcase:
     needs: scope

@@ -12,10 +12,15 @@ on an empty baseline with one seeded workflow:
 - a tree under ``on_error`` pause: a task root, a sub-workflow root whose
   child build raises, and a later sub-workflow root whose child builds (the
   pause leaves it READY with no child);
-- two trees under ``on_error`` pause where the order of the roots decides
+- three trees under ``on_error`` pause where the order of the roots decides
   the rows: a root whose child builds before a root whose build raises (the
   child and the task row of its root go in, then the pause pauses them); two
-  roots whose builds raise (the second stays READY with no error);
+  roots whose builds raise (the second stays READY with no error); a root
+  whose child (``on_error`` fail) has one sub-workflow root whose build
+  raises, before a root whose child builds (the child ends FAILED, its
+  advance fails the first root and pauses the workflow; the second root
+  stays READY and its child is not written). The error of that workflow and
+  the result of its first node name the failed child in a message;
 - a spec with the id and the name of the seeded workflow, and a spec with
   its id and another name.
 
@@ -130,11 +135,32 @@ class BrokenChild(WorkflowDefinition[int]):
         raise RuntimeError('the child cannot be built')
 
 
+class FailingChild(WorkflowDefinition[int]):
+    """A child under ``on_error`` fail whose only root is a sub-workflow
+    whose child build raises: the child ends FAILED at the start."""
+
+    name = 'dualrun.start.failing'
+    definition_key = 'dualrun.start.failing.v1'
+
+    @classmethod
+    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
+        _ = (args, params)
+        _BUILDS[cls.definition_key] += 1
+        broken = SubWorkflowNode(workflow_def=BrokenChild)
+        return app.workflow(
+            cls.name,
+            [broken],
+            on_error=OnError.FAIL,
+            output=broken,
+            definition_key=cls.definition_key,
+        )
+
+
 @pytest.fixture(autouse=True)
 def registered_definitions() -> None:
     """The child definitions, registered again: other tests clear the
     definition registry."""
-    for definition in (BuiltChild, BrokenChild):
+    for definition in (BuiltChild, BrokenChild, FailingChild):
         register_workflow_definition(definition)
 
 
@@ -190,6 +216,17 @@ def _broken_twice_tree() -> WorkflowSpec[Any]:
     )
 
 
+def _failed_child_tree() -> WorkflowSpec[Any]:
+    failing = SubWorkflowNode(workflow_def=FailingChild)
+    built = SubWorkflowNode(workflow_def=BuiltChild)
+    return APP.workflow(
+        'dualrun.start.failed_child',
+        [failing, built],
+        on_error=OnError.PAUSE,
+        definition_key='dualrun.start.failed_child.v1',
+    )
+
+
 _EXISTING_NAME = 'dualrun.start.existing'
 
 
@@ -204,6 +241,7 @@ class _Seed:
     pausing: uuid.UUID
     built_then_broken: uuid.UUID
     broken_twice: uuid.UUID
+    failed_child: uuid.UUID
     existing: uuid.UUID
 
 
@@ -227,6 +265,7 @@ def _seed(connection: Connection) -> _Seed:
         pausing=uuid.uuid4(),
         built_then_broken=uuid.uuid4(),
         broken_twice=uuid.uuid4(),
+        failed_child=uuid.uuid4(),
         existing=existing,
     )
 
@@ -237,6 +276,7 @@ def _starts(seed: _Seed) -> tuple[tuple[WorkflowSpec[Any], uuid.UUID], ...]:
         (_pausing_tree(), seed.pausing),
         (_built_then_broken_tree(), seed.built_then_broken),
         (_broken_twice_tree(), seed.broken_twice),
+        (_failed_child_tree(), seed.failed_child),
         (_named(_EXISTING_NAME), seed.existing),
         (_named('dualrun.start.other_name'), seed.existing),
     )
@@ -316,11 +356,13 @@ def test_start_writes_what_the_session_statements_wrote(
         reference.Started(),
         reference.Started(),
         reference.Started(),
+        reference.Started(),
         reference.Existing(),
         reference.IdConflict(existing_name=_EXISTING_NAME),
     )
     # The candidate maps an existing workflow of the same name to its handle.
     assert run.candidate.report == (
+        reference.Started(),
         reference.Started(),
         reference.Started(),
         reference.Started(),
@@ -379,6 +421,7 @@ def test_the_start_on_the_core_writes_what_the_python_caller_wrote(
 
     assert run.diff.entries == (), render_diff(run.diff)
     expected = (
+        reference.Started(),
         reference.Started(),
         reference.Started(),
         reference.Started(),

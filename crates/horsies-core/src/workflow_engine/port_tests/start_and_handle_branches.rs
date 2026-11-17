@@ -152,7 +152,6 @@ async fn a_node_whose_options_do_not_parse_refuses_the_start_and_writes_nothing(
 /// the refusal names the task of the node, as Python's does.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1223"]
 async fn the_refusal_of_options_that_do_not_parse_names_the_task_of_the_node() {
     let pool = shared_pool().await;
     for (case, refused, _rows) in starts_with_corrupt_options(&pool).await {
@@ -395,7 +394,6 @@ async fn tasks_reads_each_stored_node_status_as_its_enum_member() {
 /// names the workflow, the node and the value.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1239"]
 async fn tasks_of_a_node_with_a_status_outside_the_enum_names_the_workflow_the_node_and_the_value()
 {
     let db = IsolatedDatabase::create().await;
@@ -418,8 +416,10 @@ async fn tasks_of_a_node_with_a_status_outside_the_enum_names_the_workflow_the_n
 
     db.drop().await;
     let error = read.expect_err("a status outside the enum is refused");
+    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
+    assert!(!error.retryable);
     let workflow_text = workflow_id.to_string();
-    for subject in [workflow_text.as_str(), "node-9", "BOGUS"] {
+    for subject in [workflow_text.as_str(), "node-9", "'BOGUS'"] {
         assert!(
             error.message.contains(subject),
             "{subject}: {}",
