@@ -39,6 +39,36 @@ unless it starts with "Added".
   tracing-subscriber, toml, owo-colors and tempfile are built only with
   `cli`. sqlx is built only with `sqlx`.
 - **The crate declares `rust-version = "1.91"`.**
+- **`Horsies::new` does no I/O, and the app owns no broker.** The app
+  builds the core's producer manifest from `AppConfig` and a core handle
+  (`CoreHandle`, client family `RUST`) that connects at the first
+  operation. `with_broker`, `bind_broker`, `broker_if_initialized`,
+  `get_broker`, `from_core`, `into_core` and `into_parts` are removed.
+  Added: `Horsies::with_handle(config, Arc<CoreHandle>)` shares one handle
+  between apps.
+- **`new_observe_only` is replaced by a schema mode.**
+  `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)` never runs
+  schema DDL; `SchemaMode::AssumeInitialized` also uses no listener.
+  `Horsies::new` is `SchemaMode::MigrateAndValidate`.
+- **A pool size outside the core's bounds is refused.** `Horsies::new`
+  refuses `broker.pool_size` outside 1 to 10,000 and `broker.max_overflow`
+  above 10,000, with the field name.
+- **A worker profile with a preload is refused.** A Rust worker starts each
+  child with `exec` of its own binary, so `Horsies::new` refuses a profile
+  whose `preload` is `Library` (the default) or `App`, with the path
+  `worker_profiles.<name>.preload`. Set `preload: ChildPreload::NoPreload`.
+- **`role` and `set_role` use `AppRole`** (`Producer`, `Worker`,
+  `Scheduler`) in place of a string.
+- **Added: send suppression on the app.** `suppress_sends(bool)` and
+  `are_sends_suppressed()`; `HORSIES_SUPPRESS_SENDS=1` in the environment
+  suppresses the sends of the process, as in Python.
+- **The queue rules of a task registration are Python's.** In `Default`
+  queue mode a task that names a queue is refused, `default` included
+  (`HRS-200`). In `Custom` mode a task that names no queue is refused
+  (`HRS-200`), and an unknown queue is refused with `HRS-103`.
+  `validate_queue` refuses with `HRS-103` and the valid names.
+- **`registry()`, `workflow_registry()`, `resolve_enqueue` and
+  `ResolvedEnqueue` are no longer public.**
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,

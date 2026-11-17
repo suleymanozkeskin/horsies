@@ -95,3 +95,4 @@ pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
+pub use workflow_operations::{WorkflowRetentionFailed, WorkflowRetentionPass};
