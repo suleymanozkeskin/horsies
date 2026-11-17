@@ -95,3 +95,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "
 serial_test = "3"
 futures = "0.3"
 http-body-util = "0.1"
+# The scan of the log events (`tests/log_message_errors.rs`): the lexer of
+# Rust source into token trees, with line numbers, and the decoder of string
+# literals. Tests only.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", default-features = false }
