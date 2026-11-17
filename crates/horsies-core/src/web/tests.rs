@@ -1574,45 +1574,79 @@ async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     assert_eq!(issues[0]["type"], "int_parsing");
 }
 
-/// A workflow path id that is not a UUID on an action route answers
-/// FastAPI's 422 `uuid_parsing` body, with no database call (the router's
-/// pool is lazy and unreachable).
+/// A workflow path id that is not a UUID on an action route answers 400
+/// `INVALID_INPUT`, as the task cancel route and the Python web app do
+/// (`require_path_uuid`), with no database call (the router's pool is lazy
+/// and unreachable). The detail names `workflow_id` and carries pydantic's
+/// message.
 #[tokio::test]
-async fn a_workflow_action_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
+async fn a_workflow_action_path_id_that_is_not_a_uuid_is_invalid_input() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
         true,
     );
+    let reason = uuid::Uuid::parse_str("not-a-uuid").expect_err("not a UUID");
+    let refusal = serde_json::json!({
+        "code": "INVALID_INPUT",
+        "detail": format!("Path parameter workflow_id: Input should be a valid UUID, {reason}."),
+    });
     for path in [
         "/api/workflows/not-a-uuid/pause",
         "/api/workflows/not-a-uuid/resume",
         "/api/workflows/not-a-uuid/cancel",
     ] {
         let response = router.clone().oneshot(action_request(path)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(json(response).await, refusal, "{path}");
+    }
+}
+
+/// A node index that pydantic reads as an integer outside the 32-bit node
+/// index column names no node: 404 with the not-found text, and no database
+/// call (the router's pool is lazy and unreachable). Text over pydantic's
+/// size bound is FastAPI's 422 `int_parsing_size`.
+#[tokio::test]
+async fn a_node_index_outside_the_integer_column_is_not_found() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let run_id = uuid::Uuid::new_v4();
+    let huge = "1".repeat(40);
+    for index in ["2147483648", "-2147483649", huge.as_str()] {
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/api/workflows/{run_id}/tasks/{index}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{index}");
         assert_eq!(
-            response.status(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{path}"
-        );
-        let body = json(response).await;
-        let issue = &body["detail"][0];
-        assert_eq!(issue["type"], "uuid_parsing", "{path}");
-        assert_eq!(
-            issue["loc"],
-            serde_json::json!(["path", "workflow_id"]),
-            "{path}"
-        );
-        assert_eq!(issue["input"], "not-a-uuid", "{path}");
-        let reason = issue["ctx"]["error"]
-            .as_str()
-            .expect("ctx.error is the parser's reason");
-        assert_eq!(
-            issue["msg"],
-            serde_json::json!(format!("Input should be a valid UUID, {reason}")),
-            "{path}"
+            json(response).await,
+            serde_json::json!({"detail": "Workflow task not found."}),
+            "{index}"
         );
     }
+
+    let too_long = "1".repeat(4_301);
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/workflows/{run_id}/tasks/{too_long}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body["detail"][0]["type"], "int_parsing_size", "{body}");
+    assert_eq!(
+        body["detail"][0]["loc"],
+        serde_json::json!(["path", "task_index"])
+    );
 }
 
 /// Python `tests/unit/test_monitoring_task_detail_absence.py`,

@@ -420,18 +420,14 @@ class TestAggregateAndWorkflowAnswers:
 
     @pytest.mark.parametrize('task_index', [-(2**31) - 1, 2**31, 10**30])
     @pytest.mark.asyncio
-    async def test_a_node_index_outside_the_integer_column_is_python_database_failure(
+    async def test_a_node_index_outside_the_integer_column_names_no_node(
         self, task_index: int,
     ) -> None:
-        """Python's statement failed on the cast; the answer is the same, with no call."""
+        """An index that the integer column cannot hold names no node: ``Ok(None)``,
+        with no call. A client value is not a database failure."""
         broker, call = _broker('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
 
         result = await get_workflow_node(broker, RUN_ID, task_index)
 
-        match result:
-            case Err(MonitoringQueryDbOperationFailed() as error):
-                assert error.retryable is False
-                assert error.message.startswith('workflow node detail query failed: ')
-            case _:
-                raise AssertionError(f'expected a database failure: {result!r}')
+        assert result == Ok(None)
         call.assert_not_awaited()

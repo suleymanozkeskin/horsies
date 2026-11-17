@@ -17,6 +17,7 @@ pub use horsies_core::manifest::SchemaMode;
 
 use crate::config::{producer_manifest, rust_config_refusals};
 use crate::registry::{check_queue, queue_priority, register_task, valid_queue_names, QueueSource};
+use crate::send::TaskFunctions;
 use crate::{AppConfig, HorsiesError, TaskRuntime, ValidationReport};
 
 /// The environment variable that suppresses sends in this process when its
@@ -63,6 +64,7 @@ pub struct Horsies {
     state: Arc<AppState>,
     role: AppRole,
     sends: SendSuppression,
+    functions: Arc<TaskFunctions>,
 }
 
 impl Horsies {
@@ -103,6 +105,7 @@ impl Horsies {
             state: Arc::new(AppState::new()),
             role: AppRole::Producer,
             sends: SendSuppression::new(),
+            functions: Arc::new(TaskFunctions::new()),
         }
     }
 
@@ -226,7 +229,7 @@ impl Horsies {
     /// parameter: it reads the app's state. The `#[horsies::task]` attribute
     /// calls it when the task registers.
     pub fn task_runtime(&self) -> TaskRuntime {
-        TaskRuntime::new(Arc::clone(self.state()))
+        TaskRuntime::new(Arc::clone(self.state()), Arc::clone(&self.functions))
     }
 
     /// The core handle of the app.
@@ -242,6 +245,11 @@ impl Horsies {
     /// The state that task bodies read.
     pub(crate) fn state(&self) -> &Arc<AppState> {
         &self.state
+    }
+
+    /// The typed functions that the task attributes registered on this app.
+    pub(crate) fn functions(&self) -> &TaskFunctions {
+        &self.functions
     }
 
     /// The suppression of this process's sends, for a send path that lives

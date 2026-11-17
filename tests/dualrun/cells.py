@@ -95,9 +95,13 @@ class RawTable:
 
 @dataclass(frozen=True, slots=True)
 class RawSnapshot:
-    """The rows of every catalog table, tables in catalog order."""
+    """The rows of every catalog table, tables in catalog order, and the
+    attached leaves of every partitioned ``horsies_`` parent
+    (``partition_tree``: parent, leaf, detach pending, bound; the columns of
+    ``normalize.PARTITION_TREE``)."""
 
     tables: tuple[RawTable, ...]
+    partition_tree: tuple[RawRow, ...] = ()
 
 
 # ---- Errors ----

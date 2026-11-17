@@ -17,7 +17,14 @@ from tests.dualrun.worker_run import (
     Absent,
     AttemptReport,
     Live,
+    NodeKey,
+    NodeReport,
+    NoTaskRow,
+    ReportEntry,
+    ReportKey,
     TaskReport,
+    WorkflowKey,
+    WorkflowReport,
     Terminal,
     compare_reports,
     compared_part,
@@ -71,11 +78,31 @@ def test_a_report_difference_names_the_task_and_both_sides() -> None:
         attempts=(AttemptReport(attempt=1, outcome='COMPLETED', error_code=None),),
     )
     retried = TaskReport(state=Live(status='PENDING', retry_count=1), attempts=())
-    reference = {same: completed, other: completed}
-    candidate = {same: completed, other: retried}
+    reference: dict[ReportKey, ReportEntry] = {same: completed, other: completed}
+    candidate: dict[ReportKey, ReportEntry] = {same: completed, other: retried}
     differences = compare_reports(reference, candidate)
-    assert [difference.task_id for difference in differences] == [other]
+    assert [difference.key for difference in differences] == [other]
     assert differences[0].reference == completed
     assert differences[0].candidate == retried
     assert compare_reports(reference, dict(reference)) == ()
     assert TaskReport(state=Absent(), attempts=()) != completed
+
+
+def test_a_report_covers_nodes_and_workflows_by_their_fixed_workflow_id() -> None:
+    workflow_id = uuid4()
+    reference: dict[ReportKey, ReportEntry] = {
+        NodeKey(workflow_id=workflow_id, task_index=1): NodeReport(
+            status='PENDING', task=NoTaskRow()
+        ),
+        WorkflowKey(workflow_id=workflow_id): WorkflowReport(status='PAUSED'),
+    }
+    candidate: dict[ReportKey, ReportEntry] = {
+        NodeKey(workflow_id=workflow_id, task_index=1): NodeReport(
+            status='PENDING', task=NoTaskRow()
+        ),
+        WorkflowKey(workflow_id=workflow_id): WorkflowReport(status='RUNNING'),
+    }
+    differences = compare_reports(reference, candidate)
+    assert [difference.key for difference in differences] == [
+        WorkflowKey(workflow_id=workflow_id)
+    ]
