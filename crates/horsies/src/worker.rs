@@ -288,7 +288,10 @@ mod tests {
         let manifest = app()
             .worker_manifest_of(WorkerStart::profile("batch"))
             .unwrap();
-        let refused = plan_refusal(WorkerPlan::of_manifest(&manifest).unwrap_err());
+        let Err(refused) = WorkerPlan::of_manifest(&manifest) else {
+            panic!("an unknown profile is refused");
+        };
+        let refused = plan_refusal(refused);
         let WorkerRunError::ProfileRefused { refusals } = refused else {
             panic!("an unknown profile is a profile refusal");
         };
