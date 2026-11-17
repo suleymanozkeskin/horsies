@@ -1,7 +1,8 @@
 """The Python side of ``task_facets``: the rank is SQL's, the filter is here.
 
 The facet statement itself is ``horsies_monitoring_task_facets``; its cases
-are in ``tests/integration/baseline_scheduler_monitoring_cases.sql``.
+are in
+``crates/horsies-core/src/sql_tests/cases/baseline_scheduler_monitoring_cases.sql``.
 
 Since the monitoring switch the production read runs in the core; this file
 tests Python's body before the switch, the dual-run reference
