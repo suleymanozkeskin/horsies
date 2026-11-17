@@ -79,13 +79,13 @@ pub(super) enum PolicyRead {
 
 /// Read the `retry_policy` of a stored options text.
 ///
-/// Precondition: `options_text` parsed as a `serde_json::Value` object. Each
-/// read below decodes a part of that text, so none of them can fail; a failed
-/// one is a defect and panics. A repeated key keeps its first place and takes
-/// its last value, as `serde_json::Map` keeps it. Pure.
+/// Precondition: `options_text` reads as a JSON object by Python's
+/// `loads_json` rule (`check_python_loads`), so no key repeats and every
+/// string is UTF-8. Each read below decodes a part of that text, so none of
+/// them can fail; a failed one is a defect and panics. Pure.
 pub(super) fn read_retry_policy(options_text: &str) -> PolicyRead {
     let options: RawMembers<'_> = serde_json::from_str(options_text)
-        .expect("a text that parsed as a JSON object parses with its members kept raw");
+        .expect("a text that reads as a JSON object parses with its members kept raw");
     let Some(raw) = options.get("retry_policy") else {
         return PolicyRead::Absent;
     };
@@ -131,12 +131,12 @@ fn policy_from_object(raw: &RawValue) -> PolicyRead {
 
 /// The members of a JSON object, each value as its raw text. A key is kept
 /// once, at its first place, with its last value.
-struct RawMembers<'a> {
+pub(super) struct RawMembers<'a> {
     members: Vec<(String, &'a RawValue)>,
 }
 
 impl<'a> RawMembers<'a> {
-    fn get(&self, key: &str) -> Option<&'a RawValue> {
+    pub(super) fn get(&self, key: &str) -> Option<&'a RawValue> {
         self.members
             .iter()
             .find(|(name, _)| name == key)
@@ -185,7 +185,7 @@ impl<'de> Visitor<'de> for RawMembersVisitor {
 
 /// A JSON integer as Python reads it: an `int` of any size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JsonInt {
+pub(super) enum JsonInt {
     /// Below 0.
     Negative,
     /// From 0 to `u64::MAX`. `-0` is 0.
@@ -196,7 +196,7 @@ enum JsonInt {
 
 /// A JSON value as Python's `json.loads` gives it, one level deep. An array
 /// keeps the raw text of each item.
-enum PythonValue<'a> {
+pub(super) enum PythonValue<'a> {
     None,
     Bool(bool),
     Int(JsonInt),
@@ -223,7 +223,7 @@ impl PythonValue<'_> {
 
 /// The value that a raw JSON text holds. The first byte names the kind; a
 /// number is an int when its text has no `.`, `e` or `E`.
-fn python_value(raw: &RawValue) -> PythonValue<'_> {
+pub(super) fn python_value(raw: &RawValue) -> PythonValue<'_> {
     let text = raw.get();
     match text.as_bytes().first() {
         Some(b'n') => PythonValue::None,

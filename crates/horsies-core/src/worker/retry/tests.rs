@@ -87,6 +87,10 @@ fn a_missing_or_null_timeout_runs_without_a_limit() {
     }
 }
 
+fn not_an_int(found: NotAnInt) -> TimeoutRefusal {
+    TimeoutRefusal::NotAnInteger { found }
+}
+
 #[test]
 fn a_timeout_outside_its_rule_refuses_the_run() {
     let cases = [
@@ -96,10 +100,22 @@ fn a_timeout_outside_its_rule_refuses_the_run() {
             r#"{"timeout_ms": 4294967296}"#,
             TimeoutRefusal::AboveMaximum,
         ),
-        (r#"{"timeout_ms": 2000.5}"#, TimeoutRefusal::NotAnInteger),
-        (r#"{"timeout_ms": 2000.0}"#, TimeoutRefusal::NotAnInteger),
-        (r#"{"timeout_ms": "2000"}"#, TimeoutRefusal::NotAnInteger),
-        (r#"{"timeout_ms": true}"#, TimeoutRefusal::NotAnInteger),
+        (r#"{"timeout_ms": 2000.5}"#, not_an_int(NotAnInt::Float)),
+        (r#"{"timeout_ms": 2000.0}"#, not_an_int(NotAnInt::Float)),
+        (r#"{"timeout_ms": 1e3}"#, not_an_int(NotAnInt::Float)),
+        (r#"{"timeout_ms": "2000"}"#, not_an_int(NotAnInt::Str)),
+        (r#"{"timeout_ms": true}"#, not_an_int(NotAnInt::Bool)),
+        (r#"{"timeout_ms": [2000]}"#, not_an_int(NotAnInt::List)),
+        (r#"{"timeout_ms": {}}"#, not_an_int(NotAnInt::Dict)),
+        // An int of any size is compared with the bounds, as Python compares it.
+        (
+            r#"{"timeout_ms": 18446744073709551616}"#,
+            TimeoutRefusal::AboveMaximum,
+        ),
+        (
+            r#"{"timeout_ms": -18446744073709551616}"#,
+            TimeoutRefusal::BelowMinimum,
+        ),
     ];
     for (text, refusal) in cases {
         let options = read_stored_options(Some(text));
@@ -117,6 +133,138 @@ fn a_timeout_outside_its_rule_refuses_the_run() {
             "{text}"
         );
     }
+}
+
+/// Python `_timeout_value`: the text of each timeout refusal.
+#[test]
+fn each_timeout_refusal_has_python_s_text() {
+    let cases = [
+        (
+            not_an_int(NotAnInt::Float),
+            "stored timeout_ms is a float, not an int",
+        ),
+        (
+            not_an_int(NotAnInt::Bool),
+            "stored timeout_ms is a bool, not an int",
+        ),
+        (
+            not_an_int(NotAnInt::Str),
+            "stored timeout_ms is a str, not an int",
+        ),
+        (
+            not_an_int(NotAnInt::List),
+            "stored timeout_ms is a list, not an int",
+        ),
+        (
+            not_an_int(NotAnInt::Dict),
+            "stored timeout_ms is a dict, not an int",
+        ),
+        (
+            TimeoutRefusal::BelowMinimum,
+            "stored timeout_ms is below 1000 ms",
+        ),
+        (
+            TimeoutRefusal::AboveMaximum,
+            "stored timeout_ms is above the limit of 4294967295 ms (about 49.7 days)",
+        ),
+    ];
+    for (refusal, text) in cases {
+        assert_eq!(timeout_refusal_message(refusal), text);
+    }
+}
+
+/// Python `read_stored_timeout` and `read_stored_retry_policy`: the reason of
+/// a text that `loads_json` refuses, and of a JSON value that is not an
+/// object. The texts after `JSON parse failed: ` are those of `loads_json`
+/// (`core::codec::python_loads`).
+#[test]
+fn an_unreadable_text_has_python_s_reason() {
+    let cases = [
+        (
+            "{",
+            "stored task_options do not parse: JSON parse failed: Expecting property name \
+             enclosed in double quotes: line 1 column 2 (char 1)",
+        ),
+        (
+            " ",
+            "stored task_options do not parse: JSON parse failed: Expecting value: line 1 \
+             column 2 (char 1)",
+        ),
+        (
+            r#"{"a":1,"a":2}"#,
+            "stored task_options do not parse: JSON parse failed: JSON object repeats a key",
+        ),
+        (
+            r#"{"timeout_ms": NaN}"#,
+            "stored task_options do not parse: JSON parse failed: Non-standard JSON constant \
+             is not allowed: NaN",
+        ),
+        ("[1]", "stored task_options are a JSON list, not an object"),
+        (
+            "null",
+            "stored task_options are a JSON NoneType, not an object",
+        ),
+        (
+            r#""x""#,
+            "stored task_options are a JSON str, not an object",
+        ),
+        ("1", "stored task_options are a JSON int, not an object"),
+        ("1.5", "stored task_options are a JSON float, not an object"),
+        ("true", "stored task_options are a JSON bool, not an object"),
+    ];
+    for (text, reason) in cases {
+        let options = read_stored_options(Some(text));
+        assert_eq!(
+            options,
+            StoredOptions::Unreadable {
+                reason: reason.to_owned()
+            },
+            "{text}"
+        );
+        assert_eq!(options.run_permit(), RunPermit::Refuse(reason.to_owned()));
+        assert_eq!(
+            stored_max_retries(Some(text)),
+            Err(RetryLimitRefused::UnreadableOptions {
+                reason: reason.to_owned()
+            }),
+            "{text}"
+        );
+    }
+}
+
+/// Python reads an int literal of up to 4300 digits in any member; the
+/// timeout is compared with its bounds, and a member that is not read stays
+/// unread. An int of 4301 digits makes the text unreadable.
+#[test]
+fn a_long_int_reads_in_any_member() {
+    let long = "9".repeat(400);
+    let other = read_stored_options(Some(&format!(r#"{{"other": {long}, "timeout_ms": 2000}}"#)));
+    assert_eq!(
+        other.run_permit(),
+        RunPermit::RunWithTimeout(Duration::from_millis(2000))
+    );
+    let above = read_stored_options(Some(&format!(r#"{{"timeout_ms": {long}}}"#)));
+    assert_eq!(
+        above.run_permit(),
+        RunPermit::Refuse(
+            "stored timeout_ms is above the limit of 4294967295 ms (about 49.7 days)".to_owned()
+        )
+    );
+    let below = read_stored_options(Some(&format!(r#"{{"timeout_ms": -{long}}}"#)));
+    assert_eq!(
+        below.run_permit(),
+        RunPermit::Refuse("stored timeout_ms is below 1000 ms".to_owned())
+    );
+    let too_long = "9".repeat(4301);
+    assert_eq!(
+        read_stored_options(Some(&format!(r#"{{"other": {too_long}}}"#))).run_permit(),
+        RunPermit::Refuse(
+            "stored task_options do not parse: JSON parse failed: Exceeds the limit (4300 \
+             digits) for integer string conversion: value has 4301 digits; use \
+             sys.set_int_max_str_digits() to increase the limit"
+                .to_owned()
+        )
+    );
 }
 
 /// Python `test_a_refused_timeout_retries_until_max_retries_when_asked`: a
@@ -629,18 +777,42 @@ fn a_cancel_grace_outside_its_rule_is_refused_with_python_text() {
         ),
         (
             r#"{"cancel_grace_ms": true}"#,
-            GraceRefusal::NotAnInteger { found: "bool" },
+            GraceRefusal::NotAnInteger {
+                found: NotAnInt::Bool,
+            },
             "stored cancel_grace_ms is a bool, not an int",
         ),
         (
             r#"{"cancel_grace_ms": 500.5}"#,
-            GraceRefusal::NotAnInteger { found: "float" },
+            GraceRefusal::NotAnInteger {
+                found: NotAnInt::Float,
+            },
             "stored cancel_grace_ms is a JSON float, not an int",
         ),
         (
             r#"{"cancel_grace_ms": "500"}"#,
-            GraceRefusal::NotAnInteger { found: "str" },
+            GraceRefusal::NotAnInteger {
+                found: NotAnInt::Str,
+            },
             "stored cancel_grace_ms is a JSON str, not an int",
+        ),
+        (
+            r#"{"cancel_grace_ms": [500]}"#,
+            GraceRefusal::NotAnInteger {
+                found: NotAnInt::List,
+            },
+            "stored cancel_grace_ms is a JSON list, not an int",
+        ),
+        // An int of any size is compared with the bounds, as Python compares it.
+        (
+            r#"{"cancel_grace_ms": 18446744073709551616}"#,
+            GraceRefusal::AboveMaximum,
+            "stored cancel_grace_ms is above 10000 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": -18446744073709551616}"#,
+            GraceRefusal::BelowMinimum,
+            "stored cancel_grace_ms is below 100 ms",
         ),
     ];
     for (text, refusal, message) in cases {
