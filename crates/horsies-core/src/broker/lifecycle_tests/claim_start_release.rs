@@ -255,6 +255,58 @@ mod release {
         cleanup_tasks(&pool, &[held, reclaimed]).await;
     }
 
+    /// A release clears every claim and run field and the finalizing
+    /// marker, as Python's `UNCLAIM_CLAIMED_TASK_SQL` (`core/worker/sql.py`):
+    /// a released PENDING row names no worker, no claim and no run.
+    #[tokio::test]
+    #[serial]
+    async fn a_release_clears_every_claim_and_run_field() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed()).await;
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET started_at = NOW(), worker_pid = 321, worker_hostname = 'host1',
+                 worker_process_name = 'worker', finalizing_at = NOW(),
+                 finalizing_by_worker_id = $2
+             WHERE id = $1",
+        )
+        .bind(task_id)
+        .bind(WORKER)
+        .execute(&pool)
+        .await
+        .expect("stamp the run fields");
+
+        let outcomes = release_claims(
+            &core_pool_for_test_pool(&pool),
+            StatementLog::Off,
+            &release(task_id, ReleasePlacement::SameClass),
+        )
+        .await
+        .expect("release");
+
+        assert_eq!(outcomes, vec![(task_id, ReleaseOutcome::Released)]);
+        let row = live_row(&pool, task_id).await.expect("live row");
+        assert_eq!(row["status"], "PENDING");
+        for field in [
+            "claimed_at",
+            "claimed_by_worker_id",
+            "claim_expires_at",
+            "started_at",
+            "worker_pid",
+            "worker_hostname",
+            "worker_process_name",
+            "finalizing_at",
+            "finalizing_by_worker_id",
+        ] {
+            assert_eq!(
+                row[field],
+                serde_json::Value::Null,
+                "a release must clear {field}"
+            );
+        }
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
     /// The placement ISOLATED writes the class (Python's return of a row
     /// whose class does not fit its task).
     #[tokio::test]

@@ -49,7 +49,7 @@ fn full_profile() -> Value {
 /// A profile of `count` isolated children. Its per-pass claim limit is
 /// `count` tasks: the claim check refuses a limit above the capacity of the
 /// worker (Python `profile_claim_errors`,
-/// `horsies/core/models/worker_profile.py:1012-1039`), and the 5 tasks of
+/// `python/horsies/core/models/worker_profile.py:1012-1039`), and the 5 tasks of
 /// [`full_profile`] are above a capacity of fewer than 5 seats.
 fn isolated_profile(count: u32) -> Value {
     let mut profile = full_profile();

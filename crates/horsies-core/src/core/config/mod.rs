@@ -17,7 +17,10 @@ pub use payload::PayloadPolicy;
 pub use queue::{CustomQueueConfig, CustomQueueConfigError, QueueMode};
 pub use recovery::{RecoveryConfig, RecoveryConfigError};
 pub use resilience::{ResilienceConfigError, WorkerResilienceConfig};
-pub use retention::{EnqueueRetention, RetentionChoice, RetentionConfig, RetentionConfigError};
+pub use retention::{
+    EnqueueRetention, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    RetentionConfigError,
+};
 pub use schedule::{
     CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule, DailySchedule, DaySelector,
     HourlySchedule, IntervalSchedule, Month, MonthlySchedule, ScheduleConfig, SchedulePattern,

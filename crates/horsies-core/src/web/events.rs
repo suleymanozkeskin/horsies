@@ -35,7 +35,7 @@ pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// The most items one web client can have queued. On overflow, the client's
 /// queued events are dropped and it gets one event with no ids for every
 /// topic ("refresh the whole topic"), so a slow client cannot grow the web
-/// process. Python keeps an unbounded queue (`horsies/web/events.py:211`).
+/// process. Python keeps an unbounded queue (`python/horsies/web/events.py:211`).
 pub const SUBSCRIBER_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

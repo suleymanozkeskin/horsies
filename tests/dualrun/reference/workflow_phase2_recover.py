@@ -1,6 +1,6 @@
 """Phase-2 recovery, before ``horsies_workflow_phase2_recover``.
 
-``drive_phase2_recovery`` (``horsies/core/workflows/phase2_recovery.py``)
+``drive_phase2_recovery`` (``python/horsies/core/workflows/phase2_recovery.py``)
 discovered the records, then for each one, in its own session transaction:
 ``horsies_phase2_consume`` with the node status of the record's kind; on
 ``APPLIED_TO_NODE`` the engine's progression (``apply_node_progression``,

@@ -250,19 +250,26 @@ fn insert_args_from_entries(
 ) -> Result<(), WorkflowError> {
     for (kwarg_name, dep_idx_value) in args_from_map {
         let dep_idx = dep_idx_value.as_i64().unwrap_or(-1) as i32;
+        // No row in the read: the child start reads terminal dependencies only (its `SOURCE` rows), so a
+        // dependency that is not terminal is absent here too; an index with no node row is left out the same way.
         let Some(dep) = dep_results.get(&dep_idx) else {
-            tracing::error!(
+            tracing::debug!(
                 dep_idx,
                 kwarg = %kwarg_name,
-                "args_from names a dependency index with no node row; the kwarg is left out",
+                "args_from names a dependency with no terminal row in the read; the kwarg is left out",
             );
+            continue;
+        };
+        // A dependency that is not terminal (join `any` or `quorum` promoted the node first) gets no kwarg:
+        // the receiving task uses its default (Python `core/workflows/engine.py:841`).
+        let Some(inner) = dependency_result(dep_idx, dep) else {
             continue;
         };
         let entry = ArgsFromEntry {
             marker: true,
             source_task_name: &dep.task_name,
             source_definition_key: dep.sub_definition_key.as_deref(),
-            inner: dependency_result(dep_idx, dep),
+            inner,
         };
         kwargs.insert(kwarg_name.clone(), serde_json::to_value(&entry)?);
     }
@@ -356,24 +363,25 @@ pub(crate) struct StoredInputRefused {
 ///   not read gives `RESULT_DESERIALIZATION_ERROR`.
 /// - COMPLETED or FAILED with a NULL or empty stored result: [`missing_result_error`] (decided: no writer stores
 ///   such a node, so it is stored data that does not parse).
-/// - A dependency that is not terminal: `UPSTREAM_SKIPPED`. Python leaves the key out for such a dependency
-///   (workflow ledger row 18).
-fn dependency_result(dep_idx: i32, dep: &DepResult) -> TaskResult<serde_json::Value> {
+/// - A dependency that is not terminal: `None`, and the key is left out. Python reads the dependency results
+///   from terminal rows only (`core/workflows/sql.py:523-530`), and the baseline input builder
+///   (`horsies_workflow_task_input`) does the same.
+fn dependency_result(dep_idx: i32, dep: &DepResult) -> Option<TaskResult<serde_json::Value>> {
     match (dep.status.as_str(), dep.result.as_deref()) {
-        ("SKIPPED", _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
-        ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => {
+        ("SKIPPED", _) => Some(TaskResult::Err(upstream_skipped_error(dep_idx))),
+        ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => Some(
             serde_json::from_str::<TaskResult<serde_json::Value>>(text).unwrap_or_else(|e| {
                 tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
                 TaskResult::Err(dep_parse_error(dep_idx, &e))
-            })
-        }
-        (status @ ("COMPLETED" | "FAILED"), _) => TaskResult::Err(missing_result_error(
+            }),
+        ),
+        (status @ ("COMPLETED" | "FAILED"), _) => Some(TaskResult::Err(missing_result_error(
             dep_idx,
             dep.node_id.as_deref(),
             &dep.task_name,
             status,
-        )),
-        (_, _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
+        ))),
+        (_, _) => None,
     }
 }
 
@@ -753,16 +761,23 @@ mod tests {
         assert_eq!(result, "{}");
     }
 
+    /// Python reads dependency results from terminal rows only (`core/workflows/sql.py:523-530`): a dependency
+    /// that is not terminal when join `any` or `quorum` promotes the node gets no kwarg, and the kwargs of the
+    /// terminal dependencies stay (#892).
     #[test]
-    fn a_dependency_that_is_not_terminal_gives_upstream_skipped() {
+    fn a_dependency_that_is_not_terminal_gets_no_kwarg() {
+        let stored = serde_json::to_string(&TaskResult::Ok(json!(1))).unwrap();
         for status in ["PENDING", "READY", "ENQUEUED", "RUNNING"] {
             let mut deps = HashMap::new();
             deps.insert(0, dep(status, None));
-            let result = merged("{}", &Some(json!({"answer": 0})), &deps);
-            let TaskResult::Err(error) = inner_of(&result, "answer") else {
-                panic!("a {status} dependency must give an error entry");
-            };
-            assert_eq!(error.error_code.to_string(), "UPSTREAM_SKIPPED");
+            deps.insert(1, dep("COMPLETED", Some(stored.clone())));
+            let result = merged("{}", &Some(json!({"waiting": 0, "done": 1})), &deps);
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert!(parsed.get("waiting").is_none(), "{status}: {result}");
+            assert!(
+                matches!(inner_of(&result, "done"), TaskResult::Ok(value) if value == json!(1)),
+                "{status}: {result}"
+            );
         }
     }
 

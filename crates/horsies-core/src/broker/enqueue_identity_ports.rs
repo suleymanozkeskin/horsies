@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::broker::enqueue_history_tests::migrated_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::{BrokerError, PostgresBroker};
+use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
@@ -67,6 +67,14 @@ impl Send {
 }
 
 async fn send(broker: &PostgresBroker, send: Send) -> Result<Uuid, BrokerError> {
+    send_as(broker, send, SendKind::First).await
+}
+
+async fn send_as(
+    broker: &PostgresBroker,
+    send: Send,
+    send_kind: SendKind,
+) -> Result<Uuid, BrokerError> {
     broker
         .enqueue(
             TASK_NAME,
@@ -82,6 +90,7 @@ async fn send(broker: &PostgresBroker, send: Send) -> Result<Uuid, BrokerError> 
             send.key,
             EnqueueRetention::Default,
             Some(false),
+            send_kind,
         )
         .await
 }
@@ -380,8 +389,8 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
 /// halves are covered by `enqueue_history_tests` (replay, second key). The
 /// prototype refused a resend of a keyed task id with no key; Python's
 /// production exact-id check compares the version-1 fingerprint and
-/// `sent_at` only (`horsies/core/brokers/postgres.py:2071-2131`), and the
-/// fingerprint has no key field (`horsies/core/history/identity/fingerprint.py:31-50`).
+/// `sent_at` only (`python/horsies/core/brokers/postgres.py:2071-2131`), and the
+/// fingerprint has no key field (`python/horsies/core/history/identity/fingerprint.py:31-50`).
 /// The core keeps the production rule: the resend returns the same task, and
 /// the key binding stays.
 #[tokio::test]
@@ -437,6 +446,52 @@ async fn a_replay_after_the_move_returns_the_moved_task() {
     assert_eq!(history_rows(&pool, first.task_id).await, 1);
 }
 
+/// `tests/dualrun/test_enqueue_task.py`, cases `history.first`,
+/// `history.repeat` and `history.repeat_other`: after a task moved to
+/// history, a `REPEAT` send of the same command answers with its id and
+/// writes nothing; a `REPEAT` send of another command under the id is a
+/// payload mismatch and writes nothing; a `FIRST` send does not read history
+/// and writes a new live row.
+#[tokio::test]
+#[serial]
+async fn a_repeat_send_of_a_finished_task_answers_from_history() {
+    let pool = migrated_pool().await;
+    clear_enqueue_state(&pool).await;
+    ensure_history_coverage(&pool).await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let repeated = Send::new(None, Utc::now());
+    let other = Send::new(None, Utc::now());
+    let first = Send::new(None, Utc::now());
+    for finished in [repeated, other, first] {
+        assert_eq!(
+            send(&broker, finished).await.expect("the first send"),
+            finished.task_id
+        );
+        move_to_history(&pool, finished.task_id).await;
+    }
+
+    let same = send_as(&broker, repeated, SendKind::Repeat).await;
+    let changed = Send {
+        priority: OTHER_PRIORITY,
+        ..other
+    };
+    let mismatch = send_as(&broker, changed, SendKind::Repeat).await;
+    let again = send_as(&broker, first, SendKind::First).await;
+
+    assert_eq!(
+        same.expect("a repeat of the same command"),
+        repeated.task_id
+    );
+    assert_eq!(live_rows(&pool, repeated.task_id).await, 0);
+    assert!(
+        matches!(mismatch, Err(BrokerError::PayloadMismatch { task_id }) if task_id == other.task_id),
+        "{mismatch:?}"
+    );
+    assert_eq!(live_rows(&pool, other.task_id).await, 0);
+    assert_eq!(again.expect("a first send writes again"), first.task_id);
+    assert_eq!(live_rows(&pool, first.task_id).await, 1);
+}
+
 /// `test_unkeyed_enqueue_creates_no_key_only_registry_row`: unkeyed sends
 /// write no reservation.
 #[tokio::test]
@@ -454,7 +509,7 @@ async fn unkeyed_sends_write_no_reservation() {
 
 /// `test_enqueue_cutover_conversion.py::TestConvertedStatement::test_new_row_carries_real_cutover_values`:
 /// the stored fingerprint is the SHA-256 of Python's version-1 array for the
-/// send (`horsies/core/history/identity/fingerprint.py:31-50`; the input
+/// send (`python/horsies/core/history/identity/fingerprint.py:31-50`; the input
 /// takes the keyword slot, the positional slot is null). The expected bytes
 /// come from the literal array, not from the core's fingerprint code.
 #[tokio::test]
@@ -479,6 +534,7 @@ async fn a_new_row_stores_the_exact_version_one_fingerprint() {
             None,
             EnqueueRetention::Default,
             None,
+            SendKind::First,
         )
         .await
         .expect("send");

@@ -6,11 +6,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::PostgresBroker;
+use crate::broker::{PostgresBroker, SendKind};
 use crate::core::app::{PreparedSchedules, ScheduleSendFacts};
 use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 
 use super::calculator::{next_run_at, should_run_now};
+use super::config_digest::config_digest;
 use super::state;
 
 /// The prefix of the hash input of a slot task id. It names the layout, so
@@ -105,6 +106,13 @@ pub enum SchedulerStartError {
          Horsies::prepare_schedules from the same config"
     )]
     NotPrepared { schedule: String },
+    /// The client family check before the first schedule-state write
+    /// failed: `BrokerError::ClientFamilyMismatch` when the database records
+    /// another family or none (not retryable), or the error of the family
+    /// read (`BrokerError::is_retryable` tells whether a later start may
+    /// pass).
+    #[error("the client family check before the first schedule write failed: {0}")]
+    ClientFamily(#[source] crate::broker::BrokerError),
 }
 
 /// Why one slot was not enqueued.
@@ -229,7 +237,8 @@ fn check_schedules_at_start(
 ///
 /// The scheduler:
 /// 1. Refuses to start, writing nothing, when the schedule section is invalid
-///    or an enabled pattern has no next slot. The join handle then yields the
+///    or an enabled pattern has no next slot, or when the broker's client
+///    family check fails. The join handle then yields the
 ///    [`SchedulerStartError`]; the host exits non-zero.
 /// 2. Initializes schedule state for all configured schedules; one schedule's
 ///    failure is logged and the others go on (the existence heal retries it).
@@ -262,8 +271,8 @@ pub fn spawn_scheduler(
     ))
 }
 
-/// The body of [`spawn_scheduler`]: start checks, state initialization, then
-/// the tick loop until `cancel` fires.
+/// The body of [`spawn_scheduler`]: start checks, the client family check,
+/// state initialization, then the tick loop until `cancel` fires.
 async fn run_scheduler(
     broker: Arc<PostgresBroker>,
     schedule_config: ScheduleConfig,
@@ -277,6 +286,12 @@ async fn run_scheduler(
     }
 
     check_schedules_at_start(&schedule_config, &prepared, Utc::now())?;
+    // The state initialization is the first schedule-state write. The slot
+    // enqueue checks the family again inside the broker's send.
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(SchedulerStartError::ClientFamily)?;
     initialize_schedules(broker.pool(), &schedule_config.schedules).await;
 
     let lock_pool = scheduler_lock_pool(broker.pool());
@@ -322,7 +337,7 @@ fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
 
 /// Store the state row of each enabled schedule that is new or whose pattern
 /// or timezone changed, in two statements (Python `_initialize_schedules`,
-/// `horsies/core/scheduler/service.py`):
+/// `python/horsies/core/scheduler/service.py`):
 ///
 /// 1. One read of every row's name and digest, with the database time.
 /// 2. One write of the new and changed rows, each with its first run computed
@@ -1024,6 +1039,7 @@ async fn enqueue_scheduled_task(
             None,
             retention,
             None,
+            SendKind::First,
         )
         .await
         .map_err(|source| ScheduleFireError::Broker {
@@ -1032,30 +1048,11 @@ async fn enqueue_scheduled_task(
         })
 }
 
-/// The part of a schedule that decides its slots: pattern and timezone.
-#[derive(serde::Serialize)]
-struct ScheduleTiming<'a> {
-    pattern: &'a crate::core::config::SchedulePattern,
-    timezone: &'a str,
-}
-
-/// SHA-256 of the schedule's pattern and timezone, for change detection
-/// (Python `_compute_config_hash`). A change of input, queue or catch-up
-/// settings does not move `next_run_at`.
-///
-/// Stable across toolchain upgrades (C20): SHA-256 over serde_json text of a
-/// struct with a fixed field order.
+/// SHA-256 of the schedule's pattern and timezone in Python's digest text
+/// (`config_digest`), for change detection. A change of input, queue or
+/// catch-up settings does not move `next_run_at`.
 fn compute_config_hash(schedule: &TaskSchedule) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-
-    let timing = ScheduleTiming {
-        pattern: &schedule.pattern,
-        timezone: &schedule.timezone,
-    };
-    // The pattern types hold only strings, integers, enums and times: they
-    // always serialize. A failure here is a defect, not an operational error.
-    let text = serde_json::to_vec(&timing).expect("schedule pattern serializes to JSON");
-    Sha256::digest(&text).into()
+    config_digest(&schedule.pattern, &schedule.timezone)
 }
 
 #[cfg(test)]
@@ -1209,10 +1206,9 @@ mod tests {
 
     #[test]
     fn compute_config_hash_is_stable_sha256() {
-        // C20: the config hash must use a stable algorithm (SHA-256), not the
-        // toolchain-dependent DefaultHasher. SHA-256 hex is 64 lowercase chars;
-        // the old u64 DefaultHasher output was 16 — pinning the length and a
-        // golden value guards against a regression to an unstable hasher.
+        // The config hash is SHA-256 of Python's digest text, not a
+        // toolchain-dependent hasher; the golden value is the digest that
+        // Python's `_compute_config_hash` stores for the same schedule.
         let schedule = TaskSchedule {
             name: "test".to_owned(),
             task_name: "my_task".to_owned(),
@@ -1230,12 +1226,12 @@ mod tests {
             max_catch_up_runs: 100,
         };
         let hash = compute_config_hash(&schedule);
-        // Golden value pins the exact algorithm + serialization basis:
-        // SHA-256 of {"pattern":{"type":"interval","seconds":60},"timezone":"UTC"}.
+        // SHA-256 of
+        // {"pattern":{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null},"timezone":"UTC"}.
         let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex,
-            "b896b67f1120471246f798d1f83ba3b4601931e97069ae773d2bf0c1880f705f",
+            "a7bba31d521252fd1fb6e910224d2c9a13daa9d45b4c3a1c4569f7b76a2e92e1",
         );
     }
 
@@ -1338,6 +1334,49 @@ mod tests {
             Err(SchedulerStartError::InvalidScheduleConfig(ref message))
                 if message.contains("Not/A_Timezone")
         ));
+    }
+
+    /// A broker handle of the other client family is refused before the
+    /// first schedule-state write: the join handle yields
+    /// `SchedulerStartError::ClientFamily` with the mismatch, not retryable,
+    /// and no state row is written.
+    #[tokio::test]
+    #[serial]
+    async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let pool = test_pool().await;
+        let broker = Arc::new(
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python),
+        );
+        let name = format!("scheduler_family_{}", uuid::Uuid::new_v4().simple());
+        let schedule = interval_schedule_secs(&name, 60);
+        let prepared = prepared_for(std::slice::from_ref(&schedule));
+
+        let outcome = spawn_scheduler(
+            broker,
+            ScheduleConfig::new(vec![schedule]),
+            default_app_config(),
+            prepared,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("scheduler task joins");
+
+        let refusal = match outcome {
+            Err(SchedulerStartError::ClientFamily(refusal)) => refusal,
+            other => panic!("expected the client family refusal, got {other:?}"),
+        };
+        assert!(matches!(
+            refusal,
+            BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Rust),
+                own: ClientFamily::Python,
+            }
+        ));
+        assert!(!refusal.is_retryable());
+        assert!(state::get_state(&pool, &name).await.unwrap().is_none());
     }
 
     #[test]

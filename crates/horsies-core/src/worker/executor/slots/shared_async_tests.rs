@@ -610,7 +610,12 @@ async fn a_child_that_reported_a_run_stuck_survives_the_backstops_and_the_drain_
     assert!(not_answered(&mut neighbour_answer));
     let report = pool.stop(Duration::from_millis(500)).await;
 
-    assert_eq!(report, PoolStopReport::KilledAtDrainDeadline);
+    assert_eq!(
+        report,
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: vec![stuck.task_id, neighbour.task_id]
+        }
+    );
     assert_eq!(
         answer_of(stuck_answer).await,
         timed_out(RetryPlacement::Isolated)

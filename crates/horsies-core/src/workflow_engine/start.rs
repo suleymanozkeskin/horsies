@@ -554,7 +554,7 @@ impl DownstreamSubworkflow {
 /// dependencies. It visits each index once, so it takes at most one step per node and edge. A
 /// sub-workflow node is `Reachable` only when another sub-workflow node is below it. Does no I/O.
 ///
-/// Python computes the same at start (`with_downstream_subworkflow`, `horsies/core/workflows/sql.py`),
+/// Python computes the same at start (`with_downstream_subworkflow`, `python/horsies/core/workflows/sql.py`),
 /// and so does the SQL start (`horsies_workflow_start_nodes`).
 pub(crate) fn downstream_subworkflow_facts(nodes: &[AnyNode]) -> Vec<DownstreamSubworkflow> {
     let dependencies: HashMap<usize, &[usize]> = nodes
@@ -609,7 +609,7 @@ pub(crate) fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), W
 /// `None` (SQL NULL) when the node takes no context.
 ///
 /// A node defined with an empty list takes no context, and its row stores NULL, as for no list
-/// (Python `_graph_columns`, `horsies/core/workflows/child_build.py:479-485`). The task input of
+/// (Python `_graph_columns`, `python/horsies/core/workflows/child_build.py:479-485`). The task input of
 /// the baseline mint adds the context member for any stored array, an empty one included
 /// (`horsies_workflow_task_input`). Pure.
 pub(crate) fn stored_workflow_ctx_from(node: &AnyNode) -> Option<&[String]> {
@@ -623,7 +623,7 @@ pub(crate) fn stored_workflow_ctx_from(node: &AnyNode) -> Option<&[String]> {
 /// that the child start of the engine code mints: the node's input with the workflow meta member
 /// ([`WORKFLOW_META_KWARG`]: the workflow id, the node index and the task name). Python writes the
 /// member into the input of every task it mints for a node
-/// (`horsies/core/workflows/engine.py:946-950`, `:1447-1453` for a child root), and so does the
+/// (`python/horsies/core/workflows/engine.py:946-950`, `:1447-1453` for a child root), and so does the
 /// baseline mint (`horsies_workflow_task_input`). The worker removes it before the input decode.
 ///
 /// Errors: the refusals of [`input_object`]: an input that does not read, that is not a JSON
@@ -662,7 +662,7 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
 /// Why the child start of the engine code ([`start_child_workflow_in_tx`]) did not write the child.
 ///
 /// Python fails the parent node while it prepares the child (`enqueue_subworkflow_task`,
-/// `horsies/core/workflows/engine.py:1045-1260`, `:1370-1425`): the depth limit, the definition
+/// `python/horsies/core/workflows/engine.py:1045-1260`, `:1370-1425`): the depth limit, the definition
 /// load, the `args_from` merge, the build, and the queue of a child node. The callers here check
 /// those before the start (the build resolves the queues). Once the child
 /// spec is built, a child that the start cannot write raises, and the caller's transaction rolls
@@ -882,7 +882,7 @@ fn insert_workflow_tasks<'a>(
         // Engine-minted rows carry no fingerprint, key or retained input.
         if prepared.iter().any(|p| p.fast_path) {
             // The task input of each fast root: its node input with the workflow meta member
-            // (Python `horsies/core/workflows/engine.py:1447-1453`). The node row keeps the
+            // (Python `python/horsies/core/workflows/engine.py:1447-1453`). The node row keeps the
             // node input.
             let fast_roots = prepared
                 .iter()
@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     /// A node defined with no list or with an empty list takes no context, and its row stores NULL
-    /// (Python `_graph_columns`, `horsies/core/workflows/child_build.py:479-485`).
+    /// (Python `_graph_columns`, `python/horsies/core/workflows/child_build.py:479-485`).
     #[test]
     fn an_empty_context_list_is_no_context() {
         let mut node = node_with(false, Some(10));
@@ -1538,7 +1538,7 @@ mod tests {
     }
 
     /// The task input of a root carries the workflow meta member next to the node's own members
-    /// (Python `horsies/core/workflows/engine.py:1447-1453`). An input that is not a JSON object
+    /// (Python `python/horsies/core/workflows/engine.py:1447-1453`). An input that is not a JSON object
     /// takes no member and is refused.
     #[test]
     fn a_root_task_input_carries_the_workflow_meta() {
@@ -1714,7 +1714,7 @@ mod tests {
     /// Only a sub-workflow root of the child that cannot start refuses the parent node. Every other
     /// failure of the engine code's child start is an error of the step, as Python raises it: an
     /// options merge that fails, for example (`_child_task_options_json`,
-    /// `horsies/core/workflows/engine.py:425-475`). A `?` on a `WorkflowError` inside the start takes
+    /// `python/horsies/core/workflows/engine.py:425-475`). A `?` on a `WorkflowError` inside the start takes
     /// the second form.
     #[test]
     fn only_a_root_sub_workflow_that_cannot_start_refuses_the_parent_node() {
@@ -2010,8 +2010,8 @@ mod tests {
     }
 
     /// Python refuses a node whose stored retry policy does not validate, and the start's transaction rolls
-    /// back (`horsies/core/workflows/lifecycle.py:152-203`, `root_retry_and_deadline`; the reader is
-    /// `stored_max_retries`, `horsies/core/codec/task_options.py:80-103`). Each options text here is a JSON
+    /// back (`python/horsies/core/workflows/lifecycle.py:152-203`, `root_retry_and_deadline`; the reader is
+    /// `stored_max_retries`, `python/horsies/core/codec/task_options.py:80-103`). Each options text here is a JSON
     /// object, so `prepare_workflow_task_facts` accepts it; only the retry limit refuses it. A reader that
     /// guesses a limit (3 for a policy without an integer `max_retries`) lets the start write its rows, and
     /// passes 21 on to the baseline CHECK (`max_retries BETWEEN 0 AND 20`) as a database error.
@@ -2085,7 +2085,7 @@ mod tests {
     }
 
     /// Python raises when a node's options are not a JSON object and the start rolls back
-    /// (`horsies/core/workflows/lifecycle.py:576-604`); a deadline the database cannot read fails the
+    /// (`python/horsies/core/workflows/lifecycle.py:576-604`); a deadline the database cannot read fails the
     /// insert. The core refuses both before any row: options that do not read are not replaced when a
     /// deadline is merged in, and a stored `good_until` that is not an RFC 3339 text is not read as no
     /// deadline.
@@ -2516,7 +2516,7 @@ mod tests {
     /// The child start of the engine code (recovery case 1.5, the engine promotion of a
     /// sub-workflow node) writes the workflow meta into the input of each root task of the child,
     /// on the fast path (bulk insert) and on the slow path (a root that names a context source), as
-    /// Python does (`horsies/core/workflows/engine.py:1447-1453`) and as the baseline mint does
+    /// Python does (`python/horsies/core/workflows/engine.py:1447-1453`) and as the baseline mint does
     /// (`horsies_workflow_task_input`). The node rows keep the node input, and a node defined with
     /// an empty context list stores NULL. The test's transaction rolls back.
     #[tokio::test]

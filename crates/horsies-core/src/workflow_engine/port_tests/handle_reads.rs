@@ -175,7 +175,6 @@ async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
 /// zero age expires a PAUSED workflow.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #851"]
 async fn a_zero_age_expires_a_paused_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause_zero_age").await;
@@ -457,14 +456,11 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
     let tasks = handle(&pool, parent).tasks().await.expect("tasks()");
 
     assert_eq!(tasks[0].sub_workflow_id, Some(child));
-    let summary: SubWorkflowSummary = serde_json::from_str(
-        tasks[0]
-            .sub_workflow_summary
-            .as_deref()
-            .expect("the node gives its summary"),
-    )
-    .expect("the summary decodes");
-    assert_eq!(summary.status, "COMPLETED");
+    let summary: SubWorkflowSummary = tasks[0]
+        .sub_workflow_summary
+        .clone()
+        .expect("the node gives its summary");
+    assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(
         (
             summary.total_tasks,
@@ -481,7 +477,6 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
 /// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_corrupt_summary_returns_err`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #849"]
 async fn a_corrupt_summary_makes_tasks_return_stored_data_invalid() {
     let pool = shared_pool().await;
     let (parent, child) =
@@ -505,7 +500,6 @@ async fn a_corrupt_summary_makes_tasks_return_stored_data_invalid() {
 /// an unknown status is never read as FAILED.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #849"]
 async fn a_summary_with_an_unknown_status_makes_tasks_return_stored_data_invalid() {
     let pool = shared_pool().await;
     let (parent, child) = seed_linked_child(
@@ -679,7 +673,6 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
 /// connections; `get()` reads the finished workflow by polling.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #850"]
 async fn get_polls_when_the_listener_cannot_connect() {
     let mut db = IsolatedDatabase::create().await;
     let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);

@@ -1,10 +1,10 @@
 //! The two one-statement writers of a RUNNING task's attempt.
 //!
 //! - `horsies_finish_failed_attempt`: the attempt row with the retry or the
-//!   terminal failure (Python `horsies/core/worker/failed_attempt.py`).
+//!   terminal failure (Python `python/horsies/core/worker/failed_attempt.py`).
 //! - `horsies_finish_workflow_success`: the attempt row, the history row and
 //!   the phase-2 record of a workflow task's success (Python
-//!   `horsies/core/worker/workflow_success.py`).
+//!   `python/horsies/core/worker/workflow_success.py`).
 //!
 //! Each function takes the task advisory lock, then the row lock under the
 //! full fence (worker and claim generation; the failed attempt also fences on
@@ -33,6 +33,7 @@ use crate::core::lifecycle::{
     RetryRefusal, UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 use crate::db::{CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement};
+use crate::log_targets::{FAILED_ATTEMPT, WORKFLOW_SUCCESS};
 
 use super::error::BrokerError;
 
@@ -230,6 +231,7 @@ pub(crate) async fn finish_unreported_attempt(
     match &outcome {
         UnreportedAttemptOutcome::Failed(failed) => log_failed_attempt(command, failed),
         UnreportedAttemptOutcome::Released(released) => tracing::debug!(
+            target: FAILED_ATTEMPT,
             function = FINISH_FAILED_ATTEMPT.name(),
             task_id = %command.task_id,
             queue = %released.queue_name,
@@ -364,6 +366,7 @@ fn log_failed_attempt(command: &FinishFailedAttempt, outcome: &FailedAttemptOutc
             ..
         } => {
             tracing::info!(
+                target: FAILED_ATTEMPT,
                 task_id = %command.task_id,
                 %next_retry_at,
                 %good_until,
@@ -392,6 +395,7 @@ fn log_failed_attempt(command: &FinishFailedAttempt, outcome: &FailedAttemptOutc
         }
         FailedAttemptOutcome::Refused(refusal) => {
             tracing::warn!(
+                target: FAILED_ATTEMPT,
                 function = FINISH_FAILED_ATTEMPT.name(),
                 task_id = %command.task_id,
                 outcome = refusal.as_str(),
@@ -410,6 +414,7 @@ fn log_workflow_success(command: &FinishWorkflowSuccess, outcome: &WorkflowSucce
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { .. } => {
             tracing::debug!(
+                target: WORKFLOW_SUCCESS,
                 function = FINISH_WORKFLOW_SUCCESS.name(),
                 task_id = %command.task_id,
                 outcome = outcome.as_str(),
@@ -421,6 +426,7 @@ fn log_workflow_success(command: &FinishWorkflowSuccess, outcome: &WorkflowSucce
         }
         WorkflowSuccessOutcome::Refused(refusal) => {
             tracing::warn!(
+                target: WORKFLOW_SUCCESS,
                 function = FINISH_WORKFLOW_SUCCESS.name(),
                 task_id = %command.task_id,
                 outcome = refusal.as_str(),
@@ -442,6 +448,7 @@ fn log_at_debug(
     retry: &RetryRequest,
 ) {
     tracing::debug!(
+        target: FAILED_ATTEMPT,
         function,
         %task_id,
         outcome,

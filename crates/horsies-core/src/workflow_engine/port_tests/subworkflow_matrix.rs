@@ -117,7 +117,7 @@ pub(super) fn given_params_node(
 /// parent passes through `args_from` and writes what it saw into the input of
 /// its one task. The builder runs in the engine, so `value` is the result
 /// envelope itself, not the wrap that crosses to a worker (Python
-/// `horsies/core/workflows/engine.py:1171-1185`; the core's
+/// `python/horsies/core/workflows/engine.py:1171-1185`; the core's
 /// `child_build_input`).
 fn failed_input_definition() -> RegisteredWorkflowDefinition {
     RegisteredWorkflowDefinition {
@@ -344,7 +344,7 @@ pub(super) fn assert_subworkflow_error(
     if let Some(child) = child_id {
         assert_eq!(details.sub_workflow_id, child);
     }
-    assert_eq!(details.sub_workflow_summary.status, "FAILED");
+    assert_eq!(details.sub_workflow_summary.status, WorkflowStatus::Failed);
     assert!(details.sub_workflow_summary.failed_tasks >= 1);
     details.sub_workflow_summary.clone()
 }
@@ -430,7 +430,7 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     let child_id = sub.sub_workflow_id.expect("the node holds its child");
     assert_ok_value(&node_result(sub.result), serde_json::json!(11));
     let summary = summary_of(sub.sub_workflow_summary.as_deref());
-    assert_eq!(summary.status, "COMPLETED");
+    assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(summary.output, Some(serde_json::json!(11)));
     assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
     let child = tree(&pool, workflow_id)
@@ -448,8 +448,12 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
     assert_eq!(infos[0].sub_workflow_id, Some(child_id));
     assert_eq!(
-        summary_of(infos[0].sub_workflow_summary.as_deref()).status,
-        "COMPLETED"
+        infos[0]
+            .sub_workflow_summary
+            .as_ref()
+            .expect("tasks() gives the child summary")
+            .status,
+        WorkflowStatus::Completed
     );
     assert_ok_value(
         infos[0].result.as_ref().expect("tasks() holds the result"),
@@ -482,8 +486,12 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
     assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
     assert!(infos[0].sub_workflow_id.is_some());
     assert_eq!(
-        summary_of(infos[0].sub_workflow_summary.as_deref()).status,
-        "COMPLETED"
+        infos[0]
+            .sub_workflow_summary
+            .as_ref()
+            .expect("tasks() gives the child summary")
+            .status,
+        WorkflowStatus::Completed
     );
     assert_ok_value(
         infos[0].result.as_ref().expect("tasks() holds the result"),
@@ -538,8 +546,12 @@ async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
     assert_eq!(infos[0].status, WorkflowTaskStatus::Failed);
     assert_eq!(infos[0].sub_workflow_id, Some(child_id));
     assert_eq!(
-        summary_of(infos[0].sub_workflow_summary.as_deref()).status,
-        "FAILED"
+        infos[0]
+            .sub_workflow_summary
+            .as_ref()
+            .expect("tasks() gives the child summary")
+            .status,
+        WorkflowStatus::Failed
     );
     let _info = assert_subworkflow_error(
         infos[0].result.as_ref().expect("tasks() holds the result"),
@@ -589,14 +601,14 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
         assert_subworkflow_error(&args_from_inner(&input, "child_result"), Some(child_id));
     let _through_ctx = assert_subworkflow_error(&ctx_result(&input, "node_0"), Some(child_id));
     // The context holds the stored summary text as a JSON string (Python
-    // `_build_workflow_context_data`, `horsies/core/workflows/engine.py:1666-1677`;
+    // `_build_workflow_context_data`, `python/horsies/core/workflows/engine.py:1666-1677`;
     // the baseline `horsies_workflow_task_input`); the worker parses it.
     let summary_text = input[WORKFLOW_CTX_KWARG]["summaries_by_id"]["node_0"]
         .as_str()
         .unwrap_or_else(|| panic!("the context holds the child summary as text: {input}"));
     let summary: SubWorkflowSummary =
         serde_json::from_str(summary_text).expect("the child summary decodes");
-    assert_eq!(summary.status, "FAILED");
+    assert_eq!(summary.status, WorkflowStatus::Failed);
     assert_eq!(summary.failed_tasks, 1);
 }
 

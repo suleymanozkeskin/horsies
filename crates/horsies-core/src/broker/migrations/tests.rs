@@ -225,46 +225,17 @@ fn a_lost_lock_is_not_retryable_and_a_busy_lock_is() {
     assert_eq!(INSTALL_LOCK_WAIT, Duration::from_secs(300));
 }
 
-/// The package folder of the baseline SQL files.
+/// The folder of the baseline SQL files.
 fn baseline_sql_folder() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../horsies/core/baseline/sql")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("baseline")
 }
 
-/// Python's `BASELINE_SQL_FILES`, read from
-/// `horsies/core/baseline/migration.py`: one quoted name per line between
-/// the line that opens the tuple and the line that closes it.
-fn python_baseline_sql_files() -> Vec<String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../horsies/core/baseline/migration.py");
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let mut lines = source
-        .lines()
-        .skip_while(|line| !line.starts_with("BASELINE_SQL_FILES: Final = ("));
-    assert!(
-        lines.next().is_some(),
-        "no BASELINE_SQL_FILES tuple in {}",
-        path.display()
-    );
-    lines
-        .take_while(|line| line.trim() != ")")
-        .map(|line| {
-            line.trim()
-                .trim_end_matches(',')
-                .trim_matches('\'')
-                .to_owned()
-        })
-        .collect()
-}
-
-/// The core's list is Python's list in Python's order, and it holds every
-/// SQL file of the package folder. A file that one side adds fails here and
-/// in Python's `tests/unit/test_baseline_migration.py`.
+/// The list holds every SQL file of the baseline folder, in name order. A
+/// file added to the folder without a line in `baseline_sql_files!` fails
+/// here.
 #[test]
-fn baseline_file_list_is_python_s_list_and_the_whole_folder() {
-    let python = python_baseline_sql_files();
-    assert!(!python.is_empty(), "Python's list is empty");
-    assert_eq!(BASELINE_SQL_FILES, python.as_slice());
+fn baseline_file_list_is_the_whole_folder() {
+    assert!(!BASELINE_SQL_FILES.is_empty(), "the baseline list is empty");
 
     let mut folder: Vec<String> = std::fs::read_dir(baseline_sql_folder())
         .expect("read the baseline SQL folder")
@@ -283,8 +254,9 @@ fn baseline_file_list_is_python_s_list_and_the_whole_folder() {
 
 /// Migration 1000 is the listed files as they are on disk, concatenated in
 /// list order, and its checksum is Python's rule
-/// (`horsies/core/baseline/migration.py`, `baseline_checksum`): SHA-384 of
-/// the UTF-8 bytes of that text.
+/// (`python/horsies/core/baseline/migration.py`, `baseline_checksum`):
+/// SHA-384 of the UTF-8 bytes of that text. `BASELINE_SQL_FILE_TEXTS`, which
+/// Python reads, holds the same names and texts in the same order.
 #[test]
 fn baseline_is_one_migration_built_from_every_listed_file() {
     let baseline = &embedded_migrations()[0];
@@ -299,6 +271,16 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
         })
         .collect();
     assert_eq!(baseline.script.sql(), on_disk);
+    let names: Vec<&str> = BASELINE_SQL_FILE_TEXTS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(names, BASELINE_SQL_FILES);
+    let texts: String = BASELINE_SQL_FILE_TEXTS
+        .iter()
+        .map(|(_, text)| *text)
+        .collect();
+    assert_eq!(texts, on_disk);
     assert_eq!(
         baseline.checksum.as_slice(),
         Sha384::digest(on_disk.as_bytes()).as_slice()
