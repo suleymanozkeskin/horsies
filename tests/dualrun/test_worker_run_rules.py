@@ -7,12 +7,14 @@ from uuid import uuid4
 
 import pytest
 
-from tests.dualrun.catalog import BASELINE_CATALOG
+from tests.dualrun.catalog import ATTEMPT_ARCHIVE, BASELINE_CATALOG
 from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
-from tests.dualrun.rules import Ignored
+from tests.dualrun.rules import EachItem, Ignored, Index, JsonPath
 from tests.dualrun.worker_run import (
+    ARCHIVE_PROCESS_ID_POSITIONS,
     PROCESS_ID_COLUMNS,
     UNCOMPARED_TABLES,
+    WHOLE_RUN_ATTEMPT_ARCHIVE,
     WHOLE_RUN_CATALOG,
     Absent,
     AttemptReport,
@@ -46,11 +48,30 @@ def test_only_the_process_id_columns_change_rule() -> None:
         for base_column, whole_column in zip(base.columns, whole.columns, strict=True):
             assert base_column.name == whole_column.name
             if base_column != whole_column:
-                assert isinstance(whole_column.rule, Ignored)
+                match base_column.rule == ATTEMPT_ARCHIVE:
+                    case True:
+                        assert whole_column.rule == WHOLE_RUN_ATTEMPT_ARCHIVE
+                    case False:
+                        assert isinstance(whole_column.rule, Ignored)
                 changed.add((base.name, base_column.name))
     assert changed, 'the catalog has process id columns to ignore'
-    assert {column for _, column in changed} == PROCESS_ID_COLUMNS
+    assert {column for _, column in changed} == PROCESS_ID_COLUMNS | {'attempt_snapshot'}
     assert not {table for table, _ in changed} & UNCOMPARED_TABLES
+
+
+def test_the_attempt_archive_ignores_only_the_process_id_fields() -> None:
+    added = WHOLE_RUN_ATTEMPT_ARCHIVE.paths[len(ATTEMPT_ARCHIVE.paths):]
+    assert WHOLE_RUN_ATTEMPT_ARCHIVE.paths[: len(ATTEMPT_ARCHIVE.paths)] == ATTEMPT_ARCHIVE.paths
+    assert (WHOLE_RUN_ATTEMPT_ARCHIVE.storage, WHOLE_RUN_ATTEMPT_ARCHIVE.format) == (
+        ATTEMPT_ARCHIVE.storage,
+        ATTEMPT_ARCHIVE.format,
+    )
+    assert [path.steps for path in added] == [
+        (EachItem(), Index(position=position)) for position in ARCHIVE_PROCESS_ID_POSITIONS
+    ]
+    assert all(
+        isinstance(path, JsonPath) and isinstance(path.rule, Ignored) for path in added
+    )
 
 
 def test_the_compared_part_leaves_out_the_time_driven_tables() -> None:
