@@ -10,6 +10,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use horsies_core::core::lifecycle::OwnedClaim;
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::{
     BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker,
@@ -25,9 +26,14 @@ use crate::bridge::blocking::{call_blocking, call_blocking_within};
 use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
+use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
+use crate::operations::expiry_and_orphans::{
+    audit_orphaned_workflow_tasks_operation, cancel_owned_orphan_operation,
+    expire_pending_tasks_operation,
+};
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
 };
@@ -543,6 +549,71 @@ impl CoreHandle {
             "CoreHandle.cancel_task_async",
             CallKind::Write,
             cancel_task_operation(self.connection(), task_id, include_running),
+        )
+    }
+
+    /// One pending expiry pass (`horsies_expire_pending_tasks` in bounded
+    /// batches): `PendingExpiryDrained`, `PendingExpiryBoundReached`, or
+    /// `PendingExpiryFailed`. Writes; each batch commits alone. Awaitable
+    /// only: its caller, `PostgresBroker.expire_pending_tasks`, runs on an
+    /// event loop.
+    fn expire_pending_tasks_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.expire_pending_tasks_async",
+            CallKind::Write,
+            expire_pending_tasks_operation(self.connection()),
+        )
+    }
+
+    /// One page of the orphan sweep (`horsies_cancel_orphaned_tasks` and the
+    /// page's cursor counts, in one transaction): `OrphanPageAudited`,
+    /// `OrphanAuditLockBusy`, or `OrphanAuditFailed`. Writes. Awaitable only:
+    /// its caller, `PostgresBroker.audit_orphaned_workflow_tasks`, runs on an
+    /// event loop.
+    fn audit_orphaned_workflow_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.audit_orphaned_workflow_tasks_async",
+            CallKind::Write,
+            audit_orphaned_workflow_tasks_operation(self.connection()),
+        )
+    }
+
+    /// Cancel one claimed workflow task that this claim (`worker_id`,
+    /// `claimed_at`) holds and that no runnable node links
+    /// (`horsies_cancel_owned_orphan`): `TaskRowEnded`, a refusal
+    /// (`AttemptAlreadyApplied`, `AttemptLostClaim`,
+    /// `AttemptSourceStateConflict`, `AttemptTaskAbsent`), or
+    /// `AttemptWriteFailed`. Writes, in one statement. Awaitable only: its
+    /// caller, the worker's finalize, runs on the worker's event loop. A
+    /// naive `claimed_at` raises `TypeError`.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at))]
+    fn cancel_owned_orphan_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let fence = OwnedClaim {
+            worker_id,
+            claimed_at: utc_instant(claimed_at)?,
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.cancel_owned_orphan_async",
+            CallKind::Write,
+            cancel_owned_orphan_operation(self.connection(), task_id, fence),
         )
     }
 

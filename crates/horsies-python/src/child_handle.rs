@@ -26,6 +26,7 @@ use crate::bridge::CallKind;
 use crate::errors::ManifestRefused;
 use crate::handle::{checked_core, BrokerConnection};
 use crate::operations::arguments::utc_instant;
+use crate::operations::expiry_and_orphans::expire_owned_claim_operation;
 use crate::operations::finalizing::{mark_finalizing_operation, marker_fence};
 use crate::operations::start::{start_attempt_operation, start_command, start_window};
 
@@ -142,6 +143,49 @@ impl CoreChildHandle {
             "CoreChildHandle.start_attempt_async",
             CallKind::Write,
             start_attempt_operation(self.connection.clone(), command, window),
+        )
+    }
+
+    /// Expire one claimed row of `worker_id` whose deadline passed before its
+    /// start (`horsies_expire_owned_claim`, the miss path after a start that
+    /// missed with `DEADLINE_PASSED`): `TaskRowEnded`, a refusal
+    /// (`AttemptAlreadyApplied`, `AttemptLostClaim`,
+    /// `AttemptSourceStateConflict`, `AttemptTaskAbsent`), or
+    /// `AttemptWriteFailed`. Writes, in one statement, checked out as
+    /// reserved work. Blocking, for the isolated child and the seats of a
+    /// shared thread child.
+    #[pyo3(signature = (task_id, *, worker_id))]
+    fn expire_owned_claim(
+        &self,
+        py: Python<'_>,
+        task_id: Uuid,
+        worker_id: String,
+    ) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreChildHandle.expire_owned_claim",
+            CallKind::Write,
+            expire_owned_claim_operation(self.connection.clone(), task_id, worker_id),
+        )
+    }
+
+    /// The awaitable form of `expire_owned_claim`, for a shared async child.
+    #[pyo3(signature = (task_id, *, worker_id))]
+    fn expire_owned_claim_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreChildHandle.expire_owned_claim_async",
+            CallKind::Write,
+            expire_owned_claim_operation(self.connection.clone(), task_id, worker_id),
         )
     }
 

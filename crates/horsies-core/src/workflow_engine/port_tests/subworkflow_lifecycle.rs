@@ -24,12 +24,12 @@ use crate::broker::attempt_writes::{
     RetryRequest,
 };
 use crate::broker::core_rows::StatementLog;
+use crate::broker::expiry_and_orphans::expire_pending_pass;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::{WorkflowSpec, WorkflowSpecRegistry};
-use crate::worker::recovery::expire_pending_tasks;
 use crate::workflow_engine::engine::on_workflow_task_complete;
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery;
 use crate::workflow_engine::recovery::{recover_stuck_workflows, GLOBAL_SCAN_ROW_CAP};
@@ -632,9 +632,10 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
     let child_id = child_of(&db.pool, workflow_id, 0).await;
 
     assert!(
-        expire_pending_tasks(&core_pool_for_test_pool(&db.pool), StatementLog::Off)
+        expire_pending_pass(&core_pool_for_test_pool(&db.pool), StatementLog::Off)
             .await
-            .expect("expire_pending_tasks")
+            .expect("expire_pending_pass")
+            .expired()
             >= 1
     );
     assert!(recovery_pass(&db.pool, &registry).await >= 1);
