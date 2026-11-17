@@ -184,7 +184,7 @@ async fn admit_workflow_write(broker: &PostgresBroker, workflow_id: Uuid) -> Han
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    match steps::cancel(broker, workflow_id).await {
+    match Box::pin(steps::cancel(broker, workflow_id)).await {
         Ok(CancelOutcome::Cancelled {
             cancelled_workflow_ids,
             cancelled_task_ids,
@@ -354,7 +354,7 @@ fn python_timedelta_text(total_micros: u64) -> String {
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    match steps::pause(broker, workflow_id).await {
+    match Box::pin(steps::pause(broker, workflow_id)).await {
         Ok(PauseOutcome::Paused {
             paused_workflow_ids,
             abandoned_task_ids,
@@ -409,14 +409,14 @@ pub async fn resume_workflow(
     _payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
-    resume_with(
+    Box::pin(resume_with(
         broker,
         workflow_id,
         ChildBuild::Registry {
             registry,
             retention,
         },
-    )
+    ))
     .await
     .map_err(|failure| failure.into_handle_error(workflow_id))
 }
@@ -430,7 +430,7 @@ pub(crate) async fn resume_client_workflow(
     workflow_id: Uuid,
     source: &dyn ChildSpecSource,
 ) -> HandleResult<bool> {
-    resume_with(broker, workflow_id, ChildBuild::Client(source))
+    Box::pin(resume_with(broker, workflow_id, ChildBuild::Client(source)))
         .await
         .map_err(|failure| failure.into_handle_error(workflow_id))
 }
@@ -475,7 +475,7 @@ pub(crate) async fn resume_with(
     admit_workflow_write(broker, workflow_id)
         .await
         .map_err(ResumeFailure::Handle)?;
-    let committed = steps::resume(broker, workflow_id, build)
+    let committed = Box::pin(steps::resume(broker, workflow_id, build))
         .await
         .map_err(ResumeFailure::Step)?;
     match committed.disposition {
@@ -488,12 +488,12 @@ pub(crate) async fn resume_with(
         ResumeDisposition::NotPaused => return Ok(false),
         ResumeDisposition::Resumed => {}
     }
-    advance_parents(
+    Box::pin(advance_parents(
         broker,
         CheckoutClass::Batch,
         committed.parent_advances,
         build,
-    )
+    ))
     .await
     .map_err(|failure| {
         ResumeFailure::Handle(resume_recovery_failed(workflow_id, &failure.error))
@@ -501,9 +501,13 @@ pub(crate) async fn resume_with(
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
     // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree (Python
     // `core/workflows/lifecycle.py:1234-1262`).
-    crate::workflow_engine::recovery::recover_workflow_tree(broker, build, workflow_id)
-        .await
-        .map_err(|error| ResumeFailure::Handle(resume_recovery_failed(workflow_id, &error)))?;
+    Box::pin(crate::workflow_engine::recovery::recover_workflow_tree(
+        broker,
+        build,
+        workflow_id,
+    ))
+    .await
+    .map_err(|error| ResumeFailure::Handle(resume_recovery_failed(workflow_id, &error)))?;
     Ok(true)
 }
 
