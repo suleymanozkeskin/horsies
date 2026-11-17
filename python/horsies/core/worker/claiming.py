@@ -43,6 +43,7 @@ from horsies.core.worker.dispatch_claim import DispatchClaim, dispatch_claim_of
 from horsies.core.worker.queue_cap_hold import (
     HeldRow,
     QueueCapHold,
+    StartedClaim,
     read_queue_starts,
 )
 from horsies.core.worker.release import (
@@ -342,24 +343,7 @@ class ClaimMixin:
                 waits out renewal-cap + lease (the reaper's stale-claimed
                 path needs a dead claimer heartbeat and does not apply).
         """
-        # TIER 1: the per-pass critical section (advisory-lock acquisition + cap
-        # counts + budget math + windowed claim) is one server-side statement
-        # (horsies_claim). It runs in autocommit, as its own transaction, so
-        # the xact-scoped advisory lock ends with the statement — never held
-        # across a client round trip, so a stalled worker cannot freeze the
-        # cluster mid-pass. Budget and cap semantics are computed in-function;
-        # see horsies_claim in the baseline SQL.
-        # The claim loop's held connection: one checkout for the passes that
-        # follow each other, given back after an idle period.
-        claim_result = rows_or_raise(
-            await self._claim_runner.run(
-                SingleStatement(
-                    statement=HORSIES_CLAIM_SQL,
-                    parameters=self._claim_params(),
-                ),
-            ),
-        )
-        claim_rows = read_claim_rows(claim_result.columns, claim_result.rows)
+        claim_rows = await self._claim_rows()
 
         claimed_rows = claim_rows.tasks
         fitting_rows: list[dict[str, Any]] = []
@@ -383,6 +367,7 @@ class ClaimMixin:
                             parse_row_class(task_id, row['execution']),
                             task_id,
                         ),
+                        claimed_at=claim_time_of(row),
                         row=row,
                     ),
                 )
@@ -394,6 +379,59 @@ class ClaimMixin:
             dropped=len(claimed_rows) - len(fitting_rows),
             short_of_plan=claim_rows.short_of_plan,
         )
+
+    async def _claim_rows(self) -> ClaimRows:
+        """One claim pass: the rows it took, in dispatch order, and the rows
+        its plan chose and its take did not get.
+
+        The per-pass critical section (advisory-lock acquisition, cap
+        counts, budget math, windowed claim) is one ``horsies_claim``
+        statement in autocommit, as its own transaction, so the
+        transaction-scoped advisory lock ends with the statement: it is
+        never held across a client round trip, and a stalled worker cannot
+        freeze the cluster mid-pass. It runs on the claim loop's held
+        connection: one checkout for the passes that follow each other,
+        given back after an idle period.
+
+        Raises:
+            Exception: DB errors propagate to the claim pass.
+        """
+        claim_result = rows_or_raise(
+            await self._claim_runner.run(
+                SingleStatement(
+                    statement=HORSIES_CLAIM_SQL,
+                    parameters=self._claim_params(),
+                ),
+            ),
+        )
+        return read_claim_rows(claim_result.columns, claim_result.rows)
+
+    async def _count_queue_starts(
+        self,
+        queues: Sequence[str],
+        started: Sequence[StartedClaim],
+    ) -> dict[str, int]:
+        """The count of each capped queue of one start check: its RUNNING
+        rows plus this worker's started rows that are not RUNNING yet. One
+        statement (``COUNT_QUEUE_STARTS_SQL``) on the claim loop's held
+        connection; ``queues`` is not empty.
+
+        Raises:
+            Exception: DB errors propagate to the claim pass.
+        """
+        counted = rows_or_raise(
+            await self._claim_runner.run(
+                SingleStatement(
+                    statement=COUNT_QUEUE_STARTS_SQL,
+                    parameters={
+                        'queues': list(queues),
+                        'wid': self.worker_instance_id,
+                        'started_ids': [claim.task_id for claim in started],
+                    },
+                ),
+            ),
+        )
+        return read_queue_starts(counted.columns, counted.rows)
 
     async def _dispatch_claim_row(self, row: Mapping[str, Any]) -> asyncio.Future[Any]:
         """Hand one claimed row to dispatch, and return its finalizer task."""
@@ -430,19 +468,7 @@ class ClaimMixin:
         queues = hold.held_queues()
         if not queues:
             return
-        counted = rows_or_raise(
-            await self._claim_runner.run(
-                SingleStatement(
-                    statement=COUNT_QUEUE_STARTS_SQL,
-                    parameters={
-                        'queues': list(queues),
-                        'wid': self.worker_instance_id,
-                        'started_ids': list(hold.started_ids()),
-                    },
-                ),
-            ),
-        )
-        starts = read_queue_starts(counted.columns, counted.rows)
+        starts = await self._count_queue_starts(queues, hold.started_claims())
         for held in hold.admit(starts, self._free_capacity()):
             finalizer = await self._dispatch_claim_row(held.row)
             _end_start_when_done(hold, finalizer, held.task_id)
