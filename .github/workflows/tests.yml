@@ -299,9 +299,8 @@ jobs:
       - name: Check formatting of every crate, the core included
         run: cargo fmt --all --check
 
-  # Every crate of the workspace except the end-to-end crates under
-  # rust/tests/ (horsies-test-worker, horsies-test-support,
-  # horsies-queue-mismatch-tests): their tests still use the API of the old
+  # Every crate of the workspace. The check leaves out horsies-test-worker
+  # (rust/tests/worker/): its workflow tests still use the API of the old
   # Rust client and move to the client of the core with #1410.
   rust:
     needs: scope
@@ -357,11 +356,7 @@ jobs:
       # Cargo unifies the features of the checked crates: horsies-python turns
       # on the `web` feature of horsies-core here.
       - name: Check the workspace
-        run: >-
-          cargo check --workspace --all-targets
-          --exclude horsies-test-worker
-          --exclude horsies-test-support
-          --exclude horsies-queue-mismatch-tests
+        run: cargo check --workspace --all-targets --exclude horsies-test-worker
 
       - name: Check the core without the web feature
         run: cargo check -p horsies-core --all-targets
