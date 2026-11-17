@@ -24,12 +24,14 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
 from horsies.core.worker.dispatch_claim import DispatchClaim
+from horsies.core.lifecycle.outcomes import PhaseTwoStep
 from horsies.core.worker.finalize import (
+    _NodeFinishOwed,
     _Phase1Input,
-    _PersistedTaskOutcome,
     _PlainTaskDone,
     _finalize_data_for_log,
 )
+from horsies.core.workflows.node_finish import FactsUnknown
 from horsies.core.worker.runtime import (
     FinalizeStage,
     _FINALIZE_STAGE_TIMEOUT,
@@ -2457,18 +2459,23 @@ _SENTINEL_FINALIZE_ERR = _FinalizeError(
     retryable=True,
 )
 
-_SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
-
-
-def _persisted_outcome(
+def _phase_two_owed(
     *,
     queue_name: str = 'default',
-) -> _PersistedTaskOutcome:
-    return _PersistedTaskOutcome(
-        result=_SENTINEL_TASK_RESULT,
-        task_name='loaded_task',
+) -> _NodeFinishOwed:
+    """What phase 1 hands to phase 2: the queue and the node facts."""
+    return _NodeFinishOwed(
         queue_name=queue_name,
+        facts=PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW,
     )
+
+
+def _replay_owed(
+    *,
+    queue_name: str = 'default',
+) -> _NodeFinishOwed:
+    """What the replay load hands to phase 2: no node facts."""
+    return _NodeFinishOwed(queue_name=queue_name, facts=FactsUnknown())
 
 
 @pytest.mark.unit
@@ -2654,7 +2661,7 @@ class TestRetryFinalizePhase1:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_persisted_outcome()),
+            return_value=Ok(_phase_two_owed()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2678,21 +2685,19 @@ class TestRetryFinalizePhase1:
         assert persist_args is not None
         assert persist_args.kwargs['claim'] == CLAIM
         worker._finalize_workflow_phase.assert_awaited_once_with(
-            err.task_id,
-            _SENTINEL_TASK_RESULT,
-            queue_name='default',
-            task_name='loaded_task',
+            err.task_id, _phase_two_owed(),
         )
         assert key_p1 not in worker._finalize_retry_attempts
         assert key_p2 not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
     async def test_happy_path_uses_persisted_routing_context(self) -> None:
-        """Phase-1 replay routes from the same row as its terminal result."""
+        """Phase-1 replay hands phase 2 what phase 1 returned, not the
+        context of the error data."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_persisted_outcome(queue_name='persisted-queue')),
+            return_value=Ok(_phase_two_owed(queue_name='persisted-queue')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2719,10 +2724,7 @@ class TestRetryFinalizePhase1:
         await worker._retry_finalize_phase1(err, 0.0)
 
         worker._finalize_workflow_phase.assert_awaited_once_with(
-            err.task_id,
-            _SENTINEL_TASK_RESULT,
-            queue_name='persisted-queue',
-            task_name='loaded_task',
+            err.task_id, _phase_two_owed(queue_name='persisted-queue'),
         )
 
     # --- U-3e: _persist fails → delegates ---
@@ -2800,7 +2802,7 @@ class TestRetryFinalizePhase1:
             retryable=True,
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_persisted_outcome()),
+            return_value=Ok(_phase_two_owed()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Err(phase2_err),
@@ -2839,18 +2841,18 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._stop.set()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._load_persisted_task_result = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_terminal = AsyncMock()  # type: ignore[assignment]
 
         err = self._make_err()
         await worker._retry_finalize_phase2(err, 1.0)
 
-        worker._load_persisted_task_result.assert_not_called()
+        worker._load_persisted_terminal.assert_not_called()
 
     # --- U-3i: _load fails → delegates ---
 
     @pytest.mark.asyncio
     async def test_load_err_delegates_to_handle_finalize_error(self) -> None:
-        """When _load_persisted_task_result returns Err, delegates to handler."""
+        """When _load_persisted_terminal returns Err, delegates to handler."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         load_err = _FinalizeError(
@@ -2860,7 +2862,7 @@ class TestRetryFinalizePhase2:
             task_id='task-rf2-1',
             retryable=True,
         )
-        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+        worker._load_persisted_terminal = AsyncMock(  # type: ignore[assignment]
             return_value=Err(load_err),
         )
         worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
@@ -2877,8 +2879,8 @@ class TestRetryFinalizePhase2:
         """Happy path: load succeeds, workflow succeeds → clears phase2 attempts."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_persisted_outcome()),
+        worker._load_persisted_terminal = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_replay_owed()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2890,20 +2892,17 @@ class TestRetryFinalizePhase2:
         await worker._retry_finalize_phase2(err, 0.0)
 
         worker._finalize_workflow_phase.assert_awaited_once_with(
-            err.task_id,
-            _SENTINEL_TASK_RESULT,
-            queue_name='default',
-            task_name='loaded_task',
+            err.task_id, _replay_owed(),
         )
         assert key not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
     async def test_happy_path_uses_persisted_routing_context(self) -> None:
-        """Phase-2 replay routes from the same row as its terminal result."""
+        """Phase-2 retry hands phase 2 what the replay load read from the row."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_persisted_outcome(queue_name='critical')),
+        worker._load_persisted_terminal = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_replay_owed(queue_name='critical')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2920,11 +2919,7 @@ class TestRetryFinalizePhase2:
         await worker._retry_finalize_phase2(err, 0.0)
 
         worker._finalize_workflow_phase.assert_awaited_once_with(
-            err.task_id,
-            _SENTINEL_TASK_RESULT,
-            queue_name='critical',
-            # Reloaded row name wins over error-data context.
-            task_name='loaded_task',
+            err.task_id, _replay_owed(queue_name='critical'),
         )
 
     @pytest.mark.asyncio
@@ -2933,7 +2928,7 @@ class TestRetryFinalizePhase2:
         it: phase 2 does not run, and its retry count is cleared."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
-        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+        worker._load_persisted_terminal = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(_PlainTaskDone()),
         )
         worker._finalize_workflow_phase = AsyncMock()  # type: ignore[assignment]
@@ -2960,8 +2955,8 @@ class TestRetryFinalizePhase2:
             task_id='task-rf2-1',
             retryable=True,
         )
-        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_persisted_outcome()),
+        worker._load_persisted_terminal = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_replay_owed()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Err(wf_err),
@@ -6175,10 +6170,11 @@ class TestPersistTerminalStateFusedPath:
                 claim=replace(CLAIM, claimed_at=claimed_at),
             )
 
-        persisted = result.ok_value
-        assert persisted is not None and persisted.result.is_ok()
-        assert persisted.task_name == 'persisted_task'
-        assert persisted.queue_name == 'persisted_queue'
+        # Phase 2 takes the locked row's queue and the node facts; the node
+        # result comes from the phase-2 record.
+        assert result.ok_value == _NodeFinishOwed(
+            queue_name='persisted_queue', facts=PhaseTwoStep.NO_DEPENDENTS,
+        )
         assert finish.await_args.args[1] == FinishWorkflowSuccess(
             task_id='task-1',
             fence=OwnedClaim(worker_id=worker.worker_instance_id, claimed_at=claimed_at),
