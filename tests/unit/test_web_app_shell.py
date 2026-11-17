@@ -1,6 +1,8 @@
 # pyright: reportPrivateUsage=false
 # These tests deliberately exercise module-private rules and seams.
-"""Unit tests for the monitoring app's shell: hardening, gating, and serving.
+"""Unit tests for the shell of the Python monitoring app before it mounted the
+core's handler (``tests/dualrun/reference/web_app.py``, the reference of the
+web dual-run): hardening, gating, and serving.
 
 These exercise the app over httpx's ASGI transport without a database. The
 few paths that do reach the broker are pointed at a port nothing listens on,
@@ -39,9 +41,9 @@ from horsies.web import (
     MonitoringUIConfig,
     TrustedHeader,
     ViewOnly,
-    create_monitoring_app,
 )
-from horsies.web import app as web_app_module
+from tests.dualrun.reference import web_app as web_app_module
+from tests.dualrun.reference.web_app import create_monitoring_app
 from horsies.web.schema import SchemaProbe, SchemaState, SchemaStatus
 
 pytestmark = [pytest.mark.unit]

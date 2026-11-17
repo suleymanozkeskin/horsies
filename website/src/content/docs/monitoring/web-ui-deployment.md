@@ -125,19 +125,19 @@ themselves: oauth2-proxy, Cloudflare Access, Tailscale Serve.
 
 ## Connection footprint
 
-The web app uses the broker's existing pool for queries and adds one dedicated
-listener.
+The web app uses the broker's existing pool for queries and the process
+listener of the broker for the event stream and the worker ping.
 
 | Source | Cost |
 |---|---|
 | API requests | One pooled connection per concurrent request, released on response |
-| SSE event listener | ~2 connections for the process lifetime |
-| Manual worker ping | One LISTEN round trip per invocation |
+| SSE event stream | No connection of its own: subscriptions on the process listener (one connection per session URL and process) |
+| Manual worker ping | One LISTEN round trip per invocation, on the process listener |
 
-The listener is the web app's own, not the broker's internal one, which
-isolates it from result-waiter state. It starts lazily on the first
-SSE subscriber and closes at shutdown. Its subscriptions are held for the app's
-lifetime, so there is no per-request LISTEN churn.
+Each event stream has a bounded queue on the process listener, so a slow
+stream cannot hold the broker's result waiters. The stream's subscriptions
+start on the first SSE subscriber and are held for the app's lifetime, so
+there is no per-request LISTEN churn.
 
 Size the pool for the number of concurrent dashboard viewers, and read
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) before pointing the
@@ -155,9 +155,9 @@ horsies web \
   --pgbouncer-transaction-mode
 ```
 
-In mounted mode this is already the broker config of the host app: the web app
-uses `session_database_url` when set, and falls back to `database_url`
-otherwise. Without a session-capable URL the event stream cannot connect, and
+In mounted mode this is already the broker config of the host app: the
+process listener uses `session_database_url` when set, and falls back to
+`database_url` otherwise. Without a session-capable URL the event stream cannot connect, and
 the dashboard runs permanently on its polling fallback.
 
 ## Schema handling

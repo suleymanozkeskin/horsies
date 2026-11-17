@@ -1,5 +1,5 @@
 //! Short-lived shared cache for the monitoring aggregate reads: task stats,
-//! facets and breakdown (Python `python/horsies/web/read_cache.py:34-37`,
+//! facets and breakdown (Python `tests/dualrun/reference/web_read_cache.py:34-37`,
 //! `:170-194`). Each read has its own cache, keyed by its query text.
 
 use std::collections::hash_map::DefaultHasher;

@@ -376,7 +376,7 @@ async fn read_task(
 }
 
 /// The 404 detail text for a task id that no table holds (Python
-/// `python/horsies/web/routes/tasks.py`, `task_not_found_text`).
+/// `tests/dualrun/reference/web_routes/tasks.py`, `task_not_found_text`).
 pub(super) fn task_not_found_text(reason: TaskAbsenceReason) -> &'static str {
     match reason {
         TaskAbsenceReason::PredatesRetainedHistory => {
@@ -552,7 +552,7 @@ async fn read_schedules(
 
 /// Pending streams per (queue, class) with their oldest wait and coverage,
 /// and the budget load of each live worker (Python `read_class_report`,
-/// `python/horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
+/// `tests/dualrun/reference/web_routes/workers.py:84-94`). A failed or refused read is 503.
 async fn read_class_report(
     State(state): State<WebState>,
 ) -> Result<Json<ClassReportInfo>, ApiError> {
@@ -564,11 +564,11 @@ async fn read_class_report(
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
 /// fleet check counts the same workers as live (Python
-/// `STALE_SNAPSHOT_THRESHOLD_S`, `python/horsies/web/routes/workers.py:31-35`).
+/// `STALE_SNAPSHOT_THRESHOLD_S`, `tests/dualrun/reference/web_routes/workers.py:31-35`).
 const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
 
 /// One entry of the worker list (Python `read_workers`,
-/// `python/horsies/web/routes/workers.py:96-133`).
+/// `tests/dualrun/reference/web_routes/workers.py:96-133`).
 ///
 /// The snapshot age, the staleness and the uptime are measured to `read_at`,
 /// the database clock of the list statement: `snapshot_at` and
@@ -684,7 +684,7 @@ async fn read_events(State(state): State<WebState>) -> Response {
 }
 
 /// The response of an action, with its log line (Python `_respond`,
-/// `python/horsies/web/routes/actions.py`): `monitoring action route=...
+/// `tests/dualrun/reference/web_routes/actions.py`): `monitoring action route=...
 /// id=... http=... result=...`, at INFO on `horsies.web`.
 fn action_response(
     route: &'static str,

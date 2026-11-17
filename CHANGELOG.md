@@ -121,6 +121,27 @@ written in Rust, on a new baseline schema.
   per topic (`tasks`, `workflows`, `workers`). A client that keeps up sees
   no change.
 
+- **The monitoring web app runs in the core.** `create_monitoring_app`
+  keeps its signature and mounts the core's monitoring handler: the routes,
+  the guards, the read caches, the schema gate, the event stream and the page
+  run in `horsies._core`. The app calls the auth policy as 0.7 did: no call
+  for the page and its assets, `can_view` for a read and the event stream,
+  `can_view` then `can_act` for `/api/meta` and each action.
+  `monitoring_app.state.events.close()` ends the open event streams.
+
+- **The web event stream uses the process listener of the broker.** It
+  opens no connection of its own. After the listener reconnects, each stream
+  gets one event with no ids per topic; 0.7 went on with a silent gap. A
+  broker built with `assume_initialized=True` has no listener, so its event
+  stream sends the `degraded` event and closes.
+
+- **The worker list measures ages to the database clock.** `snapshot_age_s`,
+  `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
+  the database read; 0.7 measured them to the clock of the web host.
+
+- **A web request body over 1 MiB is refused with 413.** The task cancel
+  route, the one route that reads a body, takes `{"include_running": bool}`.
+
 - **The pool of the worker process can be as small as 3 connections.**
   `ParentPool(max_size=PoolSize(connections=N))` accepts N of 3 and 4
   (`PARENT_POOL_MIN_CONNECTIONS` is 3, was 5): the flushers of the batched
@@ -246,6 +267,12 @@ written in Rust, on a new baseline schema.
   key of `GET /api/workers/classes`, and the `not_recorded` value of
   `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
   records these facts.
+
+- **The Python route modules of the web app.** `horsies.web.routes`,
+  `horsies.web.events`, `horsies.web.read_cache`,
+  `horsies.web.auth.view_guard`, `horsies.web.auth.act_guard` and
+  `horsies.web.schema.schema_guard` are removed: the core's handler serves
+  every route. The exports of `horsies.web` are unchanged.
 
 ### Rust client (crate `horsies`)
 
@@ -651,6 +678,23 @@ unless it starts with "Added".
   `SchemaProbe`, `SchemaState`, `MetaResponse`, ...) are no longer public.
   The crate no longer embeds a UI build of its own (`webui-dist/`), and the
   frozen UI source `rust/webui/` is removed.
+- **`rerun_task(broker, ...)` becomes `app.rerun_task(command, policy)`**,
+  which runs in a transaction of the app's handle and returns
+  `Result<RerunOutcome, AppRerunError>` (`Connect`, `Rerun(RerunError)`).
+  `RerunOutcome` is Python's catalog: `Enqueued`, `SourceLive`,
+  `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
+  `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
+  `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+- **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
+  sent_at)`**, the rerun in a transaction that the caller owns (Python
+  `rerun_task(connection, ...)`): the core builds each statement and
+  decides the outcome, the caller's driver runs the statements, and the
+  rerun commits or rolls back with the caller's own writes. Nothing commits
+  inside. `transaction` is any `CallerTransaction`; the adapters are
+  `rerun::TokioPostgresCaller` (feature `tokio-postgres`) and
+  `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
+  `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
+  { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
 
 ## [0.7.0] - 2026-11-15
 

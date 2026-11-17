@@ -26,7 +26,7 @@ from horsies.monitoring import (
     list_schedules,
 )
 from horsies.monitoring.execution_classes import class_report_info, slot_health_info
-from horsies.web.routes._common import query_failed
+from tests.dualrun.reference.web_routes._common import query_failed
 
 # A worker writes a snapshot periodically; treat its latest one as stale once
 # it is older than the live window, which signals a worker that stopped

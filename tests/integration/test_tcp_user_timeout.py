@@ -26,7 +26,7 @@ from horsies.core.worker.child_pool import (
     _get_worker_pool,  # pyright: ignore[reportPrivateUsage]
     _initialize_worker_pool,  # pyright: ignore[reportPrivateUsage]
 )
-from horsies.web.events import EventBroadcaster
+from tests.dualrun.reference.web_events import EventBroadcaster
 from tests.broker_resources_support import current_resources, listener_of
 
 pytestmark = [pytest.mark.integration]
