@@ -271,9 +271,6 @@ fn oversized_input(app: &Horsies, schedule: &TaskSchedule, size: usize) -> Optio
 }
 
 /// The error of a start that the core refused or that failed. Pure.
-///
-/// Panics: on the refusals of the app-config start (`InvalidScheduleConfig`,
-/// `NotPrepared`, `PayloadTooLarge`), which a manifest start never gives.
 fn start_error(error: &SchedulerStartError) -> SchedulerRunError {
     match error {
         SchedulerStartError::UnknownTimezone { schedule, .. }
@@ -286,11 +283,6 @@ fn start_error(error: &SchedulerStartError) -> SchedulerRunError {
             message: error.to_string(),
             retryable: cause.is_retryable(),
         },
-        SchedulerStartError::InvalidScheduleConfig(_)
-        | SchedulerStartError::NotPrepared { .. }
-        | SchedulerStartError::PayloadTooLarge { .. } => {
-            panic!("a manifest start gave a refusal of the app-config start: {error}")
-        }
     }
 }
 
