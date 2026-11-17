@@ -27,10 +27,11 @@ pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 pub use models::{
-    ActionResponse, Breakdown, CancelTaskBody, ErrorCategory, ErrorFacet, FacetValue, Facets,
-    GroupRow, LeafTaskInfo, LivenessReport, ScheduleStateInfo, StatusCount, TaskAttemptInfo,
-    TaskDetail, TaskListPage, TaskSummary, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
-    WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, CancelTaskBody, ErrorCategory,
+    ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo, LivenessReport, ScheduleStateInfo,
+    StatusCount, TaskAttemptInfo, TaskDetail, TaskListPage, TaskSummary, WorkerHistoryPoint,
+    WorkerPingInfo, WorkerStateInfo, WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail,
+    WorkflowRunSummary, WorkflowTaskDetail,
 };
 pub use models::{
     BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,

@@ -745,7 +745,6 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     let mut state = migrated_state().await;
     state.assets = Arc::new(EmbeddedAssets);
@@ -1234,7 +1233,6 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
     let state = migrated_state().await;
     let prefix = format!("w4_http_{}__", Uuid::new_v4().simple());
