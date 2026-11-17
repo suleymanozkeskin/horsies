@@ -87,5 +87,8 @@
     "tests/integration/test_history_forever_leaf.py",
     "tests/dualrun"
   ],
+  "exclude": [
+    "tests/dualrun/reference/worker_parent"
+  ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }
