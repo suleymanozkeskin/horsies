@@ -2,9 +2,9 @@
 
 use std::ops::{Deref, DerefMut};
 
-use chrono::{Duration, Timelike};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use sqlx::pool::PoolConnection;
-use sqlx::{PgConnection, PgPool, Postgres};
+use sqlx::{Connection, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::core::history::commands::{
@@ -19,8 +19,8 @@ use crate::core::history::ddl::runtime_names::{
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    CLOCK_EXCEPTIONS, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER,
-    TASK_HISTORY_FOREVER_LEAF, WORKFLOW_PHASE2_PENDING,
+    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER, TASK_HISTORY_FOREVER_LEAF,
+    WORKFLOW_PHASE2_PENDING,
 };
 use crate::core::history::outcomes::{
     CatalogConflictKind, LeafAttachment, LeafCreation, LeafDrop, LeafInspection,
@@ -33,10 +33,14 @@ use super::catalog::{
     AT_LOWER_BOUND_KIND, INDEX_SCHEMA_VERSION,
 };
 use super::locks::{
-    is_lock_not_available, try_lock_leaf_for_session, try_lock_leaf_for_transaction,
+    is_lock_not_available, try_lock_leaf_for_transaction,
     try_lock_relation_exclusive_for_transaction, unlock_leaf_for_session, LeafLockAttempt,
 };
 use super::publication::LoaderPublication;
+use super::retirement::{
+    begin_leaf_detach, drop_detached_retention_leaf, record_leaf_detached, recorded_detach,
+    BeginDetach, DetachRecord, RecordedDetach,
+};
 
 const DAILY: Duration = Duration::days(1);
 const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
@@ -292,24 +296,6 @@ pub async fn inspect_leaf(
                 })
             }
         }
-    }
-}
-
-/// The parent a period or heartbeat leaf detaches from.
-async fn detach_parent(
-    connection: &mut PgConnection,
-    leaf: &LeafRef,
-) -> Result<String, HistoryError> {
-    let retention_class = read_retention_class(connection, leaf.class_key())
-        .await?
-        .ok_or_else(|| HistoryError::contract("detaching class disappeared"))?;
-    match retention_class.kind {
-        RetentionClassKind::Period(_) | RetentionClassKind::Heartbeat(_) => {
-            retention_class.parent_name()
-        }
-        RetentionClassKind::Forever => Err(HistoryError::contract(
-            "detaching class has no finite parent",
-        )),
     }
 }
 
@@ -882,7 +868,16 @@ pub async fn verify_static_forever_leaf(
     }
 }
 
-/// Detach one expired leaf without waiting for its advisory lock.
+/// Detach one expired PERIOD or HEARTBEAT leaf without waiting for its
+/// advisory lock.
+///
+/// `horsies_begin_leaf_detach` classifies the leaf and takes its session
+/// lock; `DETACH PARTITION ... CONCURRENTLY` runs under the command's
+/// statement timeout and a 2 s lock timeout; `horsies_record_leaf_detached`
+/// records it and, when the published manifest names the leaf, the readers
+/// are published in the same transaction. Any state other than `DETACHABLE`
+/// is returned as its inspection and nothing is detached;
+/// `LeafInspection::Detached` means an earlier call detached the leaf.
 ///
 /// `pool` must preserve PostgreSQL session affinity. PgBouncer transaction
 /// pooling does not preserve the session advisory lock used by this function.
@@ -893,93 +888,33 @@ pub async fn detach_expired_leaf<P: LoaderPublication>(
 ) -> Result<DetachExpiredLeafOutcome, HistoryError> {
     let leaf = command.leaf();
     let mut connection = SessionConnection::new(pool.acquire().await?);
-    let prior_timeouts =
-        read_prior_timeouts(&mut connection, command.statement_timeout_ms()).await?;
-    if matches!(
-        try_lock_leaf_for_session(&mut connection, leaf.class_key(), leaf.bounds().lower()).await?,
-        LeafLockAttempt::Busy
-    ) {
-        connection.mark_reusable();
-        return Ok(DetachExpiredLeafOutcome::Busy {
-            leaf_name: leaf.leaf_name().to_owned(),
-        });
-    }
-    let result = detach_locked(&mut connection, command, publisher).await;
-    let cleanup = restore_timeouts_and_unlock(&mut connection, leaf, &prior_timeouts).await;
-    if cleanup.is_ok() {
-        connection.mark_reusable();
-    }
-    match (result, cleanup) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(outcome), Ok(())) => Ok(outcome),
-    }
-}
-
-async fn detach_locked<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    command: &DetachExpiredHistoryLeaf,
-    publisher: &P,
-) -> Result<DetachExpiredLeafOutcome, HistoryError> {
-    let leaf = command.leaf();
-    let inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
-    match &inspection {
-        LeafInspection::Detachable { .. } => {}
-        _ => return Ok(DetachExpiredLeafOutcome::Inspection(inspection)),
-    }
-    let parent = detach_parent(connection, leaf).await?;
-    match detach_attached_leaf(
-        connection,
+    let detach = detach_retention_leaf(
+        &mut connection,
         leaf,
-        &parent,
+        DetachStep::Concurrently,
         command.statement_timeout_ms(),
         publisher,
     )
-    .await?
-    {
-        PhysicalDetach::Busy => Ok(DetachExpiredLeafOutcome::Busy {
+    .await?;
+    Ok(match detach {
+        RetentionDetach::Busy => DetachExpiredLeafOutcome::Busy {
             leaf_name: leaf.leaf_name().to_owned(),
-        }),
-        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Detached {
+        },
+        RetentionDetach::Recorded { .. } => DetachExpiredLeafOutcome::Detached {
             leaf_name: leaf.leaf_name().to_owned(),
-        }),
-    }
+        },
+        RetentionDetach::Inspection(inspection) => DetachExpiredLeafOutcome::Inspection(inspection),
+    })
 }
 
-enum PhysicalDetach {
-    Detached,
-    Busy,
-}
-
-/// `DETACH PARTITION ... CONCURRENTLY`, the catalog stamp, and republication.
-/// The caller holds the leaf's session lock and has checked the preconditions.
-async fn detach_attached_leaf<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    leaf: &LeafRef,
-    parent: &str,
-    statement_timeout_ms: Option<u64>,
-    publisher: &P,
-) -> Result<PhysicalDetach, HistoryError> {
-    set_ddl_timeouts(connection, statement_timeout_ms).await?;
-    let detach = sqlx::query(&format!(
-        "ALTER TABLE {parent} DETACH PARTITION {} CONCURRENTLY",
-        leaf.leaf_name()
-    ))
-    .execute(&mut *connection)
-    .await;
-    match detach {
-        Ok(_) => {}
-        Err(error) if is_lock_not_available(&error) => return Ok(PhysicalDetach::Busy),
-        Err(error) => return Err(error.into()),
-    }
-    record_detached(connection, leaf.leaf_name()).await?;
-    if publisher.needs_republication(connection).await? {
-        publisher.republish(connection).await?;
-    }
-    Ok(PhysicalDetach::Detached)
-}
-
-/// Finalize an interrupted detach without waiting for its advisory lock.
+/// Finalize a concurrent detach that a crash or a timeout left pending,
+/// without waiting for its advisory lock.
+///
+/// Acts on `DETACH_INTERRUPTED` only: `DETACH PARTITION ... FINALIZE`, then
+/// the record (and the publication) as in [`detach_expired_leaf`]. A leaf
+/// found already detached gets its detach recorded, without the lock. The
+/// result is `LeafInspection::Detached` once the detach is recorded; every
+/// other state is returned unchanged.
 ///
 /// `pool` must preserve PostgreSQL session affinity. PgBouncer transaction
 /// pooling does not preserve the session advisory lock used by this function.
@@ -990,142 +925,262 @@ pub async fn finalize_interrupted_detach<P: LoaderPublication>(
 ) -> Result<FinalizeInterruptedLeafOutcome, HistoryError> {
     let leaf = command.leaf();
     let mut connection = SessionConnection::new(pool.acquire().await?);
-    let prior_timeouts =
-        read_prior_timeouts(&mut connection, command.statement_timeout_ms()).await?;
-    if matches!(
-        try_lock_leaf_for_session(&mut connection, leaf.class_key(), leaf.bounds().lower()).await?,
-        LeafLockAttempt::Busy
-    ) {
-        connection.mark_reusable();
-        return Ok(FinalizeInterruptedLeafOutcome::Busy {
+    let finalize = detach_retention_leaf(
+        &mut connection,
+        leaf,
+        DetachStep::Finalize,
+        command.statement_timeout_ms(),
+        publisher,
+    )
+    .await?;
+    Ok(match finalize {
+        RetentionDetach::Busy => FinalizeInterruptedLeafOutcome::Busy {
             leaf_name: leaf.leaf_name().to_owned(),
-        });
-    }
-    let result = finalize_locked(&mut connection, command, publisher).await;
-    let cleanup = restore_timeouts_and_unlock(&mut connection, leaf, &prior_timeouts).await;
-    if cleanup.is_ok() {
-        connection.mark_reusable();
-    }
-    match (result, cleanup) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(outcome), Ok(())) => Ok(outcome),
+        },
+        RetentionDetach::Recorded { eligible_at } => {
+            FinalizeInterruptedLeafOutcome::Inspection(LeafInspection::Detached {
+                leaf_name: leaf.leaf_name().to_owned(),
+                eligible_at,
+            })
+        }
+        RetentionDetach::Inspection(inspection) => {
+            FinalizeInterruptedLeafOutcome::Inspection(inspection)
+        }
+    })
+}
+
+/// The detach statement one call runs, and the state it acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachStep {
+    /// `DETACH PARTITION ... CONCURRENTLY`; acts on `DETACHABLE`.
+    Concurrently,
+    /// `DETACH PARTITION ... FINALIZE`; acts on `DETACH_INTERRUPTED`.
+    Finalize,
+}
+
+impl DetachStep {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Concurrently => "CONCURRENTLY",
+            Self::Finalize => "FINALIZE",
+        }
     }
 }
 
-async fn finalize_locked<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    command: &FinalizeInterruptedLeafDetach,
+/// What one detach or finalize call ended with.
+enum RetentionDetach {
+    /// Another session holds the leaf lock, or the detach statement met a
+    /// held relation lock.
+    Busy,
+    /// The detach is recorded in the catalog (by this call or before it).
+    Recorded { eligible_at: DateTime<Utc> },
+    /// The call did not detach the leaf; the inspection names its state.
+    Inspection(LeafInspection),
+}
+
+/// One detach or finalize of a PERIOD or HEARTBEAT leaf on one session
+/// connection.
+///
+/// The connection is marked reusable only when it holds no leaf lock and its
+/// session timeouts are the ones it had before the call. A cancel, or a
+/// failure after which that is not known, leaves it unmarked: it is closed,
+/// and PostgreSQL releases the session lock.
+async fn detach_retention_leaf<P: LoaderPublication>(
+    connection: &mut SessionConnection,
+    leaf: &LeafRef,
+    step: DetachStep,
+    statement_timeout_ms: Option<u64>,
     publisher: &P,
-) -> Result<FinalizeInterruptedLeafOutcome, HistoryError> {
-    let leaf = command.leaf();
-    set_ddl_timeouts(connection, command.statement_timeout_ms()).await?;
-    let inspect_command = InspectHistoryLeaf::new(leaf.clone());
-    let inspection = inspect_leaf(connection, &inspect_command).await?;
-    match inspection {
-        LeafInspection::Detached { .. } => {
-            record_detached(connection, leaf.leaf_name()).await?;
-            if publisher.needs_republication(connection).await? {
-                publisher.republish(connection).await?;
-            }
+) -> Result<RetentionDetach, HistoryError> {
+    let (parent_name, inspection) = match (begin_leaf_detach(connection, leaf).await?, step) {
+        (
+            BeginDetach::Locked {
+                parent_name,
+                inspection,
+            },
+            _,
+        ) => (parent_name, inspection),
+        (BeginDetach::Busy, _) => {
+            connection.mark_reusable();
+            return Ok(RetentionDetach::Busy);
         }
-        LeafInspection::DetachInterrupted { .. } => {
-            let parent = detach_parent(connection, leaf).await?;
-            let finalize = sqlx::query(&format!(
-                "ALTER TABLE {parent} DETACH PARTITION {} FINALIZE",
-                leaf.leaf_name()
-            ))
-            .execute(&mut *connection)
-            .await;
-            match finalize {
-                Ok(_) => {}
-                Err(error) if is_lock_not_available(&error) => {
-                    return Ok(FinalizeInterruptedLeafOutcome::Busy {
-                        leaf_name: leaf.leaf_name().to_owned(),
-                    });
-                }
-                Err(error) => return Err(error.into()),
-            }
-            record_detached(connection, leaf.leaf_name()).await?;
-            if publisher.needs_republication(connection).await? {
-                publisher.republish(connection).await?;
-            }
+        (
+            BeginDetach::Unlocked(LeafInspection::Detached { eligible_at, .. }),
+            DetachStep::Finalize,
+        ) => {
+            let recorded = record_detach(connection, leaf, eligible_at, publisher).await?;
+            connection.mark_reusable();
+            return Ok(recorded);
         }
-        other => return Ok(FinalizeInterruptedLeafOutcome::Inspection(other)),
-    }
-    Ok(FinalizeInterruptedLeafOutcome::Inspection(
-        inspect_leaf(connection, &inspect_command).await?,
-    ))
+        (BeginDetach::Unlocked(inspection), _) => {
+            connection.mark_reusable();
+            return Ok(RetentionDetach::Inspection(inspection));
+        }
+    };
+    // The session holds the leaf lock from here on.
+    let eligible_at = match (&inspection, step) {
+        (LeafInspection::Detachable { eligible_at, .. }, DetachStep::Concurrently)
+        | (LeafInspection::DetachInterrupted { eligible_at, .. }, DetachStep::Finalize) => {
+            *eligible_at
+        }
+        _ => {
+            let released = restore_timeouts_and_unlock(connection, leaf, None).await;
+            return release_outcome(
+                connection,
+                Ok(RetentionDetach::Inspection(inspection)),
+                released,
+            );
+        }
+    };
+    let prior = match read_prior_timeouts(connection, statement_timeout_ms).await {
+        Ok(prior) => prior,
+        Err(error) => {
+            let released = restore_timeouts_and_unlock(connection, leaf, None).await;
+            return release_outcome(connection, Err(error), released);
+        }
+    };
+    let outcome = match run_detach_statement(
+        connection,
+        leaf,
+        &parent_name,
+        step,
+        statement_timeout_ms,
+    )
+    .await
+    {
+        Ok(PhysicalDetach::Busy) => Ok(RetentionDetach::Busy),
+        Ok(PhysicalDetach::Detached) => {
+            record_detach(connection, leaf, eligible_at, publisher).await
+        }
+        Err(error) => Err(error),
+    };
+    let released = restore_timeouts_and_unlock(connection, leaf, Some(&prior)).await;
+    release_outcome(connection, outcome, released)
 }
 
-pub async fn drop_detached_leaf<P: LoaderPublication>(
+/// The outcome of a call that held the leaf lock, after the release. The
+/// connection is marked reusable only when the release succeeded; the first
+/// error wins.
+fn release_outcome(
+    connection: &mut SessionConnection,
+    outcome: Result<RetentionDetach, HistoryError>,
+    released: Result<(), HistoryError>,
+) -> Result<RetentionDetach, HistoryError> {
+    match released {
+        Ok(()) => {
+            connection.mark_reusable();
+            outcome
+        }
+        Err(release_error) => match outcome {
+            Err(error) => Err(error),
+            Ok(_) => Err(release_error),
+        },
+    }
+}
+
+enum PhysicalDetach {
+    Detached,
+    Busy,
+}
+
+/// `ALTER TABLE <parent> DETACH PARTITION <leaf> CONCURRENTLY | FINALIZE`
+/// under the statement timeout and the DDL lock timeout. The caller holds the
+/// leaf's session lock and restores the timeouts. A held relation lock
+/// (`55P03`) is `Busy`.
+async fn run_detach_statement(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+    parent_name: &str,
+    step: DetachStep,
+    statement_timeout_ms: Option<u64>,
+) -> Result<PhysicalDetach, HistoryError> {
+    if !is_safe_identifier(parent_name) {
+        return Err(HistoryError::contract(format!(
+            "leaf {}: parent name {parent_name:?} is not a safe identifier",
+            leaf.leaf_name()
+        )));
+    }
+    set_ddl_timeouts(connection, statement_timeout_ms).await?;
+    let detach = sqlx::query(&format!(
+        "ALTER TABLE {parent_name} DETACH PARTITION {} {}",
+        leaf.leaf_name(),
+        step.keyword()
+    ))
+    .execute(&mut *connection)
+    .await;
+    match detach {
+        Ok(_) => Ok(PhysicalDetach::Detached),
+        Err(error) if is_lock_not_available(&error) => Ok(PhysicalDetach::Busy),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Record the detach that the leaf's state shows, in one READ COMMITTED
+/// transaction on the connection: `horsies_record_leaf_detached` and, when the
+/// published manifest names the leaf, the reader publication commit
+/// together. A failure rolls both back.
+///
+/// A relation that vanished after its detach is `LeafInspection::Missing`. A
+/// leaf still attached, or a catalog row that vanished, contradicts the
+/// detach and is `HistoryError::Contract`.
+async fn record_detach<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+    eligible_at: DateTime<Utc>,
+    publisher: &P,
+) -> Result<RetentionDetach, HistoryError> {
+    let mut transaction = connection.begin().await?;
+    let recorded = match record_and_publish(&mut transaction, leaf.leaf_name(), publisher).await {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            // The first error is the one to report. A rollback that fails
+            // leaves a broken session, which the timeout restore of the
+            // caller then fails on, so the connection is closed.
+            let _rollback = transaction.rollback().await;
+            return Err(error);
+        }
+    };
+    transaction.commit().await?;
+    match recorded_detach(leaf.leaf_name(), recorded)? {
+        RecordedDetach::Detached => Ok(RetentionDetach::Recorded { eligible_at }),
+        RecordedDetach::Missing => Ok(RetentionDetach::Inspection(LeafInspection::Missing {
+            leaf_name: leaf.leaf_name().to_owned(),
+            cataloged: true,
+            eligible_at: Some(eligible_at),
+        })),
+    }
+}
+
+/// The record statement and, when it says so, the publication, inside the
+/// caller's transaction. It does not commit.
+async fn record_and_publish<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    leaf_name: &str,
+    publisher: &P,
+) -> Result<DetachRecord, HistoryError> {
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *connection)
+        .await?;
+    let recorded = record_leaf_detached(connection, leaf_name).await?;
+    match recorded.manifest_names_leaf {
+        true => {
+            let _republished = publisher.republish(connection).await?;
+        }
+        false => {}
+    }
+    Ok(recorded.record)
+}
+
+/// Drop one already-detached PERIOD or HEARTBEAT leaf inside the caller's
+/// transaction: one call of `horsies_drop_detached_leaf`, which reads the
+/// published manifest itself. Refused while the published readers still
+/// probe the relation. The catalog keeps the dropped leaf's row. It does not
+/// commit; see `retirement::drop_detached_retention_leaf`.
+pub async fn drop_detached_leaf(
     connection: &mut PgConnection,
     command: &DropDetachedHistoryLeaf,
-    publisher: &P,
 ) -> Result<LeafDrop, HistoryError> {
-    let leaf = command.leaf();
-    let inspect_command = InspectHistoryLeaf::new(leaf.clone());
-    let mut inspection = inspect_leaf(connection, &inspect_command).await?;
-    if !matches!(inspection, LeafInspection::Detached { .. }) {
-        return Ok(LeafDrop::Inspection(inspection));
-    }
-    if matches!(
-        try_lock_leaf_for_transaction(connection, leaf.class_key(), leaf.bounds().lower()).await?,
-        LeafLockAttempt::Busy
-    ) {
-        return Ok(LeafDrop::Busy {
-            leaf_name: leaf.leaf_name().to_owned(),
-        });
-    }
-    inspection = inspect_leaf(connection, &inspect_command).await?;
-    if !matches!(inspection, LeafInspection::Detached { .. }) {
-        return Ok(LeafDrop::Inspection(inspection));
-    }
-    if publisher
-        .references_leaf(connection, leaf.leaf_name())
-        .await?
-    {
-        return Ok(LeafDrop::RefusedLoaderReferences {
-            leaf_name: leaf.leaf_name().to_owned(),
-        });
-    }
-    if matches!(
-        try_lock_relation_exclusive_for_transaction(connection, leaf.leaf_name()).await?,
-        LeafLockAttempt::Busy
-    ) {
-        return Ok(LeafDrop::Busy {
-            leaf_name: leaf.leaf_name().to_owned(),
-        });
-    }
-    sqlx::query(&format!("DROP TABLE {}", leaf.leaf_name()))
-        .execute(&mut *connection)
-        .await?;
-    // The exceptions of the rows the leaf held go with it. A heartbeat leaf
-    // holds no history row, so it has none.
-    if leaf.class_key() != HEARTBEAT_CLASS_KEY {
-        sqlx::query(&format!(
-            "DELETE FROM {CLOCK_EXCEPTIONS}
-             WHERE retention_class_key = $1 AND terminal_at >= $2 AND terminal_at < $3"
-        ))
-        .bind(leaf.class_key())
-        .bind(leaf.bounds().lower())
-        .bind(leaf.bounds().upper())
-        .execute(&mut *connection)
-        .await?;
-    }
-    let sql = format!(
-        "UPDATE {LEAF_CATALOG}
-         SET detached_at = COALESCE(detached_at, statement_timestamp()),
-             dropped_at = statement_timestamp()
-         WHERE leaf_name = $1"
-    );
-    sqlx::query(&sql)
-        .bind(leaf.leaf_name())
-        .execute(connection)
-        .await?;
-    Ok(LeafDrop::Dropped {
-        leaf_name: leaf.leaf_name().to_owned(),
-    })
+    drop_detached_retention_leaf(connection, command.leaf()).await
 }
 
 async fn pending_blocker_count(
@@ -1143,22 +1198,6 @@ async fn pending_blocker_count(
         .bind(leaf.bounds().upper())
         .fetch_one(connection)
         .await?)
-}
-
-async fn record_detached(
-    connection: &mut PgConnection,
-    leaf_name: &str,
-) -> Result<(), HistoryError> {
-    let sql = format!(
-        "UPDATE {LEAF_CATALOG}
-         SET detached_at = COALESCE(detached_at, statement_timestamp())
-         WHERE leaf_name = $1"
-    );
-    sqlx::query(&sql)
-        .bind(leaf_name)
-        .execute(connection)
-        .await?;
-    Ok(())
 }
 
 async fn set_ddl_timeouts(
@@ -1202,27 +1241,32 @@ async fn read_prior_timeouts(
     Ok(PriorTimeouts { statement, lock })
 }
 
+/// Restore the session timeouts read before the detach statement (`None`
+/// when they were not changed) and release the leaf's session lock. Every
+/// step runs; the first error is returned.
 async fn restore_timeouts_and_unlock(
     connection: &mut PgConnection,
     leaf: &LeafRef,
-    prior: &PriorTimeouts,
+    prior: Option<&PriorTimeouts>,
 ) -> Result<(), HistoryError> {
-    let restore_statement = if let Some(prior_timeout) = prior.statement.as_deref() {
-        sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+    let restore_statement = match prior.and_then(|prior| prior.statement.as_deref()) {
+        Some(prior_timeout) => sqlx::query("SELECT set_config('statement_timeout', $1, false)")
             .bind(prior_timeout)
             .execute(&mut *connection)
             .await
             .map(|_| ())
-            .map_err(HistoryError::from)
-    } else {
-        Ok(())
+            .map_err(HistoryError::from),
+        None => Ok(()),
     };
-    let restore_lock = sqlx::query("SELECT set_config('lock_timeout', $1, false)")
-        .bind(&prior.lock)
-        .execute(&mut *connection)
-        .await
-        .map(|_| ())
-        .map_err(HistoryError::from);
+    let restore_lock = match prior {
+        Some(prior) => sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+            .bind(&prior.lock)
+            .execute(&mut *connection)
+            .await
+            .map(|_| ())
+            .map_err(HistoryError::from),
+        None => Ok(()),
+    };
     let unlock = unlock_leaf_for_session(connection, leaf.class_key(), leaf.bounds().lower()).await;
     restore_statement.and(restore_lock).and(unlock)
 }
