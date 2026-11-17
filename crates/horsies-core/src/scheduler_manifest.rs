@@ -22,8 +22,10 @@
 //! `pattern_json` is the JSON text of the client's pattern model, in the
 //! form of Python's `pattern.model_dump(mode='json')`: an object with a
 //! `type` key and every field of the pattern, `null` for an unset optional
-//! field, a time of day as `HH:MM:SS` with `.ffffff` when the microsecond is
-//! not zero.
+//! field, a time of day as `HH:MM:SS`. The zone of a schedule comes only
+//! from its `timezone`, and slots fire at whole seconds: the parser refuses
+//! a time of day with a UTC offset or with a fraction of a second, as the
+//! Python config refuses a `time` with `tzinfo` or with microseconds.
 
 use std::collections::HashSet;
 
@@ -113,8 +115,10 @@ impl ManifestValue for CatchUpRuns {
 }
 
 /// A schedule pattern, parsed from its JSON text. The parser refuses text
-/// that is not a pattern of the core, that has a field the pattern does not
-/// have, or whose pattern breaks its rules ([`SchedulePattern::validate`]).
+/// that is not a pattern of the core (a time of day with a UTC offset
+/// included), that has a field the pattern does not have, or whose pattern
+/// breaks its rules ([`SchedulePattern::validate`]; a time of day with a
+/// fraction of a second included).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "String")]
 pub struct PatternJson(SchedulePattern);
